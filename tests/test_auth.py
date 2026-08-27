@@ -78,8 +78,8 @@ class TestDecryptOauthToken:
 
     def test_invalid_token_raises(self) -> None:
         """InvalidToken exception → raises ValueError when a key is provided."""
-        from cryptography.fernet import Fernet
         import pytest
+        from cryptography.fernet import Fernet
 
         from api.auth import decrypt_oauth_token
 
@@ -89,8 +89,8 @@ class TestDecryptOauthToken:
 
     def test_wrong_key_raises(self) -> None:
         """Wrong key → raises ValueError rather than silently returning garbage."""
-        from cryptography.fernet import Fernet
         import pytest
+        from cryptography.fernet import Fernet
 
         from api.auth import decrypt_oauth_token, encrypt_oauth_token
 
@@ -237,8 +237,8 @@ class TestTotpUtilities:
 
     def test_decrypt_totp_secret_invalid_data_raises_valueerror(self) -> None:
         """decrypt_totp_secret with garbage data raises ValueError."""
-        from cryptography.fernet import Fernet
         import pytest
+        from cryptography.fernet import Fernet
 
         from api.auth import decrypt_totp_secret
 
@@ -248,8 +248,8 @@ class TestTotpUtilities:
 
     def test_decrypt_totp_secret_wrong_key_raises_valueerror(self) -> None:
         """decrypt_totp_secret with wrong key raises ValueError."""
-        from cryptography.fernet import Fernet
         import pytest
+        from cryptography.fernet import Fernet
 
         from api.auth import decrypt_totp_secret, encrypt_totp_secret
 

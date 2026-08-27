@@ -1,19 +1,19 @@
 """Extraction Analysis router — versions, summary, violations, and parsing errors for flagged records."""
 
 import asyncio
-from collections.abc import Callable, Coroutine
 import json
 import math
-from pathlib import Path
 import re
 import time
+from collections.abc import Callable, Coroutine
+from pathlib import Path
 from typing import Annotated, Any
 
 import defusedxml.ElementTree as ET
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-import structlog
 
 from api.dependencies import require_admin
 

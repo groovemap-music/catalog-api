@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -13,7 +13,7 @@ import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 OPENAPI_PATH = Path(__file__).resolve().parent / "internal-insights" / "v1" / "openapi.yaml"
-OUTPUT_PATH = REPOSITORY_ROOT / "insights" / "catalog_api_contract.py"
+OUTPUT_PATH = Path(__file__).resolve().parent / "internal-insights" / "v1" / "python" / "catalog_api_contract.py"
 
 
 def render() -> str:
@@ -42,6 +42,7 @@ def main() -> int:
             sys.stderr.write(f"stale API contract artifact: {OUTPUT_PATH.relative_to(REPOSITORY_ROOT)}\n")
             return 1
         return 0
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT_PATH.write_text(expected, encoding="utf-8")
     return 0
 

@@ -15,8 +15,8 @@ import bisect
 from datetime import UTC, datetime
 from typing import Any
 
-from psycopg.rows import dict_row
 import structlog
+from psycopg.rows import dict_row
 
 from api.queries.helpers import run_query
 

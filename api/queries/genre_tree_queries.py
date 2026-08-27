@@ -6,8 +6,9 @@ contains the styles that appear on releases tagged with that genre.
 
 from typing import Any
 
-from api.queries.helpers import run_query
 from common import AsyncResilientNeo4jDriver
+
+from api.queries.helpers import run_query
 
 
 _GENRE_TREE_CYPHER = """

@@ -25,9 +25,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import fakeredis
 import fakeredis.aioredis as aioredis_fake
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-import pytest
 
 from api.config import ApiConfig
 
@@ -238,8 +238,8 @@ def test_client(
 
     _app_tokens_module.configure(mock_pool)
 
-    from api.nlq.config import NLQConfig
     import api.routers.nlq as _nlq_router
+    from api.nlq.config import NLQConfig
 
     _nlq_router.configure(NLQConfig(), None, mock_redis, jwt_secret=TEST_JWT_SECRET)
 
@@ -258,8 +258,8 @@ def test_client(
 
     app.state.metrics_buffer = MetricsBuffer()
 
-    from api.notifications import LogNotificationChannel
     import api.routers.auth as _auth_router
+    from api.notifications import LogNotificationChannel
 
     _auth_router.configure(
         mock_pool,

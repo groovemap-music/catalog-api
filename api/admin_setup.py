@@ -16,13 +16,13 @@ from __future__ import annotations
 
 import argparse
 import getpass
-from os import getenv
 import sys
+from os import getenv
 
 import psycopg
+from common.config import get_secret, parse_postgres_host_port
 
 from api.auth import _hash_password
-from common.config import get_secret, parse_postgres_host_port
 
 
 def _build_conninfo() -> str:

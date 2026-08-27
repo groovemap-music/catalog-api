@@ -63,14 +63,14 @@ curl -f http://localhost:8005/health
 From the repository root:
 
 ```bash
-docker build -t discogsography/perftest -f tests/perftest/Dockerfile tests/perftest/
+just performance-image
 ```
 
 ## Run
 
 ### Basic Run
 
-The config file (`config.yaml`) is mounted into the container at `/config/config.yaml`. The default config is included in `tests/perftest/config.yaml`:
+The config file (`config.yaml`) is mounted into the container at `/config/config.yaml`. The default config is included in `performance/config.yaml`:
 
 ```bash
 mkdir -p perftest-results
@@ -78,8 +78,8 @@ mkdir -p perftest-results
 docker run --rm \
   --network discogsography_discogsography \
   -v "$(pwd)/perftest-results:/results" \
-  -v "$(pwd)/tests/perftest/config.yaml:/config/config.yaml:ro" \
-  discogsography/perftest
+  -v "$(pwd)/performance/config.yaml:/config/config.yaml:ro" \
+  catalog-api-performance:local
 ```
 
 ### Preparing Clean Logs
@@ -87,7 +87,7 @@ docker run --rm \
 Before running a performance test, truncate the API and profiling logs so results only contain queries from this run. This prevents stale data from prior sessions mixing into the profiling output:
 
 ```bash
-docker exec discogsography-api sh -c 'truncate -s 0 /logs/api.log /logs/profiling.log 2>/dev/null; echo "Logs cleared"'
+docker exec catalog-api sh -c 'truncate -s 0 /logs/api.log /logs/profiling.log 2>/dev/null; echo "Logs cleared"'
 ```
 
 > **Why this matters:** Profiling logs accumulate across API restarts and prior test runs. Without truncating, the profiling output contains queries from different code versions and cache states, making it hard to attribute execution plans to specific query changes.
@@ -97,8 +97,8 @@ docker exec discogsography-api sh -c 'truncate -s 0 /logs/api.log /logs/profilin
 After the performance test completes, copy logs from the API container into your results directory:
 
 ```bash
-docker cp discogsography-api:/logs/api.log ./perftest-results/
-docker cp discogsography-api:/logs/profiling.log ./perftest-results/
+docker cp catalog-api:/logs/api.log ./perftest-results/
+docker cp catalog-api:/logs/profiling.log ./perftest-results/
 ```
 
 > **Tip:** To capture database profiling data, restart the API with `LOG_LEVEL=DEBUG` and `DB_PROFILING=true` before running the performance test. This writes Cypher PROFILE and SQL EXPLAIN (ANALYZE, BUFFERS, VERBOSE) execution plans to `profiling.log`.
@@ -112,12 +112,12 @@ docker run --rm \
   --network discogsography_discogsography \
   -v "$(pwd)/perftest-results:/results" \
   -v "$(pwd)/my-config.yaml:/config/config.yaml:ro" \
-  discogsography/perftest
+  catalog-api-performance:local
 ```
 
 ## Configuration
 
-The test is driven by a `config.yaml` file mounted at `/config/config.yaml`. The default config (`tests/perftest/config.yaml`) includes:
+The test is driven by a `config.yaml` file mounted at `/config/config.yaml`. The default config (`performance/config.yaml`) includes:
 
 ```yaml
 api_base_url: "http://api:8004"

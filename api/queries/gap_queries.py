@@ -13,8 +13,9 @@ Graph model used:
 
 from typing import Any
 
-from api.queries.helpers import run_count, run_query
 from common import AsyncResilientNeo4jDriver
+
+from api.queries.helpers import run_count, run_query
 
 
 def _build_filters(exclude_wantlist: bool, formats: list[str] | None) -> str:

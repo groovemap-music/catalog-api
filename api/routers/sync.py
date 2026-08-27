@@ -5,17 +5,17 @@ import contextlib
 from typing import Annotated, Any
 from uuid import UUID
 
+import structlog
+from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver
+from common.query_debug import execute_sql
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from psycopg.rows import dict_row
-import structlog
 
 from api.auth import decode_token, get_oauth_encryption_key, token_revocation_reason
 from api.limiter import limiter
 from api.syncer import run_full_sync
-from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver
-from common.query_debug import execute_sql
 
 
 logger = structlog.get_logger(__name__)

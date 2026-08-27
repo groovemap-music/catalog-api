@@ -6,8 +6,9 @@ temporal collaboration data (yearly counts, first/last year).
 
 from typing import Any
 
-from api.queries.helpers import run_count, run_query, run_single
 from common import AsyncResilientNeo4jDriver
+
+from api.queries.helpers import run_count, run_query, run_single
 
 
 async def get_artist_identity(driver: AsyncResilientNeo4jDriver, artist_id: str) -> dict[str, Any] | None:

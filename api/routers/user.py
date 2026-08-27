@@ -1,13 +1,13 @@
 """User endpoints — migrated from explore service."""
 
 import asyncio
-from collections import OrderedDict
 import time
+from collections import OrderedDict
 from typing import Annotated, Any
 
+import structlog
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
-import structlog
 
 from api.dependencies import UnifiedAuth, get_optional_user, require_user, require_user_or_app_token
 from api.limiter import bearer_token_key_func, limiter

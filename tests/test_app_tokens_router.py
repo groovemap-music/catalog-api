@@ -1,19 +1,19 @@
 """Tests for api/routers/app_tokens.py — settings UI backend."""
 
 import base64
-from datetime import UTC, datetime
 import hashlib
 import hmac
 import json
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from fastapi.testclient import TestClient
 import pytest
+from fastapi.testclient import TestClient
 
 import api.app_tokens as app_tokens_module
 from api.routers.app_tokens import _isoformat
-from tests.api.conftest import TEST_JWT_SECRET, TEST_USER_ID, make_test_jwt
+from tests.conftest import TEST_JWT_SECRET, TEST_USER_ID, make_test_jwt
 
 
 _AUTH_HEADER = {"Authorization": f"Bearer {make_test_jwt()}"}

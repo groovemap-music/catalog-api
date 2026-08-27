@@ -1,4 +1,4 @@
-"""Discogs OAuth 1.0a integration for discogsography auth service.
+"""Discogs OAuth 1.0a integration for the GrooveMap catalog API.
 
 Implements Out-of-Band (OOB) OAuth flow:
 1. Backend requests a token from Discogs with callback_uri="oob"
@@ -11,8 +11,8 @@ Implements Out-of-Band (OOB) OAuth flow:
 
 import os
 import time
-from typing import Any
 import urllib.parse
+from typing import Any
 
 import httpx
 import structlog

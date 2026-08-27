@@ -9,11 +9,11 @@ from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
 
-from fastapi.testclient import TestClient
 import pytest
+from fastapi.testclient import TestClient
 
 from api.app_tokens import generate_plaintext_token, hash_token
-from tests.api.conftest import TEST_USER_ID
+from tests.conftest import TEST_USER_ID
 
 
 _APP_USER_ID = "99999999-9999-9999-9999-999999999999"

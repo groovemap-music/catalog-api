@@ -8,9 +8,10 @@ and label-to-label similarity via cosine similarity on genre vectors.
 import asyncio
 from typing import Any
 
+from common import AsyncResilientNeo4jDriver
+
 from api.queries.helpers import run_query, run_single
 from api.queries.similarity import cosine_similarity, to_genre_vector
-from common import AsyncResilientNeo4jDriver
 
 
 # Minimum releases for a label to have a meaningful fingerprint

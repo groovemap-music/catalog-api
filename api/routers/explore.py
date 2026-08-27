@@ -1,15 +1,15 @@
 """Explore endpoints — migrated from explore service."""
 
 import asyncio
-from collections import OrderedDict
 import json
 import time
+from collections import OrderedDict
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from neo4j.exceptions import ClientError as Neo4jClientError
-import structlog
 
 from api.limiter import limiter
 from api.models import PathNode, PathResponse
@@ -17,17 +17,21 @@ from api.queries import collaborator_queries, genre_tree_queries
 from api.queries.neo4j_queries import (
     AUTOCOMPLETE_DISPATCH,
     COUNT_DISPATCH,
-    DEFAULT_PATH_DEPTH as _DEFAULT_PATH_DEPTH,
     DETAILS_DISPATCH,
     EXPAND_DISPATCH,
     EXPLORE_DISPATCH,
-    MAX_PATH_DEPTH as _MAX_PATH_DEPTH,
     TRENDS_DISPATCH,
     find_shortest_path,
     get_genre_emergence,
     get_graph_stats,
     get_year_range,
     node_label_to_type,
+)
+from api.queries.neo4j_queries import (
+    DEFAULT_PATH_DEPTH as _DEFAULT_PATH_DEPTH,
+)
+from api.queries.neo4j_queries import (
+    MAX_PATH_DEPTH as _MAX_PATH_DEPTH,
 )
 
 

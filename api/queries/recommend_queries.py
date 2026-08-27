@@ -8,10 +8,11 @@ Explore From Here: personalized traversal with taste-based ranking.
 import asyncio
 from typing import Any
 
+from common import AsyncResilientNeo4jDriver
+
 from api.queries.helpers import run_query, run_single
 from api.queries.neo4j_queries import _PATH_REL_TYPES
 from api.queries.similarity import cosine_similarity, to_genre_vector
-from common import AsyncResilientNeo4jDriver
 
 
 # Minimum releases for an artist to have a meaningful fingerprint

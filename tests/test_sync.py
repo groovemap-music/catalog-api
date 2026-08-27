@@ -5,10 +5,10 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from fastapi.testclient import TestClient
 import pytest
+from fastapi.testclient import TestClient
 
-from tests.api.conftest import TEST_JWT_SECRET, TEST_USER_EMAIL, TEST_USER_ID, make_test_jwt
+from tests.conftest import TEST_JWT_SECRET, TEST_USER_EMAIL, TEST_USER_ID, make_test_jwt
 
 
 def _close_coro_and_return(task_mock: Any) -> Any:
@@ -251,7 +251,7 @@ class TestVerifyToken:
 
     def test_valid_token_returns_payload(self, test_client: TestClient) -> None:  # noqa: ARG002
         from api.auth import decode_token
-        from tests.api.conftest import TEST_JWT_SECRET
+        from tests.conftest import TEST_JWT_SECRET
 
         token = make_test_jwt()
         payload = decode_token(token, TEST_JWT_SECRET)
@@ -260,7 +260,7 @@ class TestVerifyToken:
 
     def test_wrong_signature_raises(self, test_client: TestClient) -> None:  # noqa: ARG002
         from api.auth import decode_token
-        from tests.api.conftest import TEST_JWT_SECRET
+        from tests.conftest import TEST_JWT_SECRET
 
         bad_token = make_test_jwt(secret="wrong-secret")  # noqa: S106
         with pytest.raises(ValueError, match="signature"):
@@ -268,7 +268,7 @@ class TestVerifyToken:
 
     def test_expired_token_raises(self, test_client: TestClient) -> None:  # noqa: ARG002
         from api.auth import decode_token
-        from tests.api.conftest import TEST_JWT_SECRET
+        from tests.conftest import TEST_JWT_SECRET
 
         expired_token = make_test_jwt(exp=1)
         with pytest.raises(ValueError, match=r"[Ee]xpir"):
@@ -276,7 +276,7 @@ class TestVerifyToken:
 
     def test_malformed_token_raises(self, test_client: TestClient) -> None:  # noqa: ARG002
         from api.auth import decode_token
-        from tests.api.conftest import TEST_JWT_SECRET
+        from tests.conftest import TEST_JWT_SECRET
 
         with pytest.raises(ValueError, match="Invalid token"):
             decode_token("only.two.parts.extra", TEST_JWT_SECRET)
@@ -289,7 +289,7 @@ class TestVerifyToken:
         import json
 
         from api.auth import decode_token
-        from tests.api.conftest import TEST_JWT_SECRET, TEST_USER_ID
+        from tests.conftest import TEST_JWT_SECRET, TEST_USER_ID
 
         def b64url(data: bytes) -> str:
             return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")

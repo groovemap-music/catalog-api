@@ -9,12 +9,13 @@ import json
 import secrets
 from typing import Annotated, Any
 
+import httpx
+import structlog
+from common import describe_exception
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
-import httpx
 from neo4j.exceptions import ClientError, Neo4jError, TransientError
 from psycopg.rows import dict_row
-import structlog
 
 from api.auth import decrypt_oauth_token, get_oauth_encryption_key
 from api.limiter import limiter
@@ -27,7 +28,6 @@ from api.queries.insights_neo4j_queries import (
 from api.queries.insights_pg_queries import query_data_completeness
 from api.queries.rarity_queries import fetch_all_rarity_signals
 from api.syncer import DISCOGS_API_BASE, MAX_RATE_LIMIT_RETRIES, SYNC_DELAY_SECONDS, _auth_header
-from common import describe_exception
 
 
 logger = structlog.get_logger(__name__)

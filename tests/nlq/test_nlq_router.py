@@ -5,9 +5,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 from fastapi.testclient import TestClient
 
+import api.routers.nlq as nlq_router
 from api.nlq.config import NLQConfig
 from api.nlq.engine import NLQResult
-import api.routers.nlq as nlq_router
 
 
 class TestNLQStatus:
@@ -525,9 +525,9 @@ def test_query_with_admin_token_treated_as_unauthenticated(test_client: TestClie
     import hmac
     import json as json_mod
 
-    from api.nlq.engine import NLQResult
     import api.routers.nlq as nlq_router
-    from tests.api.conftest import TEST_JWT_SECRET
+    from api.nlq.engine import NLQResult
+    from tests.conftest import TEST_JWT_SECRET
 
     # Build an admin JWT
     def b64url(data: bytes) -> str:
@@ -566,8 +566,8 @@ def test_query_with_admin_token_treated_as_unauthenticated(test_client: TestClie
 def test_query_returns_none_user_when_config_is_none(test_client: TestClient) -> None:
     """When api config is None, user_id extraction returns None."""
     import api.api as api_module
-    from api.nlq.engine import NLQResult
     import api.routers.nlq as nlq_router
+    from api.nlq.engine import NLQResult
 
     mock_result = NLQResult(summary="No config.", entities=[], tools_used=[])
     original_config = nlq_router._nlq_config

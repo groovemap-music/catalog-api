@@ -2,9 +2,9 @@
 
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse
-import structlog
 
 from api.limiter import limiter
 from api.queries.musicbrainz_queries import (

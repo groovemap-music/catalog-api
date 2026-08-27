@@ -6,9 +6,9 @@ Artist and label endpoints also query Neo4j for release ID lookups.
 
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
-import structlog
 
 from api.limiter import limiter
 from api.queries.rarity_queries import (

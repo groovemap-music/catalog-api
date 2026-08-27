@@ -2,9 +2,9 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
-import pytest
 
 
 class TestInsightsConfigure:

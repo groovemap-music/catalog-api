@@ -13,14 +13,13 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from neo4j import Query
-
 from common.query_debug import (
     is_db_profiling,
     log_cypher_query,
     log_explain_result,
     log_profile_result,
 )
+from neo4j import Query
 
 
 if TYPE_CHECKING:

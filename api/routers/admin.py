@@ -1,16 +1,17 @@
 """Admin router — login, logout, extraction history, trigger, and DLQ purge."""
 
 import asyncio
-from datetime import UTC, datetime
 import json
+from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
+import httpx
+import structlog
+from common import describe_exception
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
-import httpx
 from psycopg.rows import dict_row
-import structlog
 
 from api.admin_auth import create_admin_token, verify_admin_password
 from api.audit_log import record_audit_entry
@@ -42,7 +43,6 @@ from api.queries.admin_queries import (
     get_user_stats,
 )
 from api.queries.metrics_queries import get_health_history, get_queue_history
-from common import describe_exception
 
 
 logger = structlog.get_logger(__name__)

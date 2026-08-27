@@ -1,44 +1,33 @@
-"""API microservice for discogsography — user accounts and JWT authentication."""
+"""GrooveMap catalog API — identity, catalog, graph, and recommendation services."""
 
 import asyncio
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
 import hashlib
 import hmac
 import json
 import os
-from pathlib import Path
 import secrets
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Annotated, Any
 
+import redis.asyncio as aioredis
+import structlog
+import uvicorn
+from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver, HealthServer, neo4j_security_kwargs, parse_postgres_host_port, setup_logging
+from common.query_debug import execute_sql
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from psycopg.rows import dict_row
 from pydantic import BaseModel
-import redis.asyncio as aioredis
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-import structlog
-import uvicorn
 
 import api.app_tokens as _app_tokens
-from api.auth import (
-    b64url_encode,
-    decode_token,
-    decrypt_oauth_token,
-    encrypt_oauth_token,
-    get_oauth_encryption_key,
-    token_revocation_reason,
-)
-from api.config import ApiConfig
 import api.dependencies as _dependencies
-from api.limiter import limiter
-from api.metrics_collector import MetricsBuffer, normalize_path, run_collector
-from api.notifications import LogNotificationChannel, ResendNotificationChannel
-from api.queries.search_queries import ALL_TYPES, execute_search
 import api.routers.admin as _admin_router
 import api.routers.app_tokens as _app_tokens_router
 import api.routers.auth as _auth_router
@@ -59,6 +48,19 @@ import api.routers.snapshot as _snapshot_router
 import api.routers.sync as _sync_router
 import api.routers.taste as _taste_router
 import api.routers.user as _user_router
+from api.auth import (
+    b64url_encode,
+    decode_token,
+    decrypt_oauth_token,
+    encrypt_oauth_token,
+    get_oauth_encryption_key,
+    token_revocation_reason,
+)
+from api.config import ApiConfig
+from api.limiter import limiter
+from api.metrics_collector import MetricsBuffer, normalize_path, run_collector
+from api.notifications import LogNotificationChannel, ResendNotificationChannel
+from api.queries.search_queries import ALL_TYPES, execute_search
 from api.services.discogs import (
     DISCOGS_AUTHORIZE_URL,
     REDIS_OAUTH_STATE_TTL,
@@ -69,8 +71,6 @@ from api.services.discogs import (
     request_oauth_token,
 )
 from api.syncer import reconcile_stale_sync_history
-from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver, HealthServer, neo4j_security_kwargs, parse_postgres_host_port, setup_logging
-from common.query_debug import execute_sql
 
 
 logger = structlog.get_logger(__name__)
@@ -730,22 +730,7 @@ async def revoke_discogs(
 def main() -> None:  # pragma: no cover
     """Entry point for the API service."""
     setup_logging("api", log_file=Path("/logs/api.log"))
-    # fmt: off
-    print("██████╗ ██╗███████╗ ██████╗ ██████╗  ██████╗ ███████╗")
-    print("██╔══██╗██║██╔════╝██╔════╝██╔═══██╗██╔════╝ ██╔════╝")
-    print("██║  ██║██║███████╗██║     ██║   ██║██║  ███╗███████╗")
-    print("██║  ██║██║╚════██║██║     ██║   ██║██║   ██║╚════██║")
-    print("██████╔╝██║███████║╚██████╗╚██████╔╝╚██████╔╝███████║")
-    print("╚═════╝ ╚═╝╚══════╝ ╚═════╝ ╚═════╝  ╚═════╝ ╚══════╝")
-    print()
-    print(" █████╗ ██████╗ ██╗")
-    print("██╔══██╗██╔══██╗██║")
-    print("███████║██████╔╝██║")
-    print("██╔══██║██╔═══╝ ██║")
-    print("██║  ██║██║     ██║")
-    print("╚═╝  ╚═╝╚═╝     ╚═╝")
-    print()
-    # fmt: on
+    print("GrooveMap Catalog API")
     uvicorn.run(
         app,
         host="0.0.0.0",  # noqa: S104  # nosec B104

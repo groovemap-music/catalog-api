@@ -7,8 +7,8 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
-from fastapi import HTTPException
 import pytest
+from fastapi import HTTPException
 
 from api import app_tokens
 from api.app_tokens import (
@@ -439,7 +439,8 @@ class TestRevokeToken:
 
 class TestReExport:
     def test_require_app_token_importable_from_dependencies(self) -> None:
-        from api.dependencies import AppTokenAuth as DepAuth, require_app_token as dep_require
+        from api.dependencies import AppTokenAuth as DepAuth
+        from api.dependencies import require_app_token as dep_require
 
         assert dep_require is require_app_token
         assert DepAuth is AppTokenAuth

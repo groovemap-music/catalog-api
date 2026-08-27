@@ -10,23 +10,24 @@ Key Discogs API gotchas:
 """
 
 import asyncio
-from datetime import UTC, datetime
 import json
 import os
 import time
-from typing import Any
 import urllib.parse
+from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 import httpx
-from psycopg.rows import dict_row
 import structlog
+from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver
+from common.query_debug import execute_sql, log_cypher_query
+from psycopg.rows import dict_row
 
 from api.auth import decrypt_oauth_token
 from api.cache import RecommendCache
-from api.oauth import _build_oauth_header, _hmac_sha1_signature as _hmac_sha1
-from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver
-from common.query_debug import execute_sql, log_cypher_query
+from api.oauth import _build_oauth_header
+from api.oauth import _hmac_sha1_signature as _hmac_sha1
 
 
 logger = structlog.get_logger(__name__)

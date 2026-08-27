@@ -1,7 +1,7 @@
 """Tests for API service Pydantic models."""
 
-from pydantic import ValidationError
 import pytest
+from pydantic import ValidationError
 
 from api.models import LoginRequest, LoginResponse, PathNode, PathResponse, RegisterRequest
 

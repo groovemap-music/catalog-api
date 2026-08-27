@@ -7,8 +7,8 @@ guardrails, entity deduplication, and an optional SSE status callback.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import json
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import structlog

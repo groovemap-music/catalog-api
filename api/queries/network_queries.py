@@ -7,9 +7,9 @@ Provides multi-hop collaborator traversal, betweenness centrality
 from typing import Any
 
 import structlog
+from common import AsyncResilientNeo4jDriver
 
 from api.queries.helpers import run_count, run_query, run_single
-from common import AsyncResilientNeo4jDriver
 
 
 logger = structlog.get_logger(__name__)

@@ -10,10 +10,10 @@ import os
 import sys
 
 import psycopg
+from common.config import get_secret, parse_postgres_host_port
 from psycopg.rows import dict_row
 
 from api.auth import decrypt_oauth_token, encrypt_oauth_token, get_oauth_encryption_key
-from common.config import get_secret, parse_postgres_host_port
 
 
 def _build_conninfo() -> str:

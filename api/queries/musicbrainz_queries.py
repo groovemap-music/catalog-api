@@ -2,11 +2,11 @@
 
 from typing import Any
 
+from common.query_debug import execute_sql
 from psycopg import sql
 from psycopg.rows import dict_row
 
 from api.queries.helpers import run_query, run_single
-from common.query_debug import execute_sql
 
 
 async def get_artist_musicbrainz(neo4j_driver: Any, discogs_id: int | str) -> dict[str, Any] | None:

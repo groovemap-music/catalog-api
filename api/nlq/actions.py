@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 import structlog
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 
 logger = structlog.get_logger(__name__)

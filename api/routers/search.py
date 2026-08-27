@@ -2,9 +2,9 @@
 
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
-import structlog
 
 from api.limiter import limiter
 from api.queries.search_queries import ALL_TYPES, execute_search

@@ -1,0 +1,12 @@
+.git
+.github
+.venv
+dist/*
+!dist/*.whl
+htmlcov
+**/__pycache__
+**/*.pyc
+tests
+docs
+secrets
+.env*

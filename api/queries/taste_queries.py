@@ -7,8 +7,9 @@ obscurity scores, taste drift timelines, blind spots, and top labels.
 import asyncio
 from typing import Any
 
-from api.queries.helpers import run_count, run_query
 from common import AsyncResilientNeo4jDriver
+
+from api.queries.helpers import run_count, run_query
 
 
 async def get_collection_count(driver: AsyncResilientNeo4jDriver, user_id: str) -> int:

@@ -7,11 +7,11 @@ import hashlib
 import json
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
-import structlog
 
 from api.limiter import limiter
 from api.nlq.config import NLQConfig

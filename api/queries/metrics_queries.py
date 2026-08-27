@@ -10,10 +10,9 @@ import json
 import logging
 from typing import Any
 
+from common.query_debug import execute_sql
 from psycopg import sql
 from psycopg.rows import dict_row
-
-from common.query_debug import execute_sql
 
 
 logger = logging.getLogger(__name__)

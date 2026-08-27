@@ -1,14 +1,15 @@
 """Collection gap analysis endpoints — "Complete My Collection" feature."""
 
 import asyncio
-from collections import OrderedDict
 import time
+from collections import OrderedDict
 from typing import Annotated, Any
 
+import structlog
+from common.query_debug import execute_sql
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
-import structlog
 
 from api.dependencies import require_user
 from api.queries.gap_queries import (
@@ -22,7 +23,6 @@ from api.queries.gap_queries import (
     get_master_gaps,
     get_master_metadata,
 )
-from common.query_debug import execute_sql
 
 
 logger = structlog.get_logger(__name__)

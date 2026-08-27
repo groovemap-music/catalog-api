@@ -39,7 +39,7 @@ class ApiConfig:
     redis_host: str = "redis://redis:6379/0"
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 30
-    discogs_user_agent: str = "discogsography/1.0 +https://github.com/SimplicityGuy/discogsography"
+    discogs_user_agent: str = "GrooveMap/1.0 +https://github.com/groovemap-music/catalog-api"
     discogs_oauth_callback_url: str | None = None
     app_base_url: str = "http://localhost:8006"
     cors_origins: list[str] | None = None
@@ -48,8 +48,8 @@ class ApiConfig:
     encryption_master_key: str | None = field(default=None, repr=False)
     insights_internal_secret: str | None = field(default=None, repr=False)
     resend_api_key: str | None = field(default=None, repr=False)
-    resend_sender_email: str = "noreply@discogsography.com"
-    resend_sender_name: str = "Discogsography"
+    resend_sender_email: str = "noreply@groovemap.music"
+    resend_sender_name: str = "GrooveMap"
     extractor_host: str = "extractor-discogs"
     extractor_health_port: int = 8000
     rabbitmq_management_host: str = "rabbitmq"
@@ -105,7 +105,7 @@ class ApiConfig:
             redis_host=_build_redis_url(),
             jwt_algorithm=jwt_algorithm,
             jwt_expire_minutes=_env_int("JWT_EXPIRE_MINUTES", 30),
-            discogs_user_agent=getenv("DISCOGS_USER_AGENT", "discogsography/1.0 +https://github.com/SimplicityGuy/discogsography"),
+            discogs_user_agent=getenv("DISCOGS_USER_AGENT", "GrooveMap/1.0 +https://github.com/groovemap-music/catalog-api"),
             discogs_oauth_callback_url=getenv("DISCOGS_OAUTH_CALLBACK_URL") or None,
             app_base_url=getenv("APP_BASE_URL", "http://localhost:8006").rstrip("/"),
             cors_origins=cors_origins,
@@ -114,8 +114,8 @@ class ApiConfig:
             encryption_master_key=get_secret("ENCRYPTION_MASTER_KEY") or None,
             insights_internal_secret=get_secret("INSIGHTS_INTERNAL_SECRET") or None,
             resend_api_key=get_secret("RESEND_API_KEY") or None,
-            resend_sender_email=getenv("RESEND_SENDER_EMAIL", "noreply@discogsography.com"),
-            resend_sender_name=getenv("RESEND_SENDER_NAME", "Discogsography"),
+            resend_sender_email=getenv("RESEND_SENDER_EMAIL", "noreply@groovemap.music"),
+            resend_sender_name=getenv("RESEND_SENDER_NAME", "GrooveMap"),
             extractor_host=getenv("EXTRACTOR_HOST", "extractor-discogs"),
             extractor_health_port=_coerce_port(getenv("EXTRACTOR_HEALTH_PORT", "8000"), 8000),
             rabbitmq_management_host=getenv("RABBITMQ_MANAGEMENT_HOST", getenv("RABBITMQ_HOST", "rabbitmq")),

@@ -3,9 +3,9 @@
 import asyncio
 from typing import Annotated, Any
 
+import structlog
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
-import structlog
 
 from api.cache import RecommendCache
 from api.dependencies import require_user

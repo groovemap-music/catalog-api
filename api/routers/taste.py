@@ -3,10 +3,10 @@
 import asyncio
 from typing import Annotated, Any
 
+import structlog
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse, Response
 from neo4j.exceptions import ClientError as Neo4jClientError
-import structlog
 
 from api.dependencies import require_user
 from api.models import (

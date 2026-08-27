@@ -8,13 +8,13 @@ and writes results to JSON and human-readable report files.
 from __future__ import annotations
 
 import argparse
-from datetime import UTC, datetime
-from itertools import combinations
 import json
 import math
-from pathlib import Path
 import sys
 import time
+from datetime import UTC, datetime
+from itertools import combinations
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -33,9 +33,8 @@ def list_neo4j_indexes(config: dict[str, Any]) -> list[str]:
         return ["  (neo4j_uri not configured — skipped)"]
     driver = None
     try:
-        from neo4j import GraphDatabase
-
         from common.config import neo4j_security_kwargs
+        from neo4j import GraphDatabase
 
         driver = GraphDatabase.driver(
             uri,

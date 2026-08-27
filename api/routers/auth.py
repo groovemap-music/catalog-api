@@ -1,15 +1,16 @@
 """Auth router — register, login, logout, current-user, password reset, and 2FA endpoints."""
 
-from datetime import UTC, datetime
 import json
 import secrets
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
+import structlog
+from common.query_debug import execute_sql
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from psycopg.rows import dict_row
-import structlog
 
 from api.auth import (
     _DUMMY_HASH,
@@ -40,7 +41,6 @@ from api.models import (
     TwoFactorSetupResponse,
     TwoFactorVerifyModel,
 )
-from common.query_debug import execute_sql
 
 
 logger = structlog.get_logger(__name__)

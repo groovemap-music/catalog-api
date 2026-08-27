@@ -1,1 +1,3 @@
-"""API microservice for discogsography."""
+"""GrooveMap catalog API."""
+
+__version__ = "0.1.0"

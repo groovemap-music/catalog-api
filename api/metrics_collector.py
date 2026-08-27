@@ -13,15 +13,15 @@ Provides:
 from __future__ import annotations
 
 import asyncio
-from collections import deque
-from dataclasses import dataclass, field
 import re
 import time
+from collections import deque
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
-from psycopg.types.json import Jsonb
 import structlog
+from psycopg.types.json import Jsonb
 
 
 logger = structlog.get_logger(__name__)

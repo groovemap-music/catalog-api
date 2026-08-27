@@ -2,10 +2,10 @@
 
 from typing import Annotated, Any
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-import redis.asyncio as aioredis
 
 from api.auth import REASON_CREDENTIALS_CHANGED, REASON_REVOKED, decode_token, token_revocation_reason
 from api.limiter import bearer_token_key_func, limiter

@@ -22,12 +22,11 @@ import hashlib
 import json
 from typing import Any
 
-from psycopg import sql
-from psycopg.rows import dict_row
 import structlog
-
 from common import AsyncPostgreSQLPool
 from common.query_debug import execute_sql
+from psycopg import sql
+from psycopg.rows import dict_row
 
 
 logger = structlog.get_logger(__name__)

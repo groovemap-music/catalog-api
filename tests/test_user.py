@@ -270,7 +270,7 @@ class TestVerifyJwt:
         import pytest
 
         from api.auth import decode_token
-        from tests.api.conftest import TEST_JWT_SECRET, make_test_jwt
+        from tests.conftest import TEST_JWT_SECRET, make_test_jwt
 
         token = make_test_jwt(secret="wrong-secret")  # noqa: S106
         with pytest.raises(ValueError):
@@ -304,7 +304,7 @@ class TestVerifyJwt:
         import pytest
 
         from api.auth import decode_token
-        from tests.api.conftest import TEST_JWT_SECRET, make_test_jwt
+        from tests.conftest import TEST_JWT_SECRET, make_test_jwt
 
         expired_token = make_test_jwt(exp=1)  # epoch 1970
         with pytest.raises(ValueError):
@@ -313,7 +313,7 @@ class TestVerifyJwt:
     def test_valid_token_returns_payload(self) -> None:
         """Happy path: returns the payload dict for a valid token."""
         from api.auth import decode_token
-        from tests.api.conftest import TEST_JWT_SECRET, TEST_USER_ID, make_test_jwt
+        from tests.conftest import TEST_JWT_SECRET, TEST_USER_ID, make_test_jwt
 
         token = make_test_jwt()
         result = decode_token(token, TEST_JWT_SECRET)
@@ -529,7 +529,7 @@ class TestTimelineCacheHit:
 
         cache_key = f"timeline:{0x00000000_00000000_00000000_00000001!r}:year"
         # Use the real TEST_USER_ID from conftest
-        from tests.api.conftest import TEST_USER_ID
+        from tests.conftest import TEST_USER_ID
 
         cache_key = f"timeline:{TEST_USER_ID}:year"
         cached_data = {
@@ -549,7 +549,7 @@ class TestTimelineCacheHit:
     def test_evolution_returns_cached_result(self, test_client: TestClient, auth_headers: dict[str, str]) -> None:
         """Line 190: evolution endpoint returns cached value without querying Neo4j."""
         from api.routers import user as user_module
-        from tests.api.conftest import TEST_USER_ID
+        from tests.conftest import TEST_USER_ID
 
         cache_key = f"evolution:{TEST_USER_ID}:genre"
         cached_data = {"metric": "genre", "data": [], "summary": {"total_years": 0, "unique_values": 0}}

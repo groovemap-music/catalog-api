@@ -20,8 +20,9 @@ import asyncio
 import re
 from typing import Any
 
-from api.queries.helpers import run_count, run_query, run_single
 from common import AsyncResilientNeo4jDriver
+
+from api.queries.helpers import run_count, run_query, run_single
 
 
 # Lucene special characters that must be escaped in fulltext queries

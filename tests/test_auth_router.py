@@ -1,15 +1,16 @@
 """Tests for auth router — password reset and 2FA endpoints."""
 
 import base64
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-import json
 from unittest.mock import AsyncMock
 
-from fastapi.testclient import TestClient
 import pyotp
 import pytest
+from fastapi.testclient import TestClient
 
+import api.routers.auth as auth_router
 from api.auth import (
     create_challenge_token,
     encrypt_totp_secret,
@@ -17,8 +18,7 @@ from api.auth import (
     get_totp_encryption_key,
     hash_recovery_code,
 )
-import api.routers.auth as auth_router
-from tests.api.conftest import TEST_JWT_SECRET, TEST_USER_EMAIL, TEST_USER_ID, make_sample_user_row, make_test_jwt
+from tests.conftest import TEST_JWT_SECRET, TEST_USER_EMAIL, TEST_USER_ID, make_sample_user_row, make_test_jwt
 
 
 _TEST_MASTER_KEY = base64.urlsafe_b64encode(b"test-master-key-padded-to-32!!").decode("ascii")
@@ -336,7 +336,7 @@ class TestPasswordChangedRevocation:
         import hmac
         import time
 
-        from tests.api.conftest import TEST_JWT_SECRET, TEST_USER_ID
+        from tests.conftest import TEST_JWT_SECRET, TEST_USER_ID
 
         # Create a JWT with an explicit iat in the past
         old_iat = int(time.time()) - 120

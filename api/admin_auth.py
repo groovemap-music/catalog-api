@@ -7,11 +7,11 @@ to maintain complete isolation from Discogs user tokens.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 import hashlib
 import hmac
 import json
 import secrets
+from datetime import UTC, datetime, timedelta
 
 from api.auth import _verify_password, b64url_encode
 

@@ -4,8 +4,8 @@ import json
 from typing import Any
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
-from fastapi.testclient import TestClient
 import pytest
+from fastapi.testclient import TestClient
 
 from api.queries import collaborator_queries, genre_tree_queries
 
@@ -413,7 +413,7 @@ class TestJWT:
 
     def test_verify_jwt_valid(self) -> None:
         from api.auth import decode_token
-        from tests.api.conftest import make_test_jwt
+        from tests.conftest import make_test_jwt
 
         token = make_test_jwt()
         payload = decode_token(token, "test-jwt-secret-for-unit-tests")
@@ -424,7 +424,7 @@ class TestJWT:
         import pytest
 
         from api.auth import decode_token
-        from tests.api.conftest import make_test_jwt
+        from tests.conftest import make_test_jwt
 
         token = make_test_jwt()
         with pytest.raises(ValueError):
@@ -444,7 +444,7 @@ class TestJWT:
         import pytest
 
         from api.auth import decode_token
-        from tests.api.conftest import make_test_jwt
+        from tests.conftest import make_test_jwt
 
         token = make_test_jwt(exp=1)  # expired in 1970
         with pytest.raises(ValueError, match="expired"):
@@ -499,7 +499,7 @@ class TestJWT:
 
         import api.dependencies as dependencies_module
         from api.dependencies import get_optional_user
-        from tests.api.conftest import make_test_jwt
+        from tests.conftest import make_test_jwt
 
         original = dependencies_module._jwt_secret
         dependencies_module._jwt_secret = "test-jwt-secret-for-unit-tests"

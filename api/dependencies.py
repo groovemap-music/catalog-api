@@ -1,8 +1,8 @@
 """Shared FastAPI dependency functions for API routers."""
 
 import asyncio
-from dataclasses import dataclass
 import hmac
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
 from fastapi import Depends, HTTPException, status
@@ -11,6 +11,8 @@ from psycopg.rows import dict_row
 
 from api.app_tokens import (
     TOKEN_PREFIX as _APP_TOKEN_PREFIX,
+)
+from api.app_tokens import (
     AppTokenAuth,  # noqa: F401  — re-exported for callers
     _background_tasks,
     _lookup_active_token,

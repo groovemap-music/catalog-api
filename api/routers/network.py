@@ -7,10 +7,10 @@ and community/cluster detection around artists.
 import json
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from neo4j.exceptions import ClientError as Neo4jClientError
-import structlog
 
 from api.limiter import limiter
 from api.queries import network_queries

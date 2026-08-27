@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
-from tests.api.conftest import make_test_jwt
+from tests.conftest import make_test_jwt
 
 
 def _auth_headers() -> dict[str, str]:

@@ -3,9 +3,9 @@
 import hashlib
 import inspect
 
+import slowapi.extension as slowapi_extension
 from fastapi import Request
 from slowapi import Limiter
-import slowapi.extension as slowapi_extension
 from slowapi.util import get_remote_address
 
 

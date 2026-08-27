@@ -4,9 +4,9 @@ import asyncio
 import json
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
-import structlog
 
 from api.limiter import limiter
 from api.models import (

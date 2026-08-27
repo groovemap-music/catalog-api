@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,7 +15,7 @@ import pytest
 if TYPE_CHECKING:
     from fastapi.testclient import TestClient
 
-from tests.api.test_admin_endpoints import _admin_auth_headers
+from tests.test_admin_endpoints import _admin_auth_headers
 
 
 # ---------------------------------------------------------------------------

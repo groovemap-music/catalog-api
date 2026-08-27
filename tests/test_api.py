@@ -3,11 +3,11 @@
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from fastapi.testclient import TestClient
 import pytest
+from fastapi.testclient import TestClient
 
 from api.config import ApiConfig
-from tests.api.conftest import (
+from tests.conftest import (
     TEST_USER_EMAIL,
     TEST_USER_ID,
     make_test_jwt,
@@ -117,7 +117,7 @@ class TestJwtFunctions:
 
     def test_decode_wrong_signature_raises(self, test_client: TestClient) -> None:  # noqa: ARG002
         from api.auth import decode_token
-        from tests.api.conftest import TEST_JWT_SECRET
+        from tests.conftest import TEST_JWT_SECRET
 
         bad_token = make_test_jwt(secret="wrong-secret")  # noqa: S106
         with pytest.raises(ValueError, match="Invalid token signature"):
@@ -125,7 +125,7 @@ class TestJwtFunctions:
 
     def test_decode_expired_token_raises(self, test_client: TestClient) -> None:  # noqa: ARG002
         from api.auth import decode_token
-        from tests.api.conftest import TEST_JWT_SECRET
+        from tests.conftest import TEST_JWT_SECRET
 
         expired_token = make_test_jwt(exp=1)  # epoch 1970
         with pytest.raises(ValueError, match="expired"):
@@ -133,7 +133,7 @@ class TestJwtFunctions:
 
     def test_decode_malformed_token_raises(self, test_client: TestClient) -> None:  # noqa: ARG002
         from api.auth import decode_token
-        from tests.api.conftest import TEST_JWT_SECRET
+        from tests.conftest import TEST_JWT_SECRET
 
         with pytest.raises(ValueError):
             decode_token("not.enough", TEST_JWT_SECRET)
@@ -275,8 +275,8 @@ class TestRegisterEndpoint:
         from fastapi import FastAPI
 
         import api.api as api_module
-        from api.api import app
         import api.routers.auth as auth_router
+        from api.api import app
 
         @asynccontextmanager
         async def mock_lifespan(_app: FastAPI) -> AsyncGenerator[None]:
@@ -903,7 +903,7 @@ class TestGetCurrentUser:
         import hmac
         import json
 
-        from tests.api.conftest import TEST_JWT_SECRET
+        from tests.conftest import TEST_JWT_SECRET
 
         def b64url(data: bytes) -> str:
             return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
@@ -927,7 +927,7 @@ class TestGetCurrentUser:
         import hmac
         import json
 
-        from tests.api.conftest import TEST_JWT_SECRET
+        from tests.conftest import TEST_JWT_SECRET
 
         def b64url(data: bytes) -> str:
             return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
@@ -957,8 +957,8 @@ class TestLoginServiceNotReady:
         from fastapi import FastAPI
 
         import api.api as api_module
-        from api.api import app
         import api.routers.auth as auth_router
+        from api.api import app
 
         @asynccontextmanager
         async def mock_lifespan(_app: FastAPI) -> AsyncGenerator[None]:
@@ -1072,7 +1072,7 @@ class TestGetMeServiceEdgeCases:
         import hmac
         import json
 
-        from tests.api.conftest import TEST_JWT_SECRET
+        from tests.conftest import TEST_JWT_SECRET
 
         def b64url(data: bytes) -> str:
             return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")

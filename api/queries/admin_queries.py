@@ -9,9 +9,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from psycopg.rows import dict_row
-
 from common.query_debug import execute_sql
+from psycopg.rows import dict_row
 
 
 logger = logging.getLogger(__name__)

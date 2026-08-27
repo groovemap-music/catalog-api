@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pydantic import ValidationError
 import pytest
+from pydantic import ValidationError
 
 
 def test_seed_graph_action_validates() -> None:

@@ -8,9 +8,9 @@ import hmac
 import json
 import secrets
 
+import pytest
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
-import pytest
 
 from api.admin_auth import create_admin_token, verify_admin_password
 from api.auth import _hash_password

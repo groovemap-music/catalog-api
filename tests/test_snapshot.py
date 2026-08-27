@@ -266,7 +266,7 @@ class TestSnapshotAuth:
         import hmac
         import json
 
-        from tests.api.conftest import TEST_JWT_SECRET
+        from tests.conftest import TEST_JWT_SECRET
 
         def b64url(data: bytes) -> str:
             return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
@@ -299,7 +299,7 @@ class TestSnapshotAuth:
         import json
         from unittest.mock import AsyncMock
 
-        from tests.api.conftest import TEST_JWT_SECRET, TEST_USER_EMAIL, TEST_USER_ID
+        from tests.conftest import TEST_JWT_SECRET, TEST_USER_EMAIL, TEST_USER_ID
 
         def b64url(data: bytes) -> str:
             return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
@@ -351,7 +351,7 @@ class TestSnapshotTokenChecks:
         import hmac
         import json
 
-        from tests.api.conftest import TEST_JWT_SECRET
+        from tests.conftest import TEST_JWT_SECRET
 
         def b64url(data: bytes) -> str:
             return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
@@ -383,7 +383,7 @@ class TestSnapshotTokenChecks:
         import hmac
         import json
 
-        from tests.api.conftest import TEST_JWT_SECRET
+        from tests.conftest import TEST_JWT_SECRET
 
         def b64url(data: bytes) -> str:
             return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
@@ -415,7 +415,7 @@ class TestSnapshotTokenChecks:
         import json
         from unittest.mock import AsyncMock
 
-        from tests.api.conftest import TEST_JWT_SECRET, TEST_USER_EMAIL, TEST_USER_ID
+        from tests.conftest import TEST_JWT_SECRET, TEST_USER_EMAIL, TEST_USER_ID
 
         def b64url(data: bytes) -> str:
             return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")

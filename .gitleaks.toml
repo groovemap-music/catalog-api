@@ -1,0 +1,23 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Deterministic reset-link fixture"
+condition = "AND"
+regexTarget = "line"
+paths = ['''^tests/test_notifications\.py$''']
+regexes = ['''^\s*reset_url\s*=\s*.*$''']
+
+[[allowlists]]
+description = "Documented invalid TOTP test key"
+condition = "AND"
+regexTarget = "line"
+paths = ['''^docs/superpowers/plans/2026-03-25-password-reset-totp-2fa\.md$''']
+regexes = ['''encrypt_totp_secret\(secret, .*\)\s*# test key''']
+
+[[allowlists]]
+description = "Historical performance-test fixture assertion"
+condition = "AND"
+regexTarget = "line"
+paths = ['''^performance/test_run_perftest\.py$''']
+regexes = ['''^\s*assert rec_t\[.*\]\s*==\s*.*$''']

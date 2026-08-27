@@ -3,9 +3,10 @@
 import json
 from typing import Any
 
+import structlog
+from common.credit_roles import ALL_CATEGORIES
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
-import structlog
 
 from api.limiter import limiter
 from api.models import (
@@ -35,7 +36,6 @@ from api.queries.credits_queries import (
     get_role_leaderboard,
     get_shared_credits,
 )
-from common.credit_roles import ALL_CATEGORIES
 
 
 logger = structlog.get_logger(__name__)

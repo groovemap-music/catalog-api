@@ -1,19 +1,19 @@
 """Shared JWT authentication utilities."""
 
 import base64
-from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
 import hashlib
 import hmac
 import json
 import os
 import secrets
+from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pyotp
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes as _hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF as _HKDF
-import pyotp
 
 
 def b64url_encode(data: bytes) -> str:

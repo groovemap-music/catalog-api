@@ -11,13 +11,17 @@ and is never recoverable thereafter — only its SHA-256 hex hash is persisted.
 from typing import Annotated, Any
 from uuid import UUID
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import JSONResponse
-import structlog
 
 from api.app_tokens import (
     list_user_tokens as _list_user_tokens,
+)
+from api.app_tokens import (
     mint_token as _mint_token,
+)
+from api.app_tokens import (
     revoke_token as _revoke_token,
 )
 from api.dependencies import require_user

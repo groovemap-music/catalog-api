@@ -14,8 +14,9 @@ import asyncio
 import math
 from typing import Any
 
-from api.queries.helpers import run_count, run_query
 from common import AsyncResilientNeo4jDriver
+
+from api.queries.helpers import run_count, run_query
 
 
 async def get_user_collection(

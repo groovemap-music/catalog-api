@@ -1,9 +1,9 @@
 """Discogs OAuth 1.0a signing helpers owned by the catalog API."""
 
-from base64 import b64encode
 import hashlib
 import hmac
 import urllib.parse
+from base64 import b64encode
 
 
 def _oauth_escape(value: str) -> str:

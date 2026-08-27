@@ -4,10 +4,10 @@ Forwards /api/insights/* requests to the insights microservice
 running on port 8008.
 """
 
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
 import httpx
 import structlog
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
 
 logger = structlog.get_logger(__name__)

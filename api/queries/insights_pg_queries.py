@@ -11,7 +11,6 @@ import asyncio
 from typing import Any, cast
 
 import structlog
-
 from common.query_debug import execute_sql
 
 

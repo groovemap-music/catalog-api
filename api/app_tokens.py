@@ -12,11 +12,11 @@ Contract artifact: docs/specs/v2-gruvax-integration.md (written in P7).
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 import hashlib
 import hmac
 import logging
 import secrets
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import Depends, HTTPException, status
