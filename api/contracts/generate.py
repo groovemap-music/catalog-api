@@ -20,14 +20,22 @@ def render() -> str:
     """Render operation constants from the versioned OpenAPI document."""
     document: dict[str, Any] = yaml.safe_load(OPENAPI_PATH.read_text(encoding="utf-8"))
     operations: dict[str, str] = {}
+    processing_budgets: dict[str, int | float] = {}
     for path, path_item in document["paths"].items():
         operation_id = path_item["get"]["operationId"]
         operations[operation_id] = path
+        max_processing_seconds = path_item["get"].get("x-groovemap-max-processing-seconds")
+        if max_processing_seconds is not None:
+            processing_budgets[operation_id] = max_processing_seconds
     constants = "\n".join(f"{name.upper()}_PATH = {json.dumps(path)}" for name, path in sorted(operations.items()))
+    budget_constants = "\n".join(
+        f"{name.upper()}_MAX_PROCESSING_SECONDS = {json.dumps(seconds)}" for name, seconds in sorted(processing_budgets.items())
+    )
     return f'''"""Generated from api/contracts/internal-insights/v1/openapi.yaml; do not edit."""
 
 CONTRACT_VERSION = {json.dumps(document["info"]["version"])}
 {constants}
+{budget_constants}
 '''
 
 

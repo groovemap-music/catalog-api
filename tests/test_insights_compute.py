@@ -1,8 +1,10 @@
 """Tests for the insights compute router endpoints."""
 
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import yaml
 from fastapi.testclient import TestClient
 from neo4j.exceptions import Neo4jError
 
@@ -15,6 +17,15 @@ def _neo4j_error(code: str, message: str = "boom") -> Neo4jError:
     the right subclass (ClientError / TransientError) from the code itself.
     """
     return Neo4jError._hydrate_neo4j(code=code, message=message)
+
+
+def test_community_enrichment_contract_covers_producer_worst_case() -> None:
+    """Keep the published processing budget synchronized with the bounded producer."""
+    from api.routers.insights_compute import _ENRICHMENT_DELAY_SECONDS, MAX_ENRICHMENT_RELEASES
+
+    contract = yaml.safe_load((Path(__file__).parents[1] / "api/contracts/internal-insights/v1/openapi.yaml").read_text(encoding="utf-8"))
+    operation = contract["paths"]["/api/internal/insights/community-enrichment"]["get"]
+    assert operation["x-groovemap-max-processing-seconds"] == MAX_ENRICHMENT_RELEASES * _ENRICHMENT_DELAY_SECONDS
 
 
 class TestArtistCentralityEndpoint:

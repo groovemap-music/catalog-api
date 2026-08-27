@@ -43,6 +43,7 @@ paths:
   /api/internal/insights/community-enrichment:
     get:
       operationId: community_enrichment
+      x-groovemap-max-processing-seconds: 1500
       responses:
         "200": {$ref: "#/components/responses/CommunityEnrichment"}
   /api/internal/insights/rarity-scores:
