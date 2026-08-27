@@ -1,0 +1,14 @@
+{
+  "consumer": "groovemap-music/mcp-server",
+  "operations": {
+    "collaborators": {"method": "GET", "path": "/api/collaborators/{artist_id}"},
+    "genre_tree": {"method": "GET", "path": "/api/genre-tree"},
+    "graph_stats": {"method": "GET", "path": "/api/graph/stats"},
+    "nlq_query": {"method": "POST", "path": "/api/nlq/query"},
+    "node": {"method": "GET", "path": "/api/node/{node_id}"},
+    "path": {"method": "GET", "path": "/api/path"},
+    "search": {"method": "GET", "path": "/api/search"},
+    "trends": {"method": "GET", "path": "/api/trends"}
+  },
+  "version": 1
+}

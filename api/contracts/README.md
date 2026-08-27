@@ -16,6 +16,7 @@ not deployment secrets.
 Producer-owned, versioned compatibility surfaces for independently deployed GrooveMap consumers:
 
 - `graph-explorer/v1/routes.json` records the Catalog API methods and paths used by the public graph application.
+- `mcp-server/v1/routes.json` records the API surface exposed to MCP clients.
 - `operations-console/v1/routes.json` records the privileged console surface.
 - `internal-insights/v1/openapi.yaml` records the analytics engine surface.
 
