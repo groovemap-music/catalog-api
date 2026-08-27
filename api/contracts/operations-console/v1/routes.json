@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "contract": "groovemap.operations-console-api",
+  "operations": {
+    "admin_audit_log": {"method": "GET", "path": "/api/admin/audit-log"},
+    "admin_dlq_purge": {"method": "POST", "path": "/api/admin/dlq/purge/{queue}"},
+    "admin_extraction": {"method": "GET", "path": "/api/admin/extractions/{extraction_id}"},
+    "admin_extraction_analysis_compare": {"method": "GET", "path": "/api/admin/extraction-analysis/{version}/compare/{other_version}"},
+    "admin_extraction_analysis_generate_ai_prompt": {"method": "POST", "path": "/api/admin/extraction-analysis/{version}/generate-ai-prompt"},
+    "admin_extraction_analysis_parsing_errors": {"method": "GET", "path": "/api/admin/extraction-analysis/{version}/parsing-errors"},
+    "admin_extraction_analysis_prompt_context": {"method": "POST", "path": "/api/admin/extraction-analysis/{version}/prompt-context"},
+    "admin_extraction_analysis_skipped": {"method": "GET", "path": "/api/admin/extraction-analysis/{version}/skipped"},
+    "admin_extraction_analysis_summary": {"method": "GET", "path": "/api/admin/extraction-analysis/{version}/summary"},
+    "admin_extraction_analysis_versions": {"method": "GET", "path": "/api/admin/extraction-analysis/versions"},
+    "admin_extraction_analysis_violation": {"method": "GET", "path": "/api/admin/extraction-analysis/{version}/violations/{record_id}"},
+    "admin_extraction_analysis_violations": {"method": "GET", "path": "/api/admin/extraction-analysis/{version}/violations"},
+    "admin_extraction_trigger": {"method": "POST", "path": "/api/admin/extractions/trigger"},
+    "admin_extractions": {"method": "GET", "path": "/api/admin/extractions"},
+    "admin_health_history": {"method": "GET", "path": "/api/admin/health/history"},
+    "admin_login": {"method": "POST", "path": "/api/admin/auth/login"},
+    "admin_logout": {"method": "POST", "path": "/api/admin/auth/logout"},
+    "admin_queue_history": {"method": "GET", "path": "/api/admin/queues/history"},
+    "admin_storage": {"method": "GET", "path": "/api/admin/storage"},
+    "admin_sync_activity": {"method": "GET", "path": "/api/admin/users/sync-activity"},
+    "admin_user_stats": {"method": "GET", "path": "/api/admin/users/stats"}
+  },
+  "version": 1
+}

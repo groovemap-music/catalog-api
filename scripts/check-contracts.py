@@ -37,3 +37,9 @@ internal_source = json.loads((internal_root / "python/source.json").read_text())
 assert digest(internal_root / "openapi.yaml") == internal_source["contract_sha256"]
 assert digest(internal_root / "python/catalog_api_contract.py") == internal_source["binding_sha256"]
 assert internal_source["contract_version"] == "1.0.0"
+
+admin_root = ROOT / "api/contracts/operations-console/v1"
+admin_source = json.loads((admin_root / "python/source.json").read_text())
+assert digest(admin_root / "routes.json") == admin_source["contract_sha256"]
+assert digest(admin_root / "python/catalog_admin_contract.py") == admin_source["binding_sha256"]
+assert admin_source["contract_version"] == 1
