@@ -45,7 +45,7 @@ REDIS_HOST=redis
 JWT_SECRET_KEY=your-secret-key-here
 
 # Discogs API
-DISCOGS_USER_AGENT="Discogsography/1.0 +https://github.com/SimplicityGuy/discogsography"
+DISCOGS_USER_AGENT="Discogsography/1.0 +https://github.com/groovemap-music/catalog-api"
 
 # HKDF master encryption key (derives OAuth + TOTP keys; generate with:
 # python -c 'import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())')

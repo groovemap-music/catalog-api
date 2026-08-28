@@ -388,7 +388,7 @@ JWT_EXPIRE_MINUTES=60     # 1 hour
 JWT_EXPIRE_MINUTES=1440   # 24 hours
 
 # Discogs User-Agent (required for Discogs API)
-DISCOGS_USER_AGENT="Discogsography/1.0 +https://github.com/SimplicityGuy/discogsography"
+DISCOGS_USER_AGENT="Discogsography/1.0 +https://github.com/groovemap-music/catalog-api"
 
 # Optional — public Discogs OAuth callback URL. When set, end users no longer
 # have to copy/paste a verifier code; Discogs redirects directly back to the
@@ -603,7 +603,7 @@ POSTGRES_PASSWORD="discogsography"
 POSTGRES_DATABASE="discogsography"
 REDIS_HOST="localhost"
 JWT_SECRET_KEY="your-secret-key-here"
-DISCOGS_USER_AGENT="Discogsography/1.0 +https://github.com/SimplicityGuy/discogsography"
+DISCOGS_USER_AGENT="Discogsography/1.0 +https://github.com/groovemap-music/catalog-api"
 
 # Optional — HKDF master encryption key (derives OAuth + TOTP encryption keys)
 # Required for TOTP 2FA. Without it, OAuth tokens are stored unencrypted and 2FA is disabled.
@@ -947,7 +947,7 @@ REDIS_HOST=localhost
 # JWT (API)
 JWT_SECRET_KEY=dev-secret-key-not-for-production
 JWT_EXPIRE_MINUTES=1440
-DISCOGS_USER_AGENT="Discogsography/1.0-dev +https://github.com/SimplicityGuy/discogsography"
+DISCOGS_USER_AGENT="Discogsography/1.0-dev +https://github.com/groovemap-music/catalog-api"
 
 # Data
 DISCOGS_ROOT=/tmp/discogs-data-dev
@@ -1008,7 +1008,7 @@ REDIS_HOST=redis
 
 # JWT (optional non-secret settings)
 JWT_EXPIRE_MINUTES=1440
-DISCOGS_USER_AGENT="Discogsography/1.0 +https://github.com/SimplicityGuy/discogsography"
+DISCOGS_USER_AGENT="Discogsography/1.0 +https://github.com/groovemap-music/catalog-api"
 
 # Data
 DISCOGS_ROOT=/mnt/data/discogs

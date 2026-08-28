@@ -345,7 +345,7 @@ async def _enrich_community_counts(
             )
             headers = {
                 "Authorization": auth,
-                "User-Agent": "discogsography/1.0 +https://github.com/SimplicityGuy/discogsography",
+                "User-Agent": "discogsography/1.0 +https://github.com/groovemap-music/catalog-api",
                 "Accept": "application/json",
             }
 
