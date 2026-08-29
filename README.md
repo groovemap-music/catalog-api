@@ -48,6 +48,10 @@ with parties that do not want to use the software under the AGPL; see
 [commercial licensing](COMMERCIAL-LICENSING.md). [NOTICE](NOTICE) records prior-license
 history.
 
+The container build injects its full Git revision into the service. The generated
+`/openapi.json`, `/docs`, and `/redoc` metadata link to the corresponding source tree
+for that exact revision.
+
 External code and documentation contributions are paused until the project adopts a
 relicensing-capable contributor license agreement. See [CONTRIBUTING.md](CONTRIBUTING.md).
 

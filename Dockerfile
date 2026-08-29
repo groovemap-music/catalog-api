@@ -23,6 +23,9 @@ ARG BUILD_DATE
 ARG BUILD_VERSION=0.1.0
 ARG VCS_REF
 
+RUN case "${VCS_REF}" in *[!0-9a-f]*|"") exit 1 ;; esac && \
+    [ "${#VCS_REF}" -eq 40 ]
+
 LABEL org.opencontainers.image.title="catalog-api" \
       org.opencontainers.image.description="Authentication, catalog, graph, recommendation, NLQ, analytics, and operator API" \
       org.opencontainers.image.authors="Robert Wlodarczyk <robert@simplicityguy.com>" \
@@ -30,7 +33,7 @@ LABEL org.opencontainers.image.title="catalog-api" \
       org.opencontainers.image.documentation="https://github.com/groovemap-music/catalog-api/blob/main/README.md" \
       org.opencontainers.image.source="https://github.com/groovemap-music/catalog-api" \
       org.opencontainers.image.vendor="GrooveMap" \
-      org.opencontainers.image.licenses="PolyForm-Noncommercial-1.0.0" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
       org.opencontainers.image.version="${BUILD_VERSION}" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
@@ -45,6 +48,7 @@ WORKDIR /app
 COPY --from=builder --chown=1000:1000 /app/.venv /app/.venv
 
 ENV HOME=/home/groovemap \
+    GROOVEMAP_SOURCE_REVISION="${VCS_REF}" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:$PATH"

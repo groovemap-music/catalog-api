@@ -31,9 +31,9 @@ build:
 install-check: build
     bash scripts/install-check.sh
 
-license-check:
+license-check: build
     uv run python scripts/check-license.py
-    uv run pip-licenses --ignore-packages groovemap-catalog-api --fail-on "GPL-2.0-only;GPL-3.0-only;AGPL-3.0-only"
+    uv run pip-licenses --format=json | uv run python scripts/check_dependency_licenses.py
 
 audit:
     uv run pip-audit
@@ -55,7 +55,7 @@ bump:
     uv lock
 
 performance-image: prepare-private-wheels
-    docker build --file performance/Dockerfile --tag catalog-api-performance:local .
+    bash scripts/build-image.sh performance/Dockerfile catalog-api-performance:local
 
 release-dry-run: check
     bash scripts/release-dry-run.sh

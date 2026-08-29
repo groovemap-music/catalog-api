@@ -18,7 +18,13 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 license = "AGPL-3.0-only"
-license-files = ["LICENSE"]
+license-files = [
+    "COMMERCIAL-LICENSING.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "NOTICE",
+    "THIRD_PARTY_NOTICES.md",
+]
 dependencies = [
     "anthropic>=1.0.0",
     "cryptography>=50.0.0",
