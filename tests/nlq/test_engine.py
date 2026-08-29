@@ -287,7 +287,7 @@ class TestNLQEngineGuardrails:
         result = await engine.run("...", NLQContext())
 
         assert result.tools_used == []
-        assert "I can only answer questions about the Discogsography music database" in result.summary
+        assert "I can only answer questions about the GrooveMap music database" in result.summary
 
     @pytest.mark.asyncio
     async def test_off_topic_guardrail_allows_refusals(self) -> None:
@@ -296,7 +296,7 @@ class TestNLQEngineGuardrails:
         client = _make_client()
         runner = _make_tool_runner()
 
-        refusal_text = "I can only help with questions about the Discogsography music database. Try asking about an artist or genre!"
+        refusal_text = "I can only help with questions about the GrooveMap music database. Try asking about an artist or genre!"
         text_response = _make_text_response(refusal_text)
         client.messages.create.return_value = text_response
 

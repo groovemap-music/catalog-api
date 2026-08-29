@@ -48,13 +48,13 @@ class ResendNotificationChannel:
         html_content = (
             "<html><body>"
             "<h2>Reset Your Password</h2>"
-            "<p>You requested a password reset for your Discogsography account.</p>"
+            "<p>You requested a password reset for your GrooveMap account.</p>"
             f'<p><a href="{safe_url}" style="display:inline-block;padding:12px 24px;'
             "background-color:#3b82f6;color:#ffffff;text-decoration:none;"
             'border-radius:6px;font-weight:bold">Reset Password</a></p>'
             "<p>This link expires in 15 minutes. If you didn't request this, "
             "you can safely ignore this email.</p>"
-            "<p>— Discogsography</p>"
+            "<p>— GrooveMap</p>"
             "</body></html>"
         )
 
@@ -67,7 +67,7 @@ class ResendNotificationChannel:
                     json={
                         "from": f"{self._sender_name} <{self._sender_email}>",
                         "to": [email],
-                        "subject": "Reset your Discogsography password",
+                        "subject": "Reset your GrooveMap password",
                         "html": html_content,
                     },
                 )

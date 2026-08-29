@@ -7,9 +7,8 @@ operator setup CLIs.
 ## Development
 
 This service consumes `groovemap-runtime` and `groovemap-agent-tools` from the private
-`groovemap-music/python-libraries` repository at immutable commit
-`28fa329702bc76896cc54ab8d05ec5b1bd3d929e`. Local setup requires normal Git credential
-helper access to that repository.
+`groovemap-music/python-libraries` repository. Local setup requires normal Git credential
+helper access to that repository; the lockfile records the reviewed source revision.
 
 ```bash
 mise install
@@ -44,3 +43,8 @@ releasing.
 
 The current tree is licensed under PolyForm Noncommercial 1.0.0. Historical revisions
 retain their then-applicable license.
+
+## Documentation
+
+See the [documentation index](docs/README.md) for configuration, administration,
+performance, examples, and retained design records.

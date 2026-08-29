@@ -5,7 +5,7 @@
 Admin accounts are created via the `admin-setup` CLI tool inside the API container:
 
 ```
-docker exec -it discogsography-api admin-setup --email admin@example.com
+docker exec -it groovemap-api admin-setup --email admin@example.com
 ```
 
 `admin-setup` never accepts the password as a CLI argument (command-line
@@ -20,7 +20,7 @@ Passwords must be at least 8 characters. If the email already exists, the passwo
 ## Listing Admin Accounts
 
 ```
-docker exec -it discogsography-api admin-setup --list
+docker exec -it groovemap-api admin-setup --list
 ```
 
 ## Accessing the Admin Panel
@@ -37,7 +37,7 @@ Click **Trigger Extraction** in the admin panel. This forces a full reprocessing
 - Reprocesses all files regardless of existing state markers
 - Publishes records to RabbitMQ for graphinator and tableinator consumers
 
-The admin panel also supports triggering a **MusicBrainz extraction**, which downloads the latest MusicBrainz JSONL dumps and publishes records to the `discogsography-musicbrainz-{artists,labels,release-groups,releases}` exchanges for brainzgraphinator and brainztableinator consumers.
+The admin panel also supports triggering a **MusicBrainz extraction**, which downloads the latest MusicBrainz JSONL dumps and publishes records to the `groovemap-musicbrainz-{artists,labels,release-groups,releases}` exchanges for brainzgraphinator and brainztableinator consumers.
 
 Use this when:
 
@@ -55,22 +55,22 @@ Dead-letter queues (DLQs) collect messages that consumers failed to process. Eac
 
 | Queue                                                             | Consumer          |
 | ----------------------------------------------------------------- | ----------------- |
-| `discogsography-discogs-graphinator-artists.dlq`                  | Graphinator       |
-| `discogsography-discogs-graphinator-labels.dlq`                   | Graphinator       |
-| `discogsography-discogs-graphinator-masters.dlq`                  | Graphinator       |
-| `discogsography-discogs-graphinator-releases.dlq`                 | Graphinator       |
-| `discogsography-discogs-tableinator-artists.dlq`                  | Tableinator       |
-| `discogsography-discogs-tableinator-labels.dlq`                   | Tableinator       |
-| `discogsography-discogs-tableinator-masters.dlq`                  | Tableinator       |
-| `discogsography-discogs-tableinator-releases.dlq`                 | Tableinator       |
-| `discogsography-musicbrainz-brainzgraphinator-artists.dlq`        | Brainzgraphinator |
-| `discogsography-musicbrainz-brainzgraphinator-labels.dlq`         | Brainzgraphinator |
-| `discogsography-musicbrainz-brainzgraphinator-release-groups.dlq` | Brainzgraphinator |
-| `discogsography-musicbrainz-brainzgraphinator-releases.dlq`       | Brainzgraphinator |
-| `discogsography-musicbrainz-brainztableinator-artists.dlq`        | Brainztableinator |
-| `discogsography-musicbrainz-brainztableinator-labels.dlq`         | Brainztableinator |
-| `discogsography-musicbrainz-brainztableinator-release-groups.dlq` | Brainztableinator |
-| `discogsography-musicbrainz-brainztableinator-releases.dlq`       | Brainztableinator |
+| `groovemap-discogs-graphinator-artists.dlq`                  | Graphinator       |
+| `groovemap-discogs-graphinator-labels.dlq`                   | Graphinator       |
+| `groovemap-discogs-graphinator-masters.dlq`                  | Graphinator       |
+| `groovemap-discogs-graphinator-releases.dlq`                 | Graphinator       |
+| `groovemap-discogs-tableinator-artists.dlq`                  | Tableinator       |
+| `groovemap-discogs-tableinator-labels.dlq`                   | Tableinator       |
+| `groovemap-discogs-tableinator-masters.dlq`                  | Tableinator       |
+| `groovemap-discogs-tableinator-releases.dlq`                 | Tableinator       |
+| `groovemap-musicbrainz-brainzgraphinator-artists.dlq`        | Brainzgraphinator |
+| `groovemap-musicbrainz-brainzgraphinator-labels.dlq`         | Brainzgraphinator |
+| `groovemap-musicbrainz-brainzgraphinator-release-groups.dlq` | Brainzgraphinator |
+| `groovemap-musicbrainz-brainzgraphinator-releases.dlq`       | Brainzgraphinator |
+| `groovemap-musicbrainz-brainztableinator-artists.dlq`        | Brainztableinator |
+| `groovemap-musicbrainz-brainztableinator-labels.dlq`         | Brainztableinator |
+| `groovemap-musicbrainz-brainztableinator-release-groups.dlq` | Brainztableinator |
+| `groovemap-musicbrainz-brainztableinator-releases.dlq`       | Brainztableinator |
 
 **Purging** permanently deletes all messages in a DLQ. Do this when:
 

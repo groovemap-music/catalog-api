@@ -817,6 +817,23 @@ class TestCollaboratorsEndpoint:
         assert data["collaborators"] == collabs
         assert data["total"] == 10
 
+    def test_collaborators_limit_is_forwarded(self, test_client: TestClient) -> None:
+        identity = {"artist_id": "a1", "artist_name": "Solo Artist"}
+        collaborators = AsyncMock(return_value=[])
+        with (
+            patch("api.routers.explore.collaborator_queries.get_artist_identity", AsyncMock(return_value=identity)),
+            patch("api.routers.explore.collaborator_queries.get_collaborators", collaborators),
+            patch("api.routers.explore.collaborator_queries.count_collaborators", AsyncMock(return_value=0)),
+        ):
+            response = test_client.get("/api/collaborators/a1?limit=5")
+        assert response.status_code == 200
+        assert response.json()["collaborators"] == []
+        collaborators.assert_awaited_once_with(ANY, "a1", limit=5)
+
+    @pytest.mark.parametrize("limit", [0, 101])
+    def test_collaborators_limit_bounds(self, test_client: TestClient, limit: int) -> None:
+        assert test_client.get(f"/api/collaborators/a1?limit={limit}").status_code == 422
+
     def test_collaborators_not_found_404(self, test_client: TestClient) -> None:
         with patch("api.routers.explore.collaborator_queries.get_artist_identity", AsyncMock(return_value=None)):
             response = test_client.get("/api/collaborators/unknown")
@@ -872,6 +889,16 @@ class TestGenreTreeEndpoint:
         assert data["genres"] == genres
 
         # Clean up
+        explore_module._genre_tree_cache = None
+
+    def test_genre_tree_empty_database(self, test_client: TestClient) -> None:
+        import api.routers.explore as explore_module
+
+        explore_module._genre_tree_cache = None
+        with patch("api.routers.explore.genre_tree_queries.get_genre_tree", AsyncMock(return_value=[])):
+            response = test_client.get("/api/genre-tree")
+        assert response.status_code == 200
+        assert response.json() == {"genres": []}
         explore_module._genre_tree_cache = None
 
     def test_genre_tree_cache_hit(self, test_client: TestClient) -> None:

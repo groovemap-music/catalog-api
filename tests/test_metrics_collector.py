@@ -292,7 +292,7 @@ class TestCollectQueueMetrics:
 
         fake_queues = [
             {
-                "name": "discogsography-artists-graphinator",
+                "name": "groovemap-discogs-artists-graphinator",
                 "messages_ready": 10,
                 "messages_unacknowledged": 2,
                 "consumers": 1,
@@ -318,7 +318,7 @@ class TestCollectQueueMetrics:
             rows = await collect_queue_metrics("localhost", 15672, "guest", "guest")
 
         assert len(rows) == 1
-        assert rows[0]["queue_name"] == "discogsography-artists-graphinator"
+        assert rows[0]["queue_name"] == "groovemap-discogs-artists-graphinator"
         assert rows[0]["messages_ready"] == 10
         assert rows[0]["publish_rate"] == pytest.approx(5.0)
         assert rows[0]["ack_rate"] == pytest.approx(3.0)
@@ -344,7 +344,7 @@ class TestCollectQueueMetrics:
 
         fake_queues = [
             {
-                "name": "discogsography-releases-tableinator",
+                "name": "groovemap-discogs-releases-tableinator",
                 "messages_ready": 0,
                 "messages_unacknowledged": 0,
                 "consumers": 1,

@@ -1117,7 +1117,7 @@ async def generate_ai_prompt(
     user_content = f"# Extraction Analysis — Version {version} (source: {source})\n\n" + "\n\n---\n\n".join(rule_sections)
 
     system_prompt = (
-        "You are a data pipeline debugging expert for Discogsography, a system that parses "
+        "You are a data pipeline debugging expert for GrooveMap, a system that parses "
         "Discogs XML database dumps and MusicBrainz JSONL exports into Neo4j and PostgreSQL.\n\n"
         "The user will show you data quality violations from the extraction pipeline. "
         "Each violation has a rule name, severity, affected field, the actual value, "

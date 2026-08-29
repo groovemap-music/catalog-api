@@ -1,0 +1,28 @@
+name: Publish image
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+jobs:
+  publish:
+    uses: groovemap-music/.github/.github/workflows/reusable-image-release.yml@main
+    with:
+      image-name: catalog-api
+      requires-private-library: true
+      prepare-command: just prepare-private-wheels
+    secrets: inherit
+
+  publish-performance:
+    uses: groovemap-music/.github/.github/workflows/reusable-image-release.yml@main
+    with:
+      image-name: catalog-api-performance
+      dockerfile: performance/Dockerfile
+      requires-private-library: true
+      prepare-command: just prepare-private-wheels
+    secrets: inherit

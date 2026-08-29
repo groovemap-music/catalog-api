@@ -1,6 +1,9 @@
-# API Service
+# GrooveMap catalog API service
 
-Provides user account management, JWT authentication, and Discogs OAuth 1.0a integration for Discogsography.
+Repository-wide configuration, operations, and design guidance is indexed in
+[`docs/README.md`](../docs/README.md).
+
+Provides user account management, JWT authentication, and Discogs OAuth 1.0a integration for GrooveMap.
 
 ## Overview
 
@@ -29,14 +32,14 @@ Environment variables:
 ```bash
 # PostgreSQL connection
 POSTGRES_HOST=postgres
-POSTGRES_USERNAME=discogsography
-POSTGRES_PASSWORD=discogsography
-POSTGRES_DATABASE=discogsography
+POSTGRES_USERNAME=groovemap
+POSTGRES_PASSWORD=groovemap
+POSTGRES_DATABASE=groovemap
 
 # Neo4j connection (required — used by graph queries, sync, and recommendations)
 NEO4J_HOST=neo4j
 NEO4J_USERNAME=neo4j
-NEO4J_PASSWORD=discogsography
+NEO4J_PASSWORD=groovemap
 
 # Redis (OAuth state + JTI blacklist storage)
 REDIS_HOST=redis
@@ -45,7 +48,7 @@ REDIS_HOST=redis
 JWT_SECRET_KEY=your-secret-key-here
 
 # Discogs API
-DISCOGS_USER_AGENT="Discogsography/1.0 +https://github.com/groovemap-music/catalog-api"
+DISCOGS_USER_AGENT="GrooveMap/1.0 +https://github.com/groovemap-music/catalog-api"
 
 # HKDF master encryption key (derives OAuth + TOTP keys; generate with:
 # python -c 'import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())')
@@ -55,7 +58,7 @@ ENCRYPTION_MASTER_KEY=your-base64-master-key-here
 # Optional — Resend email for password reset notifications (when not set, reset links are logged)
 # RESEND_API_KEY=your-resend-api-key
 # RESEND_SENDER_EMAIL=noreply@yourdomain.com
-# RESEND_SENDER_NAME=Discogsography
+# RESEND_SENDER_NAME=GrooveMap
 
 # Optional — CORS
 CORS_ORIGINS="http://localhost:8003,http://localhost:8006"  # Comma-separated allowed origins

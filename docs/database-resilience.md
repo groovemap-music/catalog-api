@@ -1,6 +1,6 @@
 # Database Resilience Documentation
 
-This document describes the database resilience features implemented in the Discogsography platform to handle nightly
+This document describes the database resilience features implemented in the GrooveMap platform to handle nightly
 maintenance windows and other database outages.
 
 ## Overview
@@ -130,14 +130,14 @@ NEO4J_PASSWORD=password
 
 # PostgreSQL
 POSTGRES_HOST=postgres
-POSTGRES_DATABASE=discogsography
+POSTGRES_DATABASE=groovemap
 POSTGRES_USERNAME=postgres
 POSTGRES_PASSWORD=postgres
 
 # RabbitMQ
 RABBITMQ_HOST=rabbitmq
-RABBITMQ_USERNAME=discogsography
-RABBITMQ_PASSWORD=discogsography
+RABBITMQ_USERNAME=groovemap
+RABBITMQ_PASSWORD=groovemap
 ```
 
 ### Tuning Parameters

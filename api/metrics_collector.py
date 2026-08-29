@@ -201,7 +201,7 @@ async def collect_queue_metrics(
     username: str,
     password: str,
 ) -> list[dict[str, Any]]:
-    """Poll RabbitMQ Management API for discogsography queue metrics.
+    """Poll RabbitMQ Management API for groovemap queue metrics.
 
     Returns an empty list on any failure.
     """
@@ -213,7 +213,7 @@ async def collect_queue_metrics(
         rows: list[dict[str, Any]] = []
         for q in queues:
             name: str = q.get("name", "")
-            if "discogsography" not in name and "musicbrainz" not in name:
+            if "groovemap" not in name and "musicbrainz" not in name:
                 continue
             stats = q.get("message_stats", {})
             rows.append(

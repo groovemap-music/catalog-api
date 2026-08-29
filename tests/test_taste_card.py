@@ -102,4 +102,4 @@ class TestRenderTasteCard:
         assert "120" in svg
 
     def test_branding_present(self) -> None:
-        assert "discogsography" in _default_card()
+        assert "groovemap" in _default_card()

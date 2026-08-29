@@ -1,6 +1,6 @@
 # ⚡ Performance Optimization Guide
 
-> Strategies and techniques for optimizing Discogsography's performance at scale
+> Strategies and techniques for optimizing GrooveMap's performance at scale
 
 ## Overview
 

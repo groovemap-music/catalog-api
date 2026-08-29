@@ -88,7 +88,7 @@ class TestResendNotificationChannel:
         body = call_kwargs["json"]
         assert body["from"] == "Test Sender <noreply@test.com>"
         assert body["to"] == ["user@example.com"]
-        assert body["subject"] == "Reset your Discogsography password"
+        assert body["subject"] == "Reset your GrooveMap password"
         assert "reset?token=abc" in body["html"]
         # No tracking field is ever sent — Resend has click/open tracking off
         # by default for every domain, so there is nothing to configure or
@@ -110,7 +110,7 @@ class TestResendNotificationChannel:
         mock_response.raise_for_status = MagicMock()
         mock_client = _mock_async_client(mock_response)
 
-        reset_url = "https://discogsography.com/reset-password?token=abcDEF123-xyz_789"
+        reset_url = "https://groovemap.music/reset-password?token=abcDEF123-xyz_789"
 
         with patch("api.notifications.httpx.AsyncClient", return_value=mock_client):
             channel = ResendNotificationChannel(
@@ -146,7 +146,7 @@ class TestResendNotificationChannel:
         mock_response.raise_for_status = MagicMock()
         mock_client = _mock_async_client(mock_response)
 
-        reset_url = "https://discogsography.com/reset-password?token=abc123&source=email&ts=1234567890"
+        reset_url = "https://groovemap.music/reset-password?token=abc123&source=email&ts=1234567890"
 
         with patch("api.notifications.httpx.AsyncClient", return_value=mock_client):
             channel = ResendNotificationChannel(

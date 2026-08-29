@@ -23,7 +23,7 @@ ARG BUILD_DATE
 ARG BUILD_VERSION=0.1.0
 ARG VCS_REF
 
-LABEL org.opencontainers.image.title="GrooveMap catalog API" \
+LABEL org.opencontainers.image.title="catalog-api" \
       org.opencontainers.image.description="Authentication, catalog, graph, recommendation, NLQ, analytics, and operator API" \
       org.opencontainers.image.authors="Robert Wlodarczyk <robert@simplicityguy.com>" \
       org.opencontainers.image.url="https://groovemap.music" \

@@ -54,8 +54,8 @@ class ApiConfig:
     extractor_health_port: int = 8000
     rabbitmq_management_host: str = "rabbitmq"
     rabbitmq_management_port: int = 15672
-    rabbitmq_username: str = "discogsography"
-    rabbitmq_password: str = field(default="discogsography", repr=False)
+    rabbitmq_username: str = "groovemap"
+    rabbitmq_password: str = field(default="groovemap", repr=False)
     metrics_retention_days: int = 366
     metrics_collection_interval: int = 300
 
@@ -120,8 +120,8 @@ class ApiConfig:
             extractor_health_port=_coerce_port(getenv("EXTRACTOR_HEALTH_PORT", "8000"), 8000),
             rabbitmq_management_host=getenv("RABBITMQ_MANAGEMENT_HOST", getenv("RABBITMQ_HOST", "rabbitmq")),
             rabbitmq_management_port=_coerce_port(getenv("RABBITMQ_MANAGEMENT_PORT", "15672"), 15672),
-            rabbitmq_username=get_secret("RABBITMQ_USERNAME", "discogsography"),
-            rabbitmq_password=get_secret("RABBITMQ_PASSWORD", "discogsography"),
+            rabbitmq_username=get_secret("RABBITMQ_USERNAME", "groovemap"),
+            rabbitmq_password=get_secret("RABBITMQ_PASSWORD", "groovemap"),
             metrics_retention_days=_env_int("METRICS_RETENTION_DAYS", 366),
             metrics_collection_interval=_env_int("METRICS_COLLECTION_INTERVAL", 300),
         )

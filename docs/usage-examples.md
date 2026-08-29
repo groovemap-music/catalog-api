@@ -4,7 +4,7 @@
 
 **Practical query examples for Neo4j and PostgreSQL**
 
-[🏠 Back to Main](../README.md) | [📚 Documentation Index](README.md) | [🗄️ Database Schema](database-schema.md)
+[🏠 Back to Main](../README.md) | [📚 Documentation Index](README.md) | [🗄️ Database Schema](https://github.com/groovemap-music/database-schema)
 
 </div>
 
@@ -786,9 +786,9 @@ AND (data->>'year')::int = 1959;
 
 ## Related Documentation
 
-- [Database Schema](database-schema.md) - Complete schema reference
-- [Architecture Overview](architecture.md) - System architecture
-- [Quick Start Guide](quick-start.md) - Getting started
+- [Database Schema](https://github.com/groovemap-music/database-schema) - Complete schema reference
+- [Architecture Overview](https://github.com/groovemap-music/deployment/blob/main/docs/architecture.md) - System architecture
+- [Quick Start Guide](https://github.com/groovemap-music/deployment/blob/main/docs/quick-start.md) - Getting started
 - [Performance Guide](performance-guide.md) - Query optimization
 
 ______________________________________________________________________

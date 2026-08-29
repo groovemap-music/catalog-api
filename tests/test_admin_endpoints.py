@@ -260,12 +260,12 @@ class TestDlqPurge:
         mock_client_cls.return_value = mock_client_instance
 
         resp = test_client.post(
-            "/api/admin/dlq/purge/discogsography-discogs-graphinator-artists.dlq",
+            "/api/admin/dlq/purge/groovemap-discogs-graphinator-artists.dlq",
             headers=_admin_auth_headers(),
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert data["queue"] == "discogsography-discogs-graphinator-artists.dlq"
+        assert data["queue"] == "groovemap-discogs-graphinator-artists.dlq"
         assert data["messages_purged"] == 0
 
     def test_invalid_queue(self, test_client: TestClient) -> None:
@@ -276,7 +276,7 @@ class TestDlqPurge:
         assert resp.status_code == 404
 
     def test_unauthorized(self, test_client: TestClient) -> None:
-        resp = test_client.post("/api/admin/dlq/purge/discogsography-discogs-graphinator-artists.dlq")
+        resp = test_client.post("/api/admin/dlq/purge/groovemap-discogs-graphinator-artists.dlq")
         assert resp.status_code in (401, 403)
 
     @patch("api.routers.admin.httpx.AsyncClient")
@@ -292,7 +292,7 @@ class TestDlqPurge:
         mock_client_cls.return_value = mock_client_instance
 
         resp = test_client.post(
-            "/api/admin/dlq/purge/discogsography-discogs-graphinator-artists.dlq",
+            "/api/admin/dlq/purge/groovemap-discogs-graphinator-artists.dlq",
             headers=_admin_auth_headers(),
         )
         assert resp.status_code == 200
@@ -310,7 +310,7 @@ class TestDlqPurge:
         mock_client_cls.return_value = mock_client_instance
 
         resp = test_client.post(
-            "/api/admin/dlq/purge/discogsography-discogs-graphinator-artists.dlq",
+            "/api/admin/dlq/purge/groovemap-discogs-graphinator-artists.dlq",
             headers=_admin_auth_headers(),
         )
         assert resp.status_code == 200
@@ -327,7 +327,7 @@ class TestDlqPurge:
         mock_client_cls.return_value = mock_client_instance
 
         resp = test_client.post(
-            "/api/admin/dlq/purge/discogsography-discogs-graphinator-artists.dlq",
+            "/api/admin/dlq/purge/groovemap-discogs-graphinator-artists.dlq",
             headers=_admin_auth_headers(),
         )
         assert resp.status_code == 502
@@ -341,7 +341,7 @@ class TestDlqPurge:
         mock_client_cls.return_value = mock_client_instance
 
         resp = test_client.post(
-            "/api/admin/dlq/purge/discogsography-discogs-graphinator-artists.dlq",
+            "/api/admin/dlq/purge/groovemap-discogs-graphinator-artists.dlq",
             headers=_admin_auth_headers(),
         )
         assert resp.status_code == 502
@@ -362,7 +362,7 @@ class TestDlqPurge:
 
         with capture_logs() as captured:
             resp = test_client.post(
-                "/api/admin/dlq/purge/discogsography-discogs-graphinator-artists.dlq",
+                "/api/admin/dlq/purge/groovemap-discogs-graphinator-artists.dlq",
                 headers=_admin_auth_headers(),
             )
         assert resp.status_code == 200
@@ -387,7 +387,7 @@ class TestDlqPurge:
         mock_client_cls.return_value = mock_client_instance
 
         resp = test_client.post(
-            "/api/admin/dlq/purge/discogsography-discogs-graphinator-artists.dlq",
+            "/api/admin/dlq/purge/groovemap-discogs-graphinator-artists.dlq",
             headers=_admin_auth_headers(),
         )
         assert resp.status_code == 502
@@ -402,7 +402,7 @@ class TestDlqPurge:
         mock_client_cls.return_value = mock_client_instance
 
         resp = test_client.post(
-            "/api/admin/dlq/purge/discogsography-discogs-graphinator-artists.dlq",
+            "/api/admin/dlq/purge/groovemap-discogs-graphinator-artists.dlq",
             headers=_admin_auth_headers(),
         )
         assert resp.status_code == 502
@@ -609,7 +609,7 @@ class TestServiceNotReady:
         admin_mod._config = None
         try:
             resp = test_client.post(
-                "/api/admin/dlq/purge/discogsography-discogs-graphinator-artists.dlq",
+                "/api/admin/dlq/purge/groovemap-discogs-graphinator-artists.dlq",
                 headers=_admin_auth_headers(),
             )
             assert resp.status_code == 503
@@ -1547,13 +1547,13 @@ class TestAuditLogging:
         mock_client_cls.return_value = mock_client_instance
 
         resp = test_client.post(
-            "/api/admin/dlq/purge/discogsography-discogs-graphinator-artists.dlq",
+            "/api/admin/dlq/purge/groovemap-discogs-graphinator-artists.dlq",
             headers=_admin_auth_headers(),
         )
         assert resp.status_code == 200
         mock_audit.assert_called_once()
         assert mock_audit.call_args.kwargs["action"] == "dlq.purge"
-        assert mock_audit.call_args.kwargs["target"] == "discogsography-discogs-graphinator-artists.dlq"
+        assert mock_audit.call_args.kwargs["target"] == "groovemap-discogs-graphinator-artists.dlq"
 
 
 class TestAdminAuthSecurity:

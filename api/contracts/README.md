@@ -1,5 +1,8 @@
 # Catalog API contracts
 
+See the repository [documentation index](../../docs/README.md) for producer and consumer
+ownership.
+
 `catalog-api` owns the HTTP and OpenAPI contracts in this directory. The internal
 Insights surface is versioned separately because `analytics-engine` is an independent
 release unit. Generate its pinned consumer constants with:

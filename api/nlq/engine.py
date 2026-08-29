@@ -28,7 +28,7 @@ logger = structlog.get_logger(__name__)
 # ── System prompt ────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """\
-You are a music knowledge graph assistant for Discogsography. You help users \
+You are a music knowledge graph assistant for GrooveMap. You help users \
 explore a graph of artists, labels, releases, genres, and styles from the \
 Discogs music database.
 
@@ -43,7 +43,7 @@ Supported entity types: artist, label, genre, style.
 Releases are searchable but not directly explorable as graph nodes.
 
 You can ONLY answer questions about music, artists, labels, releases, genres, \
-and styles in the Discogsography knowledge graph. If a question is unrelated \
+and styles in the GrooveMap knowledge graph. If a question is unrelated \
 to music or this database, politely decline and suggest a music-related query.
 
 Do NOT answer general knowledge questions, even if music-adjacent (e.g., band \
@@ -66,7 +66,7 @@ collection stats, taste fingerprint, blindspots, and gap analysis."""
 
 _REFUSAL_KEYWORDS = ("i can only help", "i can only answer", "i can't help", "i cannot help", "not able to help", "outside my scope")
 
-_OFF_TOPIC_REDIRECT = "I can only answer questions about the Discogsography music database. Try asking about an artist, label, or genre!"
+_OFF_TOPIC_REDIRECT = "I can only answer questions about the GrooveMap music database. Try asking about an artist, label, or genre!"
 
 
 # ── Dataclasses ──────────────────────────────────────────────────────────

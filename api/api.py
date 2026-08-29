@@ -75,6 +75,15 @@ from api.syncer import reconcile_stale_sync_history
 
 logger = structlog.get_logger(__name__)
 
+STARTUP_BANNER = r"""
+         _        _                         _
+ __ __ _| |_ __ _| |___  __ _ ___ __ _ _ __(_)
+/ _/ _` |  _/ _` | / _ \/ _` |___/ _` | '_ \ |
+\__\__,_|\__\__,_|_\___/\__, |   \__,_| .__/_|
+                        |___/         |_|
+                         catalog-api
+""".strip("\n")
+
 # Module-level state
 _pool: AsyncPostgreSQLPool | None = None
 _config: ApiConfig | None = None
@@ -356,9 +365,9 @@ _cors_origins_raw = os.environ.get("CORS_ORIGINS", "")
 _cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()] if _cors_origins_raw else None
 
 app = FastAPI(
-    title="Discogsography API",
+    title="GrooveMap API",
     version="0.1.0",
-    description="User authentication and Discogs OAuth integration for Discogsography",
+    description="User authentication and Discogs OAuth integration for GrooveMap",
     default_response_class=JSONResponse,
     lifespan=lifespan,
 )
@@ -730,7 +739,7 @@ async def revoke_discogs(
 def main() -> None:  # pragma: no cover
     """Entry point for the API service."""
     setup_logging("api", log_file=Path("/logs/api.log"))
-    print("GrooveMap Catalog API")
+    print(STARTUP_BANNER)
     uvicorn.run(
         app,
         host="0.0.0.0",  # noqa: S104  # nosec B104
@@ -738,11 +747,11 @@ def main() -> None:  # pragma: no cover
         log_level=os.getenv("LOG_LEVEL", "INFO").lower(),
         # In production/dev, all real user traffic transits the explore reverse
         # proxy (and internal callers like dashboard's admin proxy) over the
-        # discogsography docker network. Trust X-Forwarded-For/-Proto only from
+        # groovemap docker network. Trust X-Forwarded-For/-Proto only from
         # that internal subnet so slowapi's IP-keyed rate limits (api/limiter.py)
         # resolve the true client instead of collapsing every request behind the
         # proxy into a single global bucket — see discogsography-quq5. The
-        # subnet must match docker-compose.yml's `networks.discogsography.ipam`.
+        # subnet must match docker-compose.yml's `networks.groovemap.ipam`.
         proxy_headers=True,
         forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "172.20.0.0/16"),
     )

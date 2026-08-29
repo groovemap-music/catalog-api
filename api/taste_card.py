@@ -180,5 +180,5 @@ def render_taste_card(
   <line x1="50" y1="556" x2="1150" y2="556" stroke="#ffffff14" stroke-width="1"/>
   <text x="50" y="586" font-size="14" font-weight="bold" fill="{_MUTED}" letter-spacing="2">TASTE DRIFT</text>
   {sparkline}
-  <text x="1150" y="604" font-size="20" font-weight="bold" fill="url(#barGrad)" text-anchor="end">discogsography</text>
+  <text x="1150" y="604" font-size="20" font-weight="bold" fill="url(#barGrad)" text-anchor="end">groovemap</text>
 </svg>"""

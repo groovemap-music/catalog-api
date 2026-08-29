@@ -2,15 +2,15 @@
 
 <div align="center">
 
-**Consistent, emoji-enhanced logging patterns and configuration across all Discogsography services**
+**Consistent, emoji-enhanced logging patterns and configuration across all GrooveMap services**
 
-[🏠 Back to Main](../README.md) | [📚 Documentation Index](README.md) | [📋 Emoji Guide](emoji-guide.md)
+[🏠 Back to Main](../README.md) | [📚 Documentation Index](README.md) | [📋 Emoji Guide](https://github.com/groovemap-music/.github/blob/main/docs/emoji-guide.md)
 
 </div>
 
 ## 📖 Overview
 
-Discogsography uses a standardized logging approach with emoji prefixes for visual clarity and quick issue identification. All services use consistent logging controlled by the `LOG_LEVEL` environment variable.
+GrooveMap uses a standardized logging approach with emoji prefixes for visual clarity and quick issue identification. All services use consistent logging controlled by the `LOG_LEVEL` environment variable.
 
 ### Logging Flow
 
@@ -49,7 +49,7 @@ flowchart LR
 
 ### Environment Variable
 
-All services in the Discogsography platform use the `LOG_LEVEL` environment variable for consistent logging control.
+All services in the GrooveMap platform use the `LOG_LEVEL` environment variable for consistent logging control.
 
 #### Supported Log Levels
 
@@ -88,7 +88,7 @@ services:
 #### Docker Run
 
 ```bash
-docker run -e LOG_LEVEL=DEBUG discogsography/service:latest
+docker run -e LOG_LEVEL=DEBUG groovemap/service:latest
 ```
 
 ### Service-Specific Implementation
@@ -568,9 +568,9 @@ Services:  🐰 RabbitMQ | 🔗 Neo4j | 🐘 PostgreSQL | 🌐 Network
 
 ## 🔗 Related Documentation
 
-- [Emoji Guide](emoji-guide.md) - Complete emoji reference for the project
-- [Monitoring Guide](monitoring.md) - Real-time monitoring and debugging
-- [Troubleshooting Guide](troubleshooting.md) - Common issues and solutions
+- [Emoji Guide](https://github.com/groovemap-music/.github/blob/main/docs/emoji-guide.md) - Complete emoji reference for the project
+- [Monitoring Guide](https://github.com/groovemap-music/deployment/blob/main/docs/monitoring.md) - Real-time monitoring and debugging
+- [Troubleshooting Guide](https://github.com/groovemap-music/deployment/blob/main/docs/troubleshooting.md) - Common issues and solutions
 - [Configuration Guide](configuration.md) - Complete environment variable reference
 
 ______________________________________________________________________

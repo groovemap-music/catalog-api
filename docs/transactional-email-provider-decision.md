@@ -122,9 +122,9 @@ POST https://api.resend.com/emails
 Authorization: Bearer <RESEND_API_KEY>
 Content-Type: application/json
 
-{"from": "Discogsography <noreply@discogsography.com>",
+{"from": "GrooveMap <noreply@groovemap.music>",
  "to": ["user@example.com"],
- "subject": "Reset your Discogsography password",
+ "subject": "Reset your GrooveMap password",
  "html": "…"}
 ```
 
@@ -136,8 +136,8 @@ the setting lives on the domain and is off.
 | Field | Env var | Secret? | Default |
 |---|---|---|---|
 | `resend_api_key` | `RESEND_API_KEY` | ✅ via `get_secret()` | `None` — unset falls back to `LogNotificationChannel`, matching today's behavior |
-| `resend_sender_email` | `RESEND_SENDER_EMAIL` | — | `noreply@discogsography.com` |
-| `resend_sender_name` | `RESEND_SENDER_NAME` | — | `Discogsography` |
+| `resend_sender_email` | `RESEND_SENDER_EMAIL` | — | `noreply@groovemap.music` |
+| `resend_sender_name` | `RESEND_SENDER_NAME` | — | `GrooveMap` |
 
 `RESEND_API_KEY` is read through the existing `get_secret()` helper, so
 `RESEND_API_KEY_FILE` works unchanged under the `_FILE` convention.
@@ -151,7 +151,7 @@ Overage is a hard stop, not a charge — if the daily cap is hit, sends fail and
 `api/notifications.py` logs the failure via its existing `logger.exception` path. Password
 reset remains functional-but-degraded rather than silently broken.
 
-**DNS:** SPF and DKIM records for `discogsography.com` per Resend's domain verification
+**DNS:** SPF and DKIM records for `groovemap.music` per Resend's domain verification
 flow; DMARC recommended. Comparable to Brevo's existing setup — no new burden.
 
 **Files touched by the implementation bead:** `api/notifications.py`, `common/config.py`,

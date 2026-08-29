@@ -60,7 +60,7 @@ def test_build_conninfo_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "port=5432" in conninfo
     assert "user=postgres" in conninfo
     assert "password=postgres" in conninfo
-    assert "dbname=discogsography" in conninfo
+    assert "dbname=groovemap" in conninfo
 
 
 def test_build_conninfo_blank_port_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:

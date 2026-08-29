@@ -1,6 +1,9 @@
-# API Performance Test
+# GrooveMap catalog API performance runner
 
-Sequential performance test runner for all Discogsography API query endpoints. Measures response times across multiple iterations and produces a detailed report with min/avg/max/p95 statistics per endpoint.
+See the repository [documentation index](../docs/README.md) for API configuration and
+performance guidance.
+
+Sequential performance test runner for all GrooveMap API query endpoints. Measures response times across multiple iterations and produces a detailed report with min/avg/max/p95 statistics per endpoint.
 
 ## What It Tests
 
@@ -46,7 +49,7 @@ The performance test covers all API endpoints that execute database queries (Neo
 
 ## Prerequisites
 
-The Discogsography stack must be running with data loaded:
+The GrooveMap stack must be running with data loaded:
 
 ```bash
 docker compose up -d
@@ -76,7 +79,7 @@ The config file (`config.yaml`) is mounted into the container at `/config/config
 mkdir -p perftest-results
 
 docker run --rm \
-  --network discogsography_discogsography \
+  --network deployment_groovemap \
   -v "$(pwd)/perftest-results:/results" \
   -v "$(pwd)/performance/config.yaml:/config/config.yaml:ro" \
   catalog-api-performance:local
@@ -109,7 +112,7 @@ Create your own `config.yaml` and mount it instead:
 
 ```bash
 docker run --rm \
-  --network discogsography_discogsography \
+  --network deployment_groovemap \
   -v "$(pwd)/perftest-results:/results" \
   -v "$(pwd)/my-config.yaml:/config/config.yaml:ro" \
   catalog-api-performance:local
@@ -169,7 +172,7 @@ After a run, `perftest-results/` contains:
 
 ```
 ==============================================================================
-  Discogsography API Performance Test Report
+  GrooveMap API Performance Test Report
   Generated: 2026-03-19 14:30:00 UTC
 ==============================================================================
 
@@ -195,8 +198,8 @@ After a run, `perftest-results/` contains:
 
 ## Network Note
 
-The container must be on the same Docker network as the API service. The default network name is `discogsography_discogsography` (created by docker compose). Verify with:
+The container must be on the same Docker network as the API service. The default network name is `deployment_groovemap` (created by Docker Compose). Verify with:
 
 ```bash
-docker network ls | grep discogsography
+docker network ls | grep groovemap
 ```

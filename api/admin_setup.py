@@ -32,7 +32,7 @@ def _build_conninfo() -> str:
     host, port = parse_postgres_host_port(getenv("POSTGRES_HOST", "localhost"), default_port)
     user = get_secret("POSTGRES_USERNAME") or "postgres"
     password = get_secret("POSTGRES_PASSWORD") or "postgres"
-    database = getenv("POSTGRES_DATABASE", "discogsography")
+    database = getenv("POSTGRES_DATABASE", "groovemap")
     return f"host={host} port={port} user={user} password={password} dbname={database}"
 
 

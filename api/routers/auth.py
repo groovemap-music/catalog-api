@@ -500,7 +500,7 @@ async def twofa_setup(
                 detail="2FA is already enabled — disable it first before setting up again",
             )
 
-    otpauth_uri = f"otpauth://totp/Discogsography:{email}?secret={secret}&issuer=Discogsography"
+    otpauth_uri = f"otpauth://totp/GrooveMap:{email}?secret={secret}&issuer=GrooveMap"
 
     logger.info("🔐 2FA setup initiated", user_id=user_id)
     return JSONResponse(

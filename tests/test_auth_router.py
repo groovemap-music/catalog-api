@@ -145,7 +145,7 @@ class TestResetRequest:
         channel = AsyncMock()
         original_config = auth_router._config
         original_channel = auth_router._notification_channel
-        auth_router._config = replace(original_config, app_base_url="https://discogsography.example")
+        auth_router._config = replace(original_config, app_base_url="https://groovemap.example")
         auth_router._notification_channel = channel
         try:
             response = test_client.post("/api/auth/reset-request", json={"email": TEST_USER_EMAIL})
@@ -155,7 +155,7 @@ class TestResetRequest:
 
         assert response.status_code == 200
         sent_url = channel.send_password_reset.call_args.args[1]
-        assert sent_url.startswith("https://discogsography.example/?reset_token=")
+        assert sent_url.startswith("https://groovemap.example/?reset_token=")
         # Guard the regression directly: a bare relative path is what broke this.
         assert not sent_url.startswith("/")
 
@@ -175,7 +175,7 @@ class TestResetRequest:
         # from_env() strips the trailing slash on load, so go through it rather
         # than constructing the field directly.
         with pytest.MonkeyPatch.context() as mp:
-            mp.setenv("APP_BASE_URL", "https://discogsography.example/")
+            mp.setenv("APP_BASE_URL", "https://groovemap.example/")
             mp.setenv("JWT_SECRET_KEY", "x" * 32)
             loaded = ApiConfig.from_env()
         auth_router._config = replace(original_config, app_base_url=loaded.app_base_url)
@@ -187,7 +187,7 @@ class TestResetRequest:
             auth_router._notification_channel = original_channel
 
         sent_url = channel.send_password_reset.call_args.args[1]
-        assert sent_url.startswith("https://discogsography.example/?reset_token=")
+        assert sent_url.startswith("https://groovemap.example/?reset_token=")
 
 
 class TestResetConfirm:
