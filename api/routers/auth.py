@@ -68,7 +68,7 @@ async def _reject_stale_challenge(payload: dict[str, Any]) -> None:
     access-token validation — could never invalidate it. The invariant ("no
     credential derived from the pre-change password may be honored") has to be
     enforced at the MINT site too, against the challenge's own `iat`
-    (discogsography-jxmn).
+    (groovemap-jxmn).
     """
     if await token_revocation_reason(payload, _redis) is not None:
         raise HTTPException(
@@ -177,7 +177,7 @@ async def login(request: Request, body: LoginRequest) -> JSONResponse:  # noqa: 
     # credential this login mints. _verify_password is deliberately slow
     # (PBKDF2, 100k iterations); a password change committing inside that window
     # must invalidate this login, which the `iat <= password_changed` predicate
-    # can only see if `iat` predates the marker (discogsography-jxmn).
+    # can only see if `iat` predates the marker (groovemap-jxmn).
     credential_issued_at = int(datetime.now(UTC).timestamp())
 
     async with _pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -309,7 +309,7 @@ async def _process_reset_request(user: dict[str, Any] | None) -> None:
     SELECT on both branches, so response timing carries no signal about
     account existence — the Redis `setex` and the outbound Resend HTTP call
     (the actual timing oracle) both happen after the client already has the
-    response (discogsography-0lof).
+    response (groovemap-0lof).
     """
     if not user or _redis is None or _config is None:
         return
@@ -370,7 +370,7 @@ async def reset_confirm(request: Request, body: ResetConfirmModel) -> JSONRespon
         # gates JWT validation and TTLs out after jwt_expire_minutes, so it can
         # never durably revoke app tokens (which carry no expiry by design) —
         # revoking the rows themselves is the only correct fix
-        # (discogsography-ci4a).
+        # (groovemap-ci4a).
         await execute_sql(
             cur,
             "UPDATE app_tokens SET revoked_at = NOW() WHERE user_id = %s::uuid AND revoked_at IS NULL",
@@ -421,7 +421,7 @@ async def change_password(
             (hashed_password, user_id),
         )
         # Bulk-revoke third-party app tokens too (same pattern as reset-confirm;
-        # see discogsography-ci4a for why the Redis password_changed marker
+        # see groovemap-ci4a for why the Redis password_changed marker
         # alone cannot cover app tokens).
         await execute_sql(
             cur,
@@ -548,7 +548,7 @@ async def twofa_confirm(
     # this UPDATE would land as totp_enabled=TRUE with totp_secret/
     # totp_recovery_codes NULLed — login demands 2FA but neither twofa_verify
     # nor twofa_recovery can ever satisfy it, a permanent lockout
-    # (discogsography-8vlp). rowcount 0 means the setup state changed
+    # (groovemap-8vlp). rowcount 0 means the setup state changed
     # underneath us (disabled, or re-setup with a new secret) — treat that as
     # a conflict rather than silently reporting success.
     async with _pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -604,7 +604,7 @@ async def twofa_verify(request: Request, body: TwoFactorVerifyModel) -> JSONResp
     # check read a plain SELECT (no lock held past that statement, per this
     # repo's autocommit=True pool contract), so N concurrent requests could
     # all read "not locked" before any of them committed the lock, each
-    # getting a free TOTP guess (discogsography-vjod). `SELECT ... FOR UPDATE`
+    # getting a free TOTP guess (groovemap-vjod). `SELECT ... FOR UPDATE`
     # inside an explicit transaction takes a row lock that concurrent verify
     # attempts for the SAME user serialize on: the second request's SELECT
     # blocks until the first request's transaction (lock check + increment)
@@ -706,7 +706,7 @@ async def twofa_verify(request: Request, body: TwoFactorVerifyModel) -> JSONResp
 
     # Issue access token, stamped with the CHALLENGE's iat: the credential this
     # token derives from is the password proven at login, so a password change
-    # after that moment must invalidate it too (discogsography-jxmn).
+    # after that moment must invalidate it too (groovemap-jxmn).
     access_token, expires_in = _create_access_token_fn(user_id, email, issued_at=payload.get("iat"))
     logger.info("✅ 2FA verification successful", user_id=user_id)
     return JSONResponse(
@@ -767,7 +767,7 @@ async def twofa_recovery(request: Request, body: TwoFactorRecoveryModel) -> JSON
     # code (password + a one-time recovery code), so its success path must
     # reset the failed-attempt/lockout columns exactly like twofa_verify's
     # success path does — folded into this same guarded UPDATE so it only
-    # fires when the code actually matched (discogsography-cflq). Without
+    # fires when the code actually matched (groovemap-cflq). Without
     # this, stale lockout state from before the recovery login survives it
     # and can 429 a CORRECT TOTP code on the very next login.
     async with _pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -799,7 +799,7 @@ async def twofa_recovery(request: Request, body: TwoFactorRecoveryModel) -> JSON
     # getdel is atomic, so concurrent requests replaying the same challenge
     # (with different recovery codes) race here and exactly one wins; the
     # loser must be rejected — mirrors twofa_verify's identical check
-    # (discogsography-kqw4). The recovery code redeemed above is *not*
+    # (groovemap-kqw4). The recovery code redeemed above is *not*
     # un-spent on this path; that's an accepted, bounded trade (same one
     # twofa_verify's loser already takes on its TOTP code).
     consumed = await _redis.getdel(challenge_key)

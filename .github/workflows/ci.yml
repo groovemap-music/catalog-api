@@ -4,21 +4,34 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    - cron: "23 8 * * 1"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  ci:
-    uses: groovemap-music/.github/.github/workflows/reusable-ci.yml@main
+  required:
+    uses: groovemap-music/automation/.github/workflows/reusable-ci.yml@7db8b4c535c79329e3821e32177932b4f9059253
     with:
       runner: ubuntu-24.04
-      requires-private-library: true
+      language: python
       setup-command: just setup
-      check-command: just check
-      fallback-command: just source-check
+      check-command: just ci-check
+      coverage-command: just coverage
       audit-command: just audit
-      image-command: just image
+      license-command: just license-check
+      secret-scan-command: just security
+      package-command: just build
+      install-command: just install-check
+      image-command: just image && just performance-image
+      coverage-files: coverage.xml
       coverage-flags: python,api
-    secrets: inherit
+      upload-codecov: true
+      requires-private-library: true
+      private-library-client-id: ${{ vars.GROOVEMAP_CI_APP_CLIENT_ID }}
+      private-library-revision: 28fa329702bc76896cc54ab8d05ec5b1bd3d929e
+    secrets:
+      PRIVATE_LIBRARY_PRIVATE_KEY: ${{ secrets.GROOVEMAP_CI_APP_PRIVATE_KEY }}
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

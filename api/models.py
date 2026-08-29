@@ -63,7 +63,7 @@ class SnapshotNode(BaseModel):
     ``id``/``type`` are bounded so a caller can't inflate the serialized
     snapshot payload with megabyte-sized strings per node — the node-count
     cap (`SnapshotStore.max_nodes`, enforced at save time) only bounds the
-    number of nodes, not their size (discogsography-cu2.110). Real Discogs/
+    number of nodes, not their size (groovemap-cu2.110). Real Discogs/
     MusicBrainz entity ids and type names are far shorter than these caps.
     """
 

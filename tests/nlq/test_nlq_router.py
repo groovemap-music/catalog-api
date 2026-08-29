@@ -175,7 +175,7 @@ class TestNLQQuery:
         mock_redis.setex.assert_called_once()
 
     def test_cache_key_differs_by_focused_entity_context(self) -> None:
-        """Regression discogsography-xcsx: since the engine now conditions its
+        """Regression groovemap-xcsx: since the engine now conditions its
         answer on current_entity_id/current_entity_type, the cache key must
         include that context — otherwise two anonymous users asking the same
         query text about different focused entities would collide onto one
@@ -334,7 +334,7 @@ class TestNLQSSE:
         assert response.status_code == 200
 
     def test_sse_stream_replays_cache_hit_as_events(self, test_client: TestClient) -> None:
-        """discogsography-cu2.27: a streaming request whose query is already cached
+        """groovemap-cu2.27: a streaming request whose query is already cached
         (written by a prior JSON request) must receive an SSE event stream, not a
         plain JSON body — otherwise the Ask UI's SSE parser finds no events and
         the spinner hangs. The engine must not run for a cache hit.

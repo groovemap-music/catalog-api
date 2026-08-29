@@ -36,7 +36,7 @@ class SnapshotStore:
         self._max_nodes: int = max_nodes if max_nodes is not None else int(os.environ.get("SNAPSHOT_MAX_NODES", "100"))
         # Node-count alone doesn't bound per-node string size (SnapshotNode.id/type
         # are now Field(max_length=...) too, but this is a second, independent
-        # backstop on the whole serialized payload — discogsography-cu2.110).
+        # backstop on the whole serialized payload — groovemap-cu2.110).
         self._max_payload_bytes: int = (
             max_payload_bytes if max_payload_bytes is not None else int(os.environ.get("SNAPSHOT_MAX_PAYLOAD_BYTES", str(64 * 1024)))
         )
@@ -101,7 +101,7 @@ class SnapshotStore:
             # was left permanent (no TTL, never re-armed by any later save),
             # silently converting "live snapshots in a 28-day window" into
             # "lifetime saves, forever" and eventually locking the user out
-            # permanently (discogsography-7639). `nx=True` makes every save a
+            # permanently (groovemap-7639). `nx=True` makes every save a
             # chance to arm a missing TTL, not just the first.
             await self._redis.expire(count_key, self._ttl_seconds, nx=True)
             if count > self._max_per_user:

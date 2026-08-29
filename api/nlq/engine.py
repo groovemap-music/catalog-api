@@ -136,7 +136,7 @@ class NLQEngine:
         # Resolve references like "this artist"/"tell me more about them" to the
         # entity the user is currently viewing in the Explore pane. Prepended to
         # the user message (not appended to the static system prompt) so it reads
-        # naturally as query context. See discogsography-xcsx.
+        # naturally as query context. See groovemap-xcsx.
         user_content = query
         if context.current_entity_id is not None and context.current_entity_type is not None:
             user_content = (

@@ -252,7 +252,7 @@ class TestRevokeAppToken:
         assert resp.status_code == 404
 
     def test_returns_404_not_500_for_malformed_token_id(self, test_client: TestClient, mock_pool: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Regression for discogsography-cu2.70: a non-UUID path segment must not reach
+        """Regression for groovemap-cu2.70: a non-UUID path segment must not reach
         the `::uuid` SQL cast (which raises an unhandled psycopg DataError -> 500).
         It must be rejected up front and surfaced as the same 404 as an unknown id."""
         _patch_module_pool(mock_pool)

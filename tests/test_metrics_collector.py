@@ -155,7 +155,7 @@ class TestMetricsBuffer:
 
 
 class TestMetricsBufferDrainRestore:
-    """discogsography-qtts: drain()/restore() must be safe to pair across an
+    """groovemap-qtts: drain()/restore() must be safe to pair across an
     await, unlike flush()/clear() which race with concurrent record()."""
 
     def test_drain_removes_entries_and_returns_stats_and_samples(self) -> None:
@@ -461,7 +461,7 @@ class TestPersistMetrics:
 
         queue_rows = [
             {
-                "queue_name": "discogsography-artists-graphinator",
+                "queue_name": "groovemap-artists-graphinator",
                 "messages_ready": 5,
                 "messages_unacknowledged": 1,
                 "consumers": 1,
@@ -821,7 +821,7 @@ class TestRunCollector:
 
     @pytest.mark.anyio
     async def test_collector_persist_success_does_not_drop_entries_recorded_during_await(self) -> None:
-        """discogsography-qtts: a successful persist must only discard the
+        """groovemap-qtts: a successful persist must only discard the
         exact batch it persisted — not entries record()ed WHILE
         persist_metrics is awaiting. The old flush()-then-clear() design
         clear()ed the whole live buffer, silently dropping anything that
@@ -862,7 +862,7 @@ class TestRunCollector:
 
     @pytest.mark.anyio
     async def test_collector_persist_failure_preserves_entries_recorded_during_await(self) -> None:
-        """discogsography-qtts: entries record()ed WHILE persist_metrics is
+        """groovemap-qtts: entries record()ed WHILE persist_metrics is
         awaiting must survive a FAILED persist too — restore() must put the
         failed batch back ahead of them rather than discarding either set."""
         from api.metrics_collector import MetricsBuffer, run_collector

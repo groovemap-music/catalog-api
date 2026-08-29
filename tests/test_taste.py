@@ -301,7 +301,7 @@ class TestTasteTimeouts:
         assert resp.status_code == 500
 
     def test_heatmap_timeout_returns_504(self, test_client: TestClient) -> None:
-        """Regression discogsography-zmko: taste_heatmap was missing the
+        """Regression groovemap-zmko: taste_heatmap was missing the
         TransactionTimedOut -> 504 guard its siblings (fingerprint, blindspots)
         have, so a large-collection timeout surfaced as an unhandled 500."""
         from neo4j.exceptions import ClientError as Neo4jClientError
@@ -335,7 +335,7 @@ class TestTasteTimeouts:
         assert resp.status_code == 500
 
     def test_card_timeout_returns_504(self, test_client: TestClient) -> None:
-        """Regression discogsography-zmko: taste_card was missing the
+        """Regression groovemap-zmko: taste_card was missing the
         TransactionTimedOut -> 504 guard its sibling endpoints have — the exact
         same asyncio.gather over get_taste_heatmap/get_obscurity_score/
         get_taste_drift as taste_fingerprint, but unguarded."""

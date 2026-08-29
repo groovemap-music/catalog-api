@@ -486,7 +486,7 @@ class TestGetUserCollectionTimeline:
 
     @pytest.mark.asyncio
     async def test_cypher_does_not_dedupe_genre_and_label_lists(self) -> None:
-        """discogsography-cu2.7 regression: collect(DISTINCT rg)/collect(DISTINCT rl)
+        """groovemap-cu2.7 regression: collect(DISTINCT rg)/collect(DISTINCT rl)
         dedupe identical per-release genre/label lists, corrupting per-bucket
         counts (e.g. 20 Rock-only releases collapse to a single ["Rock"] entry).
         The list-of-list collects must be plain collect(), not collect(DISTINCT).

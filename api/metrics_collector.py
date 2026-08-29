@@ -126,7 +126,7 @@ class MetricsBuffer:
         persist call) is a TOCTOU — any entry ``record()``ed during that
         ``await`` is silently dropped by ``clear()``'s wholesale replacement,
         because it was never part of the snapshot ``flush()`` returned
-        (discogsography-qtts). Callers that persist across an await should
+        (groovemap-qtts). Callers that persist across an await should
         use :meth:`drain` / :meth:`restore` instead, which swap the buffer
         out atomically so newly-arrived entries can never be in the
         snapshot that gets dropped.
@@ -149,7 +149,7 @@ class MetricsBuffer:
         pass ``samples`` to :meth:`restore` to put them back ahead of
         whatever arrived in the meantime, instead of ``clear()`` wiping both
         the persisted snapshot AND everything recorded during the persist
-        window (discogsography-qtts).
+        window (groovemap-qtts).
         """
         samples = self._entries
         self._entries = deque()
@@ -356,7 +356,7 @@ async def run_collector(
         # flush()), so any request recorded during the persist `await` below
         # lands in the buffer's fresh deque and is never part of the samples
         # a failed persist has to restore or a successful one discards
-        # (discogsography-qtts). Attach endpoint_stats to the API health row.
+        # (groovemap-qtts). Attach endpoint_stats to the API health row.
         endpoint_stats: dict[str, dict[str, Any]] = {}
         buffer_samples: deque[Any] = deque()
         try:

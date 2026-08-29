@@ -43,7 +43,7 @@ async def test_sse_emits_actions_event_before_result() -> None:
 
 @pytest.mark.asyncio
 async def test_sse_replays_cached_result_without_running_engine() -> None:
-    """discogsography-cu2.27: when a streaming request hits a cache entry (written
+    """groovemap-cu2.27: when a streaming request hits a cache entry (written
     by a prior JSON request), the cached result must be replayed as synthetic
     actions/result SSE events — never run the engine, never emit a JSON body.
     """
@@ -74,7 +74,7 @@ async def test_sse_replays_cached_result_without_running_engine() -> None:
 
 @pytest.mark.asyncio
 async def test_sse_cancels_engine_task_on_client_disconnect() -> None:
-    """discogsography-cu2.28: when the SSE client disconnects, the generator is
+    """groovemap-cu2.28: when the SSE client disconnects, the generator is
     closed and the still-running engine task must be cancelled so the
     Anthropic/Neo4j work does not leak and the pending task cannot be GC'd.
     """
@@ -110,7 +110,7 @@ async def test_sse_cancels_engine_task_on_client_disconnect() -> None:
 
 @pytest.mark.asyncio
 async def test_streamed_result_event_carries_actions() -> None:
-    """Regression discogsography-l6fm.
+    """Regression groovemap-l6fm.
 
     Actions were emitted ONLY on the sideband ``actions`` frame while the
     ``result`` frame omitted them, but the sole SSE consumer reads
@@ -149,7 +149,7 @@ async def test_streamed_result_event_carries_actions() -> None:
 
 @pytest.mark.asyncio
 async def test_streamed_cached_replay_result_event_carries_actions() -> None:
-    """Regression discogsography-l6fm — same omission on the cached-replay path."""
+    """Regression groovemap-l6fm — same omission on the cached-replay path."""
     from api.routers import nlq as nlq_router
 
     engine = MagicMock()
@@ -175,7 +175,7 @@ async def test_streamed_cached_replay_result_event_carries_actions() -> None:
 
 @pytest.mark.asyncio
 async def test_streaming_query_writes_redis_cache_for_anonymous_user() -> None:
-    """Regression discogsography-c584.
+    """Regression groovemap-c584.
 
     The streaming path is the ONLY path the production Ask UI uses (nlq.js
     always sends Accept: text/event-stream), but the cache write previously
@@ -221,7 +221,7 @@ async def test_streaming_query_writes_redis_cache_for_anonymous_user() -> None:
 
 @pytest.mark.asyncio
 async def test_streaming_query_does_not_cache_for_authenticated_user() -> None:
-    """Regression discogsography-c584 — mirror the non-streaming branch's
+    """Regression groovemap-c584 — mirror the non-streaming branch's
     user_id is None guard: authenticated results must never populate the
     public query cache."""
     from api.nlq.engine import NLQResult

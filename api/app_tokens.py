@@ -176,10 +176,10 @@ async def _lookup_active_token(token_hash: str) -> dict[str, Any] | None:
 
     Joins `users` so a deactivated account's app tokens stop authenticating —
     mirroring the `is_active` check every JWT-based admin/user path already
-    enforces (discogsography-ci4a). Also projects the row's own `token_hash`
+    enforces (groovemap-ci4a). Also projects the row's own `token_hash`
     so callers can do a real defense-in-depth comparison against it, instead
     of recomputing the same value they already used for the WHERE clause and
-    comparing it to itself (discogsography-osoc).
+    comparing it to itself (groovemap-osoc).
     """
     if _pool is None:
         raise HTTPException(
@@ -235,7 +235,7 @@ def require_app_token(scopes: list[str]) -> Any:
         # projected by _lookup_active_token) against the hash we looked up
         # with. Previously this recomputed hash_token(plaintext) on both
         # sides of compare_digest — comparing a value to itself, an
-        # unreachable guard (discogsography-osoc). Comparing against the
+        # unreachable guard (groovemap-osoc). Comparing against the
         # stored column actually catches a future fast-path query that
         # bypasses the WHERE clause (e.g. column rename, query restructure).
         if not hmac.compare_digest(row["token_hash"], token_hash):
