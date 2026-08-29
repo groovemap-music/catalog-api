@@ -1,0 +1,16 @@
+GrooveMap Catalog API
+Copyright (c) 2023-2026 Robert Wlodarczyk
+
+The current repository tree is licensed under the GNU Affero General Public License,
+version 3 only (AGPL-3.0-only). See LICENSE.
+
+Versions released on or before 2026-05-13 were made available under the MIT License.
+Anyone who obtained a copy under the MIT License may continue to use that copy under
+the MIT License.
+
+Subsequent repository revisions preceding the commit that introduced the AGPL license
+were distributed under the PolyForm Noncommercial License 1.0.0, as recorded in those
+revisions. The current licensing change does not alter the license notices attached to
+those historical revisions.
+
+Third-party components remain governed by their respective licenses.
