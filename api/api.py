@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -74,6 +75,18 @@ from api.syncer import reconcile_stale_sync_history
 
 
 logger = structlog.get_logger(__name__)
+
+SOURCE_REPOSITORY = "https://github.com/groovemap-music/catalog-api"
+
+
+def source_url(revision: str | None) -> str:
+    """Return the corresponding source tree for a full Git revision."""
+    if revision is not None and re.fullmatch(r"[0-9a-f]{40}", revision):
+        return f"{SOURCE_REPOSITORY}/tree/{revision}"
+    return SOURCE_REPOSITORY
+
+
+SOURCE_URL = source_url(os.environ.get("GROOVEMAP_SOURCE_REVISION"))
 
 STARTUP_BANNER = r"""
          _        _                         _
@@ -368,6 +381,8 @@ app = FastAPI(
     title="GrooveMap API",
     version="0.1.0",
     description="User authentication and Discogs OAuth integration for GrooveMap",
+    license_info={"name": "GNU Affero General Public License v3 only", "identifier": "AGPL-3.0-only"},
+    openapi_external_docs={"description": "Corresponding source for this API revision", "url": SOURCE_URL},
     default_response_class=JSONResponse,
     lifespan=lifespan,
 )
