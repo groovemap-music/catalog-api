@@ -41,8 +41,15 @@ This repository versions one service wheel and container image. Commitizen reads
 checksums, an SBOM, notices, and provenance without tagging, pushing, publishing, or
 releasing.
 
-The current tree is licensed under PolyForm Noncommercial 1.0.0. Historical revisions
-retain their then-applicable license.
+The current tree is licensed under the [GNU Affero General Public License v3 only](LICENSE).
+The AGPL permits commercial use when its terms are followed; commercial use by itself does
+not require a separate license. Copyright holders may negotiate optional alternative terms
+with parties that do not want to use the software under the AGPL; see
+[commercial licensing](COMMERCIAL-LICENSING.md). [NOTICE](NOTICE) records prior-license
+history.
+
+External code and documentation contributions are paused until the project adopts a
+relicensing-capable contributor license agreement. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Documentation
 
