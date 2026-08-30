@@ -24,7 +24,7 @@ class _AsyncRecordIterator:
     def __init__(self, records: list[dict[str, Any]]) -> None:
         self._iter = iter(records)
 
-    def __aiter__(self) -> "_AsyncRecordIterator":
+    def __aiter__(self) -> _AsyncRecordIterator:
         return self
 
     async def __anext__(self) -> dict[str, Any]:

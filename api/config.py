@@ -60,7 +60,7 @@ class ApiConfig:
     metrics_collection_interval: int = 300
 
     @classmethod
-    def from_env(cls) -> "ApiConfig":
+    def from_env(cls) -> ApiConfig:
         """Create configuration from environment variables."""
         postgres_username = get_secret("POSTGRES_USERNAME")
         postgres_password = get_secret("POSTGRES_PASSWORD")
