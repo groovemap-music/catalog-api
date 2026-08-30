@@ -17,7 +17,7 @@ The API service:
 
 ## Architecture
 
-- **Language**: Python 3.13+
+- **Language**: Python 3.14 (managed runtime: 3.14.5)
 - **Framework**: FastAPI with async PostgreSQL (`psycopg3`)
 - **Cache**: Redis (OAuth state, graph snapshot persistence, JWT revocation blacklist)
 - **Database**: PostgreSQL 18

@@ -24,7 +24,7 @@ class _AsyncIter:
         self._records = records
         self._index = 0
 
-    def __aiter__(self) -> "_AsyncIter":
+    def __aiter__(self) -> _AsyncIter:
         return self
 
     async def __anext__(self) -> dict[str, Any]:

@@ -24,7 +24,7 @@ class NLQConfig:
         return self.enabled and self.api_key is not None
 
     @classmethod
-    def from_env(cls) -> "NLQConfig":
+    def from_env(cls) -> NLQConfig:
         """Create NLQ configuration from environment variables."""
         return cls(
             enabled=getenv("NLQ_ENABLED", "false").lower() == "true",

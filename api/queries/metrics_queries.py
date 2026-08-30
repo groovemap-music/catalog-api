@@ -199,7 +199,7 @@ async def get_health_history(pool: Any, range_value: str) -> dict[str, Any]:
                             **ep_data,
                         }
                     )
-            except (json.JSONDecodeError, AttributeError):
+            except json.JSONDecodeError, AttributeError:
                 logger.debug("Failed to parse endpoint_stats for %s at %s", name, row["ts"])
 
     # Compute uptime_pct and clean up internal counters
