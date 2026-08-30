@@ -101,7 +101,7 @@ def _verify_password(plain_password: str, hashed_password: str) -> bool:
         expected_key = bytes.fromhex(key_hex)
         actual_key = hashlib.pbkdf2_hmac("sha256", plain_password.encode("utf-8"), salt, 100_000)
         return hmac.compare_digest(actual_key, expected_key)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return False
 
 

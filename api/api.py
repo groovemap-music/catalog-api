@@ -592,7 +592,7 @@ async def verify_discogs(
         state_data = json.loads(raw_state_data)
         token_secret = state_data["secret"]
         initiating_user_id = state_data.get("user_id")
-    except (ValueError, KeyError, TypeError):
+    except ValueError, KeyError, TypeError:
         # Backwards compat: raw string is just the secret
         token_secret = raw_state_data
         initiating_user_id = None

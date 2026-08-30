@@ -469,7 +469,7 @@ async def _track_extraction(extraction_id: str) -> None:
                     else:
                         consecutive_failures += 1
                         logger.warning("⚠️ Extractor health check returned non-200", status_code=resp.status_code)
-                except (httpx.ConnectError, httpx.RequestError):
+                except httpx.ConnectError, httpx.RequestError:
                     consecutive_failures += 1
                     logger.warning("⚠️ Extractor unreachable", extraction_id=extraction_id, attempt=consecutive_failures)
                 except Exception as exc:

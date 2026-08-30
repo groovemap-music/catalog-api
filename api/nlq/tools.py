@@ -680,7 +680,7 @@ class NLQToolRunner:
         # shortestPath BFS that runs up to the query timeout.
         try:
             raw_max_depth = int(params.get("max_depth", neo4j_queries.DEFAULT_PATH_DEPTH))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             raw_max_depth = neo4j_queries.DEFAULT_PATH_DEPTH
         max_depth = max(neo4j_queries.MIN_PATH_DEPTH, min(raw_max_depth, neo4j_queries.MAX_PATH_DEPTH))
 
