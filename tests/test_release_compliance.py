@@ -304,7 +304,10 @@ def test_every_indexed_document_respects_repository_ownership() -> None:
 def test_history_rewrite_gate_preserves_external_archive_contract() -> None:
     gate = (ROOT / "docs" / "history-rewrite-gate.md").read_text()
     normalized_gate = " ".join(gate.split())
-    assert "/Users/Robert/workspaces/.archive/catalog-api-history-rewrite-20260829T221255Z" in gate
+    assert "/Users/" not in gate
+    assert ': "${EVIDENCE_ROOT:?Set EVIDENCE_ROOT to a new absolute private evidence directory}"' in gate
+    assert "readonly EVIDENCE_ROOT" in gate
+    assert "must not be recorded in this public repository" in normalized_gate
     assert "mode `0700`" in gate
     assert "mode `0600`" in gate
     assert "90 days after cutover" in gate
