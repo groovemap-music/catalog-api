@@ -35,11 +35,11 @@ visibility, branch protection, and release/tag inventory. Create and independent
 Git bundle. Store the bundle, ref manifest, and checksums outside the clone and outside this
 repository.
 
-The approved archive location for this repository is
-`/Users/Robert/workspaces/.archive/catalog-api-history-rewrite-20260829T221255Z`. It must remain
-outside every repository and synchronized workspace. Keep its directories at mode `0700` and its
-files at mode `0600`; never copy it into a repository or sync service. Retain it through cutover
-and rollback and until the later of 90 days after cutover or 30 days after the repository becomes
+The archive location is private operator evidence and must not be recorded in this public
+repository. Before running the procedure, set `EVIDENCE_ROOT` to a new absolute directory outside
+every repository and synchronized workspace. Keep its directories at mode `0700` and its files at
+mode `0600`; never copy it into a repository or sync service. Retain it through cutover and
+rollback and until the later of 90 days after cutover or 30 days after the repository becomes
 public. Deletion requires separate operator approval after that retention deadline.
 
 Use this exact preparation sequence only after the archive gate is approved. `EVIDENCE_ROOT` must
@@ -50,7 +50,8 @@ directory scheduled for automatic deletion.
 set -euo pipefail
 umask 077
 readonly SOURCE_REMOTE='git@github.com:groovemap-music/catalog-api.git'
-readonly EVIDENCE_ROOT='/Users/Robert/workspaces/.archive/catalog-api-history-rewrite-20260829T221255Z'
+: "${EVIDENCE_ROOT:?Set EVIDENCE_ROOT to a new absolute private evidence directory}"
+readonly EVIDENCE_ROOT
 test "${EVIDENCE_ROOT}" = "$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "${EVIDENCE_ROOT}")"
 test ! -e "${EVIDENCE_ROOT}"
 mkdir -m 700 "${EVIDENCE_ROOT}"
