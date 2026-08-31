@@ -21,3 +21,5 @@ updates:
       day: monday
     labels: [dependencies, docker]
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: python
