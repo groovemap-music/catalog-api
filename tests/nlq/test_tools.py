@@ -130,7 +130,7 @@ async def test_execute_autocomplete(runner: NLQToolRunner) -> None:
     ):
         result = await runner.execute("autocomplete", {"type": "artist", "query": "radio"})
     assert result["results"] == ac_items
-    # Regression for discogsography-apt8: the requested type must be
+    # Regression for groovemap-apt8: the requested type must be
     # propagated so extract_entities can tag results correctly instead of
     # falling back to "unknown".
     assert result["_entity_type"] == "artist"
@@ -193,7 +193,7 @@ async def test_execute_find_path_no_path(runner: NLQToolRunner) -> None:
 
 @pytest.mark.asyncio
 async def test_execute_find_path_clamps_oversized_max_depth(runner: NLQToolRunner) -> None:
-    """Regression for discogsography-cu2.93: a model-steered max_depth far beyond
+    """Regression for groovemap-cu2.93: a model-steered max_depth far beyond
     the HTTP route's bound must be clamped before it reaches find_shortest_path's
     shortestPath depth literal, not forwarded unbounded."""
     from api.queries import neo4j_queries
@@ -498,7 +498,7 @@ def test_extract_entities_from_autocomplete(runner: NLQToolRunner) -> None:
 
 
 def test_extract_entities_from_autocomplete_uses_propagated_entity_type(runner: NLQToolRunner) -> None:
-    """Regression for discogsography-apt8.
+    """Regression for groovemap-apt8.
 
     AUTOCOMPLETE_DISPATCH handlers never return a "type" key on their result
     items, so extract_entities used to hardcode "unknown" for every
@@ -536,7 +536,7 @@ def test_extract_entities_from_path(runner: NLQToolRunner) -> None:
 
 
 def test_extract_entities_from_path_normalizes_raw_neo4j_labels(runner: NLQToolRunner) -> None:
-    """Regression for discogsography-apt8.
+    """Regression for groovemap-apt8.
 
     find_shortest_path only ever returns raw Neo4j "labels" (never "type"),
     so extract_entities used to fall back to the raw, mixed-case label

@@ -2,8 +2,6 @@
 
 **Status:** Accepted
 **Date:** 2026-08-03
-**Bead:** `discogsography-eef5` (spike)
-**Implements:** `discogsography-iew6` (remove Brevo, integrate the replacement)
 **Decision:** Adopt **Resend** over plain REST (`httpx`). Runner-up: **Amazon SES** à la carte.
 
 ## Context
@@ -142,9 +140,9 @@ the setting lives on the domain and is off.
 `RESEND_API_KEY` is read through the existing `get_secret()` helper, so
 `RESEND_API_KEY_FILE` works unchanged under the `_FILE` convention.
 
-**Docker secret** (`docker-compose.prod.yml`): rename the `brevo_api_key` secret to
-`resend_api_key`, file `./secrets/resend_api_key.txt`, mounted at
-`/run/secrets/resend_api_key` and referenced as `RESEND_API_KEY_FILE`.
+**Runtime secret:** catalog-api reads `RESEND_API_KEY_FILE` through the `_FILE` convention.
+Secret creation, the mount path, and environment promotion belong to
+[`deployment`](https://github.com/groovemap-music/deployment).
 
 **Sending limits to document for operators:** 3,000/mo, 100/day, 1 verified domain.
 Overage is a hard stop, not a charge — if the daily cap is hit, sends fail and
@@ -154,9 +152,8 @@ reset remains functional-but-degraded rather than silently broken.
 **DNS:** SPF and DKIM records for `groovemap.music` per Resend's domain verification
 flow; DMARC recommended. Comparable to Brevo's existing setup — no new burden.
 
-**Files touched by the implementation bead:** `api/notifications.py`, `common/config.py`,
-`pyproject.toml`, `docker-compose.yml`, `docker-compose.prod.yml`,
-`tests/api/test_notifications.py`, `docs/configuration.md`, `docs/architecture.md`.
+**Repository files touched by the implementation:** `api/notifications.py`, `api/config.py`,
+`pyproject.toml`, `tests/api/test_notifications.py`, and `docs/configuration.md`.
 
 ## Verification note
 

@@ -358,7 +358,7 @@ _VALID_PATH_TYPES = frozenset(EXPLORE_DISPATCH.keys())
 # node_label_to_type is likewise re-exported from neo4j_queries — the single
 # source of truth for normalizing raw Neo4j labels, also used by the NLQ
 # find_path tool handler (api/nlq/tools.py) so the two mirror sites cannot
-# diverge again (discogsography-apt8).
+# diverge again (groovemap-apt8).
 
 
 @router.get("/api/path")

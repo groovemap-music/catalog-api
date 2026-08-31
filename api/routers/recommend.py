@@ -125,7 +125,7 @@ async def explore_from_here(
 
     # Check cache — hops changes the traversal depth (not merely a truncation
     # like limit), so it MUST be part of the key or callers get results computed
-    # for a different hop depth. See discogsography-cu2.29.
+    # for a different hop depth. See groovemap-cu2.29.
     cache_key = f"recommend:explore:{user_id}:{entity_type}:{entity_id}:{hops}"
     if _cache:
         cached = await _cache.get(cache_key)

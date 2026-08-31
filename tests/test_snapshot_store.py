@@ -1,6 +1,6 @@
 """Unit tests for api/snapshot_store.py — SnapshotStore.save's own max_nodes guard.
 
-discogsography-c3w: SnapshotStore.save previously never checked len(nodes)
+groovemap-c3w: SnapshotStore.save previously never checked len(nodes)
 against self._max_nodes; only the API router (api/routers/snapshot.py)
 enforced the cap. Any direct caller of SnapshotStore bypassing the router
 (scripts, future reuse) could persist arbitrarily large payloads to Redis.
@@ -55,7 +55,7 @@ class TestSnapshotStoreMaxNodes:
 
 
 class TestSnapshotStoreQuotaCounterAtomicity:
-    """discogsography-7639: the per-user quota counter must self-heal a
+    """groovemap-7639: the per-user quota counter must self-heal a
     missing TTL and must not be permanently consumed by a failed save."""
 
     @pytest.mark.asyncio

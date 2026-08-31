@@ -166,7 +166,7 @@ class TestGetPersonConnections:
 
     @pytest.mark.asyncio
     async def test_depth_2_cypher_is_valid_grouping_not_just_mocked(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Regression for discogsography-4828.
+        """Regression for groovemap-4828.
 
         The depth>=2 branch used to wrap `collect(DISTINCT {...})` in a CASE
         that referenced `hop2` OUTSIDE the aggregation, which Neo4j rejects at
@@ -203,7 +203,7 @@ class TestGetPersonConnections:
             "The `CASE WHEN hop2 IS NOT NULL` branch must be INSIDE "
             "collect(DISTINCT ...)'s arguments, not wrapped around the whole "
             "collect(...) call — the latter is the exact pre-fix defect "
-            "(discogsography-4828) that Neo4j rejects as an implicit "
+            "(groovemap-4828) that Neo4j rejects as an implicit "
             "grouping expression."
         )
 

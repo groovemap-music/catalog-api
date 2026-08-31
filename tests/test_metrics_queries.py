@@ -105,7 +105,7 @@ class TestHelpers:
         assert _round_or_int(None, is_raw=False) == 0.0
 
     def test_round_rate_sub_one_preserves_float(self):
-        """Regression: sub-1 msg/s rates must not truncate to 0 (discogsography-cu2.73)."""
+        """Regression: sub-1 msg/s rates must not truncate to 0 (groovemap-cu2.73)."""
         assert _round_rate(0.8) == 0.8
         assert isinstance(_round_rate(0.8), float)
         assert _round_rate(0.05) == 0.05
@@ -159,7 +159,7 @@ class TestGetQueueHistory:
     @pytest.mark.asyncio
     async def test_raw_range_sub_one_rate_not_truncated(self):
         """Regression: 1h/6h (raw) ranges must preserve sub-1 msg/s rates as floats,
-        not truncate them to 0 via int() (discogsography-cu2.73)."""
+        not truncate them to 0 via int() (groovemap-cu2.73)."""
         rows = [
             {
                 "queue_name": "graphinator-artists",

@@ -1,4 +1,4 @@
-name: Publish image
+name: Release
 
 on:
   push:
@@ -10,19 +10,44 @@ permissions:
   id-token: write
 
 jobs:
-  publish:
-    uses: groovemap-music/.github/.github/workflows/reusable-image-release.yml@main
+  release:
+    uses: groovemap-music/automation/.github/workflows/reusable-release.yml@7db8b4c535c79329e3821e32177932b4f9059253
     with:
-      image-name: catalog-api
+      repository-name: catalog-api
+      setup-command: just setup
+      check-command: just check
+      release-command: just release-dry-run
+      artifact-path: |
+        dist/*.whl
+        dist/*.tar.gz
+        dist/provenance.json
+      artifact-variant: primary
+      publish-image: true
       requires-private-library: true
-      prepare-command: just prepare-private-wheels
-    secrets: inherit
+      private-library-client-id: ${{ vars.GROOVEMAP_CI_APP_CLIENT_ID }}
+      private-library-revision: 28fa329702bc76896cc54ab8d05ec5b1bd3d929e
+      prepare-image-command: just prepare-private-wheels
+    secrets:
+      PRIVATE_LIBRARY_PRIVATE_KEY: ${{ secrets.GROOVEMAP_CI_APP_PRIVATE_KEY }}
 
-  publish-performance:
-    uses: groovemap-music/.github/.github/workflows/reusable-image-release.yml@main
+  release-performance:
+    uses: groovemap-music/automation/.github/workflows/reusable-release.yml@7db8b4c535c79329e3821e32177932b4f9059253
     with:
-      image-name: catalog-api-performance
+      repository-name: catalog-api
+      setup-command: just setup
+      check-command: just check
+      release-command: just release-dry-run
+      artifact-path: |
+        dist/*.whl
+        dist/*.tar.gz
+        dist/provenance.json
+      artifact-variant: performance
+      publish-image: true
+      image-variant: performance
       dockerfile: performance/Dockerfile
       requires-private-library: true
-      prepare-command: just prepare-private-wheels
-    secrets: inherit
+      private-library-client-id: ${{ vars.GROOVEMAP_CI_APP_CLIENT_ID }}
+      private-library-revision: 28fa329702bc76896cc54ab8d05ec5b1bd3d929e
+      prepare-image-command: just prepare-private-wheels
+    secrets:
+      PRIVATE_LIBRARY_PRIVATE_KEY: ${{ secrets.GROOVEMAP_CI_APP_PRIVATE_KEY }}

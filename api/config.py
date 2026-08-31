@@ -14,6 +14,9 @@ from common.config import (
 )
 
 
+DEFAULT_DISCOGS_USER_AGENT = "GrooveMap-catalog-api/1.0 +https://github.com/groovemap-music/catalog-api"
+
+
 def _env_int(name: str, default: int) -> int:
     """Read an integer environment variable with a stable fallback."""
     try:
@@ -39,7 +42,7 @@ class ApiConfig:
     redis_host: str = "redis://redis:6379/0"
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 30
-    discogs_user_agent: str = "GrooveMap/1.0 +https://github.com/groovemap-music/catalog-api"
+    discogs_user_agent: str = DEFAULT_DISCOGS_USER_AGENT
     discogs_oauth_callback_url: str | None = None
     app_base_url: str = "http://localhost:8006"
     cors_origins: list[str] | None = None
@@ -105,7 +108,7 @@ class ApiConfig:
             redis_host=_build_redis_url(),
             jwt_algorithm=jwt_algorithm,
             jwt_expire_minutes=_env_int("JWT_EXPIRE_MINUTES", 30),
-            discogs_user_agent=getenv("DISCOGS_USER_AGENT", "GrooveMap/1.0 +https://github.com/groovemap-music/catalog-api"),
+            discogs_user_agent=getenv("DISCOGS_USER_AGENT", DEFAULT_DISCOGS_USER_AGENT),
             discogs_oauth_callback_url=getenv("DISCOGS_OAUTH_CALLBACK_URL") or None,
             app_base_url=getenv("APP_BASE_URL", "http://localhost:8006").rstrip("/"),
             cors_origins=cors_origins,

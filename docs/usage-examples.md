@@ -10,7 +10,8 @@
 
 ## Overview
 
-Once your data is loaded, explore the music universe through powerful queries and AI-driven insights. This guide provides practical examples for both Neo4j graph queries and PostgreSQL analytics.
+This guide shows catalog-api query patterns against Neo4j and PostgreSQL and calls to its public
+HTTP endpoints. Data loading and runtime topology belong to their linked owner repositories.
 
 ## 🔗 Neo4j Graph Queries
 
@@ -235,9 +236,10 @@ LIMIT 20;
 
 #### PageRank - Find influential artists
 
-> **Note**: This requires the Neo4j **Graph Data Science (GDS)** plugin, which is **not** included in this
-> project's `docker-compose.yml` (only `apoc` is installed by default — see the `NEO4J_PLUGINS` setting).
-> Add `"graph-data-science"` to `NEO4J_PLUGINS` and restart Neo4j before running this query.
+> **Note**: This requires the Neo4j **Graph Data Science (GDS)** plugin. Plugin selection and
+> database restart procedures belong to
+> [`deployment`](https://github.com/groovemap-music/deployment); verify that environment before
+> running this query.
 
 ```cypher
 CALL gds.pageRank.stream({
@@ -639,7 +641,10 @@ curl "http://localhost:8004/api/explore/genre-emergence?before_year=1980"
 curl "http://localhost:8004/api/expand?node_id=Electronic&type=genre&category=releases&before_year=1985&limit=50&offset=0"
 ```
 
-### Insights (Precomputed Analytics)
+### Precomputed analytics
+
+These API routes proxy results produced by
+[`analytics-engine`](https://github.com/groovemap-music/analytics-engine).
 
 ```bash
 # Top artists by release count
@@ -657,7 +662,7 @@ curl "http://localhost:8004/api/insights/this-month"
 # Data completeness report across all entity types
 curl "http://localhost:8004/api/insights/data-completeness"
 
-# Computation status of precomputed insights
+# Computation status of precomputed analytics
 curl "http://localhost:8004/api/insights/status"
 ```
 

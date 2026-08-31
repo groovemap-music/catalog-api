@@ -43,7 +43,7 @@ def _challenge_only_get(value: str = TEST_USER_ID) -> AsyncMock:
 
     A blanket truthy get() also answers `revoked:jti:*` and
     `password_changed:*`, which the challenge-staleness guard added for
-    discogsography-jxmn then (correctly) treats as an invalidated challenge.
+    groovemap-jxmn then (correctly) treats as an invalidated challenge.
     """
 
     async def _get(key: str) -> str | None:
@@ -92,7 +92,7 @@ class TestResetRequest:
         mock_cur: AsyncMock,
         mock_redis: AsyncMock,
     ) -> None:
-        """discogsography-0lof: the SELECT must be the only DB/network work done
+        """groovemap-0lof: the SELECT must be the only DB/network work done
         BEFORE the response is built. `_process_reset_request` (Redis setex +
         notification send) is scheduled as a FastAPI background task so its
         cost never leaks into response timing and never diverges between the
@@ -239,7 +239,7 @@ class TestResetConfirm:
         mock_cur: AsyncMock,
         mock_redis: AsyncMock,
     ) -> None:
-        """discogsography-ci4a: a password reset must bulk-revoke the user's
+        """groovemap-ci4a: a password reset must bulk-revoke the user's
         app tokens — the password_changed Redis marker alone never covers
         them (it only gates JWTs and it TTLs out; app tokens carry no
         expiry)."""
@@ -647,7 +647,7 @@ class TestTwoFactorConfirm:
         mock_cur: AsyncMock,
         mock_redis: AsyncMock,
     ) -> None:
-        """discogsography-8vlp: if a concurrent twofa_disable commits between
+        """groovemap-8vlp: if a concurrent twofa_disable commits between
         confirm's SELECT and its enable UPDATE, the guarded
         `AND totp_secret = %s` matches zero rows — confirm must reject with
         409 rather than landing totp_enabled=TRUE against a NULLed secret
@@ -939,7 +939,7 @@ class TestTwoFactorRecoveryFull:
         mock_cur: AsyncMock,
         mock_redis: AsyncMock,
     ) -> None:
-        """discogsography-cflq: a successful recovery must reset
+        """groovemap-cflq: a successful recovery must reset
         totp_failed_attempts/totp_locked_until in the same UPDATE that redeems
         the code — otherwise stale lockout state survives the recovery login
         and can 429 a subsequent CORRECT TOTP code."""
@@ -967,7 +967,7 @@ class TestTwoFactorRecoveryFull:
         mock_cur: AsyncMock,
         mock_redis: AsyncMock,
     ) -> None:
-        """discogsography-kqw4: a concurrent request that already consumed the
+        """groovemap-kqw4: a concurrent request that already consumed the
         challenge (getdel -> None) must reject this one with 401, mirroring
         twofa_verify's identical check. Previously the getdel return value was
         discarded entirely, so a single challenge token backed by two
@@ -1559,7 +1559,7 @@ class TestTwoFactorStateMachineRegressions:
         mock_redis: AsyncMock,
         mock_conn: AsyncMock,
     ) -> None:
-        """discogsography-vjod: the lockout SELECT must take a row lock (FOR
+        """groovemap-vjod: the lockout SELECT must take a row lock (FOR
         UPDATE) inside an explicit transaction, so concurrent verify attempts
         for the same user serialize instead of all reading a stale
         pre-increment snapshot."""
@@ -1675,7 +1675,7 @@ class TestChangePassword:
         mock_redis: AsyncMock,  # noqa: ARG002  # required so setex is stubbed
         auth_headers: dict[str, str],
     ) -> None:
-        """discogsography-ci4a: same bulk-revoke contract as reset-confirm."""
+        """groovemap-ci4a: same bulk-revoke contract as reset-confirm."""
         mock_cur.fetchone = AsyncMock(return_value=make_sample_user_row())
         response = test_client.post(
             "/api/auth/change-password",
@@ -1749,7 +1749,7 @@ class TestChangePassword:
 
 
 class TestChallengeSurvivesPasswordChange:
-    """Regression tests for discogsography-jxmn (2FA challenge outlives a reset)."""
+    """Regression tests for groovemap-jxmn (2FA challenge outlives a reset)."""
 
     @staticmethod
     def _redis_with_password_change(changed_at: int) -> AsyncMock:

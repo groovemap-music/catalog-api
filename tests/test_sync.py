@@ -140,7 +140,7 @@ class TestTriggerSyncEndpoint:
         assert response.status_code == 401
 
     def test_trigger_sync_challenge_token_returns_401(self, test_client: TestClient) -> None:
-        """Regression discogsography-cu2.1 — a 2FA challenge token must NOT authenticate /api/sync."""
+        """Regression groovemap-cu2.1 — a 2FA challenge token must NOT authenticate /api/sync."""
         import base64
         import hashlib
         import hmac

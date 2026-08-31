@@ -221,7 +221,7 @@ RETURN count(r) AS total
 
 # 1. Pressing scarcity: count siblings per master (+ display fields)
 #
-# NOTE (discogsography-cu2.75): the master lookup and the sibling lookup are
+# NOTE (groovemap-cu2.75): the master lookup and the sibling lookup are
 # deliberately two separate OPTIONAL MATCHes. Combining them into one pattern
 # makes `m` contingent on a sibling existing: for a release that IS linked to a
 # master but is that master's ONLY pressing, the combined pattern (including its

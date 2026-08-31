@@ -258,7 +258,7 @@ class TestExploreFromHereCacheHit:
             mod._cache = original_cache
 
     def test_cache_key_includes_hops(self, test_client: TestClient, auth_headers: dict[str, str]) -> None:
-        """discogsography-cu2.29: the explore cache key must include the hops
+        """groovemap-cu2.29: the explore cache key must include the hops
         parameter — hops changes the traversal depth (not merely truncation), so
         omitting it serves results computed for a different depth for the TTL.
         Different hops values MUST produce different cache keys.

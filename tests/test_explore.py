@@ -22,6 +22,29 @@ class TestAutocompleteEndpoint:
         data = response.json()
         assert "results" in data
 
+    @pytest.mark.parametrize(
+        ("entity_type", "query", "sample"),
+        [
+            ("genre", "ambient", {"id": "Ambient", "name": "Ambient", "score": 1.0}),
+            ("label", "warp", {"id": "100", "name": "Warp Records", "score": 0.9}),
+            ("style", "techno", {"id": "Techno", "name": "Techno", "score": 0.8}),
+        ],
+    )
+    def test_autocomplete_supported_catalog_types(
+        self,
+        test_client: TestClient,
+        entity_type: str,
+        query: str,
+        sample: dict[str, Any],
+    ) -> None:
+        mock_func = AsyncMock(return_value=[sample])
+        with patch.dict("api.routers.explore.AUTOCOMPLETE_DISPATCH", {entity_type: mock_func}):
+            response = test_client.get(f"/api/autocomplete?q={query}&type={entity_type}&limit=7")
+
+        assert response.status_code == 200
+        assert response.json() == {"results": [sample]}
+        mock_func.assert_awaited_once_with(ANY, query, 7)
+
     def test_autocomplete_minimum_length_validation(self, test_client: TestClient) -> None:
         response = test_client.get("/api/autocomplete?q=ab")
         assert response.status_code == 422
@@ -68,6 +91,40 @@ class TestExploreEndpoint:
         data = response.json()
         assert data["center"]["name"] == "Radiohead"
         assert "categories" in data
+
+    @pytest.mark.parametrize(
+        ("entity_type", "name", "result", "expected_categories"),
+        [
+            (
+                "genre",
+                "Rock",
+                {"id": "Rock", "name": "Rock", "release_count": 10, "artist_count": 4, "label_count": 3, "style_count": 2},
+                {"releases", "artists", "labels", "styles"},
+            ),
+            (
+                "style",
+                "Techno",
+                {"id": "Techno", "name": "Techno", "release_count": 8, "artist_count": 5, "label_count": 2, "genre_count": 1},
+                {"releases", "artists", "labels", "genres"},
+            ),
+        ],
+    )
+    def test_explore_genre_and_style_success(
+        self,
+        test_client: TestClient,
+        entity_type: str,
+        name: str,
+        result: dict[str, Any],
+        expected_categories: set[str],
+    ) -> None:
+        mock_func = AsyncMock(return_value=result)
+        with patch.dict("api.routers.explore.EXPLORE_DISPATCH", {entity_type: mock_func}):
+            response = test_client.get(f"/api/explore?name={name}&type={entity_type}")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["center"] == {"id": str(result["id"]), "name": name, "type": entity_type}
+        assert {category["category"] for category in data["categories"]} == expected_categories
 
     def test_explore_not_found_404(self, test_client: TestClient) -> None:
         mock_func = AsyncMock(return_value=None)
@@ -133,6 +190,43 @@ class TestExpandEndpoint:
         data = response.json()
         assert "children" in data
         assert "total" in data
+
+    @pytest.mark.parametrize(
+        ("limit", "offset", "children", "total", "has_more"),
+        [
+            (50, 0, [{"id": "1"}, {"id": "2"}], 2, False),
+            (1, 0, [{"id": "1"}], 2, True),
+            (1, 1, [{"id": "2"}], 2, False),
+            (25, 50, [], 50, False),
+        ],
+    )
+    def test_expand_pagination_contract(
+        self,
+        test_client: TestClient,
+        limit: int,
+        offset: int,
+        children: list[dict[str, str]],
+        total: int,
+        has_more: bool,
+    ) -> None:
+        mock_query = AsyncMock(return_value=children)
+        mock_count = AsyncMock(return_value=total)
+        with (
+            patch.dict("api.routers.explore.EXPAND_DISPATCH", {"artist": {"releases": mock_query}}),
+            patch.dict("api.routers.explore.COUNT_DISPATCH", {"artist": {"releases": mock_count}}),
+        ):
+            response = test_client.get(f"/api/expand?node_id=artist-1&type=artist&category=releases&limit={limit}&offset={offset}")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "children": children,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "has_more": has_more,
+        }
+        mock_query.assert_awaited_once_with(ANY, "artist-1", limit, offset, before_year=None)
+        mock_count.assert_awaited_once_with(ANY, "artist-1", before_year=None)
 
     def test_expand_invalid_type(self, test_client: TestClient) -> None:
         response = test_client.get("/api/expand?node_id=x&type=invalid&category=releases")
@@ -323,6 +417,29 @@ class TestNodeDetailsEndpoint:
         with patch.dict("api.routers.explore.DETAILS_DISPATCH", {"artist": mock_func}):
             response = test_client.get("/api/node/1?type=artist")
         assert response.status_code == 200
+
+    @pytest.mark.parametrize(
+        ("entity_type", "node_id", "result"),
+        [
+            ("release", "10", {"id": "10", "name": "Selected Ambient Works", "year": 1992}),
+            ("genre", "Electronic", {"id": "Electronic", "name": "Electronic", "artist_count": 100}),
+            ("label", "100", {"id": "100", "name": "Warp Records", "release_count": 500}),
+        ],
+    )
+    def test_release_genre_and_label_node_details(
+        self,
+        test_client: TestClient,
+        entity_type: str,
+        node_id: str,
+        result: dict[str, Any],
+    ) -> None:
+        mock_func = AsyncMock(return_value=result)
+        with patch.dict("api.routers.explore.DETAILS_DISPATCH", {entity_type: mock_func}):
+            response = test_client.get(f"/api/node/{node_id}?type={entity_type}")
+
+        assert response.status_code == 200
+        assert response.json() == result
+        mock_func.assert_awaited_once_with(ANY, node_id)
 
     def test_node_not_found_404(self, test_client: TestClient) -> None:
         mock_func = AsyncMock(return_value=None)

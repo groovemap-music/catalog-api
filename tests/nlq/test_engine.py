@@ -208,7 +208,7 @@ class TestNLQEngineAuthTools:
 
 
 class TestNLQEngineCurrentEntityContext:
-    """Regression discogsography-xcsx: current_entity_id/current_entity_type were
+    """Regression groovemap-xcsx: current_entity_id/current_entity_type were
     plumbed from the client all the way to NLQContext but never read by the
     engine — deictic references like "this artist" had no referent."""
 

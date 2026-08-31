@@ -217,7 +217,7 @@ class TestGetObscurityScore:
 
     @pytest.mark.asyncio
     async def test_counts_distinct_collectors_not_relationships(self) -> None:
-        """discogsography-cu2.76: the syncer creates one COLLECTED relationship per
+        """groovemap-cu2.76: the syncer creates one COLLECTED relationship per
         instance_id, so a user owning multiple copies of a release must not multiply
         the collector count. The query must count(DISTINCT other) over a
         DISTINCT (u, r) base, not count(other).
@@ -253,7 +253,7 @@ class TestGetObscurityScore:
 
     @pytest.mark.asyncio
     async def test_total_releases_matches_distinct_release_count_not_instance_count(self) -> None:
-        """Regression discogsography-omrb: total_releases must describe the same
+        """Regression groovemap-omrb: total_releases must describe the same
         distinct-release basis as score/median_collectors, not a separate
         COLLECTED-edge (instance) count. A user owning 2 physical copies
         (instance_ids) of a single release must report total_releases=1 —

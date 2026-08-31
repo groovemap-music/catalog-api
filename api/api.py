@@ -94,7 +94,7 @@ STARTUP_BANNER = r"""
 / _/ _` |  _/ _` | / _ \/ _` |___/ _` | '_ \ |
 \__\__,_|\__\__,_|_\___/\__, |   \__,_| .__/_|
                         |___/         |_|
-                         catalog-api
+                    GrooveMap catalog-api
 """.strip("\n")
 
 # Module-level state
@@ -133,7 +133,7 @@ def _create_access_token(user_id: str, email: str, issued_at: int | None = None)
     was derived from was verified, instead of the (later) moment of minting. A
     password change committing in between must invalidate the new token, and the
     `iat <= password_changed` predicate can only see that if `iat` predates the
-    change (discogsography-jxmn).
+    change (groovemap-jxmn).
     """
     if _config is None:
         raise RuntimeError("Service not initialized")
@@ -251,7 +251,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:  # pragma: no cover
 
     # Reconcile sync_history rows abandoned by a hard process death (SIGKILL/
     # OOM) between the INSERT and run_full_sync's terminal UPDATE — no
-    # in-process handler survives that to fix them itself (discogsography-pxqw).
+    # in-process handler survives that to fix them itself (groovemap-pxqw).
     await reconcile_stale_sync_history(_pool)
 
     # Initialize Redis for OAuth state storage and token blacklist
@@ -367,7 +367,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:  # pragma: no cover
         # AsyncAnthropic owns an internal httpx.AsyncClient whose connection
         # pool/keep-alive sockets are never drained unless explicitly
         # closed — it has no context-manager/finalizer wired up here, so
-        # without this the client just leaks on shutdown (discogsography-8nle).
+        # without this the client just leaks on shutdown (groovemap-8nle).
         await anthropic_client.close()
     health_srv.stop()
     logger.info("✅ API service stopped")
@@ -421,7 +421,7 @@ async def metrics_middleware(request: Request, call_next: Any) -> Any:
     reconstruction that only collapses pure-integer/UUID segments — an
     unauthenticated flood of distinct junk paths (``/a1``, ``/a2``, ...) could
     fill the whole 10k-entry MetricsBuffer and evict every real endpoint's
-    samples (discogsography-jlei).
+    samples (groovemap-jlei).
     """
     import time as _time  # noqa: PLC0415
 
@@ -765,7 +765,7 @@ def main() -> None:  # pragma: no cover
         # groovemap docker network. Trust X-Forwarded-For/-Proto only from
         # that internal subnet so slowapi's IP-keyed rate limits (api/limiter.py)
         # resolve the true client instead of collapsing every request behind the
-        # proxy into a single global bucket — see discogsography-quq5. The
+        # proxy into a single global bucket — see groovemap-quq5. The
         # subnet must match docker-compose.yml's `networks.groovemap.ipam`.
         proxy_headers=True,
         forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "172.20.0.0/16"),

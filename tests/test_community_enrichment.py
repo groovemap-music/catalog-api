@@ -126,6 +126,8 @@ class TestEnrichReleasesFromDiscogs:
 
         assert result["enriched"] == 1
         assert result["errors"] == 0
+        request_headers = mock_client.get.await_args.kwargs["headers"]
+        assert request_headers["User-Agent"] == ("GrooveMap-catalog-api/1.0 +https://github.com/groovemap-music/catalog-api")
 
     @pytest.mark.asyncio
     async def test_rate_limit_retry_and_exhaust(self) -> None:
@@ -348,7 +350,7 @@ class TestEnrichReleasesFromDiscogs:
 
     @pytest.mark.asyncio
     async def test_transient_httpx_error_counted_and_run_continues(self) -> None:
-        """discogsography-cu2.26: a transient transport error on one release must
+        """groovemap-cu2.26: a transient transport error on one release must
         be counted as an error and the run must continue to the next release,
         not abort the whole invocation with an unhandled 500.
         """
@@ -382,7 +384,7 @@ class TestEnrichReleasesFromDiscogs:
 
     @pytest.mark.asyncio
     async def test_malformed_json_body_counted_and_run_continues(self) -> None:
-        """discogsography-cu2.26: a 200 response with a non-JSON body must be
+        """groovemap-cu2.26: a 200 response with a non-JSON body must be
         counted as an error, not raise out of the loop.
         """
         import json
@@ -434,7 +436,7 @@ class TestCommunityEnrichmentEndpoint:
 
 
 class TestEnrichmentBatchCap:
-    """Regression for the unbounded enrichment loop (discogsography-1cxi).
+    """Regression for the unbounded enrichment loop (groovemap-1cxi).
 
     The loop is rate-limited to one Discogs request per second, so an unbounded
     backlog makes the endpoint's wall-clock cost unbounded too — which is how

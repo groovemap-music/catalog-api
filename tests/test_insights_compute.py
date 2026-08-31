@@ -281,7 +281,7 @@ class TestRarityScoresEndpoint:
         assert "error" in response.json()
 
     def test_503_on_transaction_timeout_client_error(self, test_client: TestClient) -> None:
-        """discogsography-lx1n: the 600s transaction timeout is a ClientError.
+        """groovemap-lx1n: the 600s transaction timeout is a ClientError.
 
         The previous handler only caught TransientError, so this escaped as an
         unhandled 500 on every production run.

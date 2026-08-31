@@ -499,7 +499,7 @@ class TestViolationDetailEndpoint:
         assert data["parsed_json"] is None
 
     def test_record_detail_scopes_to_one_entity_type_when_ids_collide(self, test_client: TestClient, tmp_path: Path) -> None:
-        """Regression discogsography-tre5: record_id is a per-entity-type namespace,
+        """Regression groovemap-tre5: record_id is a per-entity-type namespace,
         not a global key — artist 1 and label 1 are distinct records that can both
         be flagged. Without an entity_type filter, the response must NOT merge
         violations from both types; it must deterministically pick one and load
@@ -534,7 +534,7 @@ class TestViolationDetailEndpoint:
         assert "<year>1850</year>" in data["raw_xml"]
 
     def test_record_detail_entity_type_param_disambiguates_collision(self, test_client: TestClient, tmp_path: Path) -> None:
-        """Regression discogsography-tre5: an explicit entity_type query parameter
+        """Regression groovemap-tre5: an explicit entity_type query parameter
         selects the correct record when IDs collide across entity types."""
         import api.routers.extraction_analysis as ea
 
@@ -823,7 +823,7 @@ class TestPromptContextEndpoint:
         assert "2" in record_ids
 
     def test_prompt_context_sample_violations_carry_field_value(self, test_client: TestClient, tmp_path: Path) -> None:
-        """Regression (discogsography-15gn): sample violations expose the extractor's real `field`/`field_value`
+        """Regression (groovemap-15gn): sample violations expose the extractor's real `field`/`field_value`
         keys — not a speculative `value`/`message` key that never exists in violations.jsonl."""
         import api.routers.extraction_analysis as ea
 
@@ -989,7 +989,7 @@ class TestGenerateAiPromptEndpoint:
         assert "year-out-of-range" in call_kwargs["messages"][0]["content"]
 
     def test_ai_prompt_includes_field_values_not_captured_placeholder(self, test_client: TestClient, tmp_path: Path) -> None:
-        """Regression (discogsography-15gn): the prompt sent to Claude must contain the actual violation
+        """Regression (groovemap-15gn): the prompt sent to Claude must contain the actual violation
         values (field_value) rather than the dead '(not captured)' fallback caused by reading a
         never-populated 'value' key."""
         import api.routers.extraction_analysis as ea
@@ -1109,7 +1109,7 @@ class TestValidateRecordId:
 
 
 class TestDotSegmentTraversalRejected:
-    """Regression for discogsography-cu2.97: a bare '..' (or '.') segment matches
+    """Regression for groovemap-cu2.97: a bare '..' (or '.') segment matches
     the alphanumeric-plus-dot allowlist regex (dots are kept to support version
     strings like "20240101.0"), but resolves to the parent/same directory when
     joined onto a Path — defeating the allowlist's stated traversal protection."""
@@ -1257,7 +1257,7 @@ class TestReadViolationsEdgeCases:
 
 
 class TestViolationsReadBoundedAndOffloaded:
-    """Regression for discogsography-cu2.98: the aggregate violations.jsonl scan
+    """Regression for groovemap-cu2.98: the aggregate violations.jsonl scan
     must be capped, streamed (never `.read_text().splitlines()` a whole file into
     memory), cached per version, and run off the event loop."""
 
@@ -1386,7 +1386,7 @@ class TestViolationsReadBoundedAndOffloaded:
 
 
 class TestCacheStampedeSingleFlight:
-    """Regression for discogsography-jrm3: concurrent misses for the same key
+    """Regression for groovemap-jrm3: concurrent misses for the same key
     must collapse into a single computation, not one duplicate scan per
     concurrent caller."""
 
@@ -1625,7 +1625,7 @@ class TestClassifyViolationBothPresent:
 
 
 class TestFindJsonFieldValue:
-    """Regression tests for discogsography-bfcm."""
+    """Regression tests for groovemap-bfcm."""
 
     def test_finds_top_level_key(self) -> None:
         import api.routers.extraction_analysis as ea
@@ -1665,7 +1665,7 @@ class TestFindJsonFieldValue:
 
 
 class TestClassifyViolationNestedJsonField:
-    """Regression tests for discogsography-bfcm.
+    """Regression tests for groovemap-bfcm.
 
     A rule on a nested dot-notation field (e.g. "genres.genre") must not be
     falsely classified as parsing_error just because the JSON value lives
