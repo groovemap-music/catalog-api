@@ -10,10 +10,14 @@ source-check:
     uvx --from ruff==0.16.4 ruff format --check .
     uvx --from ruff==0.16.4 ruff check .
     python scripts/check-contracts.py
+
+security:
     gitleaks git --redact --no-banner
     gitleaks dir . --redact --no-banner
 
-check: source-check typecheck test build install-check license-check bump-preview
+ci-check: source-check typecheck test bump-preview
+
+check: ci-check security build install-check license-check
 
 format:
     uv run ruff format .
@@ -25,15 +29,18 @@ typecheck:
 test:
     uv run pytest --cov=api --cov-report=term-missing --cov-report=xml
 
+coverage:
+    uv run pytest --cov=api --cov-report=term-missing --cov-report=xml
+
 build:
     uv build --out-dir dist --clear
 
 install-check: build
     bash scripts/install-check.sh
 
-license-check:
+license-check: build
     uv run python scripts/check-license.py
-    uv run pip-licenses --fail-on "GPL-2.0-only;GPL-3.0-only;AGPL-3.0-only"
+    uv run pip-licenses --format=json | uv run python scripts/check_dependency_licenses.py
 
 audit:
     uv run pip-audit
@@ -55,7 +62,7 @@ bump:
     uv lock
 
 performance-image: prepare-private-wheels
-    docker build --file performance/Dockerfile --tag catalog-api-performance:local .
+    bash scripts/build-image.sh performance/Dockerfile catalog-api-performance:local
 
-release-dry-run: check
+release-dry-run: check prepare-private-wheels
     bash scripts/release-dry-run.sh

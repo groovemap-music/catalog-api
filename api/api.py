@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -75,13 +76,25 @@ from api.syncer import reconcile_stale_sync_history
 
 logger = structlog.get_logger(__name__)
 
+SOURCE_REPOSITORY = "https://github.com/groovemap-music/catalog-api"
+
+
+def source_url(revision: str | None) -> str:
+    """Return the corresponding source tree for a full Git revision."""
+    if revision is not None and re.fullmatch(r"[0-9a-f]{40}", revision):
+        return f"{SOURCE_REPOSITORY}/tree/{revision}"
+    return SOURCE_REPOSITORY
+
+
+SOURCE_URL = source_url(os.environ.get("GROOVEMAP_SOURCE_REVISION"))
+
 STARTUP_BANNER = r"""
          _        _                         _
  __ __ _| |_ __ _| |___  __ _ ___ __ _ _ __(_)
 / _/ _` |  _/ _` | / _ \/ _` |___/ _` | '_ \ |
 \__\__,_|\__\__,_|_\___/\__, |   \__,_| .__/_|
                         |___/         |_|
-                         catalog-api
+                    GrooveMap catalog-api
 """.strip("\n")
 
 # Module-level state
@@ -120,7 +133,7 @@ def _create_access_token(user_id: str, email: str, issued_at: int | None = None)
     was derived from was verified, instead of the (later) moment of minting. A
     password change committing in between must invalidate the new token, and the
     `iat <= password_changed` predicate can only see that if `iat` predates the
-    change (discogsography-jxmn).
+    change (groovemap-jxmn).
     """
     if _config is None:
         raise RuntimeError("Service not initialized")
@@ -238,7 +251,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:  # pragma: no cover
 
     # Reconcile sync_history rows abandoned by a hard process death (SIGKILL/
     # OOM) between the INSERT and run_full_sync's terminal UPDATE — no
-    # in-process handler survives that to fix them itself (discogsography-pxqw).
+    # in-process handler survives that to fix them itself (groovemap-pxqw).
     await reconcile_stale_sync_history(_pool)
 
     # Initialize Redis for OAuth state storage and token blacklist
@@ -354,7 +367,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:  # pragma: no cover
         # AsyncAnthropic owns an internal httpx.AsyncClient whose connection
         # pool/keep-alive sockets are never drained unless explicitly
         # closed — it has no context-manager/finalizer wired up here, so
-        # without this the client just leaks on shutdown (discogsography-8nle).
+        # without this the client just leaks on shutdown (groovemap-8nle).
         await anthropic_client.close()
     health_srv.stop()
     logger.info("✅ API service stopped")
@@ -368,6 +381,8 @@ app = FastAPI(
     title="GrooveMap API",
     version="0.1.0",
     description="User authentication and Discogs OAuth integration for GrooveMap",
+    license_info={"name": "GNU Affero General Public License v3 only", "identifier": "AGPL-3.0-only"},
+    openapi_external_docs={"description": "Corresponding source for this API revision", "url": SOURCE_URL},
     default_response_class=JSONResponse,
     lifespan=lifespan,
 )
@@ -406,7 +421,7 @@ async def metrics_middleware(request: Request, call_next: Any) -> Any:
     reconstruction that only collapses pure-integer/UUID segments — an
     unauthenticated flood of distinct junk paths (``/a1``, ``/a2``, ...) could
     fill the whole 10k-entry MetricsBuffer and evict every real endpoint's
-    samples (discogsography-jlei).
+    samples (groovemap-jlei).
     """
     import time as _time  # noqa: PLC0415
 
@@ -750,7 +765,7 @@ def main() -> None:  # pragma: no cover
         # groovemap docker network. Trust X-Forwarded-For/-Proto only from
         # that internal subnet so slowapi's IP-keyed rate limits (api/limiter.py)
         # resolve the true client instead of collapsing every request behind the
-        # proxy into a single global bucket — see discogsography-quq5. The
+        # proxy into a single global bucket — see groovemap-quq5. The
         # subnet must match docker-compose.yml's `networks.groovemap.ipam`.
         proxy_headers=True,
         forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "172.20.0.0/16"),

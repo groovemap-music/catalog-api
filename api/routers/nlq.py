@@ -50,7 +50,7 @@ async def _extract_user_id(request: Request) -> str | None:
 
     Async because revocation state lives in Redis: a resolved user_id unlocks the
     authenticated collection tools, so a logged-out or password-changed token must
-    NOT resolve here either (discogsography-aexv). Any failure — bad token, Redis
+    NOT resolve here either (groovemap-aexv). Any failure — bad token, Redis
     error — fails closed to None, i.e. an anonymous/public query.
     """
     auth_header = request.headers.get("authorization", "")
@@ -80,7 +80,7 @@ def _cache_key(query: str, context: dict[str, Any] | None = None) -> str:
     """Build a Redis cache key from a normalized query and its entity context.
 
     The engine now resolves deictic references ("this artist") using
-    ``current_entity_id``/``current_entity_type`` (discogsography-xcsx), so the
+    ``current_entity_id``/``current_entity_type`` (groovemap-xcsx), so the
     same query text can produce a different answer depending on which entity is
     focused. The cache key MUST include that context — keying on query text
     alone would serve one focused entity's cached answer to a different
@@ -151,7 +151,7 @@ async def nlq_query(request: Request, body: NLQQueryRequest) -> Any:
 
     # Determine the response mode BEFORE consulting the cache. A streaming client
     # must ALWAYS receive an event stream — never a plain JSON cache body, which
-    # its SSE parser cannot read, hanging the Ask UI. See discogsography-cu2.27.
+    # its SSE parser cannot read, hanging the Ask UI. See groovemap-cu2.27.
     accept = request.headers.get("accept", "")
     wants_stream = "text/event-stream" in accept
 
@@ -220,7 +220,7 @@ def _stream_response(
 
     async def event_generator() -> Any:
         # Replay a cached result as synthetic SSE events so a streaming client
-        # never hangs on a plain JSON cache body. See discogsography-cu2.27.
+        # never hangs on a plain JSON cache body. See groovemap-cu2.27.
         if cached is not None:
             cached_actions = cached.get("actions", [])
             yield {"event": "actions", "data": json.dumps({"actions": cached_actions})}
@@ -234,7 +234,7 @@ def _stream_response(
                         "tools_used": cached.get("tools_used"),
                         # Mirror the non-streaming JSON body: actions travel on the
                         # result frame too, not only the sideband event. See
-                        # discogsography-l6fm.
+                        # groovemap-l6fm.
                         "actions": cached_actions,
                         "cached": True,
                     }
@@ -290,7 +290,7 @@ def _stream_response(
             # Emit final result. `actions` is repeated here on purpose: the
             # non-streaming JSON body and the Redis cache entry both carry it on
             # the result object, and a client that only subscribes to `result`
-            # would otherwise apply nothing at all. See discogsography-l6fm.
+            # would otherwise apply nothing at all. See groovemap-l6fm.
             response_data = {
                 "query": query,
                 "summary": result.summary,
@@ -306,7 +306,7 @@ def _stream_response(
             # its cached-replay path above are permanently unpopulated. Written
             # before the "result" yield: a client disconnect raises GeneratorExit
             # at that yield, and a write placed after it would never run.
-            # See discogsography-c584.
+            # See groovemap-c584.
             if user_id is None and _redis is not None:
                 cache_k = _cache_key(query, context)
                 try:
@@ -320,7 +320,7 @@ def _stream_response(
             # the still-running engine task so the Anthropic/Neo4j work does not
             # leak and the pending task cannot be GC'd mid-flight. gather with
             # return_exceptions swallows the resulting CancelledError. See
-            # discogsography-cu2.28.
+            # groovemap-cu2.28.
             if not engine_task.done():
                 engine_task.cancel()
                 await asyncio.gather(engine_task, return_exceptions=True)

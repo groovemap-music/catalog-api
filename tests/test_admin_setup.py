@@ -144,7 +144,7 @@ def test_main_no_args_prints_help_and_exits(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_main_rejects_password_as_cli_argument(monkeypatch: pytest.MonkeyPatch) -> None:
-    """discogsography-dir0: --password must not exist as a CLI flag at all —
+    """groovemap-dir0: --password must not exist as a CLI flag at all —
     argparse must reject it rather than silently accepting a leaky argument."""
     _run_main(monkeypatch, ["--email", "a@example.com", "--password", "longenoughpw"])
     with pytest.raises(SystemExit) as exc:
@@ -184,7 +184,7 @@ def test_main_add_calls_add_admin_using_env_password(monkeypatch: pytest.MonkeyP
 
 def test_main_add_prompts_interactively_when_no_env_password(monkeypatch: pytest.MonkeyPatch) -> None:
     """No ADMIN_PASSWORD set → falls back to an interactive, non-echoed prompt —
-    never a CLI argument, never in shell history (discogsography-dir0)."""
+    never a CLI argument, never in shell history (groovemap-dir0)."""
     _run_main(monkeypatch, ["--email", "a@example.com"])
     monkeypatch.setattr(admin_setup, "get_secret", lambda _name: None)
     with (

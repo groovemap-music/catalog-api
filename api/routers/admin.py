@@ -381,7 +381,7 @@ async def _track_extraction(extraction_id: str) -> None:
     # extraction_progress is only reset INSIDE process_*_data, the phantom run was
     # stamped with the PREVIOUS run's record counts, so nothing looked wrong. Only
     # honor a terminal "waiting"/"completed" after the run was observed running
-    # (discogsography-exnk).
+    # (groovemap-exnk).
     has_seen_running = False
     startup_polls = 0
 

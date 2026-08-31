@@ -1,4 +1,4 @@
-"""Regression tests for discogsography-aexv.
+"""Regression tests for groovemap-aexv.
 
 ``_extract_user_id`` in api/routers/nlq.py hand-rolled Bearer validation: it
 verified the signature and ``exp`` via ``decode_token`` and returned ``sub``

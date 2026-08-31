@@ -201,7 +201,7 @@ def _fake_request(token: str) -> object:
 
 @pytest.mark.asyncio
 async def test_extract_user_id_rejects_challenge_token() -> None:
-    """Regression discogsography-cu2.1 — _extract_user_id must not resolve a 2FA challenge token to a user."""
+    """Regression groovemap-cu2.1 — _extract_user_id must not resolve a 2FA challenge token to a user."""
     from api.routers import nlq as nlq_router
 
     secret = "test-nlq-secret"

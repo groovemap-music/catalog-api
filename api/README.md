@@ -48,7 +48,7 @@ REDIS_HOST=redis
 JWT_SECRET_KEY=your-secret-key-here
 
 # Discogs API
-DISCOGS_USER_AGENT="GrooveMap/1.0 +https://github.com/groovemap-music/catalog-api"
+DISCOGS_USER_AGENT="GrooveMap-catalog-api/1.0 +https://github.com/groovemap-music/catalog-api"
 
 # HKDF master encryption key (derives OAuth + TOTP keys; generate with:
 # python -c 'import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())')
@@ -82,7 +82,7 @@ All tokens are HS256 JWTs containing:
 - `exp`: Expiry timestamp
 - `jti`: Unique token ID, used for logout revocation (blacklisted in Redis)
 
-The API service handles all JWT validation locally. No other service requires the `JWT_SECRET_KEY`.
+The API handles JWT validation locally; `JWT_SECRET_KEY` remains inside the catalog-api boundary.
 
 ### Discogs OAuth Flow
 
@@ -92,7 +92,8 @@ The API implements Discogs OAuth 1.0a OOB (out-of-band) flow:
 1. **Authorize**: User visits the Discogs URL and approves access, receiving a PIN verifier code.
 1. **Complete**: `POST /api/oauth/verify/discogs` — exchanges the verifier for a permanent access token, which is stored in the `oauth_tokens` table.
 
-After the flow, the API service uses these tokens to sync the user's Discogs collection and wantlist directly (sync logic migrated from the former Curator service).
+After the flow, the API uses these tokens to synchronize the user's Discogs collection and
+wantlist directly.
 
 ## Operator Setup
 
@@ -178,7 +179,8 @@ Requires `ENCRYPTION_MASTER_KEY` to be configured. All 2FA endpoints require JWT
 
 ### Graph Queries
 
-All graph query endpoints are served by the API service and consumed by the Explore frontend.
+All graph query endpoints are served by the API and consumed by
+[`graph-explorer`](https://github.com/groovemap-music/graph-explorer).
 
 | Method | Path                  | Auth Required | Rate Limit | Description                          |
 | ------ | --------------------- | ------------- | ---------- | ------------------------------------ |
@@ -356,9 +358,13 @@ Time-travel through the knowledge graph with year-range and genre-emergence quer
 
 - `before_year` (required) — Year cutoff (1900–2030)
 
-### Insights
+### Analytics results
 
-Proxied endpoints forwarding to the insights microservice for precomputed analytics and music trends. Returns 503 if the insights service is unavailable. The API also exposes internal computation endpoints at `/api/internal/insights/*` that the insights service calls over HTTP to fetch raw Neo4j and PostgreSQL query results.
+These endpoints proxy precomputed music trends from
+[`analytics-engine`](https://github.com/groovemap-music/analytics-engine). They return 503 when
+that service is unavailable. The catalog API also owns the authenticated
+`/api/internal/insights/*` wire contract used by `analytics-engine` to fetch raw Neo4j and
+PostgreSQL query results.
 
 | Method | Path                              | Auth Required | Description                         |
 | ------ | --------------------------------- | ------------- | ----------------------------------- |
@@ -367,7 +373,7 @@ Proxied endpoints forwarding to the insights microservice for precomputed analyt
 | GET    | `/api/insights/label-longevity`   | No            | Label longevity rankings            |
 | GET    | `/api/insights/this-month`        | No            | Releases and trends for this month  |
 | GET    | `/api/insights/data-completeness` | No            | Data quality and completeness stats |
-| GET    | `/api/insights/status`            | No            | Computation status of insights data |
+| GET    | `/api/insights/status`            | No            | Computation status of analytics data |
 
 ### Natural Language Queries (NLQ)
 
@@ -443,7 +449,10 @@ Temporal analysis of the authenticated user's collection, showing how their tast
 
 ### Credits & Provenance
 
-Query the credited personnel (producers, engineers, mastering engineers, session musicians, designers) behind releases. Person nodes are created by the graphinator from Discogs `extraartists` data.
+Query the credited personnel (producers, engineers, mastering engineers, session musicians,
+designers) behind releases. The graph data is produced by
+[`discogs-graph-enricher`](https://github.com/groovemap-music/discogs-graph-enricher) from Discogs
+`extraartists` records.
 
 | Method | Path                                  | Auth Required | Rate Limit | Description                                           |
 | ------ | ------------------------------------- | ------------- | ---------- | ----------------------------------------------------- |
@@ -479,7 +488,11 @@ Query the credited personnel (producers, engineers, mastering engineers, session
 
 ### MusicBrainz Enrichment
 
-Endpoints exposing MusicBrainz enrichment data linked to Discogs entities. Requires data from brainzgraphinator (Neo4j) and brainztableinator (PostgreSQL).
+Endpoints exposing MusicBrainz enrichment data linked to Discogs entities. Neo4j enrichment is
+owned by
+[`musicbrainz-graph-enricher`](https://github.com/groovemap-music/musicbrainz-graph-enricher),
+and PostgreSQL enrichment is owned by
+[`musicbrainz-sql-loader`](https://github.com/groovemap-music/musicbrainz-sql-loader).
 
 | Method | Path                                     | Auth Required | Rate Limit | Description                                                                   |
 | ------ | ---------------------------------------- | ------------- | ---------- | ----------------------------------------------------------------------------- |
@@ -490,13 +503,14 @@ Endpoints exposing MusicBrainz enrichment data linked to Discogs entities. Requi
 
 **Data sources:**
 
-- `/musicbrainz` and `/relationships` — Neo4j (enriched by brainzgraphinator)
-- `/external-links` — PostgreSQL `musicbrainz.external_links` table (populated by brainztableinator)
+- `/musicbrainz` and `/relationships` — Neo4j, populated by `musicbrainz-graph-enricher`
+- `/external-links` — PostgreSQL `musicbrainz.external_links`, populated by `musicbrainz-sql-loader`
 - `/enrichment/status` — Both Neo4j and PostgreSQL
 
-### Internal Insights Computation
+### Internal analytics computation
 
-Internal endpoints called by the Insights service over HTTP to fetch raw query results. Not intended for direct external use.
+Internal endpoints called by `analytics-engine` over HTTP to fetch raw query results. These wire
+paths retain `/insights/` for API compatibility and are not intended for direct external use.
 
 | Method | Path                                       | Auth Required | Description                           |
 | ------ | ------------------------------------------ | ------------- | ------------------------------------- |
@@ -536,21 +550,21 @@ uv run pytest tests/api/ -v
 just test-api
 ```
 
-## Docker
+## Container image
 
-Build and run with Docker:
+Build the repository-owned image locally:
 
 ```bash
-# Build
-docker build -f api/Dockerfile .
-
-# Run with docker-compose
-docker-compose up api
+just image
 ```
+
+Runtime topology, databases, networks, and container startup are owned by
+[`deployment`](https://github.com/groovemap-music/deployment).
 
 ## Database Schema
 
-The API service uses the following tables (created by schema-init):
+The API service uses the following tables. Their DDL and initialization image are owned by
+[`database-schema`](https://github.com/groovemap-music/database-schema):
 
 - `users` — user accounts (`id`, `email`, `hashed_password`, `is_active`, `created_at`)
 - `oauth_tokens` — Discogs OAuth tokens (`user_id`, `provider`, `access_token`, `access_secret`, `provider_username`, `provider_user_id`, `updated_at`)

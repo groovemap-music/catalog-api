@@ -186,7 +186,7 @@ class TestHealthEndpoint:
 
 
 class TestMetricsMiddlewareCardinality:
-    """discogsography-jlei: metrics_middleware must key on the matched route's
+    """groovemap-jlei: metrics_middleware must key on the matched route's
     path TEMPLATE, so path cardinality is bounded by the number of registered
     routes — not by attacker-controlled URL segments."""
 
@@ -319,7 +319,7 @@ class TestRegisterEndpoint:
         test_client: TestClient,
         mock_cur: AsyncMock,
     ) -> None:
-        """discogsography-1385: the success log must carry user_id, never the
+        """groovemap-1385: the success log must carry user_id, never the
         registrant's email (PII) — no ad-hoc emoji/log rule bypass."""
         from structlog.testing import capture_logs
 
@@ -431,7 +431,7 @@ class TestLoginEndpoint:
         test_client: TestClient,
         mock_cur: AsyncMock,
     ) -> None:
-        """discogsography-1385: sibling of the registration leak — the
+        """groovemap-1385: sibling of the registration leak — the
         high-volume per-session login log must also carry user_id, not email."""
         from structlog.testing import capture_logs
 
@@ -921,7 +921,7 @@ class TestGetCurrentUser:
         self,
         test_client: TestClient,
     ) -> None:
-        """Regression discogsography-cu2.1 — a 2FA challenge token must NOT authenticate _get_current_user endpoints."""
+        """Regression groovemap-cu2.1 — a 2FA challenge token must NOT authenticate _get_current_user endpoints."""
         import base64
         import hashlib
         import hmac
@@ -1383,7 +1383,7 @@ class TestVerifyDiscogsOAuthStateBinding:
 
 
 class TestLifespanShutdownClosesAnthropicClient:
-    """discogsography-8nle: the lifespan-created AsyncAnthropic client must be
+    """groovemap-8nle: the lifespan-created AsyncAnthropic client must be
     closed on shutdown, mirroring the existing _neo4j/_pool/_redis cleanup."""
 
     @staticmethod
@@ -1444,6 +1444,8 @@ class TestLifespanShutdownClosesAnthropicClient:
         mock_neo4j.close.assert_awaited_once()
         mock_pool.close.assert_awaited_once()
         mock_redis.aclose.assert_awaited_once()
+        mock_health.start_background.assert_called_once()
+        mock_health.stop.assert_called_once()
 
         # Restore module globals lifespan mutated, so later tests in this
         # file see the fixture-provisioned state again.
@@ -1487,6 +1489,12 @@ class TestLifespanShutdownClosesAnthropicClient:
         ):
             async with lifespan(MagicMock()):
                 pass  # Should not raise
+
+        mock_neo4j.close.assert_awaited_once()
+        mock_pool.close.assert_awaited_once()
+        mock_redis.aclose.assert_awaited_once()
+        mock_health.start_background.assert_called_once()
+        mock_health.stop.assert_called_once()
 
         api_module._pool = None
         api_module._config = None

@@ -18,6 +18,7 @@ from neo4j.exceptions import ClientError, Neo4jError, TransientError
 from psycopg.rows import dict_row
 
 from api.auth import decrypt_oauth_token, get_oauth_encryption_key
+from api.config import DEFAULT_DISCOGS_USER_AGENT
 from api.limiter import limiter
 from api.queries.insights_neo4j_queries import (
     query_artist_centrality,
@@ -73,7 +74,7 @@ router = APIRouter(
 # Reuse api.syncer's rate-limit pacing constant rather than forking a second copy
 # — the two are explicit rate-limit siblings (both share MAX_RATE_LIMIT_RETRIES
 # against the same Discogs 60 req/min budget) and a fork previously let this value
-# drift out of sync with syncer.py's (discogsography-fnhk).
+# drift out of sync with syncer.py's (groovemap-fnhk).
 _ENRICHMENT_DELAY_SECONDS = SYNC_DELAY_SECONDS
 _STALENESS_DAYS = 7
 
@@ -345,7 +346,7 @@ async def _enrich_community_counts(
             )
             headers = {
                 "Authorization": auth,
-                "User-Agent": "catalog-api/1.0 +https://github.com/groovemap-music/catalog-api",
+                "User-Agent": DEFAULT_DISCOGS_USER_AGENT,
                 "Accept": "application/json",
             }
 

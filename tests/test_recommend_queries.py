@@ -615,7 +615,7 @@ class TestGetCollectorCounts:
 
     @pytest.mark.asyncio
     async def test_counts_distinct_users_not_relationships(self) -> None:
-        """discogsography-cu2.76: a collector who owns multiple copies of a release
+        """groovemap-cu2.76: a collector who owns multiple copies of a release
         (one COLLECTED relationship per instance_id) must be counted once, not once
         per copy — count(DISTINCT u), not count(u).
         """
@@ -759,7 +759,7 @@ class TestGetExploreTraversal:
     @pytest.mark.asyncio
     async def test_id_coalesces_to_name_for_genre_style_nodes(self) -> None:
         """Genre/Style nodes have no id property; Cypher must coalesce to name
-        so name-keyed discoveries never come back with id=None (discogsography-cu2.5).
+        so name-keyed discoveries never come back with id=None (groovemap-cu2.5).
         """
         from api.queries.recommend_queries import get_explore_traversal
 
@@ -782,7 +782,7 @@ class TestGetExploreTraversal:
 
     @pytest.mark.asyncio
     async def test_cypher_dedupes_per_discovered_node_not_per_path(self) -> None:
-        """Regression for discogsography-6mvm.
+        """Regression for groovemap-6mvm.
 
         `WITH DISTINCT discovered, path_names, rel_types, dist` dedupes the
         whole PATH tuple, not the discovered node — an artist with N releases
@@ -877,7 +877,7 @@ class TestScoreDiscoveries:
         dict.get("id", default) only falls back when the key is MISSING, not
         when it is present with value None — so score_discoveries must use
         `d.get("id") or d.get("name", "")` to avoid emitting id=None, which
-        fails DiscoveryNode(id: str) validation downstream (discogsography-cu2.5).
+        fails DiscoveryNode(id: str) validation downstream (groovemap-cu2.5).
         """
         from api.queries.recommend_queries import score_discoveries
 

@@ -4,6 +4,18 @@ Owns GrooveMap authentication, Discogs OAuth and synchronization, catalog search
 queries, recommendations, natural-language queries, internal analytics endpoints, and
 operator setup CLIs.
 
+```mermaid
+flowchart LR
+    Clients[GrooveMap clients] --> API[catalog-api]
+    API --> PG[(PostgreSQL catalog)]
+    API --> Neo4j[(Neo4j graph)]
+    API --> Redis[(Redis cache)]
+    API --> Discogs[Discogs API]
+    API --> Analytics[analytics-engine]
+    Console[operations-console] --> API
+    Explorer[graph-explorer] --> API
+```
+
 ## Development
 
 This service consumes `groovemap-runtime` and `groovemap-agent-tools` from the private
@@ -17,14 +29,14 @@ just check
 just image
 ```
 
-`just check` is the authoritative, credential-free pre-merge gate. It uses fakes and mocks
-for external systems. Live integration, load, and deployment checks are deliberately
-separate. The performance runner is owned here, while deployment owns its environment and
-orchestration.
+`just check` is the authoritative pre-merge gate. It uses fakes and mocks for external
+systems. Live integration, load, and deployment checks are deliberately separate. The
+performance runner is owned here, while deployment owns its environment and orchestration.
 
-The source-only GitHub workflow requires no cross-repository credentials. Full CI remains
-operator-local until a narrowly installed GitHub App can mint short-lived read access to
-the private Python libraries repository; a cross-repository PAT is not accepted.
+Pull requests, pushes to `main`, the weekly schedule, and Dependabot pull requests all use
+the same required validation graph from the public `groovemap-music/automation` repository.
+Private library access is minted by a narrowly installed GitHub App at an immutable library
+revision; a cross-repository PAT and a reduced dependency-update gate are both rejected.
 
 ## Contracts
 
@@ -41,10 +53,21 @@ This repository versions one service wheel and container image. Commitizen reads
 checksums, an SBOM, notices, and provenance without tagging, pushing, publishing, or
 releasing.
 
-The current tree is licensed under PolyForm Noncommercial 1.0.0. Historical revisions
-retain their then-applicable license.
+The current tree is licensed under the [GNU Affero General Public License v3 only](LICENSE).
+The AGPL permits commercial use when its terms are followed; commercial use by itself does
+not require a separate license. Copyright holders may negotiate optional alternative terms
+with parties that do not want to use the software under the AGPL; see
+[commercial licensing](COMMERCIAL-LICENSING.md). [NOTICE](NOTICE) records prior-license
+history.
+
+The container build injects its full Git revision into the service. The generated
+`/openapi.json`, `/docs`, and `/redoc` metadata link to the corresponding source tree
+for that exact revision.
+
+External code and documentation contributions are paused until the project adopts a
+relicensing-capable contributor license agreement. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Documentation
 
 See the [documentation index](docs/README.md) for configuration, administration,
-performance, examples, and retained design records.
+performance, examples, architecture decisions, and release-compliance gates.

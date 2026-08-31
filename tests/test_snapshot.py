@@ -65,7 +65,7 @@ class TestSaveSnapshot:
 
 
 class TestSnapshotNodeFieldLimits:
-    """Regression for discogsography-cu2.110: SnapshotNode.id/type had no
+    """Regression for groovemap-cu2.110: SnapshotNode.id/type had no
     max_length, so 100 nodes (the node-count cap) could each carry a
     megabyte-sized id/type string — the count cap alone didn't bound payload
     size."""
@@ -105,7 +105,7 @@ class TestSnapshotNodeFieldLimits:
 
 
 class TestSnapshotPayloadAndQuotaLimits:
-    """Regression for discogsography-cu2.110: the serialized payload size cap and
+    """Regression for groovemap-cu2.110: the serialized payload size cap and
     per-user quota, exercised end-to-end through the router."""
 
     def test_save_snapshot_rejects_oversized_payload(self, test_client: TestClient, auth_headers: dict[str, str]) -> None:
@@ -148,7 +148,7 @@ class TestSnapshotPayloadAndQuotaLimits:
 
 
 class TestSnapshotRateLimits:
-    """Regression for discogsography-cu2.110: POST /api/snapshot had no
+    """Regression for groovemap-cu2.110: POST /api/snapshot had no
     @limiter.limit decorator (unlike every other write endpoint), so looping
     the endpoint had no per-minute throttle independent of the payload/quota
     checks above."""
@@ -377,7 +377,7 @@ class TestSnapshotTokenChecks:
         assert "admin" in response.json()["detail"].lower()
 
     def test_challenge_token_rejected(self, test_client: TestClient) -> None:
-        """Regression discogsography-cu2.1 — a 2FA challenge token must NOT authenticate /api/snapshot."""
+        """Regression groovemap-cu2.1 — a 2FA challenge token must NOT authenticate /api/snapshot."""
         import base64
         import hashlib
         import hmac

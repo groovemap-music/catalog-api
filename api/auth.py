@@ -56,7 +56,7 @@ async def token_revocation_reason(payload: Mapping[str, Any], redis: Any) -> str
     ``decode_token`` only proves signature and ``exp`` — revocation lives entirely
     in Redis, so EVERY site that turns a decoded token into an identity must
     consult this. A site that skips it keeps accepting logged-out and
-    password-changed tokens until they expire (discogsography-aexv).
+    password-changed tokens until they expire (groovemap-aexv).
 
     Returns ``REASON_REVOKED`` (logout blacklisted the jti),
     ``REASON_CREDENTIALS_CHANGED`` (issued at or before a password change), or None.
@@ -202,7 +202,7 @@ def create_challenge_token(user_id: str, email: str, secret_key: str, issued_at:
     is deliberately slow (PBKDF2, 100k iterations), and a password change that
     commits inside that window must invalidate the credential derived from the
     old password — which only works if ``iat`` predates the change marker
-    (discogsography-jxmn).
+    (groovemap-jxmn).
     """
     expire = datetime.now(UTC) + timedelta(minutes=5)
     payload: dict[str, Any] = {

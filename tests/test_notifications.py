@@ -25,7 +25,7 @@ class TestLogNotificationChannel:
 
     @pytest.mark.asyncio
     async def test_send_password_reset_does_not_log_email(self) -> None:
-        """discogsography-1385: the fallback log channel must never bind the
+        """groovemap-1385: the fallback log channel must never bind the
         recipient's email address into a structlog event (PII)."""
         from structlog.testing import capture_logs
 
@@ -199,7 +199,7 @@ class TestResendNotificationChannel:
 
     @pytest.mark.asyncio
     async def test_send_password_reset_success_does_not_log_email(self) -> None:
-        """discogsography-1385: success-path log must not bind email either."""
+        """groovemap-1385: success-path log must not bind email either."""
         from structlog.testing import capture_logs
 
         from api.notifications import ResendNotificationChannel

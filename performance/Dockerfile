@@ -10,10 +10,24 @@
 
 FROM python:3.14.5-slim@sha256:c845af9399020c7e562969a13689e929074a10fd057acd1b1fad06a2fb068e97
 
+ARG BUILD_DATE
+ARG BUILD_VERSION=0.1.0
+ARG VCS_REF
+
+RUN case "${VCS_REF}" in *[!0-9a-f]*|"") exit 1 ;; esac && \
+    [ "${#VCS_REF}" -eq 40 ]
+
 LABEL org.opencontainers.image.title="catalog-api-performance" \
       org.opencontainers.image.description="Sequential performance test runner for catalog API query endpoints" \
+      org.opencontainers.image.authors="Robert Wlodarczyk <robert@simplicityguy.com>" \
+      org.opencontainers.image.url="https://groovemap.music" \
+      org.opencontainers.image.documentation="https://github.com/groovemap-music/catalog-api/blob/main/performance/README.md" \
       org.opencontainers.image.source="https://github.com/groovemap-music/catalog-api" \
-      org.opencontainers.image.licenses="PolyForm-Noncommercial-1.0.0" \
+      org.opencontainers.image.vendor="GrooveMap" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.version="${BUILD_VERSION}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.base.name="docker.io/library/python:3.14.5-slim"
 
 COPY .build/private/groovemap_runtime-0.1.0-py3-none-any.whl /wheels/
@@ -31,6 +45,7 @@ RUN groupadd -r perftest && \
 WORKDIR /app
 
 COPY --chown=perftest:perftest performance/run_perftest.py performance/entrypoint.sh ./
+COPY --chown=perftest:perftest COMMERCIAL-LICENSING.md CONTRIBUTING.md LICENSE NOTICE THIRD_PARTY_NOTICES.md /licenses/
 RUN chmod +x entrypoint.sh
 
 USER perftest
