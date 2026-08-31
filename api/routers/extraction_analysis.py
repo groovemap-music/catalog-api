@@ -322,7 +322,7 @@ def _load_state_marker(data_root: Path, version: str, source: str) -> dict[str, 
     try:
         data: dict[str, Any] = json.loads(marker_path.read_text(encoding="utf-8"))
         return data
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError, OSError:
         logger.warning("⚠️ Could not read state marker", path=str(marker_path))
         return None
 
@@ -426,7 +426,7 @@ def _load_record_files(flagged_dir: Path, entity_type: str, record_id: str) -> t
                 truncated = True
             else:
                 parsed_json = json.loads(json_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except json.JSONDecodeError, OSError:
             logger.warning("⚠️ Could not read JSON file", path=str(json_path))
 
     return raw_xml, parsed_json, truncated

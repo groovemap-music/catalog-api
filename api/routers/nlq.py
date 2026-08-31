@@ -72,7 +72,7 @@ async def _extract_user_id(request: Request) -> str | None:
         if await token_revocation_reason(payload, _redis) is not None:
             return None
         return payload.get("sub")
-    except (ValueError, Exception):
+    except ValueError, Exception:
         return None
 
 

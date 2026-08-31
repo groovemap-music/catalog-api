@@ -8,14 +8,14 @@ version = "0.1.0"
 description = "Authentication, catalog search, graph queries, recommendations, and operator APIs for GrooveMap"
 authors = [{name = "Robert Wlodarczyk", email = "robert@simplicityguy.com"}]
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.14,<3.15"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: GNU Affero General Public License v3",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 license = "AGPL-3.0-only"
 license-files = [
@@ -88,13 +88,26 @@ groovemap-runtime = { git = "https://github.com/groovemap-music/python-libraries
 groovemap-agent-tools = { git = "https://github.com/groovemap-music/python-libraries.git", subdirectory = "agent-tools", rev = "28fa329702bc76896cc54ab8d05ec5b1bd3d929e" }
 
 [tool.ruff]
-extend-exclude = ["api/catalog_contract.py", "api/contracts/internal-insights/v1/python/catalog_api_contract.py"]
+extend-exclude = [
+    "api/catalog_contract.py",
+    "api/contracts/internal-insights/v1/python/catalog_api_contract.py",
+    "docs/superpowers",
+]
 line-length = 150
-target-version = "py313"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = ["ARG", "B", "C4", "E", "F", "I", "PLC", "PTH", "RUF", "S", "SIM", "T20", "TCH", "UP", "W"]
-ignore = ["B008", "C901", "E501", "S101"]
+ignore = [
+    "B008",
+    "C901",
+    "E501",
+    "S101",
+    # FastAPI and Pydantic resolve annotations at runtime. Keep their names importable.
+    "TC001",
+    "TC002",
+    "TC003",
+]
 
 [tool.ruff.lint.isort]
 known-first-party = ["api"]
@@ -111,7 +124,7 @@ lines-after-imports = 2
 "api/queries/metrics_queries.py" = ["S608"]
 
 [tool.mypy]
-python_version = "3.13"
+python_version = "3.14"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
