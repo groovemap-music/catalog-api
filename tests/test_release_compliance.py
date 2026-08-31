@@ -20,6 +20,12 @@ def _workflow(name: str) -> dict[str, object]:
     return document
 
 
+def _dependabot() -> dict[str, object]:
+    document = yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text())
+    assert isinstance(document, dict)
+    return document
+
+
 def _assert_full_automation_pin(reference: object, workflow: str) -> None:
     expected = f"groovemap-music/automation/.github/workflows/{workflow}@{AUTOMATION_REVISION}"
     assert reference == expected
@@ -126,6 +132,16 @@ def test_no_reduced_dependency_or_legacy_automation_path_exists() -> None:
     lowered = "\n".join(paths).lower()
     assert "renovate" not in lowered
     assert ".github/workflows/claude" not in lowered
+
+
+def test_dependabot_leaves_managed_python_image_upgrades_atomic() -> None:
+    updates = _dependabot()["updates"]
+    assert isinstance(updates, list)
+    docker = next(update for update in updates if update["package-ecosystem"] == "docker")
+
+    assert docker["directories"] == ["/", "/performance"]
+    assert docker["ignore"] == [{"dependency-name": "python"}]
+    assert docker["open-pull-requests-limit"] > 0
 
 
 def test_runtime_identity_is_repository_specific() -> None:
