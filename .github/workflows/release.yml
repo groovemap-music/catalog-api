@@ -24,12 +24,7 @@ jobs:
         dist/provenance.json
       artifact-variant: primary
       publish-image: true
-      requires-private-library: true
-      private-library-client-id: ${{ vars.GROOVEMAP_CI_APP_CLIENT_ID }}
-      private-library-revision: 28fa329702bc76896cc54ab8d05ec5b1bd3d929e
       prepare-image-command: just prepare-private-wheels
-    secrets:
-      PRIVATE_LIBRARY_PRIVATE_KEY: ${{ secrets.GROOVEMAP_CI_APP_PRIVATE_KEY }}
 
   release-performance:
     uses: groovemap-music/automation/.github/workflows/reusable-release.yml@7db8b4c535c79329e3821e32177932b4f9059253
@@ -46,9 +41,4 @@ jobs:
       publish-image: true
       image-variant: performance
       dockerfile: performance/Dockerfile
-      requires-private-library: true
-      private-library-client-id: ${{ vars.GROOVEMAP_CI_APP_CLIENT_ID }}
-      private-library-revision: 28fa329702bc76896cc54ab8d05ec5b1bd3d929e
       prepare-image-command: just prepare-private-wheels
-    secrets:
-      PRIVATE_LIBRARY_PRIVATE_KEY: ${{ secrets.GROOVEMAP_CI_APP_PRIVATE_KEY }}
