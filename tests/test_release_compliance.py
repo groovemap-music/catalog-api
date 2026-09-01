@@ -87,6 +87,12 @@ def test_ci_uses_one_immutable_graph_for_every_trigger() -> None:
 
 def test_release_callers_pin_distinct_artifacts_and_repository_named_images() -> None:
     workflow = _workflow("release.yml")
+    assert workflow["permissions"] == {
+        "contents": "read",
+        "packages": "write",
+        "id-token": "write",
+        "attestations": "write",
+    }
     jobs = workflow["jobs"]
     assert isinstance(jobs, dict)
     assert set(jobs) == {"release", "release-performance"}
