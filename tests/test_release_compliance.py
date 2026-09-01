@@ -11,7 +11,7 @@ from api.config import DEFAULT_DISCOGS_USER_AGENT, ApiConfig
 
 ROOT = Path(__file__).parent.parent
 AUTOMATION_REVISION = "7db8b4c535c79329e3821e32177932b4f9059253"
-PRIVATE_LIBRARY_REVISION = "28fa329702bc76896cc54ab8d05ec5b1bd3d929e"
+PYTHON_LIBRARIES_REVISION = "28fa329702bc76896cc54ab8d05ec5b1bd3d929e"
 
 
 def _workflow(name: str) -> dict[str, object]:
@@ -66,8 +66,6 @@ def test_ci_uses_one_immutable_graph_for_every_trigger() -> None:
 
     inputs = required["with"]
     assert isinstance(inputs, dict)
-    assert inputs["private-library-revision"] == PRIVATE_LIBRARY_REVISION
-    assert inputs["private-library-client-id"] == "${{ vars.GROOVEMAP_CI_APP_CLIENT_ID }}"
     assert inputs["image-command"] == "just image && just performance-image"
     assert inputs["check-command"] == "just ci-check"
     assert inputs["coverage-command"] == "just coverage"
@@ -77,12 +75,20 @@ def test_ci_uses_one_immutable_graph_for_every_trigger() -> None:
 
     secrets = required["secrets"]
     assert isinstance(secrets, dict)
-    assert secrets["PRIVATE_LIBRARY_PRIVATE_KEY"] == "${{ secrets.GROOVEMAP_CI_APP_PRIVATE_KEY }}"
     assert secrets["CODECOV_TOKEN"] == "${{ secrets.CODECOV_TOKEN }}"
 
     source = (ROOT / ".github" / "workflows" / "ci.yml").read_text().lower()
     assert "dependabot" not in source
     assert "github.actor" not in source
+    for marker in (
+        "requires-private-library",
+        "private-library-client-id",
+        "private-library-revision",
+        "private_library_private_key",
+        "groovemap_ci_app_client_id",
+        "groovemap_ci_app_private_key",
+    ):
+        assert marker not in source
 
 
 def test_release_callers_pin_distinct_artifacts_and_repository_named_images() -> None:
@@ -116,8 +122,6 @@ def test_release_callers_pin_distinct_artifacts_and_repository_named_images() ->
         artifact_identity = f"{inputs['repository-name']}-v0.1.0-{inputs['artifact-variant']}"
         assert artifact_identity == expected_artifact_identities[name]
         artifact_identities.add(artifact_identity)
-        assert inputs["private-library-revision"] == PRIVATE_LIBRARY_REVISION
-        assert inputs["private-library-client-id"] == "${{ vars.GROOVEMAP_CI_APP_CLIENT_ID }}"
         assert inputs["release-command"] == "just release-dry-run"
         assert inputs["publish-image"] is True
         if image_variant is None:
@@ -126,11 +130,22 @@ def test_release_callers_pin_distinct_artifacts_and_repository_named_images() ->
             assert inputs["image-variant"] == image_variant
             assert inputs["dockerfile"] == "performance/Dockerfile"
 
-        secrets = job["secrets"]
-        assert isinstance(secrets, dict)
-        assert secrets["PRIVATE_LIBRARY_PRIVATE_KEY"] == "${{ secrets.GROOVEMAP_CI_APP_PRIVATE_KEY }}"
-
     assert artifact_identities == set(expected_artifact_identities.values())
+
+    source = (ROOT / ".github" / "workflows" / "release.yml").read_text().lower()
+    for marker in (
+        "requires-private-library",
+        "private-library-client-id",
+        "private-library-revision",
+        "private_library_private_key",
+        "groovemap_ci_app_client_id",
+        "groovemap_ci_app_private_key",
+    ):
+        assert marker not in source
+
+    pyproject = (ROOT / "pyproject.toml").read_text()
+    assert "https://github.com/groovemap-music/python-libraries.git" in pyproject
+    assert PYTHON_LIBRARIES_REVISION in pyproject
 
 
 def test_no_reduced_dependency_or_legacy_automation_path_exists() -> None:
