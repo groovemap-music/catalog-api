@@ -28,6 +28,7 @@ from api.auth import decrypt_oauth_token
 from api.cache import RecommendCache
 from api.oauth import _build_oauth_header
 from api.oauth import _hmac_sha1_signature as _hmac_sha1
+from api.telemetry import record_sync_duration, timer
 
 
 logger = structlog.get_logger(__name__)
@@ -598,6 +599,7 @@ async def run_full_sync(
     collection_count = 0
     wantlist_count = 0
     cancelled = False
+    elapsed = timer()
 
     try:
         # Fetch OAuth tokens for the user
@@ -694,6 +696,9 @@ async def run_full_sync(
         # cancellation, leaving the row stuck at status='running' forever —
         # groovemap-pxqw).
         final_status = "cancelled" if cancelled else ("failed" if error_message else "completed")
+        # Recorded before the sync_history write so a failing UPDATE cannot cost the
+        # measurement, and inside `finally` so a cancelled run is still counted.
+        record_sync_duration(elapsed(), final_status)
         try:
             async with pg_pool.connection() as conn, conn.cursor() as cur:
                 await execute_sql(

@@ -17,6 +17,17 @@ from api.limiter import limiter
 from api.nlq.config import NLQConfig
 from api.nlq.engine import NLQContext, NLQEngine
 from api.nlq.suggestions import build_suggestions
+from api.telemetry import (
+    CACHE_NLQ_QUERY,
+    CACHE_NLQ_SUGGESTIONS,
+    NLQ_CACHED,
+    NLQ_ERROR,
+    NLQ_INVALID,
+    NLQ_SUCCESS,
+    NLQ_UNAVAILABLE,
+    cache_get,
+    record_nlq_request,
+)
 
 
 logger = structlog.get_logger(__name__)
@@ -105,7 +116,7 @@ async def nlq_suggestions(
     cache_key = f"nlq:suggest:{pane}:{focus or ''}:{focus_type or ''}"
     if _redis is not None:
         try:
-            cached = await _redis.get(cache_key)
+            cached = await cache_get(_redis, cache_key, cache=CACHE_NLQ_SUGGESTIONS)
             if cached is not None:
                 return JSONResponse(content=json.loads(cached))
         except Exception:
@@ -135,8 +146,10 @@ async def nlq_query(request: Request, body: NLQQueryRequest) -> Any:
     """Run a natural language query against the knowledge graph."""
     # Validate query
     if not body.query or not body.query.strip():
+        record_nlq_request(NLQ_INVALID)
         return JSONResponse(content={"error": "Query must not be empty"}, status_code=400)
     if len(body.query) > _nlq_config.max_query_length:
+        record_nlq_request(NLQ_INVALID)
         return JSONResponse(
             content={"error": f"Query exceeds maximum length of {_nlq_config.max_query_length} characters"},
             status_code=400,
@@ -144,6 +157,7 @@ async def nlq_query(request: Request, body: NLQQueryRequest) -> Any:
 
     # Check availability
     if not _nlq_config.is_available or _engine is None:
+        record_nlq_request(NLQ_UNAVAILABLE)
         return JSONResponse(content={"error": "NLQ is not available"}, status_code=503)
 
     # Extract optional user_id from Bearer token
@@ -160,7 +174,7 @@ async def nlq_query(request: Request, body: NLQQueryRequest) -> Any:
     if user_id is None and _redis is not None:
         cache_k = _cache_key(body.query, body.context)
         try:
-            cached = await _redis.get(cache_k)
+            cached = await cache_get(_redis, cache_k, cache=CACHE_NLQ_QUERY)
             if cached is not None:
                 cached_data = json.loads(cached)
                 cached_data["cached"] = True
@@ -173,6 +187,7 @@ async def nlq_query(request: Request, body: NLQQueryRequest) -> Any:
         return _stream_response(body.query, user_id, body.context, cached=cached_data)
 
     if cached_data is not None:
+        record_nlq_request(NLQ_CACHED)
         return JSONResponse(content=cached_data)
 
     # Build context
@@ -182,8 +197,14 @@ async def nlq_query(request: Request, body: NLQQueryRequest) -> Any:
         current_entity_type=body.context.get("entity_type") if body.context else None,
     )
 
-    # Run engine
-    result = await _engine.run(body.query, ctx)
+    # Run engine. A raised engine error propagates to FastAPI as a 500, so the outcome is
+    # counted on both sides of the call rather than only on success.
+    try:
+        result = await _engine.run(body.query, ctx)
+    except Exception:
+        record_nlq_request(NLQ_ERROR)
+        raise
+    record_nlq_request(NLQ_SUCCESS)
 
     response_data = {
         "query": body.query,
@@ -222,6 +243,7 @@ def _stream_response(
         # Replay a cached result as synthetic SSE events so a streaming client
         # never hangs on a plain JSON cache body. See groovemap-cu2.27.
         if cached is not None:
+            record_nlq_request(NLQ_CACHED)
             cached_actions = cached.get("actions", [])
             yield {"event": "actions", "data": json.dumps({"actions": cached_actions})}
             yield {
@@ -276,9 +298,12 @@ def _stream_response(
             try:
                 result = await engine_task
             except Exception as exc:
+                record_nlq_request(NLQ_ERROR)
                 logger.error("❌ NLQ engine error", error=str(exc), exc_info=True)
                 yield {"event": "error", "data": json.dumps({"error": "An internal error occurred"})}
                 return
+
+            record_nlq_request(NLQ_SUCCESS)
 
             # Emit actions event before result so the client can snapshot and apply
             actions_payload = [action.model_dump(by_alias=True, mode="json") for action in result.actions]

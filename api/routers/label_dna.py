@@ -30,6 +30,7 @@ from api.queries.label_dna_queries import (
     get_label_genre_profile,
     get_label_identity,
 )
+from api.telemetry import CACHE_LABEL_DNA, CACHE_LABEL_SIMILAR, cache_get
 
 
 logger = structlog.get_logger(__name__)
@@ -67,7 +68,7 @@ async def _build_dna(label_id: str) -> tuple[LabelDNA | None, str]:
     cache_key = f"label-dna:{label_id}"
     if _redis:
         try:
-            cached = await _redis.get(cache_key)
+            cached = await cache_get(_redis, cache_key, cache=CACHE_LABEL_DNA)
             if cached:
                 return LabelDNA(**json.loads(cached)), "ok"
         except Exception:
@@ -174,7 +175,7 @@ async def similar_labels(
     cache_key = f"label-similar:{label_id}:{limit}"
     if _redis:
         try:
-            cached = await _redis.get(cache_key)
+            cached = await cache_get(_redis, cache_key, cache=CACHE_LABEL_SIMILAR)
             if cached:
                 return JSONResponse(content=json.loads(cached))
         except Exception:

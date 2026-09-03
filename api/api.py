@@ -16,7 +16,18 @@ from typing import Annotated, Any
 import redis.asyncio as aioredis
 import structlog
 import uvicorn
-from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver, HealthServer, neo4j_security_kwargs, parse_postgres_host_port, setup_logging
+from common import (
+    AsyncPostgreSQLPool,
+    AsyncResilientNeo4jDriver,
+    HealthServer,
+    instrument_fastapi_app,
+    instrument_httpx,
+    neo4j_security_kwargs,
+    parse_postgres_host_port,
+    setup_logging,
+    setup_telemetry,
+    shutdown_telemetry,
+)
 from common.query_debug import execute_sql
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -49,6 +60,7 @@ import api.routers.snapshot as _snapshot_router
 import api.routers.sync as _sync_router
 import api.routers.taste as _taste_router
 import api.routers.user as _user_router
+from api import __version__
 from api.auth import (
     b64url_encode,
     decode_token,
@@ -72,6 +84,7 @@ from api.services.discogs import (
     request_oauth_token,
 )
 from api.syncer import reconcile_stale_sync_history
+from api.telemetry import instrument_redis
 
 
 logger = structlog.get_logger(__name__)
@@ -254,8 +267,11 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:  # pragma: no cover
     # in-process handler survives that to fix them itself (groovemap-pxqw).
     await reconcile_stale_sync_history(_pool)
 
-    # Initialize Redis for OAuth state storage and token blacklist
-    _redis = await aioredis.from_url(_config.redis_host, decode_responses=True)
+    # Initialize Redis for OAuth state storage and token blacklist. Redis is the one
+    # backing store reached without a groovemap-runtime resilient wrapper, so the client is
+    # wrapped here to report db.client.operation.duration for every command the service
+    # issues, wherever the call site lives.
+    _redis = instrument_redis(await aioredis.from_url(_config.redis_host, decode_responses=True))
     redis_host = _config.redis_host.split("@")[-1] if "@" in _config.redis_host else _config.redis_host.split("://")[-1]
     logger.info("✅ Redis connected", host=redis_host)
 
@@ -370,6 +386,8 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:  # pragma: no cover
         # without this the client just leaks on shutdown (groovemap-8nle).
         await anthropic_client.close()
     health_srv.stop()
+    # Flush whatever the periodic reader has not pushed yet before the process exits.
+    shutdown_telemetry()
     logger.info("✅ API service stopped")
 
 
@@ -751,9 +769,25 @@ async def revoke_discogs(
     return JSONResponse(content={"revoked": True})
 
 
+def configure_telemetry() -> None:
+    """Install the metrics provider and instrument inbound and outbound HTTP.
+
+    Every step is a no-op without the OpenTelemetry extras or an
+    ``OTEL_EXPORTER_OTLP_ENDPOINT``, so this never changes how the service starts or serves.
+    The HTTP instrumentation runs after the provider is installed so it binds to it: inbound
+    requests report ``http.server.request.duration`` keyed on the templated route, and every
+    httpx client in the process — analytics-engine, Discogs, and the Anthropic SDK's own
+    client — reports ``http.client.request.duration``.
+    """
+    setup_telemetry("api", service_version=__version__)
+    instrument_fastapi_app(app)
+    instrument_httpx()
+
+
 def main() -> None:  # pragma: no cover
     """Entry point for the API service."""
     setup_logging("api", log_file=Path("/logs/api.log"))
+    configure_telemetry()
     print(STARTUP_BANNER)
     uvicorn.run(
         app,

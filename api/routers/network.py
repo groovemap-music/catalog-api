@@ -14,6 +14,7 @@ from neo4j.exceptions import ClientError as Neo4jClientError
 
 from api.limiter import limiter
 from api.queries import network_queries
+from api.telemetry import CACHE_NETWORK_CENTRALITY, CACHE_NETWORK_CLUSTER, cache_get
 
 
 logger = structlog.get_logger(__name__)
@@ -102,7 +103,7 @@ async def artist_centrality(
     cache_key = f"network:centrality:{artist_id}"
     if _redis:
         try:
-            cached = await _redis.get(cache_key)
+            cached = await cache_get(_redis, cache_key, cache=CACHE_NETWORK_CENTRALITY)
             if cached:
                 return JSONResponse(content=json.loads(cached))
         except Exception:
@@ -162,7 +163,7 @@ async def artist_cluster(
     cache_key = f"network:cluster:{artist_id}:{limit}"
     if _redis:
         try:
-            cached = await _redis.get(cache_key)
+            cached = await cache_get(_redis, cache_key, cache=CACHE_NETWORK_CLUSTER)
             if cached:
                 return JSONResponse(content=json.loads(cached))
         except Exception:
