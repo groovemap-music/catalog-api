@@ -31,7 +31,7 @@ dependencies = [
     "defusedxml>=0.7.1",
     "fastapi>=0.141.1",
     "groovemap-agent-tools==0.1.0",
-    "groovemap-runtime[neo4j,postgres]==0.1.0",
+    "groovemap-runtime[neo4j,otel,otel-http,postgres]==0.1.0",
     "httpx>=0.28.1",
     "neo4j-rust-ext>=6.2.0.0",
     "orjson>=3.12.0",
@@ -84,8 +84,8 @@ packages = ["api"]
 exclude-newer = "2 days"
 
 [tool.uv.sources]
-groovemap-runtime = { git = "https://github.com/groovemap-music/python-libraries.git", rev = "28fa329702bc76896cc54ab8d05ec5b1bd3d929e" }
-groovemap-agent-tools = { git = "https://github.com/groovemap-music/python-libraries.git", subdirectory = "agent-tools", rev = "28fa329702bc76896cc54ab8d05ec5b1bd3d929e" }
+groovemap-runtime = { git = "https://github.com/groovemap-music/python-libraries.git", rev = "3c8309bfb6123b2c85107e949e9d626e3193db6d" }
+groovemap-agent-tools = { git = "https://github.com/groovemap-music/python-libraries.git", subdirectory = "agent-tools", rev = "3c8309bfb6123b2c85107e949e9d626e3193db6d" }
 
 [tool.ruff]
 extend-exclude = [
