@@ -9,6 +9,8 @@ from typing import Any
 
 import structlog
 
+from api.telemetry import CACHE_RECOMMEND, cache_get
+
 
 logger = structlog.get_logger(__name__)
 
@@ -16,14 +18,16 @@ logger = structlog.get_logger(__name__)
 class RecommendCache:
     """Redis cache for recommendation and similarity results."""
 
-    def __init__(self, redis: Any, default_ttl: int = 3600) -> None:
+    def __init__(self, redis: Any, default_ttl: int = 3600, cache: str = CACHE_RECOMMEND) -> None:
         self._redis = redis
         self._default_ttl = default_ttl
+        # Names this cache in `groovemap.api.cache`; it is a fixed label, never a key.
+        self._cache = cache
 
     async def get(self, key: str) -> dict[str, Any] | None:
         """Get cached value. Returns None on miss or Redis error."""
         try:
-            raw = await self._redis.get(key)
+            raw = await cache_get(self._redis, key, cache=self._cache)
             if raw is None:
                 return None
             result: dict[str, Any] = json.loads(raw)

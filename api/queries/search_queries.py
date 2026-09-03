@@ -28,6 +28,8 @@ from common.query_debug import execute_sql
 from psycopg import sql
 from psycopg.rows import dict_row
 
+from api.telemetry import CACHE_SEARCH, cache_get
+
 
 logger = structlog.get_logger(__name__)
 
@@ -398,7 +400,7 @@ async def execute_search(
     # corrupt cache entry) must degrade to a fresh PostgreSQL query, never 500.
     if redis is not None:
         try:
-            cached = await redis.get(key)
+            cached = await cache_get(redis, key, cache=CACHE_SEARCH)
             if cached:
                 return json.loads(cached)  # type: ignore[no-any-return]
         except Exception:

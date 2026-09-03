@@ -288,6 +288,28 @@ def test_client(
 
 
 @pytest.fixture(autouse=True)
+def scrubbed_otel_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run every test with no OpenTelemetry environment.
+
+    A CI runner may export OTEL_SDK_DISABLED, OTEL_EXPORTER_OTLP_ENDPOINT, or
+    OTEL_METRICS_EXPORTER for its own agents. Any of those silently changes what the SDK
+    records, so the metric assertions must not inherit them.
+    """
+    for name in [key for key in os.environ if key.startswith("OTEL_")]:
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def reset_telemetry_instruments() -> Generator[None]:
+    """Drop cached instruments so each test binds to whatever provider it installs."""
+    from api.telemetry import reset_instruments
+
+    reset_instruments()
+    yield
+    reset_instruments()
+
+
+@pytest.fixture(autouse=True)
 def reset_rate_limits() -> Generator[None]:
     """Reset slowapi rate limiter storage between tests."""
     yield

@@ -103,6 +103,45 @@ hostname remains part of the deployed wire contract.
 
 See the [logging guide](logging-guide.md) for the API's logging behavior.
 
+## OpenTelemetry metrics
+
+The API pushes metrics over OTLP HTTP/protobuf and exposes no Prometheus scrape endpoint of
+its own. Only the standard OpenTelemetry variables are read, all of them by the SDK inside
+`groovemap-runtime`; there is no GrooveMap-specific telemetry variable. With
+`OTEL_EXPORTER_OTLP_ENDPOINT` unset the service installs a no-op meter provider and runs
+exactly as it did before, so telemetry can never fail startup or change behavior.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | Collector base URL, for example `http://otel-collector:4318`; unset disables export |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | falls back to the base URL | Metrics-only endpoint override |
+| `OTEL_METRICS_EXPORTER` | `otlp` | `none` forces export off |
+| `OTEL_SDK_DISABLED` | `false` | `true` makes the SDK itself a no-op |
+| `OTEL_METRIC_EXPORT_INTERVAL` | `15000` in deployment | Push interval in milliseconds |
+| `OTEL_SERVICE_NAME` | `api` | `service.name`; the compose service key |
+| `OTEL_RESOURCE_ATTRIBUTES` | unset | Extra resource attributes, for example `service.namespace=groovemap,deployment.environment.name=dev` |
+
+The API records these metrics. `service.version` is the packaged version, and no attribute
+ever carries an identifier, a cache key, or free text.
+
+| Metric | Attributes |
+| --- | --- |
+| `http.server.request.duration` | `http.request.method`, `http.route` (the templated path), `http.response.status_code`; `/health` is excluded |
+| `http.client.request.duration` | `http.request.method`, `server.address`, `http.response.status_code`; covers analytics-engine, Discogs, and Anthropic |
+| `db.client.operation.duration` | `db.system.name` (`postgresql`, `neo4j`, or `redis`), `db.operation.name`, `error.type` on failure |
+| `groovemap.api.sync.duration` | `outcome` (`completed`, `failed`, `cancelled`) |
+| `groovemap.api.cache` | `outcome` (`hit`, `miss`), `cache` (the logical Redis cache) |
+| `groovemap.api.nlq.requests` | `outcome` (`success`, `cached`, `error`, `invalid`, `unavailable`) |
+
+PostgreSQL and Neo4j report `db.client.operation.duration` through the `groovemap-runtime`
+resilient wrappers. Redis is reached without one, so its client is wrapped at startup and
+reports the same metric itself. The collector, Prometheus, Grafana dashboards, and the
+canonical metric catalog are owned by the
+[`deployment` repository](https://github.com/groovemap-music/deployment).
+
+This is separate from the Postgres-backed endpoint history in `api/metrics_collector.py`
+that operations-console reads over `/api/admin/metrics`. That history is unchanged.
+
 ## Minimal local example
 
 Use disposable local credentials only; do not commit this file.
