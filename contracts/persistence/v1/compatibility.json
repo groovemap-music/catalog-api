@@ -10,6 +10,7 @@
     "package": "groovemap-runtime",
     "required_capabilities": [
       "neo4j",
+      "otel",
       "postgres"
     ],
     "tested_version": "0.1.0",
