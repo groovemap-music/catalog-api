@@ -36,6 +36,7 @@ from api.queries.credits_queries import (
     get_role_leaderboard,
     get_shared_credits,
 )
+from api.telemetry import CACHE_CREDITS_LEADERBOARD, CACHE_CREDITS_PERSON, cache_get
 
 
 logger = structlog.get_logger(__name__)
@@ -119,7 +120,7 @@ async def person_credits(
     cache_key = f"credits:person:{name}"
     if _redis:
         try:
-            cached = await _redis.get(cache_key)
+            cached = await cache_get(_redis, cache_key, cache=CACHE_CREDITS_PERSON)
             if cached:
                 return JSONResponse(content=json.loads(cached))
         except Exception:
@@ -201,7 +202,7 @@ async def role_leaderboard(
     cache_key = f"credits:leaderboard:{role}:{limit}"
     if _redis:
         try:
-            cached = await _redis.get(cache_key)
+            cached = await cache_get(_redis, cache_key, cache=CACHE_CREDITS_LEADERBOARD)
             if cached:
                 return JSONResponse(content=json.loads(cached))
         except Exception:

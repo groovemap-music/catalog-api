@@ -33,6 +33,7 @@ from api.queries.neo4j_queries import (
 from api.queries.neo4j_queries import (
     MAX_PATH_DEPTH as _MAX_PATH_DEPTH,
 )
+from api.telemetry import CACHE_EXPLORE, CACHE_TRENDS, cache_get
 
 
 logger = structlog.get_logger(__name__)
@@ -146,7 +147,7 @@ async def explore(
     if _redis and entity_type in ("artist", "label"):
         cache_key = f"explore:{entity_type}:{name}"
         try:
-            cached = await _redis.get(cache_key)
+            cached = await cache_get(_redis, cache_key, cache=CACHE_EXPLORE)
             if cached:
                 return JSONResponse(content=json.loads(cached))
         except Exception:
@@ -331,7 +332,7 @@ async def get_trends(
     if _redis and entity_type in ("genre", "style", "label"):
         cache_key = f"trends:{entity_type}:{name}"
         try:
-            cached = await _redis.get(cache_key)
+            cached = await cache_get(_redis, cache_key, cache=CACHE_TRENDS)
             if cached:
                 return JSONResponse(content=json.loads(cached))
         except Exception:

@@ -38,6 +38,15 @@ the same required validation graph from the public `groovemap-music/automation` 
 Private library access is minted by a narrowly installed GitHub App at an immutable library
 revision; a cross-repository PAT and a reduced dependency-update gate are both rejected.
 
+## Observability
+
+The service pushes OpenTelemetry metrics over OTLP HTTP/protobuf and never exposes a
+Prometheus scrape endpoint of its own. It reads only the standard OpenTelemetry environment
+variables; with `OTEL_EXPORTER_OTLP_ENDPOINT` unset it installs a no-op meter provider and
+behaves exactly as it did before. The
+[configuration guide](docs/configuration.md#opentelemetry-metrics) lists the variables and
+the metrics the API records.
+
 ## Contracts
 
 - Catalog events are promoted from `catalog-ingestion` and verified by digest.
