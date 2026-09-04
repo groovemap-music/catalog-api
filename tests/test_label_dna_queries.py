@@ -13,6 +13,10 @@ from api.queries.label_dna_queries import (
     get_label_full_profile,
     get_label_genre_profile,
     get_label_identity,
+    get_label_media_families_fallback,
+    get_label_media_family_counts,
+    get_label_media_profile,
+    get_label_medium_counts,
     get_label_style_profile,
 )
 from api.queries.similarity import cosine_similarity, to_genre_vector
@@ -278,6 +282,114 @@ class TestLabelFormatProfile:
         result = await get_label_format_profile(driver, "L1")
         assert len(result) == 2
         assert result[0]["name"] == "Vinyl"
+
+
+class TestLabelMediaFamilyCounts:
+    @pytest.mark.asyncio
+    @patch("api.queries.label_dna_queries.run_query", new_callable=AsyncMock)
+    async def test_returns_family_counts(self, mock_run_query: AsyncMock) -> None:
+        mock_run_query.return_value = [{"family": "vinyl", "count": 40}, {"family": "optical", "count": 30}]
+        driver = AsyncMock()
+        result = await get_label_media_family_counts(driver, "L1")
+        assert result == [{"family": "vinyl", "count": 40}, {"family": "optical", "count": 30}]
+        # DISTINCT-on-release-and-family Cypher is in the query text itself
+        cypher = mock_run_query.call_args.args[1]
+        assert "ISSUED_ON" in cypher
+        assert "IN_FAMILY" in cypher
+        assert "DISTINCT r, f" in cypher
+
+
+class TestLabelMediumCounts:
+    @pytest.mark.asyncio
+    @patch("api.queries.label_dna_queries.run_query", new_callable=AsyncMock)
+    async def test_returns_medium_counts(self, mock_run_query: AsyncMock) -> None:
+        mock_run_query.return_value = [
+            {"family": "vinyl", "medium_id": "vinyl_12", "medium_label": '12" Vinyl', "count": 30},
+            {"family": "vinyl", "medium_id": "vinyl_7", "medium_label": '7" Vinyl', "count": 10},
+        ]
+        driver = AsyncMock()
+        result = await get_label_medium_counts(driver, "L1")
+        assert len(result) == 2
+        assert result[0]["medium_id"] == "vinyl_12"
+        cypher = mock_run_query.call_args.args[1]
+        assert "DISTINCT r, m, f" in cypher
+
+
+class TestLabelMediaFamiliesFallback:
+    @pytest.mark.asyncio
+    @patch("api.queries.label_dna_queries.run_query", new_callable=AsyncMock)
+    async def test_returns_family_counts_from_media_families_property(self, mock_run_query: AsyncMock) -> None:
+        mock_run_query.return_value = [{"family": "vinyl", "count": 12}]
+        driver = AsyncMock()
+        result = await get_label_media_families_fallback(driver, "L1")
+        assert result == [{"family": "vinyl", "count": 12}]
+        cypher = mock_run_query.call_args.args[1]
+        assert "media_families" in cypher
+        assert "ISSUED_ON" not in cypher
+
+
+class TestLabelMediaProfile:
+    """Tests for get_label_media_profile — combines family + medium counts, with fallback."""
+
+    @pytest.mark.asyncio
+    @patch("api.queries.label_dna_queries.get_label_medium_counts", new_callable=AsyncMock)
+    @patch("api.queries.label_dna_queries.get_label_media_family_counts", new_callable=AsyncMock)
+    async def test_nests_mediums_under_their_family(
+        self,
+        mock_families: AsyncMock,
+        mock_mediums: AsyncMock,
+    ) -> None:
+        mock_families.return_value = [{"family": "vinyl", "count": 40}, {"family": "optical", "count": 10}]
+        mock_mediums.return_value = [
+            {"family": "vinyl", "medium_id": "vinyl_12", "medium_label": '12" Vinyl', "count": 30},
+            {"family": "vinyl", "medium_id": "vinyl_7", "medium_label": '7" Vinyl', "count": 10},
+            {"family": "optical", "medium_id": "cd", "medium_label": "CD", "count": 10},
+        ]
+        driver = AsyncMock()
+        result = await get_label_media_profile(driver, "L1")
+        assert result[0]["family"] == "vinyl"
+        assert result[0]["count"] == 40
+        assert len(result[0]["mediums"]) == 2
+        assert result[0]["mediums"][0] == {"id": "vinyl_12", "label": '12" Vinyl', "count": 30}
+        assert result[1]["family"] == "optical"
+        assert result[1]["mediums"] == [{"id": "cd", "label": "CD", "count": 10}]
+
+    @pytest.mark.asyncio
+    @patch("api.queries.label_dna_queries.get_label_media_families_fallback", new_callable=AsyncMock)
+    @patch("api.queries.label_dna_queries.get_label_medium_counts", new_callable=AsyncMock)
+    @patch("api.queries.label_dna_queries.get_label_media_family_counts", new_callable=AsyncMock)
+    async def test_falls_back_to_media_families_when_no_issued_on_edges(
+        self,
+        mock_families: AsyncMock,
+        mock_mediums: AsyncMock,
+        mock_fallback: AsyncMock,
+    ) -> None:
+        """Pre-cutover graph: no ISSUED_ON edges yet, so the family query is empty."""
+        mock_families.return_value = []
+        mock_mediums.return_value = []
+        mock_fallback.return_value = [{"family": "vinyl", "count": 8}]
+
+        driver = AsyncMock()
+        result = await get_label_media_profile(driver, "L1")
+        mock_fallback.assert_called_once_with(driver, "L1")
+        assert result == [{"family": "vinyl", "count": 8, "mediums": []}]
+
+    @pytest.mark.asyncio
+    @patch("api.queries.label_dna_queries.get_label_media_families_fallback", new_callable=AsyncMock)
+    @patch("api.queries.label_dna_queries.get_label_medium_counts", new_callable=AsyncMock)
+    @patch("api.queries.label_dna_queries.get_label_media_family_counts", new_callable=AsyncMock)
+    async def test_no_fallback_when_families_present(
+        self,
+        mock_families: AsyncMock,
+        mock_mediums: AsyncMock,
+        mock_fallback: AsyncMock,
+    ) -> None:
+        mock_families.return_value = [{"family": "vinyl", "count": 1}]
+        mock_mediums.return_value = [{"family": "vinyl", "medium_id": "vinyl_12", "medium_label": '12" Vinyl', "count": 1}]
+
+        driver = AsyncMock()
+        await get_label_media_profile(driver, "L1")
+        mock_fallback.assert_not_called()
 
 
 class TestLabelFullProfile:

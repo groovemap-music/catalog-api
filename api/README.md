@@ -399,13 +399,13 @@ Rarity analysis for releases based on market scarcity, pressing details, and col
 
 ### Label DNA
 
-Fingerprint and compare record labels based on their genre, style, format, and decade profiles. Rate limited to 30 requests/minute.
+Fingerprint and compare record labels based on their genre, style, media, and decade profiles. Rate limited to 30 requests/minute.
 
 | Method | Path                            | Auth Required | Rate Limit | Description                                    |
 | ------ | ------------------------------- | ------------- | ---------- | ---------------------------------------------- |
 | GET    | `/api/label/{label_id}/dna`     | No            | 30/min     | Full DNA fingerprint for a label               |
 | GET    | `/api/label/{label_id}/similar` | No            | 30/min     | Find labels with closest DNA fingerprint       |
-| GET    | `/api/label/dna/compare`        | No            | 30/min     | Side-by-side DNA comparison of multiple labels |
+| GET    | `/api/label/dna/compare`        | No            | 30/min     | Side-by-side DNA comparison of multiple labels (family-level media profiles) |
 
 **Query parameters for `/api/label/{label_id}/similar`:**
 
@@ -414,6 +414,18 @@ Fingerprint and compare record labels based on their genre, style, format, and d
 **Query parameters for `/api/label/dna/compare`:**
 
 - `ids` (required) — Comma-separated label IDs (2–5 labels)
+
+**Media profile (`media`):** each DNA fingerprint carries a `media` list, grouped by canonical
+media family (`vinyl`, `optical`, `digital`, `cassette`, ...) with per-medium detail nested
+inside — e.g. a `vinyl` family entry lists its `vinyl_12` and `vinyl_7` mediums separately. A
+family's `percentage` is its share of the label's total media-tagged releases; a medium's
+`percentage` is its share within its own family. Counts come from `ISSUED_ON` edges to `Medium`
+nodes and count each `(release, medium)` once even when both the Discogs and MusicBrainz
+enrichers have asserted an edge to the same medium. A label whose releases predate the media
+taxonomy cutover (no `ISSUED_ON` edges yet) falls back to the `Release.media_families` property,
+which yields family-level counts only — `mediums` is empty for those families. The deprecated
+`formats` list (raw Discogs format names, unweighted by family) is kept for one minor version;
+new consumers should read `media` instead.
 
 ### Taste Fingerprint
 
