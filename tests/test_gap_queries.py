@@ -119,7 +119,7 @@ class TestGetLabelGaps:
         assert total == 0
 
     @pytest.mark.asyncio
-    async def test_format_filter(self) -> None:
+    async def test_family_filter(self) -> None:
         from api.queries.gap_queries import get_label_gaps
 
         releases = [
@@ -139,7 +139,32 @@ class TestGetLabelGaps:
                 _MockResult(single={"total": 1}),
             ]
         )
-        results, total = await get_label_gaps(driver, "user-1", "label-1", formats=["Vinyl"])
+        results, total = await get_label_gaps(driver, "user-1", "label-1", families=["vinyl"])
+        assert results == releases
+        assert total == 1
+
+    @pytest.mark.asyncio
+    async def test_medium_filter(self) -> None:
+        from api.queries.gap_queries import get_label_gaps
+
+        releases = [
+            {
+                "id": "r1",
+                "title": "Blue Monday",
+                "year": 1983,
+                "formats": ["Vinyl"],
+                "artist": "New Order",
+                "genres": ["Electronic"],
+                "on_wantlist": False,
+            }
+        ]
+        driver = _make_driver_with_results(
+            [
+                _MockResult(records=releases),
+                _MockResult(single={"total": 1}),
+            ]
+        )
+        results, total = await get_label_gaps(driver, "user-1", "label-1", mediums=["vinyl_12"])
         assert results == releases
         assert total == 1
 
@@ -226,7 +251,7 @@ class TestGetArtistGaps:
         assert total == 0
 
     @pytest.mark.asyncio
-    async def test_format_filter(self) -> None:
+    async def test_family_filter(self) -> None:
         from api.queries.gap_queries import get_artist_gaps
 
         releases = [{"id": "r2", "title": "Kid A", "year": 2000, "formats": ["CD"]}]
@@ -236,7 +261,22 @@ class TestGetArtistGaps:
                 _MockResult(single={"total": 1}),
             ]
         )
-        results, total = await get_artist_gaps(driver, "user-1", "artist-1", formats=["CD"])
+        results, total = await get_artist_gaps(driver, "user-1", "artist-1", families=["optical"])
+        assert results == releases
+        assert total == 1
+
+    @pytest.mark.asyncio
+    async def test_medium_filter(self) -> None:
+        from api.queries.gap_queries import get_artist_gaps
+
+        releases = [{"id": "r2", "title": "Kid A", "year": 2000, "formats": ["CD"]}]
+        driver = _make_driver_with_results(
+            [
+                _MockResult(records=releases),
+                _MockResult(single={"total": 1}),
+            ]
+        )
+        results, total = await get_artist_gaps(driver, "user-1", "artist-1", mediums=["optical_cd"])
         assert results == releases
         assert total == 1
 
@@ -328,7 +368,7 @@ class TestGetMasterGaps:
         assert total == 0
 
     @pytest.mark.asyncio
-    async def test_format_filter(self) -> None:
+    async def test_family_filter(self) -> None:
         from api.queries.gap_queries import get_master_gaps
 
         releases = [{"id": "r3", "title": "OK Computer (JP)", "year": 1997, "formats": ["Vinyl"]}]
@@ -338,7 +378,22 @@ class TestGetMasterGaps:
                 _MockResult(single={"total": 1}),
             ]
         )
-        results, total = await get_master_gaps(driver, "user-1", "master-1", formats=["Vinyl"])
+        results, total = await get_master_gaps(driver, "user-1", "master-1", families=["vinyl"])
+        assert results == releases
+        assert total == 1
+
+    @pytest.mark.asyncio
+    async def test_medium_filter(self) -> None:
+        from api.queries.gap_queries import get_master_gaps
+
+        releases = [{"id": "r3", "title": "OK Computer (JP)", "year": 1997, "formats": ["Vinyl"]}]
+        driver = _make_driver_with_results(
+            [
+                _MockResult(records=releases),
+                _MockResult(single={"total": 1}),
+            ]
+        )
+        results, total = await get_master_gaps(driver, "user-1", "master-1", mediums=["vinyl_12"])
         assert results == releases
         assert total == 1
 

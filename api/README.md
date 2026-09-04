@@ -253,12 +253,21 @@ Manage third-party app tokens for the authenticated user. The plaintext token is
 
 "Complete My Collection" endpoints that find releases the user does not own.
 
-| Method | Path                                      | Auth Required | Description                                |
-| ------ | ----------------------------------------- | ------------- | ------------------------------------------ |
-| GET    | `/api/collection/formats`                 | Yes           | Distinct format names in user's collection |
-| GET    | `/api/collection/gaps/label/{label_id}`   | Yes           | Missing releases on a label                |
-| GET    | `/api/collection/gaps/artist/{artist_id}` | Yes           | Missing releases by an artist              |
-| GET    | `/api/collection/gaps/master/{master_id}` | Yes           | Missing pressings of a master release      |
+| Method | Path                                      | Auth Required | Description                                          |
+| ------ | ----------------------------------------- | ------------- | ----------------------------------------------------- |
+| GET    | `/api/collection/formats`                 | Yes           | Deprecated: distinct raw format names in collection  |
+| GET    | `/api/collection/media`                   | Yes           | Canonical media families/mediums in user's collection |
+| GET    | `/api/collection/gaps/label/{label_id}`   | Yes           | Missing releases on a label                          |
+| GET    | `/api/collection/gaps/artist/{artist_id}` | Yes           | Missing releases by an artist                        |
+| GET    | `/api/collection/gaps/master/{master_id}` | Yes           | Missing editions of a master release                 |
+
+**Media filter (ADR 0007):** each gap endpoint accepts a repeatable `media` query
+parameter of canonical family or medium ids (see `GET /api/collection/media` for the
+ids present in the user's own collection), validated against the taxonomy — an
+unknown id returns `400`. The deprecated `formats` parameter (raw Discogs format
+names) is still accepted and mapped onto the same canonical ids through the shared
+`legacy_format_names_to_media` helper; both filters combine, and the response's
+`filters` object echoes back whatever was requested under both `media` and `formats`.
 
 ### Snapshots
 
