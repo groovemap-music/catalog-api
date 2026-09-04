@@ -16,6 +16,8 @@ from api.models import (
     LabelCompareEntry,
     LabelCompareResponse,
     LabelDNA,
+    MediaFamilyWeight,
+    MediumWeight,
     SimilarLabel,
     SimilarLabelsResponse,
     StyleWeight,
@@ -29,6 +31,7 @@ from api.queries.label_dna_queries import (
     get_label_full_profile,
     get_label_genre_profile,
     get_label_identity,
+    get_label_media_profile,
 )
 from api.telemetry import CACHE_LABEL_DNA, CACHE_LABEL_SIMILAR, cache_get
 
@@ -53,6 +56,37 @@ def configure(neo4j: Any, redis: Any = None) -> None:
 def _add_percentages(items: list[dict[str, Any]], total: int) -> list[dict[str, Any]]:
     """Add percentage field to each item based on total."""
     return [{**item, "percentage": round(item["count"] / total * 100, 1) if total else 0.0} for item in items]
+
+
+def _add_media_percentages(families: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Add percentage fields to a media profile.
+
+    Each family's percentage is its share of the label's total media-tagged
+    release count (families sum to ~100%). Each medium's percentage is its
+    share within its own family (mediums within one family sum to ~100%),
+    so the nested detail reads as "of this label's vinyl, X% is 12-inch".
+    """
+    family_total = sum(f["count"] for f in families)
+    result = []
+    for family in families:
+        medium_total = sum(m["count"] for m in family["mediums"])
+        result.append(
+            {
+                "name": family["family"],
+                "count": family["count"],
+                "percentage": round(family["count"] / family_total * 100, 1) if family_total else 0.0,
+                "mediums": [
+                    {
+                        "id": medium["id"],
+                        "label": medium["label"],
+                        "count": medium["count"],
+                        "percentage": round(medium["count"] / medium_total * 100, 1) if medium_total else 0.0,
+                    }
+                    for medium in family["mediums"]
+                ],
+            }
+        )
+    return result
 
 
 async def _build_dna(label_id: str) -> tuple[LabelDNA | None, str]:
@@ -87,9 +121,10 @@ async def _build_dna(label_id: str) -> tuple[LabelDNA | None, str]:
     styles = profile["styles"]
     decades = profile["decades"]
 
-    active_years, formats = await asyncio.gather(
+    active_years, formats, media = await asyncio.gather(
         get_label_active_years(_neo4j_driver, label_id),
         get_label_format_profile(_neo4j_driver, label_id),
+        get_label_media_profile(_neo4j_driver, label_id),
     )
 
     # Artist diversity: unique artists / total releases (capped at 1.0)
@@ -120,6 +155,10 @@ async def _build_dna(label_id: str) -> tuple[LabelDNA | None, str]:
         genres=[GenreWeight(**g) for g in _add_percentages(genres, genre_total)],
         styles=[StyleWeight(**s) for s in _add_percentages(styles, style_total)],
         formats=[FormatWeight(**f) for f in _add_percentages(formats, format_total)],
+        media=[
+            MediaFamilyWeight(name=f["name"], count=f["count"], percentage=f["percentage"], mediums=[MediumWeight(**m) for m in f["mediums"]])
+            for f in _add_media_percentages(media)
+        ],
         decades=[DecadeCount(**d) for d in _add_percentages(decades, decade_total)],
     )
 

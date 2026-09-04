@@ -71,7 +71,7 @@ class TestLabelDnaEndpoint:
 
     @patch("api.routers.label_dna._build_dna")
     def test_label_dna_success(self, mock_build_dna: AsyncMock, test_client: TestClient) -> None:
-        from api.models import DecadeCount, FormatWeight, GenreWeight, LabelDNA, StyleWeight
+        from api.models import DecadeCount, FormatWeight, GenreWeight, LabelDNA, MediaFamilyWeight, MediumWeight, StyleWeight
 
         mock_build_dna.return_value = (
             LabelDNA(
@@ -86,6 +86,14 @@ class TestLabelDnaEndpoint:
                 genres=[GenreWeight(name="Jazz", count=80, percentage=80.0)],
                 styles=[StyleWeight(name="Hard Bop", count=40, percentage=50.0)],
                 formats=[FormatWeight(name="Vinyl", count=60, percentage=60.0)],
+                media=[
+                    MediaFamilyWeight(
+                        name="vinyl",
+                        count=60,
+                        percentage=60.0,
+                        mediums=[MediumWeight(id="vinyl_12", label='12" Vinyl', count=60, percentage=100.0)],
+                    ),
+                ],
                 decades=[DecadeCount(decade=1960, count=50, percentage=50.0)],
             ),
             "ok",
@@ -99,6 +107,8 @@ class TestLabelDnaEndpoint:
         assert len(data["genres"]) == 1
         assert data["genres"][0]["name"] == "Jazz"
         assert data["peak_decade"] == 1960
+        assert data["media"][0]["name"] == "vinyl"
+        assert data["media"][0]["mediums"][0]["id"] == "vinyl_12"
 
     def test_service_not_ready(self, test_client: TestClient) -> None:
         import api.routers.label_dna as mod
@@ -171,7 +181,7 @@ class TestCompareLabelsEndpoint:
 
     @patch("api.routers.label_dna._build_dna")
     def test_compare_success(self, mock_build_dna: AsyncMock, test_client: TestClient) -> None:
-        from api.models import DecadeCount, FormatWeight, GenreWeight, LabelDNA, StyleWeight
+        from api.models import DecadeCount, FormatWeight, GenreWeight, LabelDNA, MediaFamilyWeight, MediumWeight, StyleWeight
 
         dna1 = LabelDNA(
             label_id="1",
@@ -185,6 +195,14 @@ class TestCompareLabelsEndpoint:
             genres=[GenreWeight(name="Rock", count=40, percentage=80.0)],
             styles=[StyleWeight(name="Punk", count=20, percentage=40.0)],
             formats=[FormatWeight(name="Vinyl", count=30, percentage=60.0)],
+            media=[
+                MediaFamilyWeight(
+                    name="vinyl",
+                    count=30,
+                    percentage=100.0,
+                    mediums=[MediumWeight(id="vinyl_12", label='12" Vinyl', count=30, percentage=100.0)],
+                ),
+            ],
             decades=[DecadeCount(decade=1990, count=30, percentage=60.0)],
         )
         dna2 = LabelDNA(
@@ -199,6 +217,14 @@ class TestCompareLabelsEndpoint:
             genres=[GenreWeight(name="Jazz", count=25, percentage=83.3)],
             styles=[StyleWeight(name="Fusion", count=10, percentage=33.3)],
             formats=[FormatWeight(name="CD", count=20, percentage=66.7)],
+            media=[
+                MediaFamilyWeight(
+                    name="optical",
+                    count=20,
+                    percentage=100.0,
+                    mediums=[MediumWeight(id="cd", label="CD", count=20, percentage=100.0)],
+                ),
+            ],
             decades=[DecadeCount(decade=2000, count=20, percentage=66.7)],
         )
         mock_build_dna.side_effect = [(dna1, "ok"), (dna2, "ok")]
@@ -208,6 +234,8 @@ class TestCompareLabelsEndpoint:
         assert len(data["labels"]) == 2
         assert data["labels"][0]["dna"]["label_id"] == "1"
         assert data["labels"][1]["dna"]["label_id"] == "2"
+        assert data["labels"][0]["dna"]["media"][0]["name"] == "vinyl"
+        assert data["labels"][1]["dna"]["media"][0]["name"] == "optical"
 
     @patch("api.routers.label_dna._build_dna")
     def test_compare_label_not_found(self, mock_build_dna: AsyncMock, test_client: TestClient) -> None:
@@ -236,9 +264,53 @@ class TestAddPercentages:
         assert result[1]["percentage"] == 50.0
 
 
+class TestAddMediaPercentages:
+    """Tests for _add_media_percentages helper."""
+
+    def test_zero_family_total_returns_zero_percentage(self) -> None:
+        from api.routers.label_dna import _add_media_percentages
+
+        families = [{"family": "vinyl", "count": 0, "mediums": []}]
+        result = _add_media_percentages(families)
+        assert result[0]["percentage"] == 0.0
+
+    def test_family_and_medium_percentages(self) -> None:
+        """Family percentage is share of the total; medium percentage is share within its family."""
+        from api.routers.label_dna import _add_media_percentages
+
+        families = [
+            {
+                "family": "vinyl",
+                "count": 75,
+                "mediums": [
+                    {"id": "vinyl_12", "label": '12" Vinyl', "count": 50},
+                    {"id": "vinyl_7", "label": '7" Vinyl', "count": 25},
+                ],
+            },
+            {"family": "cd", "count": 25, "mediums": [{"id": "cd", "label": "CD", "count": 25}]},
+        ]
+        result = _add_media_percentages(families)
+        assert result[0]["name"] == "vinyl"
+        assert result[0]["percentage"] == 75.0
+        assert result[0]["mediums"][0]["percentage"] == pytest.approx(66.7, abs=0.1)
+        assert result[0]["mediums"][1]["percentage"] == pytest.approx(33.3, abs=0.1)
+        assert result[1]["percentage"] == 25.0
+        assert result[1]["mediums"][0]["percentage"] == 100.0
+
+    def test_family_with_empty_mediums_gets_zero_percentage_mediums(self) -> None:
+        """The media_families fallback path has no per-medium detail."""
+        from api.routers.label_dna import _add_media_percentages
+
+        families = [{"family": "vinyl", "count": 10, "mediums": []}]
+        result = _add_media_percentages(families)
+        assert result[0]["percentage"] == 100.0
+        assert result[0]["mediums"] == []
+
+
 class TestBuildDnaInternal:
     """Tests for _build_dna internal helper (lines 64-91)."""
 
+    @patch("api.routers.label_dna.get_label_media_profile")
     @patch("api.routers.label_dna.get_label_format_profile")
     @patch("api.routers.label_dna.get_label_active_years")
     @patch("api.routers.label_dna.get_label_full_profile")
@@ -247,6 +319,7 @@ class TestBuildDnaInternal:
         mock_full_profile: AsyncMock,
         mock_active_years: AsyncMock,
         mock_formats: AsyncMock,
+        mock_media: AsyncMock,
         test_client: TestClient,
     ) -> None:
         """_build_dna full success path via /api/label/{id}/dna."""
@@ -261,6 +334,14 @@ class TestBuildDnaInternal:
         }
         mock_active_years.return_value = [1970, 1975, 1980, 1985, 1990]
         mock_formats.return_value = [{"name": "Vinyl", "count": 100}, {"name": "CD", "count": 100}]
+        mock_media.return_value = [
+            {
+                "family": "vinyl",
+                "count": 100,
+                "mediums": [{"id": "vinyl_12", "label": '12" Vinyl', "count": 100}],
+            },
+            {"family": "optical", "count": 100, "mediums": [{"id": "cd", "label": "CD", "count": 100}]},
+        ]
 
         response = test_client.get("/api/label/42/dna")
         assert response.status_code == 200
@@ -275,7 +356,13 @@ class TestBuildDnaInternal:
         assert data["prolificacy"] == round(200 / 5, 2)
         # artist_diversity = min(80/200, 1.0) = 0.4
         assert data["artist_diversity"] == 0.4
+        assert len(data["media"]) == 2
+        assert data["media"][0]["name"] == "vinyl"
+        assert data["media"][0]["percentage"] == 50.0
+        assert data["media"][0]["mediums"][0]["id"] == "vinyl_12"
+        assert data["media"][0]["mediums"][0]["percentage"] == 100.0
 
+    @patch("api.routers.label_dna.get_label_media_profile")
     @patch("api.routers.label_dna.get_label_format_profile")
     @patch("api.routers.label_dna.get_label_active_years")
     @patch("api.routers.label_dna.get_label_full_profile")
@@ -284,6 +371,7 @@ class TestBuildDnaInternal:
         mock_full_profile: AsyncMock,
         mock_active_years: AsyncMock,
         mock_formats: AsyncMock,
+        mock_media: AsyncMock,
         test_client: TestClient,
     ) -> None:
         """peak_decade is None when decades list is empty."""
@@ -298,6 +386,7 @@ class TestBuildDnaInternal:
         }
         mock_active_years.return_value = []
         mock_formats.return_value = []
+        mock_media.return_value = []
 
         response = test_client.get("/api/label/99/dna")
         assert response.status_code == 200
@@ -305,6 +394,7 @@ class TestBuildDnaInternal:
         assert data["peak_decade"] is None
         # prolificacy: num_active_years=0 → 0.0
         assert data["prolificacy"] == 0.0
+        assert data["media"] == []
 
 
 class TestGetLabelFullProfile:
@@ -424,7 +514,7 @@ class TestLabelDnaModels:
     """Tests for Label DNA Pydantic models."""
 
     def test_label_dna_model(self) -> None:
-        from api.models import DecadeCount, FormatWeight, GenreWeight, LabelDNA, StyleWeight
+        from api.models import DecadeCount, FormatWeight, GenreWeight, LabelDNA, MediaFamilyWeight, MediumWeight, StyleWeight
 
         dna = LabelDNA(
             label_id="123",
@@ -438,12 +528,22 @@ class TestLabelDnaModels:
             genres=[GenreWeight(name="Rock", count=80, percentage=80.0)],
             styles=[StyleWeight(name="Punk", count=40, percentage=50.0)],
             formats=[FormatWeight(name="Vinyl", count=60, percentage=60.0)],
+            media=[
+                MediaFamilyWeight(
+                    name="vinyl",
+                    count=60,
+                    percentage=60.0,
+                    mediums=[MediumWeight(id="vinyl_12", label='12" Vinyl', count=60, percentage=100.0)],
+                ),
+            ],
             decades=[DecadeCount(decade=1990, count=50, percentage=50.0)],
         )
         dumped = dna.model_dump()
         assert dumped["label_id"] == "123"
         assert dumped["artist_diversity"] == 0.5
         assert len(dumped["genres"]) == 1
+        assert dumped["media"][0]["name"] == "vinyl"
+        assert dumped["media"][0]["mediums"][0]["id"] == "vinyl_12"
 
     def test_similar_label_model(self) -> None:
         from api.models import SimilarLabel
@@ -479,6 +579,7 @@ class TestLabelDnaModels:
             genres=[GenreWeight(name="Rock", count=10, percentage=100.0)],
             styles=[],
             formats=[],
+            media=[],
             decades=[DecadeCount(decade=2000, count=10, percentage=100.0)],
         )
         resp = LabelCompareResponse(labels=[LabelCompareEntry(dna=dna)])
@@ -504,6 +605,7 @@ class TestLabelDnaCaching:
             genres=[],
             styles=[],
             formats=[],
+            media=[],
             decades=[],
         )
         with patch("api.routers.label_dna._build_dna", return_value=(fake_dna, "ok")):
@@ -528,6 +630,7 @@ class TestLabelDnaCaching:
             genres=[],
             styles=[],
             formats=[],
+            media=[],
             decades=[],
         )
         with patch("api.routers.label_dna._build_dna", return_value=(fake_dna, "ok")):
@@ -561,6 +664,7 @@ class TestLabelDnaCaching:
             genres=[],
             styles=[],
             formats=[],
+            media=[],
             decades=[],
         )
         with patch("api.routers.label_dna._build_dna", return_value=(fake_dna, "ok")):
@@ -647,6 +751,7 @@ class TestBuildDnaCaching:
             genres=[GenreWeight(name="Jazz", count=200, percentage=100.0)],
             styles=[StyleWeight(name="Avant", count=100, percentage=100.0)],
             formats=[FormatWeight(name="Vinyl", count=100, percentage=100.0)],
+            media=[],
             decades=[DecadeCount(decade=1970, count=200, percentage=100.0)],
         )
         mock_redis.get = AsyncMock(return_value=json.dumps(dna.model_dump(), default=str))
@@ -655,6 +760,7 @@ class TestBuildDnaCaching:
         assert response.status_code == 200
         assert response.json()["label_id"] == "42"
 
+    @patch("api.routers.label_dna.get_label_media_profile")
     @patch("api.routers.label_dna.get_label_format_profile")
     @patch("api.routers.label_dna.get_label_active_years")
     @patch("api.routers.label_dna.get_label_full_profile")
@@ -663,6 +769,7 @@ class TestBuildDnaCaching:
         mock_full_profile: AsyncMock,
         mock_active_years: AsyncMock,
         mock_formats: AsyncMock,
+        mock_media: AsyncMock,
         test_client: TestClient,
         mock_redis: AsyncMock,
     ) -> None:
@@ -679,6 +786,7 @@ class TestBuildDnaCaching:
         }
         mock_active_years.return_value = [1970]
         mock_formats.return_value = []
+        mock_media.return_value = []
 
         response = test_client.get("/api/label/42/dna")
         assert response.status_code == 200
@@ -686,6 +794,7 @@ class TestBuildDnaCaching:
         cache_keys = [call[0][0] for call in mock_redis.setex.call_args_list]
         assert "label-dna:42" in cache_keys
 
+    @patch("api.routers.label_dna.get_label_media_profile")
     @patch("api.routers.label_dna.get_label_format_profile")
     @patch("api.routers.label_dna.get_label_active_years")
     @patch("api.routers.label_dna.get_label_full_profile")
@@ -694,6 +803,7 @@ class TestBuildDnaCaching:
         mock_full_profile: AsyncMock,
         mock_active_years: AsyncMock,
         mock_formats: AsyncMock,
+        mock_media: AsyncMock,
         test_client: TestClient,
         mock_redis: AsyncMock,
     ) -> None:
@@ -711,6 +821,7 @@ class TestBuildDnaCaching:
         }
         mock_active_years.return_value = []
         mock_formats.return_value = []
+        mock_media.return_value = []
 
         response = test_client.get("/api/label/42/dna")
         assert response.status_code == 200

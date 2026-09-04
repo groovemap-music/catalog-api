@@ -93,6 +93,81 @@ async def get_label_format_profile(driver: AsyncResilientNeo4jDriver, label_id: 
     return await run_query(driver, cypher, label_id=label_id)
 
 
+async def get_label_media_family_counts(driver: AsyncResilientNeo4jDriver, label_id: str) -> list[dict[str, Any]]:
+    """Get release counts per media family for a label, from ``ISSUED_ON`` edges.
+
+    Counts each (release, family) once even when the graph carries both a
+    Discogs- and a MusicBrainz-sourced ``ISSUED_ON`` edge for the same release,
+    and even when a release has more than one medium in the same family.
+    """
+    cypher = """
+    MATCH (l:Label {id: $label_id})<-[:ON]-(r:Release)-[:ISSUED_ON]->(m:Medium)-[:IN_FAMILY]->(f:MediaFamily)
+    WITH DISTINCT r, f
+    WITH f.name AS family, count(DISTINCT r) AS count
+    RETURN family, count
+    ORDER BY count DESC
+    """
+    return await run_query(driver, cypher, label_id=label_id)
+
+
+async def get_label_medium_counts(driver: AsyncResilientNeo4jDriver, label_id: str) -> list[dict[str, Any]]:
+    """Get release counts per medium (within its family) for a label, from ``ISSUED_ON`` edges.
+
+    Counts each (release, medium) once even when the graph carries both a
+    Discogs- and a MusicBrainz-sourced ``ISSUED_ON`` edge over the same node.
+    """
+    cypher = """
+    MATCH (l:Label {id: $label_id})<-[:ON]-(r:Release)-[:ISSUED_ON]->(m:Medium)-[:IN_FAMILY]->(f:MediaFamily)
+    WITH DISTINCT r, m, f
+    WITH f.name AS family, m.id AS medium_id, m.label AS medium_label, count(DISTINCT r) AS count
+    RETURN family, medium_id, medium_label, count
+    ORDER BY family, count DESC
+    """
+    return await run_query(driver, cypher, label_id=label_id)
+
+
+async def get_label_media_families_fallback(driver: AsyncResilientNeo4jDriver, label_id: str) -> list[dict[str, Any]]:
+    """Fall back to ``Release.media_families`` when a label's releases carry no ``ISSUED_ON`` edges yet.
+
+    Pre-cutover graphs only have the raw ``media_families`` list property, not
+    the ``ISSUED_ON`` → ``Medium`` → ``IN_FAMILY`` → ``MediaFamily`` traversal;
+    this yields family-level counts only, with no per-medium detail.
+    """
+    cypher = """
+    MATCH (r:Release)-[:ON]->(l:Label {id: $label_id})
+    WHERE r.media_families IS NOT NULL
+    UNWIND r.media_families AS family
+    WITH family, count(DISTINCT r) AS count
+    RETURN family, count
+    ORDER BY count DESC
+    """
+    return await run_query(driver, cypher, label_id=label_id)
+
+
+async def get_label_media_profile(driver: AsyncResilientNeo4jDriver, label_id: str) -> list[dict[str, Any]]:
+    """Get a label's media profile grouped by family, with per-medium detail nested inside.
+
+    Runs the family- and medium-level ``ISSUED_ON`` queries in parallel. When
+    the label has no ``ISSUED_ON`` edges yet (pre-cutover graph), falls back
+    to :func:`get_label_media_families_fallback` and returns family-level
+    counts with an empty ``mediums`` list for each.
+    """
+    families, mediums = await asyncio.gather(
+        get_label_media_family_counts(driver, label_id),
+        get_label_medium_counts(driver, label_id),
+    )
+
+    if not families:
+        fallback = await get_label_media_families_fallback(driver, label_id)
+        return [{"family": row["family"], "count": row["count"], "mediums": []} for row in fallback]
+
+    mediums_by_family: dict[str, list[dict[str, Any]]] = {}
+    for row in mediums:
+        mediums_by_family.setdefault(row["family"], []).append({"id": row["medium_id"], "label": row["medium_label"], "count": row["count"]})
+
+    return [{"family": row["family"], "count": row["count"], "mediums": mediums_by_family.get(row["family"], [])} for row in families]
+
+
 async def get_label_full_profile(
     driver: AsyncResilientNeo4jDriver,
     label_id: str,

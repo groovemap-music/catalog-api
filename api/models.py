@@ -138,11 +138,38 @@ class StyleWeight(BaseModel):
 
 
 class FormatWeight(BaseModel):
-    """A physical/digital format with its share of a label's catalog."""
+    """A physical/digital format with its share of a label's catalog.
+
+    Deprecated: built from the raw ``Release.formats`` name list. Kept for one
+    minor version alongside the family-grouped ``media`` profile
+    (``MediaFamilyWeight``) — new consumers should read ``media`` instead.
+    """
 
     name: str
     count: int
     percentage: float
+
+
+class MediumWeight(BaseModel):
+    """A single canonical medium (e.g. ``vinyl_12``) with its share within its family."""
+
+    id: str
+    label: str
+    count: int
+    percentage: float
+
+
+class MediaFamilyWeight(BaseModel):
+    """A media family (e.g. vinyl, optical, digital) with its share of a label's catalog.
+
+    ``mediums`` is empty when the profile came from the ``Release.media_families``
+    fallback (pre-cutover graph, no ``ISSUED_ON`` edges yet).
+    """
+
+    name: str
+    count: int
+    percentage: float
+    mediums: list[MediumWeight]
 
 
 class DecadeCount(BaseModel):
@@ -166,7 +193,8 @@ class LabelDNA(BaseModel):
     prolificacy: float  # releases per active year
     genres: list[GenreWeight]
     styles: list[StyleWeight]
-    formats: list[FormatWeight]
+    formats: list[FormatWeight]  # deprecated — see MediaFamilyWeight docstring
+    media: list[MediaFamilyWeight]
     decades: list[DecadeCount]
 
 
