@@ -381,7 +381,7 @@ Aggregate node counts across the knowledge graph.
 | ------ | ------------------ | ------------- | ------------------------------------------------------------------------ |
 | GET    | `/api/graph/stats` | No            | Total entity counts (artists, labels, releases, masters, genres, styles) |
 
-### Vinyl Archaeology
+### Time travel
 
 Time-travel through the knowledge graph with year-range and genre-emergence queries.
 
@@ -493,9 +493,10 @@ Fingerprint and compare record labels based on their genre, style, media, and de
 - `ids` (required) — Comma-separated label IDs (2–5 labels)
 
 **Media profile (`media`):** each DNA fingerprint carries a `media` list, grouped by canonical
-media family (`vinyl`, `optical`, `digital`, `cassette`, ...) with per-medium detail nested
-inside — e.g. a `vinyl` family entry lists its `vinyl_12` and `vinyl_7` mediums separately. A
-family's `percentage` is its share of the label's total media-tagged releases; a medium's
+media family (`vinyl`, `shellac`, `grooved_other`, `tape`, `optical`, `digital`, `video`,
+`other`) with per-medium detail nested inside — e.g. a `vinyl` family entry lists its
+`vinyl_12` and `vinyl_7` mediums separately, and a `tape` family entry lists its
+`tape_cassette` medium. A family's `percentage` is its share of the label's total media-tagged releases; a medium's
 `percentage` is its share within its own family. Counts come from `ISSUED_ON` edges to `Medium`
 nodes and count each `(release, medium)` once even when both the Discogs and MusicBrainz
 enrichers have asserted an edge to the same medium. A label whose releases predate the media
@@ -659,6 +660,22 @@ The API service uses the following tables. Their DDL and initialization image ar
 - `oauth_tokens` — Discogs OAuth tokens (`user_id`, `provider`, `access_token`, `access_secret`, `provider_username`, `provider_user_id`, `updated_at`)
 - `app_config` — admin key-value configuration (`key`, `value`, `updated_at`)
 - `app_tokens` — revocable third-party app tokens (`id`, `user_id`, `name`, `scope`, `token_hash`, `created_at`, `last_used_at`, `revoked_at`)
+
+## Deprecations
+
+Per [ADR 0007](https://github.com/groovemap-music/design/blob/main/docs/adr/0007-canonical-media-taxonomy.md),
+raw Discogs format names are being superseded by the canonical `media` taxonomy (family and
+medium ids). The following are kept for one minor version and will be removed afterward:
+
+| Deprecated                                     | Replacement                                                                 |
+| ----------------------------------------------- | ---------------------------------------------------------------------------- |
+| `formats` query parameter (gap endpoints)        | `media` query parameter — see [Collection Gap Analysis](#collection-gap-analysis) |
+| `GET /api/collection/formats`                    | `GET /api/collection/media`                                                  |
+| `formats` field in label DNA responses           | `media` field (`MediaFamilyWeight`, family-grouped with nested mediums) — see [Label DNA](#label-dna) |
+| `format_rarity` in the rarity breakdown           | `medium_rarity` (still present at weight `0.0`) — see [Release Rarity Scoring](#release-rarity-scoring) |
+| `Release.formats` reads (raw Discogs format list) | `Release` media edges / `media_families` — see [Backfilling `media` on Existing Sync Data](#backfilling-media-on-existing-sync-data) |
+
+No endpoint or field is removed yet; all of the above remain readable and are still populated.
 
 ## Security
 

@@ -19,6 +19,7 @@
     "collection_gaps_artist": {"method": "GET", "path": "/api/collection/gaps/artist/{artist_id}"},
     "collection_gaps_label": {"method": "GET", "path": "/api/collection/gaps/label/{label_id}"},
     "collection_gaps_master": {"method": "GET", "path": "/api/collection/gaps/master/{master_id}"},
+    "collection_media": {"method": "GET", "path": "/api/collection/media"},
     "credits_autocomplete": {"method": "GET", "path": "/api/credits/autocomplete"},
     "credits_connections": {"method": "GET", "path": "/api/credits/connections/{name}"},
     "credits_person": {"method": "GET", "path": "/api/credits/person/{name}"},
