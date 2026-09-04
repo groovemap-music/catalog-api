@@ -25,6 +25,7 @@ _DEFAULT_INSIGHTS = [
     "Most connected artists overall",
     "Top collaborators in electronic music",
     "Rarest releases on Warp Records",
+    "Which labels released the most on cassette?",
 ]
 
 _DEFAULT_GENRES = [

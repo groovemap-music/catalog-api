@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -387,3 +387,63 @@ class TestNLQEngineNonToolStop:
         assert "partial answer" in result.summary
         # Only one API call — no tool loop
         assert client.messages.create.call_count == 1
+
+
+class TestNLQEngineMediaFilteredGapRoundTrip:
+    """gm-catalog-api-be1.7 — media-filtered get_collection_gaps round-trip.
+
+    Uses a real NLQToolRunner (unlike the other tests here, which mock it)
+    so the model's `media` argument actually flows through validation and
+    into the gap query's families/mediums params, with only the model and
+    the graph query mocked.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cassette_only_gaps_round_trip(self) -> None:
+        config = _make_config()
+        client = _make_client()
+        real_runner = NLQToolRunner(neo4j_driver=MagicMock(), pg_pool=MagicMock(), redis=MagicMock())
+
+        tool_call = _make_tool_use_response(
+            "get_collection_gaps",
+            {"entity_type": "label", "entity_id": "warp-records", "media": ["tape"]},
+        )
+        final_text = _make_text_response("You're missing 3 Warp Records releases on cassette.")
+        client.messages.create.side_effect = [tool_call, final_text]
+
+        fake_gaps = [{"id": "r1", "title": "Selected Ambient Works (Cassette)"}]
+        with patch("api.queries.gap_queries.get_label_gaps", new_callable=AsyncMock, return_value=(fake_gaps, 1)) as mock_gaps:
+            engine = NLQEngine(config=config, client=client, tool_runner=real_runner)
+            result = await engine.run("What am I missing from Warp Records on cassette?", NLQContext(user_id="user-1"))
+
+        # The tool call reached the graph query with the family resolved,
+        # and the model produced a final summary from the real tool result.
+        _, kwargs = mock_gaps.call_args
+        assert kwargs["families"] == ["tape"]
+        assert kwargs["mediums"] == []
+        assert result.tools_used == ["get_collection_gaps"]
+        assert "cassette" in result.summary.lower()
+
+    @pytest.mark.asyncio
+    async def test_unknown_media_id_surfaces_as_tool_error_not_a_crash(self) -> None:
+        """An id the model hallucinates comes back as a tool_result error, not an exception."""
+        config = _make_config()
+        client = _make_client()
+        real_runner = NLQToolRunner(neo4j_driver=MagicMock(), pg_pool=MagicMock(), redis=MagicMock())
+
+        tool_call = _make_tool_use_response(
+            "get_collection_gaps",
+            {"entity_type": "label", "entity_id": "warp-records", "media": ["betamax_definitely_not_real"]},
+        )
+        final_text = _make_text_response("I couldn't recognize that media type.")
+        client.messages.create.side_effect = [tool_call, final_text]
+
+        engine = NLQEngine(config=config, client=client, tool_runner=real_runner)
+        result = await engine.run("What am I missing on betamax?", NLQContext(user_id="user-1"))
+
+        # The tool loop completed (no exception) and reported the tool as used;
+        # the error is inside the tool_result content the model saw, not raised here.
+        assert result.tools_used == ["get_collection_gaps"]
+        second_call_messages = client.messages.create.call_args_list[1].kwargs["messages"]
+        tool_result_content = second_call_messages[-1]["content"][0]["content"]
+        assert "betamax_definitely_not_real" in tool_result_content
