@@ -421,6 +421,8 @@ Natural language query interface for the knowledge graph. Translates plain Engli
 | GET    | `/api/nlq/status`       | No            | —          | Check NLQ service availability                |
 | POST   | `/api/nlq/query`        | Optional      | 10/min     | Execute a natural language query (supports SSE streaming; personalized when a Bearer token is supplied) |
 
+**Media as a filter dimension.** Per [ADR 0007](https://github.com/groovemap-music/design/blob/main/docs/adr/0007-canonical-media-taxonomy.md), the model can narrow a graph filter (`ui_filter_graph` with `by: "media"`) or the `get_collection_gaps` tool to a canonical media family or medium id — e.g. "cassette-only labels" or "what am I missing on CD". The system prompt lists the valid family ids and explains how a spoken format ("cassette", "CD") maps to a medium id (`tape_cassette`, `optical_cd`) or its family (`tape`, `optical`); the `get_collection_gaps` tool's `media` parameter is validated against the same taxonomy as the REST gap endpoints (`api/queries/media_filters.py`), and an unrecognised id comes back as a tool-level error the model can read and retry. The Ask pill's suggestion set includes one media example ("Which labels released the most on cassette?").
+
 ### Release Rarity Scoring
 
 Rarity analysis for releases based on market scarcity, media, and collector demand.

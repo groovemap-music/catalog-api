@@ -13,6 +13,7 @@ import asyncio
 from typing import Any
 
 import structlog
+from common.media import family_ids as _media_family_ids
 
 from api.nlq.actions import Action, parse_action
 
@@ -184,7 +185,7 @@ def get_public_tool_schemas() -> list[dict[str, Any]]:
 
 _ENTITY_TYPES = ["artist", "label", "genre", "style", "release"]
 _PANE_NAMES = ["explore", "trends", "insights", "genres", "credits"]
-_FILTER_DIMENSIONS = ["year", "genre", "label"]
+_FILTER_DIMENSIONS = ["year", "genre", "label", "media"]
 
 
 def get_action_tool_schemas() -> list[dict[str, Any]]:
@@ -256,7 +257,7 @@ def get_action_tool_schemas() -> list[dict[str, Any]]:
         },
         {
             "name": "ui_filter_graph",
-            "description": "Filter the current graph view by a dimension (year, genre, or label).",
+            "description": "Filter the current graph view by a dimension (year, genre, label, or media).",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -267,7 +268,10 @@ def get_action_tool_schemas() -> list[dict[str, Any]]:
                     },
                     "value": {
                         "type": "string",
-                        "description": "Filter value (e.g., '1995', 'Techno', 'Warp Records').",
+                        "description": (
+                            "Filter value (e.g., '1995', 'Techno', 'Warp Records', or a media "
+                            "family/medium id such as 'vinyl' or 'tape_cassette' when by='media')."
+                        ),
                     },
                 },
                 "required": ["by", "value"],
@@ -363,7 +367,11 @@ def get_authenticated_tool_schemas() -> list[dict[str, Any]]:
     return [
         {
             "name": "get_collection_gaps",
-            "description": "Find releases on a label or by an artist that the user does not own.",
+            "description": (
+                "Find releases on a label or by an artist that the user does not own. "
+                "Optionally narrow the search to specific media, e.g. 'cassette-only gaps' "
+                "or 'what am I missing on CD'."
+            ),
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -374,6 +382,17 @@ def get_authenticated_tool_schemas() -> list[dict[str, Any]]:
                     },
                     "entity_id": {"type": "string", "description": "The label or artist ID"},
                     "limit": {"type": "integer", "description": "Max results (default: 50)"},
+                    "media": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Canonical media family or medium ids to narrow the gap search to "
+                            "(ADR 0007 taxonomy). A family id (e.g. 'vinyl', 'tape', 'optical') "
+                            "matches any medium in that family; a medium id (e.g. 'vinyl_12', "
+                            f"'tape_cassette', 'optical_cd') matches only that medium. Valid "
+                            f"families: {', '.join(_media_family_ids())}."
+                        ),
+                    },
                 },
                 "required": ["entity_type", "entity_id"],
             },
@@ -759,15 +778,37 @@ class NLQToolRunner:
 
     async def _handle_get_collection_gaps(self, params: dict[str, Any], user_id: str | None) -> dict[str, Any]:
         from api.queries import gap_queries  # noqa: PLC0415
+        from api.queries.media_filters import UnknownMediaIdsError, resolve_media_filter  # noqa: PLC0415
 
         entity_type = params.get("entity_type", "label")
         entity_id = params.get("entity_id", "")
         limit = params.get("limit", 50)
 
+        try:
+            # No legacy `formats` alias here — the NLQ tool schema only ever
+            # offers the canonical `media` parameter to the model.
+            families, mediums = resolve_media_filter(params.get("media"), None)
+        except UnknownMediaIdsError as exc:
+            return {"error": str(exc)}
+
         if entity_type == "label":
-            gaps, total = await gap_queries.get_label_gaps(self._driver, user_id, entity_id, limit=limit)  # type: ignore[arg-type]
+            gaps, total = await gap_queries.get_label_gaps(
+                self._driver,
+                user_id,  # type: ignore[arg-type]
+                entity_id,
+                limit=limit,
+                families=families,
+                mediums=mediums,
+            )
         elif entity_type == "artist":
-            gaps, total = await gap_queries.get_artist_gaps(self._driver, user_id, entity_id, limit=limit)  # type: ignore[arg-type]
+            gaps, total = await gap_queries.get_artist_gaps(
+                self._driver,
+                user_id,  # type: ignore[arg-type]
+                entity_id,
+                limit=limit,
+                families=families,
+                mediums=mediums,
+            )
         else:
             return {"error": f"Unknown gap entity type: {entity_type}"}
         return {"gaps": gaps, "total": total}

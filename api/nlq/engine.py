@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from common.media import family_ids as _media_family_ids
 
 from api.nlq.tools import get_action_tool_schemas, get_authenticated_tool_schemas, get_public_tool_schemas
 
@@ -27,7 +28,7 @@ logger = structlog.get_logger(__name__)
 
 # ── System prompt ────────────────────────────────────────────────────────
 
-_SYSTEM_PROMPT = """\
+_SYSTEM_PROMPT = f"""\
 You are a music knowledge graph assistant for GrooveMap. You help users \
 explore a graph of artists, labels, releases, genres, and styles from the \
 Discogs music database.
@@ -41,6 +42,15 @@ up to a short paragraph for complex ones).
 
 Supported entity types: artist, label, genre, style.
 Releases are searchable but not directly explorable as graph nodes.
+
+Releases carry a canonical media taxonomy (ADR 0007). When a question names a \
+format ("on vinyl", "cassette-only", "what am I missing on CD"), pass a \
+`media` filter to the relevant tool as family or medium ids — never the raw \
+format word. Valid families: {", ".join(_media_family_ids())}. A family id \
+matches any medium in it; use a specific medium id when the user names one \
+(e.g. "cassette" -> medium `tape_cassette` or family `tape`; "CD" -> medium \
+`optical_cd` or family `optical`; "vinyl" -> family `vinyl`, or a medium such \
+as `vinyl_12` for a 12" specifically).
 
 You can ONLY answer questions about music, artists, labels, releases, genres, \
 and styles in the GrooveMap knowledge graph. If a question is unrelated \
