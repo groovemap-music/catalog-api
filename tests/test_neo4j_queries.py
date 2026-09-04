@@ -786,6 +786,7 @@ class TestNodeDetailsQueries:
             "labels": ["Parlophone"],
             "genres": ["Rock"],
             "styles": [],
+            "formats": ["Vinyl", "LP", "Album"],
         }
         driver = _make_driver(single=record)
         result = await get_release_details(driver, "10")

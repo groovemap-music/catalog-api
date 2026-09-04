@@ -421,25 +421,91 @@ class TestNodeDetailsEndpoint:
     @pytest.mark.parametrize(
         ("entity_type", "node_id", "result"),
         [
-            ("release", "10", {"id": "10", "name": "Selected Ambient Works", "year": 1992}),
+            ("artist", "1", {"id": "1", "name": "Radiohead", "release_count": 50, "label_count": 5, "alias_count": 2}),
             ("genre", "Electronic", {"id": "Electronic", "name": "Electronic", "artist_count": 100}),
             ("label", "100", {"id": "100", "name": "Warp Records", "release_count": 500}),
         ],
     )
-    def test_release_genre_and_label_node_details(
+    def test_non_release_node_details_unchanged(
         self,
         test_client: TestClient,
         entity_type: str,
         node_id: str,
         result: dict[str, Any],
     ) -> None:
+        """Non-release node responses are unchanged — no ``media`` key is added."""
         mock_func = AsyncMock(return_value=result)
         with patch.dict("api.routers.explore.DETAILS_DISPATCH", {entity_type: mock_func}):
             response = test_client.get(f"/api/node/{node_id}?type={entity_type}")
 
         assert response.status_code == 200
         assert response.json() == result
+        assert "media" not in response.json()
         mock_func.assert_awaited_once_with(ANY, node_id)
+
+    def test_release_node_details_includes_media_from_postgres(self, test_client: TestClient) -> None:
+        """When PostgreSQL has a canonical media block, it is attached verbatim as ``media``."""
+        neo4j_result: dict[str, Any] = {
+            "id": "10",
+            "name": "Selected Ambient Works",
+            "year": 1992,
+            "formats": ["Vinyl", "LP"],
+        }
+        media_block = {"taxonomy_version": "1", "items": [{"family": "vinyl", "medium": "vinyl_12"}], "families": ["vinyl"]}
+        mock_details = AsyncMock(return_value=neo4j_result)
+        mock_media = AsyncMock(return_value=media_block)
+        with (
+            patch.dict("api.routers.explore.DETAILS_DISPATCH", {"release": mock_details}),
+            patch("api.routers.explore.get_release_media", mock_media),
+        ):
+            response = test_client.get("/api/node/10?type=release")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["media"] == media_block
+        assert body["formats"] == ["Vinyl", "LP"]
+        mock_media.assert_awaited_once_with(ANY, "10")
+
+    def test_release_node_details_derives_media_fallback_when_null(self, test_client: TestClient) -> None:
+        """When ``releases.media`` is NULL (or the row is missing), derive a fallback from ``formats``."""
+        from common.media import legacy_format_names_to_media
+
+        neo4j_result: dict[str, Any] = {
+            "id": "20",
+            "name": "Discovery",
+            "year": 2001,
+            "formats": ["Vinyl", "LP", "Album"],
+        }
+        mock_details = AsyncMock(return_value=neo4j_result)
+        mock_media = AsyncMock(return_value=None)
+        with (
+            patch.dict("api.routers.explore.DETAILS_DISPATCH", {"release": mock_details}),
+            patch("api.routers.explore.get_release_media", mock_media),
+        ):
+            response = test_client.get("/api/node/20?type=release")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["media"] == legacy_format_names_to_media(["Vinyl", "LP", "Album"])
+        assert body["media"]["families"] == ["vinyl"]
+
+    def test_release_node_details_media_key_never_omitted_with_no_formats(self, test_client: TestClient) -> None:
+        """A release with no ``media`` row and no raw ``formats`` still gets a (empty) media block."""
+        from common.media import legacy_format_names_to_media
+
+        neo4j_result: dict[str, Any] = {"id": "30", "name": "Untitled", "year": None, "formats": None}
+        mock_details = AsyncMock(return_value=neo4j_result)
+        mock_media = AsyncMock(return_value=None)
+        with (
+            patch.dict("api.routers.explore.DETAILS_DISPATCH", {"release": mock_details}),
+            patch("api.routers.explore.get_release_media", mock_media),
+        ):
+            response = test_client.get("/api/node/30?type=release")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert "media" in body
+        assert body["media"] == legacy_format_names_to_media([])
 
     def test_node_not_found_404(self, test_client: TestClient) -> None:
         mock_func = AsyncMock(return_value=None)
