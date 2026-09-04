@@ -12,13 +12,13 @@ from fastapi.responses import JSONResponse
 
 from api.limiter import limiter
 from api.queries.rarity_queries import (
-    SIGNAL_WEIGHTS,
     get_rarity_by_artist,
     get_rarity_by_label,
     get_rarity_for_release,
     get_rarity_hidden_gems,
     get_rarity_leaderboard,
 )
+from api.rarity import CORE_SIGNAL_WEIGHTS, effective_weights, module_weights
 
 
 logger = structlog.get_logger(__name__)
@@ -36,9 +36,64 @@ def configure(neo4j: Any, pg_pool: Any, *_args: Any, **_kwargs: Any) -> None:
     _pg_pool = pg_pool
 
 
+def _family_signals(row: dict[str, Any]) -> dict[str, dict[str, float]]:
+    """Read the family signals for a row: module id → signal → score.
+
+    Prefers the stored ``family_signals`` JSONB. A row written before
+    ``insights.release_rarity`` gained that column carries its family signals as flat columns
+    instead, so those are attributed back to whichever installed module declares them. Rows
+    from that era were scored with a pressing signal on every medium, so reporting it is
+    faithful to how the stored score was actually composed.
+    """
+    stored = row.get("family_signals")
+    if isinstance(stored, dict) and stored:
+        return {
+            str(module_id): {str(name): float(score) for name, score in signals.items() if isinstance(score, int | float)}
+            for module_id, signals in stored.items()
+            if isinstance(signals, dict)
+        }
+
+    recovered: dict[str, dict[str, float]] = {}
+    for module_id, weights in module_weights().items():
+        contributed = {name: float(row[name]) for name in weights if row.get(name) is not None}
+        if contributed:
+            recovered[module_id] = contributed
+    return recovered
+
+
+def _media_families(row: dict[str, Any]) -> list[str]:
+    """Read the stored ``media_families`` JSONB into a list of family ids."""
+    stored = row.get("media_families")
+    if not isinstance(stored, list):
+        return []
+    return [family for family in stored if isinstance(family, str)]
+
+
 def _format_breakdown(row: dict[str, Any]) -> dict[str, dict[str, float]]:
-    """Build the breakdown dict from a flat database row."""
-    return {signal: {"score": row.get(signal, 0.0) or 0.0, "weight": weight} for signal, weight in SIGNAL_WEIGHTS.items()}
+    """Build the breakdown dict from a flat database row.
+
+    The weights reported are the *effective* ones for this release: renormalised over the
+    signals it actually has, exactly as they were when the score was composed. A release no
+    family extension claims carries no ``pressing_scarcity`` entry at all, and its core signals
+    each carry proportionally more weight. See :mod:`api.rarity.core`.
+
+    ``format_rarity`` is reported with weight ``0.0``: it is deprecated and no longer scored,
+    having been replaced by ``medium_rarity``.
+    """
+    signals = {name: float(row[name]) for name in CORE_SIGNAL_WEIGHTS if row.get(name) is not None}
+    weights = dict(CORE_SIGNAL_WEIGHTS)
+
+    declared = module_weights()
+    for module_id, contributed in _family_signals(row).items():
+        signals.update(contributed)
+        weights.update(declared.get(module_id, {}))
+
+    applied = effective_weights(signals.keys(), weights)
+    breakdown = {name: {"score": score, "weight": applied.get(name, 0.0)} for name, score in signals.items()}
+
+    if row.get("format_rarity") is not None:
+        breakdown["format_rarity"] = {"score": float(row["format_rarity"]), "weight": 0.0}
+    return breakdown
 
 
 def _format_list_item(row: dict[str, Any]) -> dict[str, Any]:
@@ -180,6 +235,8 @@ async def get_release_rarity(request: Request, release_id: int) -> JSONResponse:
             "rarity_score": row["rarity_score"],
             "tier": row["tier"],
             "hidden_gem_score": row.get("hidden_gem_score"),
+            "media_families": _media_families(row),
+            "family_signals": _family_signals(row),
             "breakdown": _format_breakdown(row),
         }
     )

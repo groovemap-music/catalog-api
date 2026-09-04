@@ -387,7 +387,7 @@ Natural language query interface for the knowledge graph. Translates plain Engli
 
 ### Release Rarity Scoring
 
-Rarity analysis for releases based on market scarcity, pressing details, and collector demand.
+Rarity analysis for releases based on market scarcity, media, and collector demand.
 
 | Method | Path                             | Auth Required | Rate Limit | Description                            |
 | ------ | -------------------------------- | ------------- | ---------- | --------------------------------------- |
@@ -396,6 +396,45 @@ Rarity analysis for releases based on market scarcity, pressing details, and col
 | GET    | `/api/rarity/artist/{artist_id}` | No            | 30/min     | Rarity scores for an artist's releases |
 | GET    | `/api/rarity/label/{label_id}`   | No            | 30/min     | Rarity scores for a label's releases   |
 | GET    | `/api/rarity/{release_id}`       | No            | 30/min     | Rarity score for a specific release    |
+
+#### Media-neutral core and per-family extensions
+
+Per [ADR 0007](https://github.com/groovemap-music/design/blob/main/docs/adr/0007-canonical-media-taxonomy.md), scoring is split into a core that reasons about every medium the same way, plus extension modules keyed by canonical media family. The code lives in `api/rarity/`; `api/queries/rarity_queries.py` owns only the graph and PostgreSQL access around it.
+
+**Core signals** (`api/rarity/core.py`) apply to every release:
+
+| Signal                  | Weight | Meaning                                                        |
+| ----------------------- | ------ | -------------------------------------------------------------- |
+| `label_catalog`         | 0.10   | Label catalog size; a smaller catalog is rarer                 |
+| `medium_rarity`         | 0.10   | The rarest canonical medium the release was issued on          |
+| `temporal_scarcity`     | 0.20   | Age, discounted when a recent reissue exists                   |
+| `graph_isolation`       | 0.15   | Graph degree; fewer connections is rarer                       |
+| `collection_prevalence` | 0.20   | Inverse community ownership, with a want-over-have bonus       |
+
+**Family extensions** (`api/rarity/families/`) contribute only where their media justify it. Today there is one:
+
+| Module    | Families                          | Signal              | Weight |
+| --------- | --------------------------------- | ------------------- | ------ |
+| `grooved` | `vinyl`, `shellac`, `grooved_other` | `pressing_scarcity` | 0.25   |
+
+Pressing scarcity counts sibling pressings of a master, which is a property of a physical grooved pressing rather than of a release. A CD, a download card, or a VHS tape has no pressings to count, so no such signal is produced for one. This is the seam a future vinyl-specific service would own: pressing plant, matrix and runout, lacquer and stamper lineage, and colour evidence all belong in this module when they arrive.
+
+The core weights deliberately sum to 0.75, not 1.0. `compose` renormalises over the signals a release actually has, so both a lone CD and a lone LP score on a full 0-100 scale and the tier thresholds mean the same thing for both. A grooved release scores under weights identical to the pre-split table.
+
+**Medium rarity** is a table keyed by canonical medium id (`MEDIUM_RARITY_SCORES`), with a documented default per family (`FAMILY_DEFAULT_MEDIUM_RARITY`) for a medium a later taxonomy version adds. It reads the release's media from `(:Release)-[:ISSUED_ON]->(:Medium)` edges, falling back to the `media_families` node property and then to the deprecated raw `formats` list through the shared mapper.
+
+**Deprecated for one minor version:** `format_rarity`, which keyed on raw Discogs format names and so mixed media with descriptors. It is still computed and still appears in the breakdown, with weight `0.0`, and no longer moves the score.
+
+#### Adding a family module
+
+1. Write `api/rarity/families/<family>.py` with a class satisfying the `FamilySignals` protocol: `module_id`, `weights`, `queries`, `applies_to(families)`, and `signals(release_ctx)`.
+2. Choose absolute weights on the same scale as the core's. There is no total to keep balanced; they are renormalised at compose time.
+3. Declare any Cypher the core does not already fetch. Each query takes an `$ids` page and returns a `release_id` column, per the chunking contract in `api/queries/rarity_queries.py`. The fact name keys the row into `ReleaseContext.facts`.
+4. Register it in `api/rarity/families/__init__.py` against the taxonomy family ids it serves.
+
+Nothing in the core changes. The orchestrator discovers the module's queries, runs them per page, and folds its signals into the composite.
+
+**Breakdown response.** `GET /api/rarity/{release_id}` returns `media_families` (the canonical families the release covers) and `family_signals` (which modules contributed and what they scored) alongside `breakdown`. Each `breakdown` entry's `weight` is the effective, renormalised weight for that release.
 
 ### Label DNA
 

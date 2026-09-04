@@ -675,6 +675,12 @@ class RarityResponse(BaseModel):
     rarity_score: float
     tier: str
     hidden_gem_score: float | None
+    # Canonical media family ids the release covers (ADR 0007).
+    media_families: list[str] = []
+    # Family extension module id → the signals it contributed. Empty when none applied.
+    family_signals: dict[str, dict[str, float]] = {}
+    # Weights are renormalised over the signals this release actually has, so they sum to 1.0.
+    # The deprecated `format_rarity` entry carries weight 0.0.
     breakdown: dict[str, RaritySignal]
 
 

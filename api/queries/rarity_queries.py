@@ -1,7 +1,12 @@
-"""Rarity scoring queries and computation logic.
+"""Rarity scoring queries and PostgreSQL lookups.
 
-Computes a 6-signal rarity index (0-100) for releases using Neo4j graph data
-and PostgreSQL community counts, and provides lookup functions for precomputed scores.
+Fetches the graph and community facts the rarity index needs, scores them through
+:mod:`api.rarity`, and provides lookup functions for the precomputed results.
+
+The scoring itself lives in :mod:`api.rarity`: a media-neutral core plus per-family extension
+modules, per ADR 0007. This module owns only the data access and the paging around it. The
+pure scoring functions and the tier table are re-exported here, so the historical import path
+``api.queries.rarity_queries`` keeps working.
 
 Graph model:
   (Release)-[:BY]->(Artist)
@@ -9,6 +14,7 @@ Graph model:
   (Release)-[:IS]->(Genre)
   (Release)-[:IS]->(Style)
   (Release)-[:DERIVED_FROM]->(Master)
+  (Release)-[:ISSUED_ON {qty, source}]->(Medium {id, family})
 """
 
 import bisect
@@ -19,156 +25,64 @@ import structlog
 from psycopg.rows import dict_row
 
 from api.queries.helpers import run_query
+from api.rarity import (
+    CORE_SIGNAL_WEIGHTS,
+    FORMAT_RARITY_SCORES,
+    MEDIUM_RARITY_SCORES,
+    RARITY_TIERS,
+    ReleaseContext,
+    compute_collection_prevalence_score,
+    compute_format_rarity_score,
+    compute_graph_isolation_score,
+    compute_label_catalog_score,
+    compute_medium_rarity_score,
+    compute_pressing_scarcity_score,
+    compute_rarity_tier,
+    compute_temporal_scarcity_score,
+    family_queries,
+    medium_rarity_score,
+    resolve_media,
+    score_release,
+)
+from api.rarity.families import grooved as _grooved
 
 
 logger = structlog.get_logger(__name__)
 
-# ── Signal weights (must sum to 1.0) ────────────────────────────────
+# The grooved extension's sibling-count query, under its historical private name. Kept
+# importable here because the chunking-contract regression tests pin it by this path.
+_PRESSING_QUERY = _grooved.PRESSING_QUERY
 
-SIGNAL_WEIGHTS: dict[str, float] = {
-    "pressing_scarcity": 0.25,
-    "label_catalog": 0.10,
-    "format_rarity": 0.10,
-    "temporal_scarcity": 0.20,
-    "graph_isolation": 0.15,
-    "collection_prevalence": 0.20,
-}
-
-# ── Format rarity lookup ────────────────────────────────────────────
-
-FORMAT_RARITY_SCORES: dict[str, float] = {
-    "Test Pressing": 100.0,
-    "Lathe Cut": 98.0,
-    "Flexi-disc": 95.0,
-    "Shellac": 90.0,
-    "Blu-spec CD": 80.0,
-    "Box Set": 70.0,
-    '10"': 65.0,
-    "8-Track Cartridge": 60.0,
-    "CDr": 50.0,
-    "Vinyl": 40.0,
-    "Cassette": 35.0,
-    "LP": 30.0,
-    "CD": 10.0,
-    "File": 5.0,
-}
-
-_DEFAULT_FORMAT_SCORE = 50.0
-
-# ── Rarity tiers ────────────────────────────────────────────────────
-
-RARITY_TIERS: list[tuple[float, str]] = [
-    (80.0, "ultra-rare"),
-    (60.0, "rare"),
-    (40.0, "scarce"),
-    (20.0, "uncommon"),
-    (0.0, "common"),
+# Re-exported for the historical import path; the definitions live in api.rarity.
+__all__ = [
+    "CORE_SIGNAL_WEIGHTS",
+    "FORMAT_RARITY_SCORES",
+    "MEDIUM_RARITY_SCORES",
+    "RARITY_PAGE_SIZE",
+    "RARITY_QUERY_TIMEOUT_SECONDS",
+    "RARITY_TIERS",
+    "compute_collection_prevalence_score",
+    "compute_format_rarity_score",
+    "compute_graph_isolation_score",
+    "compute_label_catalog_score",
+    "compute_medium_rarity_score",
+    "compute_pressing_scarcity_score",
+    "compute_rarity_tier",
+    "compute_temporal_scarcity_score",
+    "fetch_all_rarity_signals",
+    "get_rarity_by_artist",
+    "get_rarity_by_label",
+    "get_rarity_for_release",
+    "get_rarity_hidden_gems",
+    "get_rarity_leaderboard",
+    "medium_rarity_score",
 ]
-
-
-# ── Pure scoring functions ──────────────────────────────────────────
-
-
-def compute_pressing_scarcity_score(pressing_count: int) -> float:
-    """Score based on number of pressings of the same master."""
-    if pressing_count <= 0:
-        return 90.0  # Standalone release (no master link)
-    if pressing_count == 1:
-        return 100.0
-    if pressing_count == 2:
-        return 85.0
-    if pressing_count <= 5:
-        return 60.0
-    if pressing_count <= 10:
-        return 35.0
-    return 10.0
-
-
-def compute_label_catalog_score(catalog_size: int) -> float:
-    """Score based on label catalog size (smaller = rarer)."""
-    if catalog_size < 10:
-        return 100.0
-    if catalog_size <= 50:
-        return 75.0
-    if catalog_size <= 200:
-        return 50.0
-    if catalog_size <= 1000:
-        return 25.0
-    return 10.0
-
-
-def compute_format_rarity_score(formats: list[Any]) -> float:
-    """Score based on rarest format. Takes max across all formats."""
-    if not formats:
-        return _DEFAULT_FORMAT_SCORE
-    scores = [FORMAT_RARITY_SCORES.get(str(f), _DEFAULT_FORMAT_SCORE) for f in formats if f is not None]
-    return max(scores) if scores else _DEFAULT_FORMAT_SCORE
-
-
-def compute_temporal_scarcity_score(
-    release_year: int | None,
-    latest_sibling_year: int | None,
-    current_year: int,
-) -> float:
-    """Score based on age and reissue status."""
-    if release_year is None:
-        return 50.0
-    age = current_year - release_year
-    base = max(0.0, min(100.0, age * 1.5))
-    if latest_sibling_year is not None and latest_sibling_year >= current_year - 10:
-        base = max(0.0, base - 40.0)
-    return base
-
-
-def compute_graph_isolation_score(degree: int) -> float:
-    """Score based on graph node degree (fewer connections = rarer)."""
-    if degree <= 2:
-        return 90.0
-    if degree <= 4:
-        return 70.0
-    if degree <= 7:
-        return 50.0
-    if degree <= 12:
-        return 30.0
-    return 10.0
-
-
-def compute_collection_prevalence_score(have_count: int, want_count: int) -> float:
-    """Score based on community ownership rarity (inverse of prevalence).
-
-    Uses log-scale thresholds since community counts follow power-law distribution.
-    Want > have adds a +5 bonus (capped at 100) indicating scarcity pressure.
-    """
-    if have_count <= 0:
-        base = 95.0
-    elif have_count <= 10:
-        base = 85.0
-    elif have_count <= 100:
-        base = 70.0
-    elif have_count <= 1000:
-        base = 50.0
-    elif have_count <= 10000:
-        base = 25.0
-    else:
-        base = 10.0
-
-    if want_count > have_count:
-        base = min(100.0, base + 5.0)
-
-    return base
-
-
-def compute_rarity_tier(score: float) -> str:
-    """Map composite score to rarity tier label."""
-    for threshold, tier in RARITY_TIERS:
-        if score >= threshold:
-            return tier
-    return "common"
 
 
 # ── Neo4j batch signal queries ──────────────────────────────────────
 #
-# CHUNKING CONTRACT — read before editing any query in this section.
+# CHUNKING CONTRACT — read before editing any query in this section, or any query a family
+# extension module contributes.
 #
 # These signal queries used to run as eight UNBOUNDED full-graph scans
 # (`MATCH (r:Release) ...`). On the production graph that never completed:
@@ -194,7 +108,7 @@ def compute_rarity_tier(score: float) -> str:
 #
 # DO NOT reintroduce a bare `MATCH (r:Release)` here.
 
-# Releases per page. Sized so a page's eight queries stay far inside the 600s
+# Releases per page. Sized so a page's queries stay far inside the 600s
 # server-side transaction timeout while keeping the number of round trips sane.
 RARITY_PAGE_SIZE = 20_000
 
@@ -219,45 +133,43 @@ MATCH (r:Release)
 RETURN count(r) AS total
 """
 
-# 1. Pressing scarcity: count siblings per master (+ display fields)
+# 1. The release itself: the display fields, and the row set the scoring loop walks.
 #
-# NOTE (groovemap-cu2.75): the master lookup and the sibling lookup are
-# deliberately two separate OPTIONAL MATCHes. Combining them into one pattern
-# makes `m` contingent on a sibling existing: for a release that IS linked to a
-# master but is that master's ONLY pressing, the combined pattern (including its
-# inline WHERE sibling <> r) fails entirely and `m` comes back null too —
-# misclassifying the rarest pressing case (a unique pressing of a master) as "no
-# master link", scoring it 90.0 (standalone) instead of 100.0 (unique pressing).
-# The +1 must therefore be applied INSIDE the non-null branch, to a plain
-# sibling_count, rather than folded into the aggregate.
-_PRESSING_QUERY = """
+# This is deliberately media-neutral and family-neutral. It used to be folded into the
+# grooved pressing-scarcity query, which made the core's result set depend on a
+# grooved-media concept; ADR 0007 requires the core to enumerate releases on its own.
+_RELEASE_QUERY = """
 UNWIND $ids AS rid
 MATCH (r:Release {id: rid})
-OPTIONAL MATCH (r)-[:DERIVED_FROM]->(m:Master)
-OPTIONAL MATCH (m)<-[:DERIVED_FROM]-(sibling:Release)
-WHERE sibling <> r
-WITH r, m, count(DISTINCT sibling) AS sibling_count
-WITH r, CASE WHEN m IS NULL THEN 0 ELSE sibling_count + 1 END AS pressing_count
 OPTIONAL MATCH (r)-[:BY]->(a:Artist)
-WITH r, pressing_count, collect(DISTINCT a.name)[0] AS artist_name
-RETURN r.id AS release_id, pressing_count,
-       r.title AS title, artist_name, r.year AS year
+WITH r, collect(DISTINCT a.name)[0] AS artist_name
+RETURN r.id AS release_id, r.title AS title, artist_name, r.year AS year
 """
 
-# 2. Label catalog size per release
+# 2. Media per release, best evidence first.
+#
+# ISSUED_ON edges are authoritative (canonical medium id and family on the Medium node).
+# `media_families` is the cheap list property on the release node. `formats` is the
+# deprecated raw Discogs name list, kept because `format_rarity` is still reported and
+# because it is the only media evidence a release has until the enrichers backfill.
+# The list comprehension drops the null row an OPTIONAL MATCH leaves when a release has
+# no ISSUED_ON edge yet.
+_MEDIA_QUERY = """
+UNWIND $ids AS rid
+MATCH (r:Release {id: rid})
+OPTIONAL MATCH (r)-[:ISSUED_ON]->(m:Medium)
+WITH r, [x IN collect(DISTINCT {id: m.id, family: m.family}) WHERE x.id IS NOT NULL] AS mediums
+RETURN r.id AS release_id, mediums,
+       r.media_families AS media_families,
+       r.formats AS formats
+"""
+
+# 3. Label catalog size per release
 _LABEL_QUERY = """
 UNWIND $ids AS rid
 MATCH (r:Release {id: rid})-[:ON]->(l:Label)
 WITH r.id AS release_id, min(COALESCE(l.release_count, 0)) AS label_catalog_size
 RETURN release_id, label_catalog_size
-"""
-
-# 3. Formats per release
-_FORMAT_QUERY = """
-UNWIND $ids AS rid
-MATCH (r:Release {id: rid})
-WHERE r.formats IS NOT NULL
-RETURN r.id AS release_id, r.formats AS formats
 """
 
 # 4. Temporal: release year + latest sibling year
@@ -308,6 +220,20 @@ WITH r.id AS release_id, max(COALESCE(g.release_count, 0)) AS genre_max_release_
 RETURN release_id, genre_max_release_count
 """
 
+# The media-neutral queries, keyed by the fact name their rows are indexed under. Family
+# extension modules contribute further queries through the registry; see
+# api/rarity/families/registry.py. Fact names are unique across the core and every module.
+_CORE_QUERIES: dict[str, str] = {
+    "release": _RELEASE_QUERY,
+    "media": _MEDIA_QUERY,
+    "label": _LABEL_QUERY,
+    "temporal": _TEMPORAL_QUERY,
+    "degree": _DEGREE_QUERY,
+    "artist_degree": _ARTIST_DEGREE_QUERY,
+    "label_size": _LABEL_SIZE_QUERY,
+    "genre_count": _GENRE_COUNT_QUERY,
+}
+
 
 def _percentile_rank(value: float, sorted_values: list[float]) -> float:
     """Return percentile rank (0.0 to 1.0) of value in sorted list."""
@@ -346,13 +272,17 @@ async def _load_community_counts(pool: Any) -> dict[str, tuple[int, int]]:
 
 
 async def _fetch_page_signals(driver: Any, ids: list[str]) -> dict[str, list[dict[str, Any]]]:
-    """Run the eight signal queries for one page of release ids.
+    """Run the core and family-extension signal queries for one page of release ids.
 
     Run sequentially, not via asyncio.gather: running them concurrently sums
     their working sets against the single dbms.memory.transaction.total.max
     pool, which tips it into a TransientError MemoryPoolOutOfMemoryError.
     Sequential execution caps peak transaction memory at one query at a time.
     This is a daily background computation, so the wall-clock cost is acceptable.
+
+    Every installed family module's queries run for every page, regardless of which
+    releases on the page its family covers: applicability is decided per release at scoring
+    time, and a per-release query would defeat the chunking contract above.
     """
 
     async def _run(cypher: str) -> list[dict[str, Any]]:
@@ -364,16 +294,15 @@ async def _fetch_page_signals(driver: Any, ids: list[str]) -> dict[str, list[dic
             ids=ids,
         )
 
-    return {
-        "pressing": await _run(_PRESSING_QUERY),
-        "label": await _run(_LABEL_QUERY),
-        "format": await _run(_FORMAT_QUERY),
-        "temporal": await _run(_TEMPORAL_QUERY),
-        "degree": await _run(_DEGREE_QUERY),
-        "artist_degree": await _run(_ARTIST_DEGREE_QUERY),
-        "label_size": await _run(_LABEL_SIZE_QUERY),
-        "genre_count": await _run(_GENRE_COUNT_QUERY),
-    }
+    signals: dict[str, list[dict[str, Any]]] = {}
+    for fact, cypher in (*_CORE_QUERIES.items(), *family_queries().items()):
+        signals[fact] = await _run(cypher)
+    return signals
+
+
+def _index_by_release(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Index signal rows by their release_id."""
+    return {row["release_id"]: row for row in rows}
 
 
 async def fetch_all_rarity_signals(
@@ -384,11 +313,11 @@ async def fetch_all_rarity_signals(
 ) -> list[dict[str, Any]]:
     """Fetch all rarity signals from Neo4j and compute scores.
 
-    Walks the Release set in keyset-paginated chunks of ``page_size``. For each
-    page it runs the eight signal queries (5 signal + 3 quality) scoped to that
-    page's ids, joins them by release_id, and computes the composite rarity
-    score. Community counts (have/want) are loaded once from PostgreSQL when a
-    pool is provided.
+    Walks the Release set in keyset-paginated chunks of ``page_size``. For each page it runs
+    the core signal queries plus those every installed family extension declares, scoped to
+    that page's ids, joins them by release_id, and composes the rarity score through
+    :func:`api.rarity.score_release`. Community counts (have/want) are loaded once from
+    PostgreSQL when a pool is provided.
 
     Hidden-gem scoring needs percentile ranks over the *global* quality-signal
     distributions, so those are accumulated while paging and applied in a final
@@ -400,13 +329,16 @@ async def fetch_all_rarity_signals(
         page_size: Releases per chunk. Bounds per-transaction working set.
 
     Returns:
-        A list of dicts ready for PostgreSQL insertion.
+        A list of dicts ready for PostgreSQL insertion. Each carries the historical keys plus
+        ``media_families``, ``family_signals``, and ``medium_rarity``. ``pressing_scarcity`` is
+        ``None`` for a release no family extension claims — a CD has no pressings to count.
     """
     current_year = datetime.now(UTC).year
 
     logger.info("🔍 Fetching rarity signals from Neo4j...", page_size=page_size)
 
     community_map = await _load_community_counts(pool)
+    family_facts = tuple(family_queries())
 
     results: list[dict[str, Any]] = []
     # Deferred hidden-gem inputs, positionally parallel to `results`:
@@ -429,51 +361,60 @@ async def fetch_all_rarity_signals(
         pages += 1
 
         signals = await _fetch_page_signals(driver, ids)
-        pressing_rows = signals["pressing"]
 
+        media_map = _index_by_release(signals["media"])
         label_map = {r["release_id"]: r["label_catalog_size"] for r in signals["label"]}
-        format_map = {r["release_id"]: r["formats"] for r in signals["format"]}
-        temporal_map = {r["release_id"]: r for r in signals["temporal"]}
+        temporal_map = _index_by_release(signals["temporal"])
         degree_map = {r["release_id"]: r["degree"] for r in signals["degree"]}
         artist_deg_map = {r["release_id"]: r["artist_max_degree"] for r in signals["artist_degree"]}
         label_size_map = {r["release_id"]: r["label_max_catalog"] for r in signals["label_size"]}
         genre_count_map = {r["release_id"]: r["genre_max_release_count"] for r in signals["genre_count"]}
+        fact_maps = {fact: _index_by_release(signals.get(fact, [])) for fact in family_facts}
 
         all_artist_degrees.extend(r["artist_max_degree"] for r in signals["artist_degree"] if r["artist_max_degree"])
         all_label_sizes.extend(r["label_max_catalog"] for r in signals["label_size"] if r["label_max_catalog"])
         all_genre_counts.extend(r["genre_max_release_count"] for r in signals["genre_count"] if r["genre_max_release_count"])
 
-        for row in pressing_rows:
+        for row in signals["release"]:
             rid = row["release_id"]
 
-            pressing_score = compute_pressing_scarcity_score(row["pressing_count"])
-            label_score = compute_label_catalog_score(label_map.get(rid, 0))
-            fmt_score = compute_format_rarity_score(format_map.get(rid, []))
-
-            temporal_info = temporal_map.get(rid, {})
-            temporal_score = compute_temporal_scarcity_score(
-                temporal_info.get("year"),
-                temporal_info.get("latest_sibling_year"),
-                current_year,
+            media_row = media_map.get(rid, {})
+            formats = media_row.get("formats") or []
+            media = resolve_media(
+                mediums=media_row.get("mediums"),
+                media_families=media_row.get("media_families"),
+                formats=formats,
             )
 
-            isolation_score = compute_graph_isolation_score(degree_map.get(rid, 0))
-
+            temporal_info = temporal_map.get(rid, {})
             have, want = community_map.get(rid, (None, None))
-            prevalence_score = compute_collection_prevalence_score(have, want or 0) if have is not None else 50.0  # neutral fallback
 
-            rarity_score = (
-                SIGNAL_WEIGHTS["pressing_scarcity"] * pressing_score
-                + SIGNAL_WEIGHTS["label_catalog"] * label_score
-                + SIGNAL_WEIGHTS["format_rarity"] * fmt_score
-                + SIGNAL_WEIGHTS["temporal_scarcity"] * temporal_score
-                + SIGNAL_WEIGHTS["graph_isolation"] * isolation_score
-                + SIGNAL_WEIGHTS["collection_prevalence"] * prevalence_score
+            core_signals = {
+                "label_catalog": compute_label_catalog_score(label_map.get(rid, 0)),
+                "medium_rarity": compute_medium_rarity_score(media),
+                "temporal_scarcity": compute_temporal_scarcity_score(
+                    temporal_info.get("year"),
+                    temporal_info.get("latest_sibling_year"),
+                    current_year,
+                ),
+                "graph_isolation": compute_graph_isolation_score(degree_map.get(rid, 0)),
+                # Neutral fallback when the community counts are unavailable.
+                "collection_prevalence": compute_collection_prevalence_score(have, want or 0) if have is not None else 50.0,
+            }
+
+            scored = score_release(
+                ReleaseContext(
+                    release_id=rid,
+                    media=media,
+                    year=row.get("year"),
+                    facts={fact: fact_maps[fact].get(rid, {}) for fact in family_facts},
+                ),
+                core_signals,
             )
 
             quality_inputs.append(
                 (
-                    rarity_score,
+                    scored.score,
                     artist_deg_map.get(rid, 0) or 0,
                     label_size_map.get(rid, 0) or 0,
                     genre_count_map.get(rid, 0) or 0,
@@ -486,16 +427,21 @@ async def fetch_all_rarity_signals(
                     "title": row.get("title") or "",
                     "artist_name": row.get("artist_name") or "",
                     "year": row.get("year"),
-                    "rarity_score": round(rarity_score, 1),
-                    "tier": compute_rarity_tier(rarity_score),
+                    "rarity_score": round(scored.score, 1),
+                    "tier": scored.tier,
                     # Filled in below, once the global distributions are known.
                     "hidden_gem_score": 0.0,
-                    "pressing_scarcity": pressing_score,
-                    "label_catalog": label_score,
-                    "format_rarity": fmt_score,
-                    "temporal_scarcity": temporal_score,
-                    "graph_isolation": isolation_score,
-                    "collection_prevalence": prevalence_score,
+                    # None when no family extension claimed this release.
+                    "pressing_scarcity": scored.signals.get("pressing_scarcity"),
+                    "label_catalog": core_signals["label_catalog"],
+                    # Deprecated, unscored, retained for one minor version.
+                    "format_rarity": compute_format_rarity_score(formats),
+                    "temporal_scarcity": core_signals["temporal_scarcity"],
+                    "graph_isolation": core_signals["graph_isolation"],
+                    "collection_prevalence": core_signals["collection_prevalence"],
+                    "medium_rarity": core_signals["medium_rarity"],
+                    "media_families": list(media.families),
+                    "family_signals": scored.family_signals,
                 }
             )
 
@@ -560,7 +506,8 @@ async def get_rarity_for_release(pool: Any, release_id: int) -> dict[str, Any] |
             SELECT release_id, title, artist_name, year, rarity_score, tier,
                    hidden_gem_score, pressing_scarcity, label_catalog,
                    format_rarity, temporal_scarcity, graph_isolation,
-                   collection_prevalence
+                   collection_prevalence, medium_rarity, media_families,
+                   family_signals
             FROM insights.release_rarity
             WHERE release_id = %s
             """,
