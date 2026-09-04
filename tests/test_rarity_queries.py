@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from api.queries.rarity_queries import (
-    SIGNAL_WEIGHTS,
+    _CORE_QUERIES,
+    CORE_SIGNAL_WEIGHTS,
     compute_collection_prevalence_score,
     compute_format_rarity_score,
     compute_graph_isolation_score,
@@ -21,6 +22,8 @@ from api.queries.rarity_queries import (
     get_rarity_hidden_gems,
     get_rarity_leaderboard,
 )
+from api.rarity import family_queries
+from api.rarity.families.grooved import GroovedSignals
 
 
 # ── Pure scoring function tests ──────────────────────────────────────
@@ -244,9 +247,25 @@ class TestRarityTier:
 
 
 class TestSignalWeights:
-    def test_weights_sum_to_one(self) -> None:
-        total = sum(SIGNAL_WEIGHTS.values())
+    def test_core_weights_leave_room_for_the_family_extensions(self) -> None:
+        """The core no longer sums to 1.0 on its own.
+
+        ADR 0007 splits scoring into a media-neutral core plus per-family extensions, so the
+        declared weights are deliberately partial: the core's 0.75 plus the grooved module's
+        0.25 is what used to be one flat table. `compose` renormalises over the signals a given
+        release actually has — see tests/test_rarity_core.py.
+        """
+        assert abs(sum(CORE_SIGNAL_WEIGHTS.values()) - 0.75) < 0.001
+
+    def test_core_plus_grooved_reproduces_the_historical_total(self) -> None:
+        """A grooved release still scores under weights summing to exactly 1.0."""
+        total = sum(CORE_SIGNAL_WEIGHTS.values()) + sum(GroovedSignals.weights.values())
         assert abs(total - 1.0) < 0.001
+
+    def test_deprecated_format_rarity_carries_no_weight(self) -> None:
+        """format_rarity is reported but no longer scored; medium_rarity replaced it."""
+        assert "format_rarity" not in CORE_SIGNAL_WEIGHTS
+        assert CORE_SIGNAL_WEIGHTS["medium_rarity"] == 0.10
 
 
 # ── PostgreSQL query function tests ──────────────────────────────────
@@ -620,6 +639,7 @@ def _fake_run_query(
     pressing: list | None = None,
     label: list | None = None,
     formats: list | None = None,
+    media: list | None = None,
     temporal: list | None = None,
     degree: list | None = None,
     artist_degree: list | None = None,
@@ -630,14 +650,38 @@ def _fake_run_query(
     """Build a run_query stub that dispatches on the cypher, not on call order.
 
     fetch_all_rarity_signals is paginated, so the call sequence is
-    (page query, 8 signal queries)* + a final empty page + a count query.
-    Dispatching on the query text keeps these tests independent of that
-    interleaving.
+    (page query, core signal queries, family-extension queries)* + a final empty
+    page + a count query. Dispatching on the query text keeps these tests
+    independent of that interleaving.
+
+    ADR 0007 note: the core now drives its result set off its own release query rather than
+    off the grooved pressing query, and reads media through one query that returns ISSUED_ON
+    mediums, `media_families`, and the deprecated raw `formats`. The `pressing` and `formats`
+    fixture arguments still carry the display fields and the raw format names, so the stub
+    derives the two new row sets from them and existing callers need no change. Pass `media`
+    explicitly to exercise the canonical media paths.
     """
     pressing = pressing or []
+    formats = formats or []
+    # The display fields (title, artist, year) used to ride on the pressing query.
+    release_rows = [
+        {
+            "release_id": r["release_id"],
+            "title": r.get("title"),
+            "artist_name": r.get("artist_name"),
+            "year": r.get("year"),
+        }
+        for r in pressing
+    ]
+    media_rows = (
+        media
+        if media is not None
+        else [{"release_id": r["release_id"], "mediums": [], "media_families": None, "formats": r.get("formats")} for r in formats]
+    )
     signal_rows = {
+        "r.title AS title": release_rows,
+        "AS mediums": media_rows,
         "label_catalog_size": label or [],
-        "r.formats AS formats": formats or [],
         "latest_sibling_year": temporal or [],
         "AS degree": degree or [],
         "artist_max_degree": artist_degree or [],
@@ -658,7 +702,7 @@ def _fake_run_query(
         if "count(r) AS total" in cypher:  # coverage check
             return [{"total": len(all_ids)}]
         ids = set(kwargs["ids"])
-        if "pressing_count," in cypher:
+        if "AS pressing_count" in cypher:  # the grooved extension's own query
             return [r for r in pressing if r["release_id"] in ids]
         for marker, rows in signal_rows.items():
             if marker in cypher:
@@ -718,9 +762,71 @@ class TestFetchAllRaritySignals:
         assert 0 <= r["rarity_score"] <= 100
         assert r["tier"] in ("common", "uncommon", "scarce", "rare", "ultra-rare")
         assert r["pressing_scarcity"] == 100.0
-        assert r["format_rarity"] == 95.0  # Flexi-disc max
+        assert r["format_rarity"] == 95.0  # Flexi-disc max, deprecated and unscored
         assert r["collection_prevalence"] == 70.0  # have=50 -> 70.0, want<have -> no bonus
         assert "hidden_gem_score" in r
+        # ADR 0007 additive keys. The consumer that writes insights.release_rarity reads the
+        # row by key, so every historical key above must survive alongside these three.
+        assert r["medium_rarity"] == 95.0  # grooved_flexi_disc
+        # ["LP", "Flexi-disc"]: "LP" is a descriptor, not a format name, so the legacy mapper
+        # attaches it to the flexi-disc entry rather than opening a second, vinyl one.
+        assert r["media_families"] == ["grooved_other"]
+        assert r["family_signals"] == {"grooved": {"pressing_scarcity": 100.0}}
+
+    @pytest.mark.asyncio
+    async def test_non_grooved_release_carries_no_pressing_signal(self) -> None:
+        """ADR 0007: a CD has no pressings to count, so the row stores NULL, not a score.
+
+        The historical behaviour gave every medium a pressing_scarcity, which is what made a
+        lone CD look exactly as rare as a lone LP.
+        """
+        mock_driver = MagicMock()
+
+        pressing_data = [{"release_id": "1", "pressing_count": 1, "title": "R1", "artist_name": "A1", "year": 1970}]
+        media_data = [
+            {
+                "release_id": "1",
+                "mediums": [{"id": "optical_cd", "family": "optical"}],
+                "media_families": ["optical"],
+                "formats": ["CD"],
+            }
+        ]
+
+        run_query = _fake_run_query(pressing=pressing_data, media=media_data)
+        with patch("api.queries.rarity_queries.run_query", side_effect=run_query):
+            results = await fetch_all_rarity_signals(mock_driver, None)
+
+        r = results[0]
+        assert r["pressing_scarcity"] is None
+        assert r["family_signals"] == {}
+        assert r["media_families"] == ["optical"]
+        assert r["medium_rarity"] == 10.0
+        assert 0 <= r["rarity_score"] <= 100
+
+    @pytest.mark.asyncio
+    async def test_issued_on_mediums_win_over_the_deprecated_formats_list(self) -> None:
+        """The canonical ISSUED_ON edges are authoritative; raw formats are a fallback."""
+        mock_driver = MagicMock()
+
+        pressing_data = [{"release_id": "1", "pressing_count": 1, "title": "R1", "artist_name": "A1", "year": 1970}]
+        media_data = [
+            {
+                "release_id": "1",
+                "mediums": [{"id": "grooved_lathe_cut", "family": "grooved_other"}],
+                "media_families": ["grooved_other"],
+                # Stale raw list that would otherwise score as a plain CD.
+                "formats": ["CD"],
+            }
+        ]
+
+        run_query = _fake_run_query(pressing=pressing_data, media=media_data)
+        with patch("api.queries.rarity_queries.run_query", side_effect=run_query):
+            results = await fetch_all_rarity_signals(mock_driver, None)
+
+        r = results[0]
+        assert r["medium_rarity"] == 98.0  # lathe cut, from the edge
+        assert r["format_rarity"] == 10.0  # CD, from the deprecated list
+        assert r["family_signals"] == {"grooved": {"pressing_scarcity": 100.0}}
 
     @pytest.mark.asyncio
     async def test_handles_zero_quality_signals(self) -> None:
@@ -729,7 +835,7 @@ class TestFetchAllRaritySignals:
 
         pressing_data = [{"release_id": "1", "pressing_count": 1, "title": "R1", "artist_name": "A1", "year": 1970}]
         label_data = [{"release_id": "1", "label_catalog_size": 5}]
-        format_data = [{"release_id": "1", "formats": ["LP"]}]
+        format_data = [{"release_id": "1", "formats": ["Vinyl", "LP"]}]
         temporal_data = [{"release_id": "1", "year": 1970, "latest_sibling_year": None}]
         degree_data = [{"release_id": "1", "degree": 2}]
         artist_degree_data = [{"release_id": "1", "artist_max_degree": 0}]
@@ -772,7 +878,7 @@ class TestFetchAllRaritySignals:
 
         pressing_data = [{"release_id": "1", "pressing_count": 1, "title": "R1", "artist_name": "A1", "year": 1970}]
         label_data = [{"release_id": "1", "label_catalog_size": 20}]
-        format_data = [{"release_id": "1", "formats": ["LP"]}]
+        format_data = [{"release_id": "1", "formats": ["Vinyl", "LP"]}]
         temporal_data = [{"release_id": "1", "year": 1970, "latest_sibling_year": None}]
         degree_data = [{"release_id": "1", "degree": 3}]
         artist_degree_data = [{"release_id": "1", "artist_max_degree": 500}]
@@ -806,7 +912,7 @@ class TestFetchAllRaritySignals:
 
         pressing_data = [{"release_id": "1", "pressing_count": 1, "title": "R1", "artist_name": "A1", "year": 1970}]
         label_data = [{"release_id": "1", "label_catalog_size": 20}]
-        format_data = [{"release_id": "1", "formats": ["LP"]}]
+        format_data = [{"release_id": "1", "formats": ["Vinyl", "LP"]}]
         temporal_data = [{"release_id": "1", "year": 1970, "latest_sibling_year": None}]
         degree_data = [{"release_id": "1", "degree": 3}]
         artist_degree_data = [{"release_id": "1", "artist_max_degree": 500}]
@@ -851,7 +957,7 @@ class TestFetchAllRaritySignals:
         with patch("api.queries.rarity_queries.run_query", side_effect=_recording):
             await fetch_all_rarity_signals(mock_driver, None)
 
-        pressing_cypher = next(c for c in sent if "pressing_count," in c)
+        pressing_cypher = next(c for c in sent if "AS pressing_count" in c)
         # Two independent OPTIONAL MATCH clauses, not one combined pattern that
         # conditions `m` on a sibling existing.
         assert "OPTIONAL MATCH (r)-[:DERIVED_FROM]->(m:Master)\n" in pressing_cypher
@@ -881,7 +987,7 @@ class TestFetchAllRaritySignals:
         # Post-fix pressing_query semantics for a sole-pressing-with-master release.
         pressing_data = [{"release_id": "1", "pressing_count": 1, "title": "R1", "artist_name": "A1", "year": 1970}]
         label_data = [{"release_id": "1", "label_catalog_size": 20}]
-        format_data = [{"release_id": "1", "formats": ["LP"]}]
+        format_data = [{"release_id": "1", "formats": ["Vinyl", "LP"]}]
         temporal_data = [{"release_id": "1", "year": 1970, "latest_sibling_year": None}]
         degree_data = [{"release_id": "1", "degree": 3}]
         artist_degree_data = [{"release_id": "1", "artist_max_degree": 500}]
@@ -1083,8 +1189,9 @@ class TestRarityChunking:
 
         assert id_batches
         assert all(len(batch) <= 2 for batch in id_batches)
-        # 3 pages x 8 signal queries
-        assert len(id_batches) == 24
+        # 3 pages x (8 core signal queries + the 1 the grooved extension declares)
+        assert len(id_batches) == 3 * (len(_CORE_QUERIES) + len(family_queries()))
+        assert len(id_batches) == 27
 
     @pytest.mark.asyncio
     async def test_hidden_gem_percentiles_span_pages(self) -> None:

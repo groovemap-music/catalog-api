@@ -1,0 +1,6 @@
+{
+  "binding_sha256": "5ec6d7e0317e39396b9b40effb4804e70242768b95499b922b161c6f300c1273",
+  "contract_sha256": "85ebbe7b94669f2abd38ca9c5c83b4019aa71b8aa3aa4b9d9fb7f78ba35095ef",
+  "producer_commit": "f0dae1037c809c6855863aebc35d0a7d21366482",
+  "producer_repository": "https://github.com/groovemap-music/musicbrainz-ingestion"
+}

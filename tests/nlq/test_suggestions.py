@@ -35,6 +35,14 @@ def test_suggestions_focus_length_cap() -> None:
     assert all(len(q) <= 256 for q in result)
 
 
+def test_suggestions_insights_default_includes_a_media_example() -> None:
+    """gm-catalog-api-be1.7 — the Ask pill's suggestion set includes a media-filter example."""
+    from api.nlq.suggestions import build_suggestions
+
+    result = build_suggestions(pane="insights", focus=None, focus_type=None)
+    assert any("cassette" in q.lower() for q in result)
+
+
 def test_suggestions_whitespace_only_focus_falls_back_to_default() -> None:
     """A focus that is only whitespace should fall back to default pane templates."""
     from api.nlq.suggestions import build_suggestions

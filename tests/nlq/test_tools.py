@@ -91,6 +91,60 @@ def test_action_tool_names_do_not_collide_with_data_tool_names() -> None:
     assert action_names.isdisjoint(data_names), f"Collision: {action_names & data_names}"
 
 
+def test_filter_dimensions_includes_media() -> None:
+    """_FILTER_DIMENSIONS must expose media as a ui_filter_graph dimension (gm-catalog-api-be1.7)."""
+    from api.nlq.tools import _FILTER_DIMENSIONS
+
+    assert "media" in _FILTER_DIMENSIONS
+    schemas = get_action_tool_schemas()
+    filter_graph = next(s for s in schemas if s["name"] == "ui_filter_graph")
+    assert "media" in filter_graph["input_schema"]["properties"]["by"]["enum"]
+
+
+def test_get_collection_gaps_schema_exposes_media_parameter() -> None:
+    """The get_collection_gaps tool schema must accept a media array of family/medium ids."""
+    schemas = get_authenticated_tool_schemas()
+    gaps_schema = next(s for s in schemas if s["name"] == "get_collection_gaps")
+    media_prop = gaps_schema["input_schema"]["properties"]["media"]
+    assert media_prop["type"] == "array"
+    assert media_prop["items"]["type"] == "string"
+    # Description should list valid families so the model can translate a
+    # spoken format ("cassette") into a taxonomy id.
+    assert "vinyl" in media_prop["description"]
+    assert "tape" in media_prop["description"]
+    # media is optional — entity_type/entity_id remain the only required fields.
+    assert gaps_schema["input_schema"]["required"] == ["entity_type", "entity_id"]
+
+
+def test_execute_action_filter_graph_by_media_recorded() -> None:
+    """gm-catalog-api-be1.7 regression — the bounce: a real ui_filter_graph(by='media', ...)
+    call must validate and land in the action recorder, not be swallowed by execute_action's
+    except block (FilterDimension previously excluded 'media')."""
+    runner = NLQToolRunner(MagicMock(), MagicMock(), MagicMock())
+    recorder: list[Any] = []
+
+    result = runner.execute_action("ui_filter_graph", {"by": "media", "value": "tape_cassette"}, recorder)
+
+    assert result == {"ok": True}
+    assert len(recorder) == 1
+    assert recorder[0].type == "filter_graph"
+    assert recorder[0].by == "media"
+    assert recorder[0].value == "tape_cassette"
+
+
+def test_execute_action_filter_graph_unknown_media_id_returns_readable_error() -> None:
+    """An id the model hallucinates for by='media' returns a readable tool error and is
+    never recorded (gm-catalog-api-be1.7)."""
+    runner = NLQToolRunner(MagicMock(), MagicMock(), MagicMock())
+    recorder: list[Any] = []
+
+    result = runner.execute_action("ui_filter_graph", {"by": "media", "value": "betamax_definitely_not_real"}, recorder)
+
+    assert "error" in result
+    assert "betamax_definitely_not_real" in result["error"]
+    assert recorder == []
+
+
 # ── Runner tests ──────────────────────────────────────────────────────────
 
 
@@ -414,6 +468,52 @@ async def test_execute_get_collection_gaps_unknown_type(runner: NLQToolRunner) -
     """Get collection gaps returns error for unknown entity type."""
     result = await runner.execute("get_collection_gaps", {"entity_type": "master", "entity_id": "m1"}, user_id="u1")
     assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_execute_get_collection_gaps_forwards_media_family(runner: NLQToolRunner) -> None:
+    """A family id in `media` should reach get_label_gaps as `families` (gm-catalog-api-be1.7)."""
+    fake_gaps = [{"id": "r1", "title": "Cassette Only"}]
+    with patch("api.queries.gap_queries.get_label_gaps", new_callable=AsyncMock, return_value=(fake_gaps, 1)) as mock_gaps:
+        result = await runner.execute(
+            "get_collection_gaps",
+            {"entity_type": "label", "entity_id": "l1", "media": ["tape"]},
+            user_id="u1",
+        )
+    assert result["gaps"] == fake_gaps
+    _, kwargs = mock_gaps.call_args
+    assert kwargs["families"] == ["tape"]
+    assert kwargs["mediums"] == []
+
+
+@pytest.mark.asyncio
+async def test_execute_get_collection_gaps_forwards_media_medium(runner: NLQToolRunner) -> None:
+    """A medium id in `media` should reach get_artist_gaps as `mediums` (gm-catalog-api-be1.7)."""
+    fake_gaps = [{"id": "r2", "title": "On CD"}]
+    with patch("api.queries.gap_queries.get_artist_gaps", new_callable=AsyncMock, return_value=(fake_gaps, 1)) as mock_gaps:
+        result = await runner.execute(
+            "get_collection_gaps",
+            {"entity_type": "artist", "entity_id": "a1", "media": ["optical_cd"]},
+            user_id="u1",
+        )
+    assert result["gaps"] == fake_gaps
+    _, kwargs = mock_gaps.call_args
+    assert kwargs["families"] == []
+    assert kwargs["mediums"] == ["optical_cd"]
+
+
+@pytest.mark.asyncio
+async def test_execute_get_collection_gaps_unknown_media_id_returns_tool_error(runner: NLQToolRunner) -> None:
+    """An invalid media id must not reach the graph query — it comes back as a readable error (gm-catalog-api-be1.7)."""
+    with patch("api.queries.gap_queries.get_label_gaps", new_callable=AsyncMock) as mock_gaps:
+        result = await runner.execute(
+            "get_collection_gaps",
+            {"entity_type": "label", "entity_id": "l1", "media": ["laserdisc_definitely_not_real"]},
+            user_id="u1",
+        )
+    assert "error" in result
+    assert "laserdisc_definitely_not_real" in result["error"]
+    mock_gaps.assert_not_awaited()
 
 
 @pytest.mark.asyncio

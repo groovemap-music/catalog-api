@@ -44,6 +44,33 @@ def test_seed_graph_entity_name_length_cap() -> None:
         parse_action({"type": "seed_graph", "entities": [{"name": "x" * 257, "entity_type": "artist"}]})
 
 
+def test_filter_graph_action_accepts_media_family() -> None:
+    """gm-catalog-api-be1.7 — by='media' with a family id (e.g. 'tape') validates."""
+    from api.nlq.actions import parse_action
+
+    action = parse_action({"type": "filter_graph", "by": "media", "value": "tape"})
+    assert action.by == "media"
+    assert action.value == "tape"
+
+
+def test_filter_graph_action_accepts_media_medium() -> None:
+    """gm-catalog-api-be1.7 — by='media' with a medium id (e.g. 'tape_cassette') validates."""
+    from api.nlq.actions import parse_action
+
+    action = parse_action({"type": "filter_graph", "by": "media", "value": "tape_cassette"})
+    assert action.by == "media"
+    assert action.value == "tape_cassette"
+
+
+def test_filter_graph_action_rejects_unknown_media_id() -> None:
+    """gm-catalog-api-be1.7 regression — the model bounce: by='media' with an id the
+    taxonomy does not know must fail validation, not pass through silently."""
+    from api.nlq.actions import parse_action
+
+    with pytest.raises(ValidationError):
+        parse_action({"type": "filter_graph", "by": "media", "value": "betamax_definitely_not_real"})
+
+
 def test_parse_action_list_drops_malformed() -> None:
     from api.nlq.actions import parse_action_list
 

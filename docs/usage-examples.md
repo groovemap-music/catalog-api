@@ -181,7 +181,7 @@ LIMIT 20;
 
 ```cypher
 MATCH (r:Release)-[:DERIVED_FROM]->(m:Master {title: "Dark Side of the Moon"})
-RETURN r.title, r.year, r.country, r.format
+RETURN r.title, r.year, r.country, r.formats
 ORDER BY r.year;
 ```
 
@@ -329,7 +329,7 @@ ORDER BY (data->>'year')::int;
 SELECT
     data->>'title' as title,
     data->>'country' as country,
-    data->'format' as format
+    data->'formats' as formats
 FROM releases
 WHERE (data->>'year')::int = 1969
 ORDER BY data->>'title'
@@ -458,13 +458,17 @@ ORDER BY data->>'title';
 
 #### Find releases with specific format
 
+`formats` holds the raw Discogs format name list (deprecated per ADR 0007 — new consumers
+should filter on the canonical `media` family/medium ids via `GET /api/search?media=vinyl` or
+a `GET /api/collection/gaps/*` endpoint's `media` parameter instead of matching raw names here).
+
 ```sql
 SELECT
     data->>'title' as title,
     data->>'year' as year,
-    data->'format' as format
+    data->'formats' as formats
 FROM releases
-WHERE data->'format' @> '["Vinyl"]'
+WHERE data->'formats' @> '["Vinyl"]'
 AND (data->>'year')::int >= 1960
 ORDER BY (data->>'year')::int
 LIMIT 20;
@@ -583,6 +587,43 @@ curl "http://localhost:8004/api/user/recommendations?limit=20" \
   -H "Authorization: Bearer <your-jwt-token>"
 ```
 
+### Collection Gap Analysis (requires JWT authentication)
+
+"Complete My Collection": which releases on a label, by an artist, or of a master you don't
+already own.
+
+```bash
+# Canonical media families/mediums present in your own collection (drives the media
+# picker; also the deprecated GET /api/collection/formats, raw format names)
+curl "http://localhost:8004/api/collection/media" \
+  -H "Authorization: Bearer <your-jwt-token>"
+
+# Missing releases on a label, narrowed to canonical media family or medium ids (ADR 0007)
+curl "http://localhost:8004/api/collection/gaps/label/12345?media=vinyl&media=tape_cassette" \
+  -H "Authorization: Bearer <your-jwt-token>"
+
+# Missing editions of a master, still accepting the deprecated formats parameter (raw
+# Discogs format names, mapped onto the same canonical media ids)
+curl "http://localhost:8004/api/collection/gaps/master/67890?formats=Vinyl" \
+  -H "Authorization: Bearer <your-jwt-token>"
+```
+
+### Natural Language Query (NLQ)
+
+```bash
+# Ask a question in plain English; the model can narrow a graph filter or the
+# get_collection_gaps tool to a canonical media family or medium id
+curl -X POST "http://localhost:8004/api/nlq/query" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Which labels released the most on cassette?"}'
+
+# Personalized queries (media-aware collection gap tool) with an authenticated session
+curl -X POST "http://localhost:8004/api/nlq/query" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <your-jwt-token>" \
+  -d '{"query": "What am I missing from Warp Records on CD?"}'
+```
+
 ### Graph Snapshots
 
 Snapshots are persisted in Redis with a configurable TTL (default 28 days) and survive service restarts.
@@ -613,6 +654,10 @@ curl "http://localhost:8004/api/search?q=blue&types=release&genres=Jazz&year_min
 
 # Search across multiple entity types with pagination
 curl "http://localhost:8004/api/search?q=warp&types=artist,label&limit=10&offset=0"
+
+# Search releases narrowed to a canonical media family or medium id (ADR 0007); the
+# response's facets.media counts every matching release by family id regardless of filter
+curl "http://localhost:8004/api/search?q=blue&types=release&media=vinyl&media=optical_cd&limit=20"
 ```
 
 ### Path Finder
@@ -628,7 +673,7 @@ curl "http://localhost:8004/api/path?from_name=Kraftwerk&from_type=artist&to_nam
 curl "http://localhost:8004/api/path?from_name=Techno&from_type=genre&to_name=Warp%20Records&to_type=label"
 ```
 
-### Vinyl Archaeology (Time Travel)
+### Time travel
 
 ```bash
 # Get the year range of all releases in the database
@@ -666,10 +711,24 @@ curl "http://localhost:8004/api/insights/data-completeness"
 curl "http://localhost:8004/api/insights/status"
 ```
 
+### Release Rarity Scoring
+
+The score is media-neutral at its core, with per-family extensions (e.g. pressing scarcity
+for grooved media). See [`api/README.md`](../api/README.md#release-rarity-scoring) for the
+full signal breakdown, weights, and `media_families`/`family_signals` response fields.
+
+```bash
+# Rarity score and breakdown for a specific release
+curl "http://localhost:8004/api/rarity/12345678"
+
+# Top rarest releases overall
+curl "http://localhost:8004/api/rarity/leaderboard?limit=20"
+```
+
 ### Label DNA (Fingerprint and Compare)
 
 ```bash
-# Get the full DNA fingerprint for a label (genres, styles, decades, formats)
+# Get the full DNA fingerprint for a label (genres, styles, decades, media)
 curl "http://localhost:8004/api/label/12345/dna"
 
 # Find labels with a similar DNA fingerprint
@@ -798,4 +857,4 @@ AND (data->>'year')::int = 1959;
 
 ______________________________________________________________________
 
-**Last Updated**: 2026-03-14
+**Last Updated**: 2026-09-04

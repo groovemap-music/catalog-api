@@ -7,7 +7,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
 from api.limiter import limiter
-from api.queries.search_queries import ALL_TYPES, execute_search
+from api.queries.search_queries import ALL_TYPES, execute_search, split_media_filter
 
 
 logger = structlog.get_logger(__name__)
@@ -38,6 +38,10 @@ async def search(
         description="Comma-separated entity types to search",
     ),
     genres: str = Query(default="", description="Comma-separated genre filter"),
+    media: list[str] = Query(
+        default=[],
+        description="Repeated media family or medium id (ADR 0007) to filter release results",
+    ),
     year_min: int | None = Query(default=None, ge=1000, le=9999, description="Minimum release year"),
     year_max: int | None = Query(default=None, ge=1000, le=9999, description="Maximum release year"),
     limit: int = Query(default=20, ge=1, le=100, description="Results per page"),
@@ -66,7 +70,24 @@ async def search(
     # Parse genre filter
     genre_list = [g.strip() for g in genres.split(",") if g.strip()] if genres else []
 
-    logger.debug("🔍 Search request", q=q, types=requested_types, genres=genre_list, year_min=year_min, year_max=year_max)
+    # Parse and validate media filter (ADR 0007 family/medium ids)
+    media_list = [m.strip() for m in media if m and m.strip()]
+    media_families, media_mediums, unknown_media = split_media_filter(media_list)
+    if unknown_media:
+        return JSONResponse(
+            content={"error": f"Invalid media id(s): {', '.join(unknown_media)}"},
+            status_code=400,
+        )
+
+    logger.debug(
+        "🔍 Search request",
+        q=q,
+        types=requested_types,
+        genres=genre_list,
+        media=media_list,
+        year_min=year_min,
+        year_max=year_max,
+    )
 
     result = await execute_search(
         pool=_pool,
@@ -78,6 +99,8 @@ async def search(
         year_max=year_max,
         limit=limit,
         offset=offset,
+        media_families=media_families,
+        media_mediums=media_mediums,
     )
 
     return JSONResponse(content=result)

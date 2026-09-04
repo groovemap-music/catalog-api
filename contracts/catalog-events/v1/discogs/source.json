@@ -1,0 +1,6 @@
+{
+  "binding_sha256": "cfcd98aa02612889cb3e9c8eab5eb495b58ed7091dd10bca02fac0629c038e7f",
+  "contract_sha256": "d530ff04ee33224ed044db8d52c3870d97e5a69d7aa991eab41d8d8b579f5dd7",
+  "producer_commit": "c1bf1b4ada3ee88e1e6768a0be7fa6ed1b921831",
+  "producer_repository": "https://github.com/groovemap-music/discogs-ingestion"
+}

@@ -5,7 +5,9 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal
 
 import structlog
-from pydantic import BaseModel, Field, TypeAdapter, ValidationError
+from common.media import family_ids as _media_family_ids
+from common.media import medium_ids as _media_medium_ids
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_validator
 
 
 logger = structlog.get_logger(__name__)
@@ -14,7 +16,7 @@ _MAX_FIELD_LEN = 256
 
 EntityType = Literal["artist", "label", "genre", "style", "release"]
 PaneName = Literal["explore", "trends", "insights", "genres", "credits"]
-FilterDimension = Literal["year", "genre", "label"]
+FilterDimension = Literal["year", "genre", "label", "media"]
 
 
 class _SeedEntity(BaseModel):
@@ -43,6 +45,22 @@ class FilterGraphAction(BaseModel):
     type: Literal["filter_graph"] = "filter_graph"
     by: FilterDimension
     value: Annotated[str | int | tuple[int, int], Field()]
+
+    @model_validator(mode="after")
+    def _validate_media_value(self) -> FilterGraphAction:
+        """When ``by == "media"``, ``value`` must be a known family or medium id.
+
+        Unlike the other filter dimensions (free-form year/genre/label text),
+        a media filter drives the same ADR 0007 taxonomy the data tools
+        validate against, so a hallucinated id is caught here too rather
+        than silently reaching the UI as an unfilterable value.
+        """
+        if self.by == "media":
+            known = frozenset(_media_family_ids()) | frozenset(_media_medium_ids())
+            if not isinstance(self.value, str) or self.value not in known:
+                msg = f"unknown media id for filter_graph: {self.value!r}. Expected a canonical media family or medium id (ADR 0007 taxonomy)."
+                raise ValueError(msg)
+        return self
 
 
 class FindPathAction(BaseModel):

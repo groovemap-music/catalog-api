@@ -490,6 +490,285 @@ class TestSearchQueryModuleHelpers:
         assert "year" not in result["metadata"]
 
 
+class TestMediaFacetFilter:
+    """Media (family/medium) filter -- ADR 0007 / gm-catalog-api-be1.5."""
+
+    def test_split_media_filter_recognises_family_id(self) -> None:
+        from api.queries.search_queries import split_media_filter
+
+        families, mediums, unknown = split_media_filter(["vinyl"])
+        assert families == ["vinyl"]
+        assert mediums == []
+        assert unknown == []
+
+    def test_split_media_filter_recognises_medium_id(self) -> None:
+        from api.queries.search_queries import split_media_filter
+
+        families, mediums, unknown = split_media_filter(["vinyl_12"])
+        assert families == []
+        assert mediums == ["vinyl_12"]
+        assert unknown == []
+
+    def test_split_media_filter_mixed_family_and_medium(self) -> None:
+        from api.queries.search_queries import split_media_filter
+
+        families, mediums, unknown = split_media_filter(["vinyl", "optical_cd", "tape"])
+        assert families == ["vinyl", "tape"]
+        assert mediums == ["optical_cd"]
+        assert unknown == []
+
+    def test_split_media_filter_flags_unknown_ids(self) -> None:
+        from api.queries.search_queries import split_media_filter
+
+        families, mediums, unknown = split_media_filter(["vinyl", "not-a-real-id", "also-bogus"])
+        assert families == ["vinyl"]
+        assert mediums == []
+        assert unknown == ["not-a-real-id", "also-bogus"]
+
+    def test_split_media_filter_empty(self) -> None:
+        from api.queries.search_queries import split_media_filter
+
+        assert split_media_filter([]) == ([], [], [])
+
+    def test_media_filter_clause_empty(self) -> None:
+        from api.queries.search_queries import _media_filter_clause
+
+        clause, params = _media_filter_clause([], [])
+        assert clause.as_string(None) == "TRUE"
+        assert params == []
+
+    def test_media_filter_clause_family_only_uses_indexed_operator(self) -> None:
+        from api.queries.search_queries import _media_filter_clause
+
+        clause, params = _media_filter_clause(["vinyl", "tape"], [])
+        rendered = clause.as_string(None)
+        assert "?|" in rendered
+        assert "families" in rendered
+        assert "jsonb_path_exists" not in rendered
+        assert params == [["vinyl", "tape"]]
+
+    def test_media_filter_clause_medium_only_uses_jsonb_path_exists(self) -> None:
+        from api.queries.search_queries import _media_filter_clause
+
+        clause, params = _media_filter_clause([], ["vinyl_12"])
+        rendered = clause.as_string(None)
+        assert "jsonb_path_exists" in rendered
+        assert "$.items[*]" in rendered
+        assert params == ["vinyl_12"]
+
+    def test_media_filter_clause_multiple_mediums_or_combined(self) -> None:
+        from api.queries.search_queries import _media_filter_clause
+
+        clause, params = _media_filter_clause([], ["vinyl_12", "optical_cd"])
+        rendered = clause.as_string(None)
+        assert rendered.count("jsonb_path_exists") == 2
+        assert " OR " in rendered
+        assert params == ["vinyl_12", "optical_cd"]
+
+    def test_media_filter_clause_family_and_medium_or_combined(self) -> None:
+        from api.queries.search_queries import _media_filter_clause
+
+        clause, params = _media_filter_clause(["vinyl"], ["optical_cd"])
+        rendered = clause.as_string(None)
+        assert "?|" in rendered
+        assert "jsonb_path_exists" in rendered
+        assert " OR " in rendered
+        assert params == [["vinyl"], "optical_cd"]
+
+    def test_media_filter_clause_null_passthrough_for_non_release_types(self) -> None:
+        """Entity types without a media column pass the filter (NULL IS NULL)."""
+        from api.queries.search_queries import _media_filter_clause
+
+        clause, _params = _media_filter_clause(["vinyl"], [], column=None)
+        rendered = clause.as_string(None)
+        assert "IS NULL OR" in rendered
+
+    def test_entity_select_pushes_media_family_filter_before_limit(self) -> None:
+        from api.queries.search_queries import _entity_select
+
+        frag, params = _entity_select(
+            "release", "title", has_year=False, has_genres=False, per_table_limit=40, has_media=True, media_families=["vinyl"]
+        )
+        rendered = frag.as_string(None)
+        where_idx = rendered.index("WHERE")
+        limit_idx = rendered.index("ORDER BY rank DESC, data_id LIMIT")
+        assert where_idx < limit_idx
+        assert "?|" in rendered[where_idx:limit_idx]
+        assert params == [["vinyl"]]
+
+    def test_entity_select_ignores_media_when_has_media_false(self) -> None:
+        """Non-release entity types (e.g. artist) have no media column -- the
+        filter must not be applied even if media ids are passed in.
+        """
+        from api.queries.search_queries import _entity_select
+
+        frag, params = _entity_select("artist", "name", has_year=False, has_genres=False, per_table_limit=40, media_families=["vinyl"])
+        rendered = frag.as_string(None)
+        assert "NULL::jsonb" in rendered
+        assert params == [["vinyl"]]  # param still consumed (NULL IS NULL OR ...)
+
+    def test_build_union_combines_media_and_genre_filters(self) -> None:
+        from api.queries.search_queries import _build_union
+
+        frag, params = _build_union(["release"], per_table_limit=40, genres=["Rock"], media_families=["vinyl"])
+        rendered = frag.as_string(None)
+        assert "?| %s::text[]" in rendered
+        assert params == [["Rock"], ["vinyl"]]
+
+    @pytest.mark.asyncio
+    async def test_run_results_applies_media_family_filter(self) -> None:
+        from api.queries.search_queries import _run_results
+
+        mock_pool = TestSearchQueryAsyncFunctions._db_mocks()
+        with patch("api.queries.search_queries.execute_sql", new_callable=AsyncMock) as mock_exec:
+            await _run_results(mock_pool, "love", ["release"], [], None, None, 10, 0, ["vinyl"], [])
+
+        rendered = mock_exec.call_args[0][1].as_string(None)
+        assert "families" in rendered
+        assert "?|" in rendered
+
+    @pytest.mark.asyncio
+    async def test_run_results_applies_media_and_genre_filter_together(self) -> None:
+        """groovemap-be1.5: media and genre filters must combine (AND) on release results."""
+        from api.queries.search_queries import _run_results
+
+        mock_pool = TestSearchQueryAsyncFunctions._db_mocks()
+        with patch("api.queries.search_queries.execute_sql", new_callable=AsyncMock) as mock_exec:
+            await _run_results(mock_pool, "love", ["release"], ["Rock"], None, None, 10, 0, ["vinyl"], [])
+
+        executed_params = mock_exec.call_args[0][2]
+        rendered = mock_exec.call_args[0][1].as_string(None)
+        where_idx = rendered.index("WHERE")
+        limit_idx = rendered.index("ORDER BY rank DESC, data_id LIMIT")
+        subquery = rendered[where_idx:limit_idx]
+        assert "?| %s::text[]" in subquery  # genre
+        assert "families" in subquery  # media family
+        assert rendered.count("%s") == len(executed_params)
+
+    @pytest.mark.asyncio
+    async def test_execute_search_applies_media_filter_and_returns_media_facet(self) -> None:
+        """A media filter is accepted end-to-end and the response carries a
+        (possibly empty, since the DB is mocked) facets.media mapping.
+        """
+        from api.queries.search_queries import execute_search
+
+        mock_pool = TestSearchQueryAsyncFunctions._db_mocks()
+
+        with patch("api.queries.search_queries.execute_sql", new_callable=AsyncMock):
+            result = await execute_search(mock_pool, None, "blue", ["release"], [], None, None, 20, 0, media_families=["vinyl"], media_mediums=[])
+
+        assert "media" in result["facets"]
+        assert result["facets"]["media"] == {}
+
+    def test_cache_key_differs_on_media_filter(self) -> None:
+        from api.queries.search_queries import cache_key
+
+        k1 = cache_key("blue", ["release"], [], None, None, 20, 0, media=["vinyl"])
+        k2 = cache_key("blue", ["release"], [], None, None, 20, 0, media=["optical_cd"])
+        k3 = cache_key("blue", ["release"], [], None, None, 20, 0)
+        assert len({k1, k2, k3}) == 3
+
+    def test_cache_key_media_order_independent(self) -> None:
+        from api.queries.search_queries import cache_key
+
+        k1 = cache_key("blue", ["release"], [], None, None, 20, 0, media=["vinyl", "tape"])
+        k2 = cache_key("blue", ["release"], [], None, None, 20, 0, media=["tape", "vinyl"])
+        assert k1 == k2
+
+
+class TestSearchMediaEndpoint:
+    """Router-level behaviour for GET /api/search?media=..."""
+
+    def test_media_filter_forwarded(self, test_client: TestClient) -> None:
+        captured: dict[str, Any] = {}
+
+        async def _capture(**kwargs: Any) -> dict[str, Any]:
+            captured.update(kwargs)
+            return {
+                "query": "blue",
+                "total": 0,
+                "facets": {"type": {}, "genre": {}, "decade": {}, "media": {}},
+                "results": [],
+                "pagination": {"limit": 20, "offset": 0, "has_more": False},
+            }
+
+        with patch("api.routers.search.execute_search", side_effect=_capture):
+            response = test_client.get("/api/search?q=blue&media=vinyl&media=optical_cd")
+
+        assert response.status_code == 200
+        assert captured["media_families"] == ["vinyl"]
+        assert captured["media_mediums"] == ["optical_cd"]
+
+    def test_media_and_genre_filters_combine(self, test_client: TestClient) -> None:
+        captured: dict[str, Any] = {}
+
+        async def _capture(**kwargs: Any) -> dict[str, Any]:
+            captured.update(kwargs)
+            return {
+                "query": "blue",
+                "total": 0,
+                "facets": {"type": {}, "genre": {}, "decade": {}, "media": {}},
+                "results": [],
+                "pagination": {"limit": 20, "offset": 0, "has_more": False},
+            }
+
+        with patch("api.routers.search.execute_search", side_effect=_capture):
+            response = test_client.get("/api/search?q=blue&media=vinyl&genres=Jazz")
+
+        assert response.status_code == 200
+        assert captured["media_families"] == ["vinyl"]
+        assert captured["genres"] == ["Jazz"]
+
+    def test_unknown_media_id_returns_400(self, test_client: TestClient) -> None:
+        with patch("api.routers.search.execute_search", new_callable=AsyncMock):
+            response = test_client.get("/api/search?q=blue&media=not-a-real-id")
+
+        assert response.status_code == 400
+        assert "not-a-real-id" in response.json()["error"]
+
+    def test_unknown_media_id_among_valid_ones_lists_only_unknown(self, test_client: TestClient) -> None:
+        with patch("api.routers.search.execute_search", new_callable=AsyncMock):
+            response = test_client.get("/api/search?q=blue&media=vinyl&media=bogus")
+
+        assert response.status_code == 400
+        error = response.json()["error"]
+        assert "bogus" in error
+        assert "vinyl" not in error
+
+    def test_no_media_filter_defaults_to_empty(self, test_client: TestClient) -> None:
+        captured: dict[str, Any] = {}
+
+        async def _capture(**kwargs: Any) -> dict[str, Any]:
+            captured.update(kwargs)
+            return {
+                "query": "blue",
+                "total": 0,
+                "facets": {"type": {}, "genre": {}, "decade": {}, "media": {}},
+                "results": [],
+                "pagination": {"limit": 20, "offset": 0, "has_more": False},
+            }
+
+        with patch("api.routers.search.execute_search", side_effect=_capture):
+            test_client.get("/api/search?q=blue")
+
+        assert captured["media_families"] == []
+        assert captured["media_mediums"] == []
+
+    def test_response_includes_media_facet(self, test_client: TestClient) -> None:
+        expected = {
+            "query": "blue",
+            "total": 1,
+            "facets": {"type": {}, "genre": {}, "decade": {}, "media": {"vinyl": 1}},
+            "results": [],
+            "pagination": {"limit": 20, "offset": 0, "has_more": False},
+        }
+        with patch("api.routers.search.execute_search", return_value=expected):
+            response = test_client.get("/api/search?q=blue")
+
+        data = response.json()
+        assert data["facets"]["media"] == {"vinyl": 1}
+
+
 class TestSearchQueryAsyncFunctions:
     """Tests for async DB query functions in search_queries."""
 
@@ -749,6 +1028,27 @@ class TestSearchQueryAsyncFunctions:
             result = await execute_search(mock_pool, mock_redis, "blue", ["artist"], [], None, None, 20, 0)
 
         assert result["query"] == "blue"
+
+    @pytest.mark.asyncio
+    async def test_run_media_facets(self) -> None:
+        from api.queries.search_queries import _run_media_facets
+
+        mock_cursor = AsyncMock()
+        mock_cursor.fetchall = AsyncMock(return_value=[{"family": "vinyl", "cnt": 40}, {"family": "optical", "cnt": 12}])
+        mock_cursor.__aenter__ = AsyncMock(return_value=mock_cursor)
+        mock_cursor.__aexit__ = AsyncMock(return_value=False)
+
+        mock_conn = AsyncMock()
+        mock_conn.cursor = MagicMock(return_value=mock_cursor)
+        mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_conn.__aexit__ = AsyncMock(return_value=False)
+
+        mock_pool = MagicMock()
+        mock_pool.connection = MagicMock(return_value=mock_conn)
+
+        with patch("api.queries.search_queries.execute_sql", new_callable=AsyncMock):
+            result = await _run_media_facets(mock_pool, "Hendrix")
+        assert result == {"vinyl": 40, "optical": 12}
 
     @pytest.mark.asyncio
     async def test_run_results_final_order_has_unique_tiebreaker(self) -> None:

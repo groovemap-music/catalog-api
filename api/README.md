@@ -93,7 +93,10 @@ The API implements Discogs OAuth 1.0a OOB (out-of-band) flow:
 1. **Complete**: `POST /api/oauth/verify/discogs` — exchanges the verifier for a permanent access token, which is stored in the `oauth_tokens` table.
 
 After the flow, the API uses these tokens to synchronize the user's Discogs collection and
-wantlist directly.
+wantlist directly. Both sync paths compute the ADR 0007 canonical `media` block from the raw
+Discogs API format objects (via `common.media.map_discogs_formats`) and store it in the
+`media` JSONB column on `user_collections` / `user_wantlists`, alongside the existing
+(deprecated) `formats` / `format` columns, which are unchanged.
 
 ## Operator Setup
 
@@ -137,6 +140,29 @@ If a user attempts to start the Discogs OAuth flow before credentials are config
   "detail": "Discogs app credentials not configured. Ask an admin to run discogs-setup on the API container."
 }
 ```
+
+### Backfilling `media` on Existing Sync Data
+
+Rows synced before the `media` column existed have `media IS NULL`. The `catalog-media-backfill`
+CLI is a one-shot tool, included in the API container, that fills them in:
+
+```bash
+# Backfill both user_collections and user_wantlists
+docker exec <api-container> catalog-media-backfill
+
+# Only one table, or a smaller/larger batch size
+docker exec <api-container> catalog-media-backfill --collection-only
+docker exec <api-container> catalog-media-backfill --wantlist-only
+docker exec <api-container> catalog-media-backfill --batch-size 200
+```
+
+It reads a batch of rows with `media IS NULL`, computes the media block, and writes the batch
+back, repeating until none remain. `user_collections` rows are mapped from the raw Discogs API
+`formats` column via `map_discogs_formats`; `user_wantlists` rows only ever kept the first
+format's name (the deprecated `format` column), so they're mapped via the best-effort
+`legacy_format_names_to_media` helper instead. Because only `media IS NULL` rows are ever
+selected, the command is idempotent — safe to re-run, and safe to run alongside new syncs
+(which always write `media` themselves).
 
 ## API Endpoints
 
@@ -227,12 +253,21 @@ Manage third-party app tokens for the authenticated user. The plaintext token is
 
 "Complete My Collection" endpoints that find releases the user does not own.
 
-| Method | Path                                      | Auth Required | Description                                |
-| ------ | ----------------------------------------- | ------------- | ------------------------------------------ |
-| GET    | `/api/collection/formats`                 | Yes           | Distinct format names in user's collection |
-| GET    | `/api/collection/gaps/label/{label_id}`   | Yes           | Missing releases on a label                |
-| GET    | `/api/collection/gaps/artist/{artist_id}` | Yes           | Missing releases by an artist              |
-| GET    | `/api/collection/gaps/master/{master_id}` | Yes           | Missing pressings of a master release      |
+| Method | Path                                      | Auth Required | Description                                          |
+| ------ | ----------------------------------------- | ------------- | ----------------------------------------------------- |
+| GET    | `/api/collection/formats`                 | Yes           | Deprecated: distinct raw format names in collection  |
+| GET    | `/api/collection/media`                   | Yes           | Canonical media families/mediums in user's collection |
+| GET    | `/api/collection/gaps/label/{label_id}`   | Yes           | Missing releases on a label                          |
+| GET    | `/api/collection/gaps/artist/{artist_id}` | Yes           | Missing releases by an artist                        |
+| GET    | `/api/collection/gaps/master/{master_id}` | Yes           | Missing editions of a master release                 |
+
+**Media filter (ADR 0007):** each gap endpoint accepts a repeatable `media` query
+parameter of canonical family or medium ids (see `GET /api/collection/media` for the
+ids present in the user's own collection), validated against the taxonomy — an
+unknown id returns `400`. The deprecated `formats` parameter (raw Discogs format
+names) is still accepted and mapped onto the same canonical ids through the shared
+`legacy_format_names_to_media` helper; both filters combine, and the response's
+`filters` object echoes back whatever was requested under both `media` and `formats`.
 
 ### Snapshots
 
@@ -245,7 +280,7 @@ Save and restore graph exploration states as shareable URLs.
 
 ### Unified Search
 
-Full-text search across all entity types using PostgreSQL, with facet counts and result highlighting. Results are cached in Redis for 5 minutes.
+Full-text search across all entity types using PostgreSQL, with facet counts and result highlighting. Results are cached in Redis for 5 minutes. The response's `facets` object carries `type`, `genre`, `decade`, and `media` — each a `{value: count}` mapping (`media` keyed by ADR 0007 family id), counted from matching releases.
 
 | Method | Path          | Auth Required | Rate Limit | Description                                   |
 | ------ | ------------- | ------------- | ---------- | --------------------------------------------- |
@@ -256,6 +291,7 @@ Full-text search across all entity types using PostgreSQL, with facet counts and
 - `q` (required) — Search query (minimum 3 characters)
 - `types` — Comma-separated entity types to search (default: `artist,label,master,release`)
 - `genres` — Comma-separated genre filter
+- `media` — Repeated media family or medium id to filter release results (e.g. `?media=vinyl&media=optical_cd`). Ids come from the ADR 0007 canonical media taxonomy vendored in `common.media` (`family_ids()` / `medium_ids()`); an unrecognised id returns `400` listing the unknown id(s). Family and medium ids are OR-combined with each other and AND-combined with `genres`/`year_min`/`year_max`. Only release results carry media — the filter is a no-op for artist/label/master results.
 - `year_min` — Minimum release year (1000–9999)
 - `year_max` — Maximum release year (1000–9999)
 - `limit` — Results per page (1–100, default: 20)
@@ -345,7 +381,7 @@ Aggregate node counts across the knowledge graph.
 | ------ | ------------------ | ------------- | ------------------------------------------------------------------------ |
 | GET    | `/api/graph/stats` | No            | Total entity counts (artists, labels, releases, masters, genres, styles) |
 
-### Vinyl Archaeology
+### Time travel
 
 Time-travel through the knowledge graph with year-range and genre-emergence queries.
 
@@ -385,9 +421,11 @@ Natural language query interface for the knowledge graph. Translates plain Engli
 | GET    | `/api/nlq/status`       | No            | —          | Check NLQ service availability                |
 | POST   | `/api/nlq/query`        | Optional      | 10/min     | Execute a natural language query (supports SSE streaming; personalized when a Bearer token is supplied) |
 
+**Media as a filter dimension.** Per [ADR 0007](https://github.com/groovemap-music/design/blob/main/docs/adr/0007-canonical-media-taxonomy.md), the model can narrow a graph filter (`ui_filter_graph` with `by: "media"`) or the `get_collection_gaps` tool to a canonical media family or medium id — e.g. "cassette-only labels" or "what am I missing on CD". The system prompt lists the valid family ids and explains how a spoken format ("cassette", "CD") maps to a medium id (`tape_cassette`, `optical_cd`) or its family (`tape`, `optical`); the `get_collection_gaps` tool's `media` parameter is validated against the same taxonomy as the REST gap endpoints (`api/queries/media_filters.py`), and an unrecognised id comes back as a tool-level error the model can read and retry. The Ask pill's suggestion set includes one media example ("Which labels released the most on cassette?").
+
 ### Release Rarity Scoring
 
-Rarity analysis for releases based on market scarcity, pressing details, and collector demand.
+Rarity analysis for releases based on market scarcity, media, and collector demand.
 
 | Method | Path                             | Auth Required | Rate Limit | Description                            |
 | ------ | -------------------------------- | ------------- | ---------- | --------------------------------------- |
@@ -397,15 +435,54 @@ Rarity analysis for releases based on market scarcity, pressing details, and col
 | GET    | `/api/rarity/label/{label_id}`   | No            | 30/min     | Rarity scores for a label's releases   |
 | GET    | `/api/rarity/{release_id}`       | No            | 30/min     | Rarity score for a specific release    |
 
+#### Media-neutral core and per-family extensions
+
+Per [ADR 0007](https://github.com/groovemap-music/design/blob/main/docs/adr/0007-canonical-media-taxonomy.md), scoring is split into a core that reasons about every medium the same way, plus extension modules keyed by canonical media family. The code lives in `api/rarity/`; `api/queries/rarity_queries.py` owns only the graph and PostgreSQL access around it.
+
+**Core signals** (`api/rarity/core.py`) apply to every release:
+
+| Signal                  | Weight | Meaning                                                        |
+| ----------------------- | ------ | -------------------------------------------------------------- |
+| `label_catalog`         | 0.10   | Label catalog size; a smaller catalog is rarer                 |
+| `medium_rarity`         | 0.10   | The rarest canonical medium the release was issued on          |
+| `temporal_scarcity`     | 0.20   | Age, discounted when a recent reissue exists                   |
+| `graph_isolation`       | 0.15   | Graph degree; fewer connections is rarer                       |
+| `collection_prevalence` | 0.20   | Inverse community ownership, with a want-over-have bonus       |
+
+**Family extensions** (`api/rarity/families/`) contribute only where their media justify it. Today there is one:
+
+| Module    | Families                          | Signal              | Weight |
+| --------- | --------------------------------- | ------------------- | ------ |
+| `grooved` | `vinyl`, `shellac`, `grooved_other` | `pressing_scarcity` | 0.25   |
+
+Pressing scarcity counts sibling pressings of a master, which is a property of a physical grooved pressing rather than of a release. A CD, a download card, or a VHS tape has no pressings to count, so no such signal is produced for one. This is the seam a future vinyl-specific service would own: pressing plant, matrix and runout, lacquer and stamper lineage, and colour evidence all belong in this module when they arrive.
+
+The core weights deliberately sum to 0.75, not 1.0. `compose` renormalises over the signals a release actually has, so both a lone CD and a lone LP score on a full 0-100 scale and the tier thresholds mean the same thing for both. A grooved release scores under weights identical to the pre-split table.
+
+**Medium rarity** is a table keyed by canonical medium id (`MEDIUM_RARITY_SCORES`), with a documented default per family (`FAMILY_DEFAULT_MEDIUM_RARITY`) for a medium a later taxonomy version adds. It reads the release's media from `(:Release)-[:ISSUED_ON]->(:Medium)` edges, falling back to the `media_families` node property and then to the deprecated raw `formats` list through the shared mapper.
+
+**Deprecated for one minor version:** `format_rarity`, which keyed on raw Discogs format names and so mixed media with descriptors. It is still computed and still appears in the breakdown, with weight `0.0`, and no longer moves the score.
+
+#### Adding a family module
+
+1. Write `api/rarity/families/<family>.py` with a class satisfying the `FamilySignals` protocol: `module_id`, `weights`, `queries`, `applies_to(families)`, and `signals(release_ctx)`.
+2. Choose absolute weights on the same scale as the core's. There is no total to keep balanced; they are renormalised at compose time.
+3. Declare any Cypher the core does not already fetch. Each query takes an `$ids` page and returns a `release_id` column, per the chunking contract in `api/queries/rarity_queries.py`. The fact name keys the row into `ReleaseContext.facts`.
+4. Register it in `api/rarity/families/__init__.py` against the taxonomy family ids it serves.
+
+Nothing in the core changes. The orchestrator discovers the module's queries, runs them per page, and folds its signals into the composite.
+
+**Breakdown response.** `GET /api/rarity/{release_id}` returns `media_families` (the canonical families the release covers) and `family_signals` (which modules contributed and what they scored) alongside `breakdown`. Each `breakdown` entry's `weight` is the effective, renormalised weight for that release.
+
 ### Label DNA
 
-Fingerprint and compare record labels based on their genre, style, format, and decade profiles. Rate limited to 30 requests/minute.
+Fingerprint and compare record labels based on their genre, style, media, and decade profiles. Rate limited to 30 requests/minute.
 
 | Method | Path                            | Auth Required | Rate Limit | Description                                    |
 | ------ | ------------------------------- | ------------- | ---------- | ---------------------------------------------- |
 | GET    | `/api/label/{label_id}/dna`     | No            | 30/min     | Full DNA fingerprint for a label               |
 | GET    | `/api/label/{label_id}/similar` | No            | 30/min     | Find labels with closest DNA fingerprint       |
-| GET    | `/api/label/dna/compare`        | No            | 30/min     | Side-by-side DNA comparison of multiple labels |
+| GET    | `/api/label/dna/compare`        | No            | 30/min     | Side-by-side DNA comparison of multiple labels (family-level media profiles) |
 
 **Query parameters for `/api/label/{label_id}/similar`:**
 
@@ -414,6 +491,19 @@ Fingerprint and compare record labels based on their genre, style, format, and d
 **Query parameters for `/api/label/dna/compare`:**
 
 - `ids` (required) — Comma-separated label IDs (2–5 labels)
+
+**Media profile (`media`):** each DNA fingerprint carries a `media` list, grouped by canonical
+media family (`vinyl`, `shellac`, `grooved_other`, `tape`, `optical`, `digital`, `video`,
+`other`) with per-medium detail nested inside — e.g. a `vinyl` family entry lists its
+`vinyl_12` and `vinyl_7` mediums separately, and a `tape` family entry lists its
+`tape_cassette` medium. A family's `percentage` is its share of the label's total media-tagged releases; a medium's
+`percentage` is its share within its own family. Counts come from `ISSUED_ON` edges to `Medium`
+nodes and count each `(release, medium)` once even when both the Discogs and MusicBrainz
+enrichers have asserted an edge to the same medium. A label whose releases predate the media
+taxonomy cutover (no `ISSUED_ON` edges yet) falls back to the `Release.media_families` property,
+which yields family-level counts only — `mediums` is empty for those families. The deprecated
+`formats` list (raw Discogs format names, unweighted by family) is kept for one minor version;
+new consumers should read `media` instead.
 
 ### Taste Fingerprint
 
@@ -570,6 +660,22 @@ The API service uses the following tables. Their DDL and initialization image ar
 - `oauth_tokens` — Discogs OAuth tokens (`user_id`, `provider`, `access_token`, `access_secret`, `provider_username`, `provider_user_id`, `updated_at`)
 - `app_config` — admin key-value configuration (`key`, `value`, `updated_at`)
 - `app_tokens` — revocable third-party app tokens (`id`, `user_id`, `name`, `scope`, `token_hash`, `created_at`, `last_used_at`, `revoked_at`)
+
+## Deprecations
+
+Per [ADR 0007](https://github.com/groovemap-music/design/blob/main/docs/adr/0007-canonical-media-taxonomy.md),
+raw Discogs format names are being superseded by the canonical `media` taxonomy (family and
+medium ids). The following are kept for one minor version and will be removed afterward:
+
+| Deprecated                                     | Replacement                                                                 |
+| ----------------------------------------------- | ---------------------------------------------------------------------------- |
+| `formats` query parameter (gap endpoints)        | `media` query parameter — see [Collection Gap Analysis](#collection-gap-analysis) |
+| `GET /api/collection/formats`                    | `GET /api/collection/media`                                                  |
+| `formats` field in label DNA responses           | `media` field (`MediaFamilyWeight`, family-grouped with nested mediums) — see [Label DNA](#label-dna) |
+| `format_rarity` in the rarity breakdown           | `medium_rarity` (still present at weight `0.0`) — see [Release Rarity Scoring](#release-rarity-scoring) |
+| `Release.formats` reads (raw Discogs format list) | `Release` media edges / `media_families` — see [Backfilling `media` on Existing Sync Data](#backfilling-media-on-existing-sync-data) |
+
+No endpoint or field is removed yet; all of the above remain readable and are still populated.
 
 ## Security
 

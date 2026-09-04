@@ -125,6 +125,18 @@ async def test_filter_graph_action_recorded() -> None:
 
 
 @pytest.mark.asyncio
+async def test_filter_graph_action_by_media_recorded() -> None:
+    """gm-catalog-api-be1.7 regression — the bounce: an end-to-end ui_filter_graph(by="media")
+    call must reach the action recorder through the real engine + tool runner."""
+    result = await _run_with_action("ui_filter_graph", {"by": "media", "value": "tape_cassette"})
+    assert len(result.actions) == 1
+    action = result.actions[0]
+    assert isinstance(action, FilterGraphAction)
+    assert action.by == "media"
+    assert action.value == "tape_cassette"
+
+
+@pytest.mark.asyncio
 async def test_ui_find_path_action_recorded_as_find_path() -> None:
     """The ``ui_find_path`` tool records an action with client type ``find_path``."""
     result = await _run_with_action(
