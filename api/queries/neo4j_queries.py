@@ -762,7 +762,13 @@ async def get_artist_details(driver: AsyncResilientNeo4jDriver, node_id: str) ->
 
 
 async def get_release_details(driver: AsyncResilientNeo4jDriver, node_id: str) -> dict[str, Any] | None:
-    """Get full details for a release node."""
+    """Get full details for a release node.
+
+    ``formats`` is the deprecated raw Discogs format name list, kept only so
+    the API layer can derive a best-effort ADR 0007 ``media`` block via
+    ``common.media.legacy_format_names_to_media`` when ``releases.media`` in
+    PostgreSQL is unavailable or NULL.
+    """
     cypher = """
     MATCH (r:Release {id: $id})
     OPTIONAL MATCH (r)-[:BY]->(a:Artist)
@@ -775,7 +781,7 @@ async def get_release_details(driver: AsyncResilientNeo4jDriver, node_id: str) -
     WITH r, artists, labels, genres, collect(DISTINCT s.name) AS styles
     RETURN r.id AS id, r.title AS name,
            CASE WHEN r.year > 0 THEN r.year ELSE null END AS year,
-           artists, labels, genres, styles
+           artists, labels, genres, styles, r.formats AS formats
     """
     return await run_single(driver, cypher, id=node_id)
 
