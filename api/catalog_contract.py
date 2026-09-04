@@ -1,4 +1,24 @@
-"""Generated from contracts/catalog-events/v1/contract.json; do not edit."""
+"""Composed adapter over the two source-owned catalog-events producer contracts.
+
+Per ADR 0005, "Source-owned catalog ingestion repositories"
+(https://github.com/groovemap-music/design/blob/main/docs/adr/0005-source-owned-catalog-ingestion.md),
+`groovemap.catalog-events/v1` is produced independently by `discogs-ingestion` and
+`musicbrainz-ingestion`; catalog-api composes both into one module because its admin
+router purges dead-letter queues across all four registered consumers. The two producer
+contracts and their generated Python bindings are promoted byte-for-byte into
+`contracts/catalog-events/v1/discogs/` and `contracts/catalog-events/v1/musicbrainz/`
+(see each subdirectory's `source.json`, digest-verified by `scripts/check-contracts.py`).
+
+This module is hand-authored, not generated: the split bindings expose only
+`exchange_name(entity)` and `queue_name(consumer, entity)` per source, with no
+dead-letter helpers, so this adapter reconstructs `dead_letter_exchange_name` /
+`dead_letter_queue_name` with the same `.dlx` / `.dlq` templates the promoted contracts'
+`queue` section defines, and re-exports both sources' entity vocabulary and exchange
+prefixes under one import. ADR 0005 freezes every runtime AMQP identifier produced here
+across a producer promotion; `tests/test_catalog_contract_frozen_identifiers.py` snapshots
+them against both promoted contracts' `runtime_identifiers` blocks so a future promotion
+that shifts a name is caught immediately.
+"""
 
 from __future__ import annotations
 
@@ -24,8 +44,8 @@ CONSUMER_SOURCES = {
     "tableinator": {"source": "discogs"},
 }
 
-# Compatibility names used by the current services. They are generated from the
-# producer-owned contract rather than independently declared by consumers.
+# Compatibility names used by the current services. They mirror the promoted,
+# producer-owned contracts rather than being independently declared here.
 DATA_TYPES = DISCOGS_DATA_TYPES
 AMQP_QUEUE_PREFIX_GRAPHINATOR = f"{DISCOGS_EXCHANGE_PREFIX}-graphinator"
 AMQP_QUEUE_PREFIX_TABLEINATOR = f"{DISCOGS_EXCHANGE_PREFIX}-tableinator"

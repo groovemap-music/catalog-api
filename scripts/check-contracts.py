@@ -14,14 +14,20 @@ def digest(path: Path) -> str:
     return sha256(path.read_bytes()).hexdigest()
 
 
-catalog_source = json.loads((ROOT / "contracts/catalog-events/v1/source.json").read_text())
 persistence_source = json.loads((ROOT / "contracts/persistence/v1/source.json").read_text())
 compatibility = json.loads((ROOT / "contracts/persistence/v1/compatibility.json").read_text())
 with (ROOT / "pyproject.toml").open("rb") as source:
     pyproject = tomllib.load(source)
 
-assert digest(ROOT / "contracts/catalog-events/v1/contract.json") == catalog_source["contract_sha256"]
-assert digest(ROOT / "api/catalog_contract.py") == catalog_source["binding_sha256"]
+# groovemap.catalog-events/v1 is produced independently by two source-owned repositories
+# (ADR 0005); catalog-api composes the contract from both promoted producers rather than
+# from one combined upstream.
+for catalog_producer in ("discogs", "musicbrainz"):
+    producer_root = ROOT / "contracts/catalog-events/v1" / catalog_producer
+    catalog_source = json.loads((producer_root / "source.json").read_text())
+    assert digest(producer_root / "contract.json") == catalog_source["contract_sha256"]
+    assert digest(producer_root / "python/catalog_contract.py") == catalog_source["binding_sha256"]
+
 assert digest(ROOT / "contracts/persistence/v1/compatibility.json") == persistence_source["contract_sha256"]
 assert compatibility["contract"] == "groovemap.persistence"
 assert compatibility["version"] == 1
