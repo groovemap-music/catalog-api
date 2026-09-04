@@ -73,9 +73,17 @@ def _format_breakdown(row: dict[str, Any]) -> dict[str, dict[str, float]]:
     """Build the breakdown dict from a flat database row.
 
     The weights reported are the *effective* ones for this release: renormalised over the
-    signals it actually has, exactly as they were when the score was composed. A release no
-    family extension claims carries no ``pressing_scarcity`` entry at all, and its core signals
-    each carry proportionally more weight. See :mod:`api.rarity.core`.
+    signals it actually has. A release no family extension claims carries no
+    ``pressing_scarcity`` entry at all, and its core signals each carry proportionally more
+    weight. See :mod:`api.rarity.core`.
+
+    For most rows this replays exactly how the stored score was composed. Legacy rows written
+    before ``medium_rarity`` existed still carry it as ``NULL``, so it drops out of the signals
+    considered here and the remaining weights renormalise to fill the gap instead — e.g. 0.90
+    of the total (every core weight but ``medium_rarity``, plus a grooved release's
+    ``pressing_scarcity``) renormalises up to 1.0. The reported breakdown for those rows is an
+    approximation of the original composition, not a replay of it, until the next daily rarity
+    table rebuild backfills ``medium_rarity`` and recomposes the stored score to match.
 
     ``format_rarity`` is reported with weight ``0.0``: it is deprecated and no longer scored,
     having been replaced by ``medium_rarity``.
