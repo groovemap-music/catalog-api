@@ -1,7 +1,0 @@
-{
-  "binding_sha256": "0fe43d0ddbe0e36098271f5478122e9d49dd272b4ff7a927af02ee9b98bb4587",
-  "contract_sha256": "cfb094491b2a29ab5b3ba0078476387cd29c881535464cdecc82dcbb6d5fed03",
-  "migration_transform": "Rebranded disposable runtime exchange prefixes for GrooveMap.",
-  "producer_commit": "e7038d1492da54e91444bfa990598e8963972ce2",
-  "producer_repository": "https://github.com/groovemap-music/catalog-ingestion"
-}

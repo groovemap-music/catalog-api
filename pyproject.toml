@@ -84,13 +84,15 @@ packages = ["api"]
 exclude-newer = "2 days"
 
 [tool.uv.sources]
-groovemap-runtime = { git = "https://github.com/groovemap-music/python-libraries.git", rev = "3c8309bfb6123b2c85107e949e9d626e3193db6d" }
-groovemap-agent-tools = { git = "https://github.com/groovemap-music/python-libraries.git", subdirectory = "agent-tools", rev = "3c8309bfb6123b2c85107e949e9d626e3193db6d" }
+groovemap-runtime = { git = "https://github.com/groovemap-music/python-libraries.git", rev = "41805b62520785f412e8f5d0db90f8d83838ec56" }
+groovemap-agent-tools = { git = "https://github.com/groovemap-music/python-libraries.git", subdirectory = "agent-tools", rev = "41805b62520785f412e8f5d0db90f8d83838ec56" }
 
 [tool.ruff]
 extend-exclude = [
     "api/catalog_contract.py",
     "api/contracts/internal-insights/v1/python/catalog_api_contract.py",
+    "contracts/catalog-events/v1/discogs/python/catalog_contract.py",
+    "contracts/catalog-events/v1/musicbrainz/python/catalog_contract.py",
     "docs/superpowers",
 ]
 line-length = 150
