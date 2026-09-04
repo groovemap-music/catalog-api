@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
 
 from api.dependencies import require_user
+from api.queries.collection_media_queries import get_collection_media_summary
 from api.queries.gap_queries import (
     get_artist_gap_summary,
     get_artist_gaps,
@@ -23,6 +24,7 @@ from api.queries.gap_queries import (
     get_master_gaps,
     get_master_metadata,
 )
+from api.queries.media_filters import UnknownMediaIdsError, resolve_media_filter
 
 
 logger = structlog.get_logger(__name__)
@@ -68,11 +70,22 @@ def _set_cached_summary(user_id: str, entity_type: str, entity_id: str, data: di
         _summary_cache.popitem(last=False)
 
 
-@router.get("/api/collection/formats")
+@router.get(
+    "/api/collection/formats",
+    deprecated=True,
+    description=(
+        "Deprecated: raw Discogs format names from the user's synced collection. "
+        "Use GET /api/collection/media instead, which returns canonical media "
+        "taxonomy families and mediums (ADR 0007)."
+    ),
+)
 async def collection_formats(
     current_user: Annotated[dict[str, Any], Depends(require_user)],
 ) -> JSONResponse:
-    """Return distinct format names from the user's synced collection."""
+    """Return distinct format names from the user's synced collection.
+
+    Deprecated: see :func:`collection_media` for the canonical replacement.
+    """
     if not _pg_pool:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     user_id: str = current_user.get("sub", "")
@@ -92,6 +105,24 @@ async def collection_formats(
     return JSONResponse(content={"formats": [r["format_name"] for r in rows if r["format_name"]]})
 
 
+@router.get("/api/collection/media")
+async def collection_media(
+    current_user: Annotated[dict[str, Any], Depends(require_user)],
+) -> JSONResponse:
+    """Return the canonical media families and mediums present in the user's collection.
+
+    Reads the ADR 0007 canonical ``media`` block computed at sync time
+    (``user_collections.media``), so results use canonical taxonomy ids
+    and labels rather than raw Discogs format names. See also the
+    deprecated ``GET /api/collection/formats``.
+    """
+    if not _pg_pool:
+        return JSONResponse(content={"error": "Service not ready"}, status_code=503)
+    user_id: str = current_user.get("sub", "")
+    summary = await get_collection_media_summary(_pg_pool, user_id)
+    return JSONResponse(content=summary)
+
+
 @router.get("/api/collection/gaps/label/{label_id}")
 async def label_gaps(
     label_id: str,
@@ -99,12 +130,29 @@ async def label_gaps(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     exclude_wantlist: bool = Query(False),
-    formats: list[str] | None = Query(None),
+    media: Annotated[
+        list[str] | None,
+        Query(description="Canonical media family or medium ids to filter by (see GET /api/collection/media)."),
+    ] = None,
+    formats: Annotated[
+        list[str] | None,
+        Query(
+            deprecated=True,
+            description=(
+                "Deprecated: raw Discogs format names. Mapped onto canonical media family/medium ids via the ADR 0007 taxonomy. Use `media` instead."
+            ),
+        ),
+    ] = None,
 ) -> JSONResponse:
     """Get releases on a label that the user does not own."""
     if not _neo4j_driver:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     user_id: str = current_user.get("sub", "")
+
+    try:
+        families, mediums = resolve_media_filter(media, formats)
+    except UnknownMediaIdsError as exc:
+        return JSONResponse(content={"error": str(exc)}, status_code=400)
 
     metadata = await get_label_metadata(_neo4j_driver, label_id)
     if metadata is None:
@@ -127,14 +175,15 @@ async def label_gaps(
         limit,
         offset,
         exclude_wantlist,
-        formats,
+        families,
+        mediums,
     )
 
     return JSONResponse(
         content={
             "entity": {"id": metadata["id"], "name": metadata["name"], "type": "label"},
             "summary": summary,
-            "filters": {"formats": formats or []},
+            "filters": {"formats": formats or [], "media": media or []},
             "results": results,
             "pagination": {"total": total, "offset": offset, "limit": limit, "has_more": offset + len(results) < total},
         }
@@ -148,12 +197,29 @@ async def artist_gaps(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     exclude_wantlist: bool = Query(False),
-    formats: list[str] | None = Query(None),
+    media: Annotated[
+        list[str] | None,
+        Query(description="Canonical media family or medium ids to filter by (see GET /api/collection/media)."),
+    ] = None,
+    formats: Annotated[
+        list[str] | None,
+        Query(
+            deprecated=True,
+            description=(
+                "Deprecated: raw Discogs format names. Mapped onto canonical media family/medium ids via the ADR 0007 taxonomy. Use `media` instead."
+            ),
+        ),
+    ] = None,
 ) -> JSONResponse:
     """Get releases by an artist that the user does not own."""
     if not _neo4j_driver:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     user_id: str = current_user.get("sub", "")
+
+    try:
+        families, mediums = resolve_media_filter(media, formats)
+    except UnknownMediaIdsError as exc:
+        return JSONResponse(content={"error": str(exc)}, status_code=400)
 
     metadata = await get_artist_metadata(_neo4j_driver, artist_id)
     if metadata is None:
@@ -176,14 +242,15 @@ async def artist_gaps(
         limit,
         offset,
         exclude_wantlist,
-        formats,
+        families,
+        mediums,
     )
 
     return JSONResponse(
         content={
             "entity": {"id": metadata["id"], "name": metadata["name"], "type": "artist"},
             "summary": summary,
-            "filters": {"formats": formats or []},
+            "filters": {"formats": formats or [], "media": media or []},
             "results": results,
             "pagination": {"total": total, "offset": offset, "limit": limit, "has_more": offset + len(results) < total},
         }
@@ -197,12 +264,29 @@ async def master_gaps(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     exclude_wantlist: bool = Query(False),
-    formats: list[str] | None = Query(None),
+    media: Annotated[
+        list[str] | None,
+        Query(description="Canonical media family or medium ids to filter by (see GET /api/collection/media)."),
+    ] = None,
+    formats: Annotated[
+        list[str] | None,
+        Query(
+            deprecated=True,
+            description=(
+                "Deprecated: raw Discogs format names. Mapped onto canonical media family/medium ids via the ADR 0007 taxonomy. Use `media` instead."
+            ),
+        ),
+    ] = None,
 ) -> JSONResponse:
-    """Get pressings of a master release that the user does not own."""
+    """Get editions of a master release that the user does not own."""
     if not _neo4j_driver:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     user_id: str = current_user.get("sub", "")
+
+    try:
+        families, mediums = resolve_media_filter(media, formats)
+    except UnknownMediaIdsError as exc:
+        return JSONResponse(content={"error": str(exc)}, status_code=400)
 
     metadata = await get_master_metadata(_neo4j_driver, master_id)
     if metadata is None:
@@ -225,14 +309,15 @@ async def master_gaps(
         limit,
         offset,
         exclude_wantlist,
-        formats,
+        families,
+        mediums,
     )
 
     return JSONResponse(
         content={
             "entity": {"id": metadata["id"], "name": metadata["name"], "type": "master"},
             "summary": summary,
-            "filters": {"formats": formats or []},
+            "filters": {"formats": formats or [], "media": media or []},
             "results": results,
             "pagination": {"total": total, "offset": offset, "limit": limit, "has_more": offset + len(results) < total},
         }

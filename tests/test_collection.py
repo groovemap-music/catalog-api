@@ -39,6 +39,56 @@ class TestCollectionFormatsEndpoint:
         finally:
             collection_module._pg_pool = original
 
+    def test_marked_deprecated_in_openapi(self, test_client: TestClient) -> None:
+        schema = test_client.app.openapi()
+        assert schema["paths"]["/api/collection/formats"]["get"]["deprecated"] is True
+
+
+class TestCollectionMediaEndpoint:
+    """Tests for GET /api/collection/media."""
+
+    def test_no_auth(self, test_client: TestClient) -> None:
+        response = test_client.get("/api/collection/media")
+        assert response.status_code in (401, 403)
+
+    def test_success_shape(self, test_client: TestClient, auth_headers: dict[str, str], mock_cur: AsyncMock) -> None:
+        mock_cur.fetchall = AsyncMock(
+            side_effect=[
+                [{"family": "vinyl", "count": 40}, {"family": "optical", "count": 5}],
+                [
+                    {"family": "vinyl", "medium": "vinyl_12", "count": 38},
+                    {"family": "vinyl", "medium": "vinyl_7", "count": 2},
+                    {"family": "optical", "medium": "optical_cd", "count": 5},
+                ],
+            ]
+        )
+        response = test_client.get("/api/collection/media", headers=auth_headers)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["families"] == [{"id": "vinyl", "count": 40}, {"id": "optical", "count": 5}]
+        assert data["mediums"] == [
+            {"id": "vinyl_12", "label": '12" vinyl', "family": "vinyl", "count": 38},
+            {"id": "vinyl_7", "label": '7" vinyl', "family": "vinyl", "count": 2},
+            {"id": "optical_cd", "label": "CD", "family": "optical", "count": 5},
+        ]
+
+    def test_empty_collection(self, test_client: TestClient, auth_headers: dict[str, str], mock_cur: AsyncMock) -> None:
+        mock_cur.fetchall = AsyncMock(side_effect=[[], []])
+        response = test_client.get("/api/collection/media", headers=auth_headers)
+        assert response.status_code == 200
+        assert response.json() == {"families": [], "mediums": []}
+
+    def test_no_pool_503(self, test_client: TestClient, auth_headers: dict[str, str]) -> None:
+        import api.routers.collection as collection_module
+
+        original = collection_module._pg_pool
+        collection_module._pg_pool = None
+        try:
+            response = test_client.get("/api/collection/media", headers=auth_headers)
+            assert response.status_code == 503
+        finally:
+            collection_module._pg_pool = original
+
 
 class TestLabelGapsEndpoint:
     """Tests for GET /api/collection/gaps/label/{label_id}."""
@@ -177,10 +227,59 @@ class TestGapsPagination:
         assert data["pagination"]["has_more"] is True
 
 
-class TestFormatFilter:
-    """Tests for format query parameter on gap endpoints."""
+class TestMediaFilter:
+    """Tests for the `media` query parameter and the deprecated `formats` alias on gap endpoints."""
 
-    def test_format_filter_passed_to_query(self, test_client: TestClient, auth_headers: dict[str, str]) -> None:
+    def test_family_filter_passed_to_query(self, test_client: TestClient, auth_headers: dict[str, str]) -> None:
+        mock_gaps = AsyncMock(return_value=(_MOCK_RELEASES, 1))
+        with (
+            patch("api.routers.collection.get_artist_metadata", new=AsyncMock(return_value=_MOCK_ARTIST_META)),
+            patch("api.routers.collection.get_artist_gap_summary", new=AsyncMock(return_value=_MOCK_SUMMARY)),
+            patch("api.routers.collection.get_artist_gaps", new=mock_gaps),
+            patch("api.routers.collection._get_cached_summary", return_value=None),
+        ):
+            response = test_client.get(
+                "/api/collection/gaps/artist/artist-1?media=vinyl",
+                headers=auth_headers,
+            )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["filters"]["media"] == ["vinyl"]
+        assert data["filters"]["formats"] == []
+        # families arg (positional index 6): driver, user_id, artist_id, limit, offset, exclude_wantlist, families, mediums
+        call_args = mock_gaps.call_args[0]
+        assert call_args[6] == ["vinyl"]
+        assert call_args[7] == []
+
+    def test_medium_filter_passed_to_query(self, test_client: TestClient, auth_headers: dict[str, str]) -> None:
+        mock_gaps = AsyncMock(return_value=(_MOCK_RELEASES, 1))
+        with (
+            patch("api.routers.collection.get_artist_metadata", new=AsyncMock(return_value=_MOCK_ARTIST_META)),
+            patch("api.routers.collection.get_artist_gap_summary", new=AsyncMock(return_value=_MOCK_SUMMARY)),
+            patch("api.routers.collection.get_artist_gaps", new=mock_gaps),
+            patch("api.routers.collection._get_cached_summary", return_value=None),
+        ):
+            response = test_client.get(
+                "/api/collection/gaps/artist/artist-1?media=vinyl_12",
+                headers=auth_headers,
+            )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["filters"]["media"] == ["vinyl_12"]
+        call_args = mock_gaps.call_args[0]
+        assert call_args[6] == []
+        assert call_args[7] == ["vinyl_12"]
+
+    def test_unknown_media_id_returns_400(self, test_client: TestClient, auth_headers: dict[str, str]) -> None:
+        response = test_client.get(
+            "/api/collection/gaps/artist/artist-1?media=not-a-real-id",
+            headers=auth_headers,
+        )
+        assert response.status_code == 400
+        assert "not-a-real-id" in response.json()["error"]
+
+    def test_deprecated_formats_alias_maps_to_media(self, test_client: TestClient, auth_headers: dict[str, str]) -> None:
+        """The deprecated `formats` alias is mapped through the taxonomy onto family/medium ids."""
         mock_gaps = AsyncMock(return_value=(_MOCK_RELEASES, 1))
         with (
             patch("api.routers.collection.get_artist_metadata", new=AsyncMock(return_value=_MOCK_ARTIST_META)),
@@ -195,9 +294,27 @@ class TestFormatFilter:
         assert response.status_code == 200
         data = response.json()
         assert data["filters"]["formats"] == ["Vinyl", "CD"]
-        # Verify the query function was called with format filter
-        call_kwargs = mock_gaps.call_args
-        assert call_kwargs[0][6] == ["Vinyl", "CD"]  # formats arg
+        assert data["filters"]["media"] == []
+        # "Vinyl" (no size) resolves to vinyl_unspecified in the vinyl family;
+        # "CD" resolves straight to the optical_cd medium in the optical family.
+        call_args = mock_gaps.call_args[0]
+        assert call_args[6] == ["optical", "vinyl"]
+        assert call_args[7] == ["optical_cd", "vinyl_unspecified"]
+
+    def test_unknown_formats_value_is_not_an_error(self, test_client: TestClient, auth_headers: dict[str, str]) -> None:
+        """Unlike `media`, an unrecognised `formats` value is silently unmapped (legacy leniency)."""
+        mock_gaps = AsyncMock(return_value=(_MOCK_RELEASES, 1))
+        with (
+            patch("api.routers.collection.get_artist_metadata", new=AsyncMock(return_value=_MOCK_ARTIST_META)),
+            patch("api.routers.collection.get_artist_gap_summary", new=AsyncMock(return_value=_MOCK_SUMMARY)),
+            patch("api.routers.collection.get_artist_gaps", new=mock_gaps),
+            patch("api.routers.collection._get_cached_summary", return_value=None),
+        ):
+            response = test_client.get(
+                "/api/collection/gaps/artist/artist-1?formats=NotARealFormat",
+                headers=auth_headers,
+            )
+        assert response.status_code == 200
 
 
 class TestSummaryCache:

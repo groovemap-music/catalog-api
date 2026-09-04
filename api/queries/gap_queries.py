@@ -8,7 +8,9 @@ Graph model used:
   (User)-[:COLLECTED]->(Release)-[:ON]->(Label)
   (User)-[:WANTS]->(Release)
   (Release)-[:DERIVED_FROM]->(Master)
-  Release nodes have: id, title, year, formats (list of strings), sha256
+  (Release)-[:ISSUED_ON {qty, source}]->(Medium)-[:IN_FAMILY]->(MediaFamily)
+  Release nodes have: id, title, year, formats (list of strings, deprecated),
+  media_families (list of canonical family ids), sha256
 """
 
 from typing import Any
@@ -18,13 +20,26 @@ from common import AsyncResilientNeo4jDriver
 from api.queries.helpers import run_count, run_query
 
 
-def _build_filters(exclude_wantlist: bool, formats: list[str] | None) -> str:
-    """Build optional WHERE clause fragments for gap queries."""
+def _build_filters(exclude_wantlist: bool, families: list[str] | None, mediums: list[str] | None) -> str:
+    """Build optional WHERE clause fragments for gap queries.
+
+    ADR 0007: a family id matches the release's ``media_families`` list
+    property directly; a medium id needs the ``ISSUED_ON`` -> ``Medium``
+    traversal since medium ids are not stored on the release node itself.
+    Combining both filters is an OR — a release matches the ``media``
+    parameter if either its family or one of its mediums is requested.
+    """
     clauses: list[str] = []
     if exclude_wantlist:
         clauses.append("AND NOT (u)-[:WANTS]->(r)")
-    if formats:
-        clauses.append("AND ANY(f IN r.formats WHERE f IN $formats)")
+    family_match = "ANY(f IN r.media_families WHERE f IN $families)"
+    medium_match = "EXISTS { MATCH (r)-[:ISSUED_ON]->(med:Medium) WHERE med.id IN $mediums }"
+    if families and mediums:
+        clauses.append(f"AND ({family_match} OR {medium_match})")
+    elif families:
+        clauses.append(f"AND {family_match}")
+    elif mediums:
+        clauses.append(f"AND {medium_match}")
     return "\n    ".join(clauses)
 
 
@@ -35,10 +50,11 @@ async def get_label_gaps(
     limit: int = 50,
     offset: int = 0,
     exclude_wantlist: bool = False,
-    formats: list[str] | None = None,
+    families: list[str] | None = None,
+    mediums: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Get releases on a label that the user does not own."""
-    extra = _build_filters(exclude_wantlist, formats)
+    extra = _build_filters(exclude_wantlist, families, mediums)
     cypher = f"""
     MATCH (u:User {{id: $user_id}})
     MATCH (l:Label {{id: $label_id}})<-[:ON]-(r:Release)
@@ -64,8 +80,10 @@ async def get_label_gaps(
     RETURN count(r) AS total
     """
     params: dict[str, Any] = {"user_id": user_id, "label_id": label_id, "limit": limit, "offset": offset}
-    if formats:
-        params["formats"] = formats
+    if families:
+        params["families"] = families
+    if mediums:
+        params["mediums"] = mediums
     results = await run_query(driver, cypher, **params)
     total = await run_count(driver, count_cypher, **params)
     return results, total
@@ -106,10 +124,11 @@ async def get_artist_gaps(
     limit: int = 50,
     offset: int = 0,
     exclude_wantlist: bool = False,
-    formats: list[str] | None = None,
+    families: list[str] | None = None,
+    mediums: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Get releases by an artist that the user does not own."""
-    extra = _build_filters(exclude_wantlist, formats)
+    extra = _build_filters(exclude_wantlist, families, mediums)
     cypher = f"""
     MATCH (u:User {{id: $user_id}})
     MATCH (a:Artist {{id: $artist_id}})<-[:BY]-(r:Release)
@@ -135,8 +154,10 @@ async def get_artist_gaps(
     RETURN count(r) AS total
     """
     params: dict[str, Any] = {"user_id": user_id, "artist_id": artist_id, "limit": limit, "offset": offset}
-    if formats:
-        params["formats"] = formats
+    if families:
+        params["families"] = families
+    if mediums:
+        params["mediums"] = mediums
     results = await run_query(driver, cypher, **params)
     total = await run_count(driver, count_cypher, **params)
     return results, total
@@ -177,10 +198,11 @@ async def get_master_gaps(
     limit: int = 50,
     offset: int = 0,
     exclude_wantlist: bool = False,
-    formats: list[str] | None = None,
+    families: list[str] | None = None,
+    mediums: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Get pressings of a master release that the user does not own."""
-    extra = _build_filters(exclude_wantlist, formats)
+    """Get editions of a master release that the user does not own."""
+    extra = _build_filters(exclude_wantlist, families, mediums)
     cypher = f"""
     MATCH (u:User {{id: $user_id}})
     MATCH (m:Master {{id: $master_id}})<-[:DERIVED_FROM]-(r:Release)
@@ -209,8 +231,10 @@ async def get_master_gaps(
     RETURN count(r) AS total
     """
     params: dict[str, Any] = {"user_id": user_id, "master_id": master_id, "limit": limit, "offset": offset}
-    if formats:
-        params["formats"] = formats
+    if families:
+        params["families"] = families
+    if mediums:
+        params["mediums"] = mediums
     results = await run_query(driver, cypher, **params)
     total = await run_count(driver, count_cypher, **params)
     return results, total
@@ -221,7 +245,7 @@ async def get_master_gap_summary(
     user_id: str,
     master_id: str,
 ) -> dict[str, Any]:
-    """Get summary counts for a master: total pressings, owned, missing."""
+    """Get summary counts for a master: total editions, owned, missing."""
     cypher = """
     MATCH (m:Master {id: $master_id})<-[:DERIVED_FROM]-(r:Release)
     WITH m, count(DISTINCT r) AS total_releases
