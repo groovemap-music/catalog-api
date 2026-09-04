@@ -42,6 +42,7 @@ from api.queries.admin_queries import (
     get_sync_activity,
     get_user_stats,
 )
+from api.queries.media_coverage_queries import DEFAULT_LIMIT, MAX_LIMIT, get_unmapped_media, known_providers
 from api.queries.metrics_queries import get_health_history, get_queue_history
 
 
@@ -320,6 +321,31 @@ async def admin_health_history(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
     try:
         data = await get_health_history(_pool, range)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+    return JSONResponse(content=data)
+
+
+# ---------------------------------------------------------------------------
+# Media mapping coverage (ADR 0007)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/admin/media/unmapped")
+async def admin_unmapped_media(
+    _admin: Annotated[dict[str, Any], Depends(require_admin)],
+    provider: Annotated[str, Query(description=f"Provider whose releases to aggregate: {' or '.join(known_providers())}.")],
+    limit: Annotated[int, Query(ge=1, le=MAX_LIMIT, description="How many top unmapped names to return.")] = DEFAULT_LIMIT,
+) -> JSONResponse:
+    """Media-mapping coverage for one provider: the most common unmapped raw names.
+
+    Ranks the raw format names and descriptions the ADR 0007 taxonomy did not map,
+    by how many releases carry each, alongside the counts that give them scale.
+    """
+    if _pool is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
+    try:
+        data = await get_unmapped_media(_pool, provider, limit)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
     return JSONResponse(content=data)

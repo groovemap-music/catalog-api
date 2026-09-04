@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from fastapi.testclient import TestClient
 
 from api.auth import _hash_password
+from api.queries.media_coverage_queries import DEFAULT_LIMIT, MAX_LIMIT
 
 
 TEST_JWT_SECRET = "test-jwt-secret-for-unit-tests"
@@ -1323,6 +1324,168 @@ class TestHealthHistoryServiceUnavailable:
         admin_mod._pool = None
         try:
             resp = test_client.get("/api/admin/health/history", headers=_admin_auth_headers())
+            assert resp.status_code == 503
+        finally:
+            admin_mod._pool = original
+
+
+# ---------------------------------------------------------------------------
+# Media mapping coverage endpoint tests
+# ---------------------------------------------------------------------------
+
+
+_UNMAPPED_PATH = "/api/admin/media/unmapped"
+
+
+def _unmapped_payload(provider: str, **overrides: Any) -> dict[str, Any]:
+    """A representative get_unmapped_media() return value."""
+    payload = {
+        "provider": provider,
+        "media_tagged_releases": 500,
+        "releases_with_unmapped": 125,
+        "unmapped_rate": 0.25,
+        "limit": 20,
+        "top_unmapped": [
+            {"kind": "format", "name": "Lathe Cut", "releases": 80},
+            {"kind": "description", "name": "Hand-Numbered", "releases": 45},
+        ],
+    }
+    payload.update(overrides)
+    return payload
+
+
+class TestUnmappedMedia:
+    @patch("api.routers.admin.get_unmapped_media")
+    def test_discogs_success(self, mock_query: Any, test_client: TestClient) -> None:
+        mock_query.return_value = _unmapped_payload("discogs")
+        resp = test_client.get(f"{_UNMAPPED_PATH}?provider=discogs", headers=_admin_auth_headers())
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["provider"] == "discogs"
+        assert data["media_tagged_releases"] == 500
+        assert data["releases_with_unmapped"] == 125
+        assert data["top_unmapped"][0] == {"kind": "format", "name": "Lathe Cut", "releases": 80}
+        assert mock_query.call_args[0][1] == "discogs"
+
+    @patch("api.routers.admin.get_unmapped_media")
+    def test_musicbrainz_success(self, mock_query: Any, test_client: TestClient) -> None:
+        mock_query.return_value = _unmapped_payload(
+            "musicbrainz",
+            media_tagged_releases=40,
+            releases_with_unmapped=10,
+            top_unmapped=[{"kind": "format", "name": "DAT", "releases": 7}],
+        )
+        resp = test_client.get(f"{_UNMAPPED_PATH}?provider=musicbrainz", headers=_admin_auth_headers())
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["provider"] == "musicbrainz"
+        assert data["top_unmapped"] == [{"kind": "format", "name": "DAT", "releases": 7}]
+        assert mock_query.call_args[0][1] == "musicbrainz"
+
+    @patch("api.routers.admin.get_unmapped_media")
+    def test_response_matches_the_published_model(self, mock_query: Any, test_client: TestClient) -> None:
+        """The body must validate against UnmappedMediaResponse, which forbids extra keys."""
+        from api.models import UnmappedMediaResponse
+
+        mock_query.return_value = _unmapped_payload("discogs")
+        resp = test_client.get(f"{_UNMAPPED_PATH}?provider=discogs", headers=_admin_auth_headers())
+
+        assert resp.status_code == 200
+        model = UnmappedMediaResponse.model_validate(resp.json())
+        assert model.provider == "discogs"
+        assert model.top_unmapped[0].name == "Lathe Cut"
+
+    @patch("api.routers.admin.get_unmapped_media")
+    def test_empty_result(self, mock_query: Any, test_client: TestClient) -> None:
+        mock_query.return_value = _unmapped_payload(
+            "musicbrainz",
+            media_tagged_releases=0,
+            releases_with_unmapped=0,
+            unmapped_rate=0.0,
+            top_unmapped=[],
+        )
+        resp = test_client.get(f"{_UNMAPPED_PATH}?provider=musicbrainz", headers=_admin_auth_headers())
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["media_tagged_releases"] == 0
+        assert data["unmapped_rate"] == 0.0
+        assert data["top_unmapped"] == []
+
+    @patch("api.routers.admin.get_unmapped_media")
+    def test_unknown_provider_returns_422(self, mock_query: Any, test_client: TestClient) -> None:
+        from api.queries.media_coverage_queries import UnknownProviderError
+
+        mock_query.side_effect = UnknownProviderError("bandcamp")
+        resp = test_client.get(f"{_UNMAPPED_PATH}?provider=bandcamp", headers=_admin_auth_headers())
+
+        assert resp.status_code == 422
+        assert "bandcamp" in resp.json()["detail"]
+
+    def test_unknown_provider_returns_422_end_to_end(self, test_client: TestClient) -> None:
+        """Unpatched: the real query function rejects the provider before any DB access."""
+        resp = test_client.get(f"{_UNMAPPED_PATH}?provider=bandcamp", headers=_admin_auth_headers())
+        assert resp.status_code == 422
+
+    def test_missing_provider_returns_422(self, test_client: TestClient) -> None:
+        resp = test_client.get(_UNMAPPED_PATH, headers=_admin_auth_headers())
+        assert resp.status_code == 422
+
+    @patch("api.routers.admin.get_unmapped_media")
+    def test_limit_is_forwarded(self, mock_query: Any, test_client: TestClient) -> None:
+        mock_query.return_value = _unmapped_payload("discogs", limit=5)
+        resp = test_client.get(f"{_UNMAPPED_PATH}?provider=discogs&limit=5", headers=_admin_auth_headers())
+
+        assert resp.status_code == 200
+        assert mock_query.call_args[0][2] == 5
+
+    @patch("api.routers.admin.get_unmapped_media")
+    def test_limit_defaults_when_omitted(self, mock_query: Any, test_client: TestClient) -> None:
+        mock_query.return_value = _unmapped_payload("discogs")
+        resp = test_client.get(f"{_UNMAPPED_PATH}?provider=discogs", headers=_admin_auth_headers())
+
+        assert resp.status_code == 200
+        assert mock_query.call_args[0][2] == DEFAULT_LIMIT
+
+    @pytest.mark.parametrize("limit", [0, -1, MAX_LIMIT + 1])
+    def test_out_of_range_limit_returns_422(self, test_client: TestClient, limit: int) -> None:
+        resp = test_client.get(f"{_UNMAPPED_PATH}?provider=discogs&limit={limit}", headers=_admin_auth_headers())
+        assert resp.status_code == 422
+
+    def test_no_token_returns_401_or_403(self, test_client: TestClient) -> None:
+        resp = test_client.get(f"{_UNMAPPED_PATH}?provider=discogs")
+        assert resp.status_code in (401, 403)
+
+    def test_invalid_token_is_rejected(self, test_client: TestClient) -> None:
+        resp = test_client.get(
+            f"{_UNMAPPED_PATH}?provider=discogs",
+            headers=_admin_auth_headers("not-a-jwt"),
+        )
+        assert resp.status_code == 401
+
+    def test_token_signed_with_the_wrong_secret_is_rejected(self, test_client: TestClient) -> None:
+        forged = _make_admin_jwt(secret="attacker-secret")  # noqa: S106
+        resp = test_client.get(f"{_UNMAPPED_PATH}?provider=discogs", headers=_admin_auth_headers(forged))
+        assert resp.status_code == 401
+
+    def test_user_token_is_rejected(self, test_client: TestClient) -> None:
+        """A non-admin token type must not reach an admin aggregation."""
+        user_token = _make_admin_jwt(token_type="access")  # noqa: S106
+        resp = test_client.get(f"{_UNMAPPED_PATH}?provider=discogs", headers=_admin_auth_headers(user_token))
+        assert resp.status_code in (401, 403)
+
+
+class TestUnmappedMediaServiceUnavailable:
+    def test_returns_503_when_pool_is_none(self, test_client: TestClient) -> None:
+        """The aggregation returns 503 when _pool is not configured."""
+        import api.routers.admin as admin_mod
+
+        original = admin_mod._pool
+        admin_mod._pool = None
+        try:
+            resp = test_client.get(f"{_UNMAPPED_PATH}?provider=discogs", headers=_admin_auth_headers())
             assert resp.status_code == 503
         finally:
             admin_mod._pool = original

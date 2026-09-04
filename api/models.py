@@ -758,6 +758,34 @@ class HealthHistoryResponse(BaseModel):
     api_endpoints: dict[str, Any]
 
 
+# --- Media mapping coverage models (ADR 0007) ---
+
+
+class UnmappedMediaName(BaseModel):
+    """One raw provider name the media taxonomy did not map, and its release count."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Which of the block's two `unmapped` lists the name came from.
+    kind: str = Field(description='Either "format" (a provider format name) or "description" (a qualifier).')
+    name: str = Field(description="The raw provider name, exactly as the record carries it.")
+    releases: int = Field(description="How many media-tagged releases carry this name.")
+
+
+class UnmappedMediaResponse(BaseModel):
+    """Response for GET /api/admin/media/unmapped."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str
+    media_tagged_releases: int
+    releases_with_unmapped: int
+    # releases_with_unmapped / media_tagged_releases, rounded to 4 places; 0.0 when nothing is tagged.
+    unmapped_rate: float
+    limit: int
+    top_unmapped: list[UnmappedMediaName]
+
+
 # ── Credits & Provenance models ──────────────────────────────────────────────
 
 
