@@ -607,6 +607,58 @@ and PostgreSQL enrichment is owned by
 - `/external-links` — PostgreSQL `musicbrainz.external_links`, populated by `musicbrainz-sql-loader`
 - `/enrichment/status` — Both Neo4j and PostgreSQL
 
+### Media mapping coverage
+
+Admin-only observability for the [ADR 0007](https://github.com/groovemap-music/design/blob/main/docs/adr/0007-canonical-media-taxonomy.md)
+canonical media taxonomy. Whenever a loader meets a provider format name the taxonomy does not
+recognise, it keeps the raw name in the release's `media` block under `unmapped` — split into
+`formats` (the provider's own format names) and `descriptions` (their qualifiers). This endpoint
+ranks those names across a provider's release table, so mapping coverage is read from the stored
+data rather than inferred.
+
+| Method | Path                         | Auth Required | Description                                                    |
+| ------ | ---------------------------- | ------------- | -------------------------------------------------------------- |
+| GET    | `/api/admin/media/unmapped`  | Admin JWT     | Top unmapped raw media names for one provider, with coverage counts |
+
+**Query parameters:**
+
+| Name       | Required | Default | Description                                                              |
+| ---------- | -------- | ------- | ------------------------------------------------------------------------ |
+| `provider` | Yes      | —       | `discogs` (the `releases` table) or `musicbrainz` (`musicbrainz.releases`) |
+| `limit`    | No       | `20`    | How many top names to return, `1`–`200`                                   |
+
+An unrecognised `provider` returns **422**, as does a `limit` outside its range or a missing
+`provider`. A request without a valid admin JWT returns **401**.
+
+Names are ranked by how many media-tagged releases carry them, descending; `kind` distinguishes a
+provider format name from a description. Because the taxonomy de-duplicates each `unmapped` list
+per release, `releases` is a release count, not an occurrence count.
+
+```console
+$ curl -H "Authorization: Bearer $ADMIN_JWT" \
+    "http://localhost:8004/api/admin/media/unmapped?provider=discogs&limit=3"
+```
+
+```json
+{
+  "provider": "discogs",
+  "media_tagged_releases": 128034,
+  "releases_with_unmapped": 4127,
+  "unmapped_rate": 0.0322,
+  "limit": 3,
+  "top_unmapped": [
+    { "kind": "format", "name": "Lathe Cut", "releases": 812 },
+    { "kind": "description", "name": "Hand-Numbered", "releases": 640 },
+    { "kind": "format", "name": "Shellac", "releases": 415 }
+  ]
+}
+```
+
+- `media_tagged_releases` — releases whose `media` column is populated (the denominator)
+- `releases_with_unmapped` — how many of those carry at least one unmapped name
+- `unmapped_rate` — `releases_with_unmapped / media_tagged_releases`, rounded to 4 places, `0.0`
+  when nothing is tagged yet
+
 ### Internal analytics computation
 
 Internal endpoints called by `analytics-engine` over HTTP to fetch raw query results. These wire
