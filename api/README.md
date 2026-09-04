@@ -93,7 +93,10 @@ The API implements Discogs OAuth 1.0a OOB (out-of-band) flow:
 1. **Complete**: `POST /api/oauth/verify/discogs` — exchanges the verifier for a permanent access token, which is stored in the `oauth_tokens` table.
 
 After the flow, the API uses these tokens to synchronize the user's Discogs collection and
-wantlist directly.
+wantlist directly. Both sync paths compute the ADR 0007 canonical `media` block from the raw
+Discogs API format objects (via `common.media.map_discogs_formats`) and store it in the
+`media` JSONB column on `user_collections` / `user_wantlists`, alongside the existing
+(deprecated) `formats` / `format` columns, which are unchanged.
 
 ## Operator Setup
 
@@ -137,6 +140,29 @@ If a user attempts to start the Discogs OAuth flow before credentials are config
   "detail": "Discogs app credentials not configured. Ask an admin to run discogs-setup on the API container."
 }
 ```
+
+### Backfilling `media` on Existing Sync Data
+
+Rows synced before the `media` column existed have `media IS NULL`. The `catalog-media-backfill`
+CLI is a one-shot tool, included in the API container, that fills them in:
+
+```bash
+# Backfill both user_collections and user_wantlists
+docker exec <api-container> catalog-media-backfill
+
+# Only one table, or a smaller/larger batch size
+docker exec <api-container> catalog-media-backfill --collection-only
+docker exec <api-container> catalog-media-backfill --wantlist-only
+docker exec <api-container> catalog-media-backfill --batch-size 200
+```
+
+It reads a batch of rows with `media IS NULL`, computes the media block, and writes the batch
+back, repeating until none remain. `user_collections` rows are mapped from the raw Discogs API
+`formats` column via `map_discogs_formats`; `user_wantlists` rows only ever kept the first
+format's name (the deprecated `format` column), so they're mapped via the best-effort
+`legacy_format_names_to_media` helper instead. Because only `media IS NULL` rows are ever
+selected, the command is idempotent — safe to re-run, and safe to run alongside new syncs
+(which always write `media` themselves).
 
 ## API Endpoints
 
