@@ -22,6 +22,7 @@
     "admin_queue_history": {"method": "GET", "path": "/api/admin/queues/history"},
     "admin_storage": {"method": "GET", "path": "/api/admin/storage"},
     "admin_sync_activity": {"method": "GET", "path": "/api/admin/users/sync-activity"},
+    "admin_unmapped_media": {"method": "GET", "path": "/api/admin/media/unmapped"},
     "admin_user_stats": {"method": "GET", "path": "/api/admin/users/stats"}
   },
   "version": 1
