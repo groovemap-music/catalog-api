@@ -11,7 +11,7 @@ from api.models import UserResponse
 
 
 ROOT = Path(__file__).parent.parent
-PYTHON_VERSION = "3.14.5"
+PYTHON_VERSION = "3.14.7"
 PYTHON_MINOR = "3.14"
 PYTHON_IMAGE = f"python:{PYTHON_VERSION}-slim"
 PYTHON_BASE_NAME = f"docker.io/library/{PYTHON_IMAGE}"
