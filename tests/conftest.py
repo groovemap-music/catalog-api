@@ -197,7 +197,7 @@ def test_client(
 
     fake_redis = aioredis_fake.FakeRedis(server=fake_redis_server)
     _sync_router.configure(mock_pool, mock_neo4j, test_api_config, api_module._running_syncs, mock_redis)
-    _explore_router.configure(mock_neo4j, test_api_config.jwt_secret_key, mock_redis)
+    _explore_router.configure(mock_neo4j, test_api_config.jwt_secret_key, mock_redis, pg_pool=mock_pool)
     _label_dna_router.configure(mock_neo4j, mock_redis)
     _user_router.configure(mock_neo4j, test_api_config.jwt_secret_key)
     _taste_router.configure(mock_neo4j, test_api_config.jwt_secret_key)

@@ -287,7 +287,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:  # pragma: no cover
     _dependencies.configure(jwt_secret_for_neo4j, _redis, pool=_pool)
     _app_tokens.configure(_pool)
     _sync_router.configure(_pool, _neo4j, _config, _running_syncs, _redis)
-    _explore_router.configure(_neo4j, jwt_secret_for_neo4j, _redis)
+    _explore_router.configure(_neo4j, jwt_secret_for_neo4j, _redis, pg_pool=_pool)
     _user_router.configure(_neo4j, jwt_secret_for_neo4j)
     _taste_router.configure(_neo4j, jwt_secret_for_neo4j)
     _collection_router.configure(_neo4j, _pool, jwt_secret_for_neo4j)

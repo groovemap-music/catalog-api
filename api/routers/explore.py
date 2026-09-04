@@ -7,6 +7,7 @@ from collections import OrderedDict
 from typing import Any
 
 import structlog
+from common.media import legacy_format_names_to_media
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from neo4j.exceptions import ClientError as Neo4jClientError
@@ -33,6 +34,7 @@ from api.queries.neo4j_queries import (
 from api.queries.neo4j_queries import (
     MAX_PATH_DEPTH as _MAX_PATH_DEPTH,
 )
+from api.queries.release_media_queries import get_release_media
 from api.telemetry import CACHE_EXPLORE, CACHE_TRENDS, cache_get
 
 
@@ -42,6 +44,7 @@ router = APIRouter()
 
 _neo4j_driver: Any = None
 _redis: Any = None
+_pg_pool: Any = None
 
 # Redis cache TTL for trends (genre/style/label) and explore (artist/label)
 # 24 hours — data changes only on import
@@ -49,10 +52,11 @@ _TRENDS_CACHE_TTL = 86400
 _EXPLORE_CACHE_TTL = 86400
 
 
-def configure(neo4j: Any, jwt_secret: str | None, redis: Any = None) -> None:  # noqa: ARG001
-    global _neo4j_driver, _redis
+def configure(neo4j: Any, jwt_secret: str | None, redis: Any = None, pg_pool: Any = None) -> None:  # noqa: ARG001
+    global _neo4j_driver, _redis, _pg_pool
     _neo4j_driver = neo4j
     _redis = redis
+    _pg_pool = pg_pool
 
 
 _autocomplete_cache: OrderedDict[tuple[str, str, int], list[dict[str, Any]]] = OrderedDict()
@@ -300,6 +304,21 @@ async def genre_tree(
         return JSONResponse(content=_genre_tree_cache)
 
 
+async def _resolve_release_media(release_id: str, formats: list[Any] | None) -> dict[str, Any]:
+    """Resolve the ADR 0007 canonical ``media`` block for a release node response.
+
+    Prefers ``releases.media`` in PostgreSQL (computed at load time by the
+    Discogs SQL loader); when the row is missing or the column is NULL —
+    or PostgreSQL is not configured — derives a best-effort block from the
+    release's raw, deprecated ``formats`` name list so the ``media`` key is
+    never omitted for a release.
+    """
+    media = await get_release_media(_pg_pool, release_id) if _pg_pool is not None else None
+    if media is not None:
+        return media
+    return legacy_format_names_to_media(formats or [])
+
+
 @router.get("/api/node/{node_id}")
 async def get_node_details(
     node_id: str,
@@ -314,6 +333,8 @@ async def get_node_details(
     result = await query_func(_neo4j_driver, node_id)
     if not result:
         return JSONResponse(content={"error": f"{type.capitalize()} '{node_id}' not found"}, status_code=404)
+    if entity_type == "release":
+        result["media"] = await _resolve_release_media(node_id, result.get("formats"))
     return JSONResponse(content=result)
 
 

@@ -216,6 +216,16 @@ All graph query endpoints are served by the API and consumed by
 | GET    | `/api/node/{node_id}` | No            | —          | Get full details for a node          |
 | GET    | `/api/trends`         | No            | —          | Get time-series release counts       |
 
+**Media (`GET /api/node/{node_id}?type=release`):** a release node response always carries a
+`media` field — the ADR 0007 canonical media block. It is read from `releases.media` in
+PostgreSQL (the block the Discogs SQL loader computes at load time), keyed by the same id as
+the Neo4j `Release.id`. When that row does not exist yet, or its `media` column is NULL, the
+API derives a best-effort block from the release's raw `formats` name list through
+`common.media.legacy_format_names_to_media`, so `media` is never omitted for a release — an
+unrecoverable release with no formats data gets an empty-but-valid block. The deprecated raw
+`formats` list (see [Deprecations](#deprecations)) is still returned alongside it. Non-release
+node responses (`artist`, `genre`, `label`, `style`) are unaffected and carry no `media` key.
+
 ### Collection Sync
 
 | Method | Path               | Auth Required | Rate Limit | Description                     |
@@ -674,6 +684,7 @@ medium ids). The following are kept for one minor version and will be removed af
 | `formats` field in label DNA responses           | `media` field (`MediaFamilyWeight`, family-grouped with nested mediums) — see [Label DNA](#label-dna) |
 | `format_rarity` in the rarity breakdown           | `medium_rarity` (still present at weight `0.0`) — see [Release Rarity Scoring](#release-rarity-scoring) |
 | `Release.formats` reads (raw Discogs format list) | `Release` media edges / `media_families` — see [Backfilling `media` on Existing Sync Data](#backfilling-media-on-existing-sync-data) |
+| `formats` field in `GET /api/node/{id}?type=release` | `media` field (canonical block) — see [Graph Queries](#graph-queries) |
 
 No endpoint or field is removed yet; all of the above remain readable and are still populated.
 
