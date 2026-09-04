@@ -1,10 +1,12 @@
 """Tests for api/syncer.py — collection and wantlist sync logic."""
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
 import pytest
+from common.media import map_discogs_formats
 
 from api.syncer import (
     MAX_RATE_LIMIT_RETRIES,
@@ -635,6 +637,107 @@ class TestSyncCollection:
         mock_neo4j._mock_session.run.assert_not_awaited()
 
 
+class TestCollectionMedia:
+    """gm-catalog-api-be1.2: sync_collection must write the ADR 0007 canonical
+    media block, computed by common.media.map_discogs_formats from the raw
+    Discogs API `formats` list, into user_collections.media — alongside the
+    existing (deprecated) `formats` column, which keeps its current value.
+    """
+
+    @pytest.mark.asyncio
+    async def test_multi_format_release_writes_media_block(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
+        """A release with more than one format entry (e.g. a Vinyl + CD box) must
+        produce a media block with one item per format — not just the first."""
+        formats_raw = [
+            {"name": "Vinyl", "qty": "2", "descriptions": ['12"', "33 ⅓ RPM", "Album"], "text": None},
+            {"name": "CD", "qty": "1", "descriptions": ["Album"], "text": None},
+        ]
+        release = _make_release_item(123)
+        release["basic_information"]["formats"] = formats_raw
+        resp = _make_collection_response([release])
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = resp
+
+        with patch("api.syncer.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            await sync_collection(
+                TEST_USER_UUID,
+                TEST_DISCOGS_USERNAME,
+                TEST_CONSUMER_KEY,
+                TEST_CONSUMER_SECRET,
+                TEST_ACCESS_TOKEN,
+                TEST_TOKEN_SECRET,
+                TEST_USER_AGENT,
+                mock_pg_pool,
+                mock_neo4j,
+            )
+
+        call_args = mock_pg_pool._mock_cur.executemany.await_args
+        upsert_sql, batch_params = call_args.args[0], call_args.args[1]
+        assert len(batch_params) == 1
+
+        # tuple layout: (..., formats_json=7, ..., metadata_json=11, media_json=12, sync_started=-1)
+        formats_json = batch_params[0][7]
+        media_json = batch_params[0][12]
+
+        # The deprecated `formats` column is untouched — still the raw API objects.
+        assert json.loads(formats_json) == formats_raw
+
+        # `media` is the canonical block the shared mapper produces for the same input.
+        expected_media = map_discogs_formats(formats_raw)
+        actual_media = json.loads(media_json)
+        assert actual_media == expected_media
+        assert len(actual_media["items"]) == 2
+        assert {item["medium"] for item in actual_media["items"]} == {"vinyl_12", "optical_cd"}
+        assert actual_media["families"] == ["optical", "vinyl"]
+
+        assert "media = EXCLUDED.media" in upsert_sql
+
+    @pytest.mark.asyncio
+    async def test_empty_formats_writes_empty_media_block(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
+        """No formats at all still writes a (empty) media block — never NULL,
+        so the ON CONFLICT upsert can overwrite unconditionally."""
+        release = _make_release_item(999)
+        release["basic_information"]["formats"] = []
+        resp = _make_collection_response([release])
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = resp
+
+        with patch("api.syncer.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            await sync_collection(
+                TEST_USER_UUID,
+                TEST_DISCOGS_USERNAME,
+                TEST_CONSUMER_KEY,
+                TEST_CONSUMER_SECRET,
+                TEST_ACCESS_TOKEN,
+                TEST_TOKEN_SECRET,
+                TEST_USER_AGENT,
+                mock_pg_pool,
+                mock_neo4j,
+            )
+
+        call_args = mock_pg_pool._mock_cur.executemany.await_args
+        batch_params = call_args.args[1]
+        media_json = batch_params[0][12]
+        assert media_json is not None
+        media_block = json.loads(media_json)
+        assert media_block["items"] == []
+        assert media_block["families"] == []
+
+
 class TestSyncWantlist:
     """Tests for sync_wantlist."""
 
@@ -947,6 +1050,103 @@ class TestSyncWantlist:
         pg_delete_call = mock_pg_pool._mock_cur.execute.await_args
         pg_cutoff = pg_delete_call.args[1][1]
         assert pg_cutoff == upserted_updated_at
+
+
+class TestWantlistMedia:
+    """gm-catalog-api-be1.2: sync_wantlist must write the ADR 0007 canonical
+    media block, computed by common.media.map_discogs_formats from the raw
+    Discogs API `formats` list, into user_wantlists.media — the wantlist path
+    previously kept only formats[0]["name"] (the deprecated `format` column,
+    which keeps its current value).
+    """
+
+    @pytest.mark.asyncio
+    async def test_multi_format_want_writes_media_block(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
+        """A want with more than one format entry must produce a media block
+        covering every entry, not just formats[0]."""
+        formats_raw = [
+            {"name": "Vinyl", "qty": "1", "descriptions": ['7"', "45 RPM"], "text": None},
+            {"name": "CD", "qty": "1", "descriptions": ["Album"], "text": None},
+        ]
+        want = _make_want_item(456)
+        want["basic_information"]["formats"] = formats_raw
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = _make_wantlist_response([want])
+
+        with patch("api.syncer.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            await sync_wantlist(
+                TEST_USER_UUID,
+                TEST_DISCOGS_USERNAME,
+                TEST_CONSUMER_KEY,
+                TEST_CONSUMER_SECRET,
+                TEST_ACCESS_TOKEN,
+                TEST_TOKEN_SECRET,
+                TEST_USER_AGENT,
+                mock_pg_pool,
+                mock_neo4j,
+            )
+
+        call_args = mock_pg_pool._mock_cur.executemany.await_args
+        upsert_sql, batch_params = call_args.args[0], call_args.args[1]
+        assert len(batch_params) == 1
+
+        # tuple layout: (..., fmt_name=5, ..., date_added=8, media_json=9, sync_started=-1)
+        fmt_name = batch_params[0][5]
+        media_json = batch_params[0][9]
+
+        # The deprecated `format` column keeps only the first format's name.
+        assert fmt_name == "Vinyl"
+
+        expected_media = map_discogs_formats(formats_raw)
+        actual_media = json.loads(media_json)
+        assert actual_media == expected_media
+        assert len(actual_media["items"]) == 2
+        assert {item["medium"] for item in actual_media["items"]} == {"vinyl_7", "optical_cd"}
+
+        assert "media = EXCLUDED.media" in upsert_sql
+
+    @pytest.mark.asyncio
+    async def test_empty_formats_writes_empty_media_block(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
+        """No formats at all still writes an (empty) media block — never NULL."""
+        want = _make_want_item(789)
+        want["basic_information"]["formats"] = []
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = _make_wantlist_response([want])
+
+        with patch("api.syncer.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            await sync_wantlist(
+                TEST_USER_UUID,
+                TEST_DISCOGS_USERNAME,
+                TEST_CONSUMER_KEY,
+                TEST_CONSUMER_SECRET,
+                TEST_ACCESS_TOKEN,
+                TEST_TOKEN_SECRET,
+                TEST_USER_AGENT,
+                mock_pg_pool,
+                mock_neo4j,
+            )
+
+        call_args = mock_pg_pool._mock_cur.executemany.await_args
+        batch_params = call_args.args[1]
+        media_json = batch_params[0][9]
+        assert media_json is not None
+        media_block = json.loads(media_json)
+        assert media_block["items"] == []
+        assert media_block["families"] == []
 
 
 class TestRunFullSync:

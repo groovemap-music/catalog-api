@@ -21,6 +21,7 @@ from uuid import UUID
 import httpx
 import structlog
 from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver
+from common.media import map_discogs_formats
 from common.query_debug import execute_sql, log_cypher_query
 from psycopg.rows import dict_row
 
@@ -181,6 +182,13 @@ async def sync_collection(
                 metadata_json = json.dumps(release_metadata) if release_metadata else None
                 formats_raw = basic.get("formats", [])
                 formats_json = json.dumps(formats_raw) if formats_raw else None
+                # ADR 0007: the canonical media block, computed straight from the raw
+                # Discogs API format objects (map_discogs_formats accepts that shape
+                # directly — this live sync never passes through a catalog-events
+                # producer, so the API is the only place this mapping can happen).
+                # map_discogs_formats always returns a full block (never None), so the
+                # upsert below can overwrite unconditionally rather than COALESCE.
+                media_json = json.dumps(map_discogs_formats(formats_raw))
 
                 batch_params.append(
                     (
@@ -196,13 +204,15 @@ async def sync_collection(
                         item.get("rating", 0),
                         item.get("date_added"),
                         metadata_json,
+                        media_json,
                         # Stamp with the app-host sync_started clock (not PG's NOW()) so
                         # this write and _reconcile_stale_collection's DELETE cutoff share
                         # ONE clock source — mirroring the Neo4j half of this same sync,
                         # which already stamps synced_at=sync_started. A DB-host clock
                         # lagging the API host would otherwise make NOW() land before the
                         # cutoff and _reconcile_stale_collection would delete the row this
-                        # sync just wrote (groovemap-vqr0).
+                        # sync just wrote (groovemap-vqr0). Kept as the LAST tuple element
+                        # so existing `batch_params[i][-1]` assertions stay valid.
                         sync_started,
                     )
                 )
@@ -215,11 +225,11 @@ async def sync_collection(
                             INSERT INTO user_collections (
                                 user_id, release_id, instance_id, folder_id,
                                 title, artist, year, formats, label,
-                                rating, date_added, metadata, updated_at
+                                rating, date_added, metadata, media, updated_at
                             ) VALUES (
                                 %s::uuid, %s, %s, %s,
                                 %s, %s, %s, %s::jsonb, %s,
-                                %s, %s, %s::jsonb, %s
+                                %s, %s, %s::jsonb, %s::jsonb, %s
                             )
                             ON CONFLICT (user_id, release_id, instance_id) DO UPDATE SET
                                 folder_id = EXCLUDED.folder_id,
@@ -231,6 +241,7 @@ async def sync_collection(
                                 rating = EXCLUDED.rating,
                                 date_added = EXCLUDED.date_added,
                                 metadata = COALESCE(EXCLUDED.metadata, user_collections.metadata),
+                                media = EXCLUDED.media,
                                 updated_at = EXCLUDED.updated_at
                         """,
                         batch_params,
@@ -428,6 +439,12 @@ async def sync_wantlist(
                 artist_name = artists[0]["name"] if artists else None
                 formats = basic.get("formats", [])
                 fmt_name = formats[0]["name"] if formats else None
+                # ADR 0007: same canonical media block as sync_collection, computed
+                # from the same raw Discogs API format objects — the wantlist path
+                # previously kept only formats[0]["name"] (fmt_name above, retained
+                # for the deprecated `format` column) and lost every other format
+                # entry's descriptions.
+                media_json = json.dumps(map_discogs_formats(formats))
 
                 batch_params.append(
                     (
@@ -440,8 +457,11 @@ async def sync_wantlist(
                         item.get("rating", 0),
                         item.get("notes"),
                         item.get("date_added"),
+                        media_json,
                         # Same single-clock fix as sync_collection: stamp with the
                         # app-host sync_started clock, not PG's NOW() (groovemap-vqr0).
+                        # Kept as the LAST tuple element so existing
+                        # `batch_params[i][-1]` assertions stay valid.
                         sync_started,
                     )
                 )
@@ -454,11 +474,11 @@ async def sync_wantlist(
                             INSERT INTO user_wantlists (
                                 user_id, release_id,
                                 title, artist, year, format,
-                                rating, notes, date_added, updated_at
+                                rating, notes, date_added, media, updated_at
                             ) VALUES (
                                 %s::uuid, %s,
                                 %s, %s, %s, %s,
-                                %s, %s, %s, %s
+                                %s, %s, %s, %s::jsonb, %s
                             )
                             ON CONFLICT (user_id, release_id) DO UPDATE SET
                                 title = EXCLUDED.title,
@@ -468,6 +488,7 @@ async def sync_wantlist(
                                 rating = EXCLUDED.rating,
                                 notes = EXCLUDED.notes,
                                 date_added = EXCLUDED.date_added,
+                                media = EXCLUDED.media,
                                 updated_at = EXCLUDED.updated_at
                         """,
                         batch_params,
