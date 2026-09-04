@@ -245,7 +245,7 @@ Save and restore graph exploration states as shareable URLs.
 
 ### Unified Search
 
-Full-text search across all entity types using PostgreSQL, with facet counts and result highlighting. Results are cached in Redis for 5 minutes.
+Full-text search across all entity types using PostgreSQL, with facet counts and result highlighting. Results are cached in Redis for 5 minutes. The response's `facets` object carries `type`, `genre`, `decade`, and `media` — each a `{value: count}` mapping (`media` keyed by ADR 0007 family id), counted from matching releases.
 
 | Method | Path          | Auth Required | Rate Limit | Description                                   |
 | ------ | ------------- | ------------- | ---------- | --------------------------------------------- |
@@ -256,6 +256,7 @@ Full-text search across all entity types using PostgreSQL, with facet counts and
 - `q` (required) — Search query (minimum 3 characters)
 - `types` — Comma-separated entity types to search (default: `artist,label,master,release`)
 - `genres` — Comma-separated genre filter
+- `media` — Repeated media family or medium id to filter release results (e.g. `?media=vinyl&media=optical_cd`). Ids come from the ADR 0007 canonical media taxonomy vendored in `common.media` (`family_ids()` / `medium_ids()`); an unrecognised id returns `400` listing the unknown id(s). Family and medium ids are OR-combined with each other and AND-combined with `genres`/`year_min`/`year_max`. Only release results carry media — the filter is a no-op for artist/label/master results.
 - `year_min` — Minimum release year (1000–9999)
 - `year_max` — Maximum release year (1000–9999)
 - `limit` — Results per page (1–100, default: 20)
