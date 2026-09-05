@@ -18,7 +18,7 @@ copyright holders; it does not change any third-party license.
   clients. Source: <https://github.com/certifi/python-certifi>.
 - `orjson` 3.12.0 declares `MPL-2.0 AND (Apache-2.0 OR MIT)` and is a direct runtime
   dependency. Source: <https://github.com/ijl/orjson>.
-- `psycopg` 3.3.4 and `psycopg-binary` 3.3.4 are licensed under `LGPL-3.0-only` and
+- `psycopg` 3.3.5 and `psycopg-binary` 3.3.5 are licensed under `LGPL-3.0-only` and
   provide PostgreSQL access. Source: <https://github.com/psycopg/psycopg>.
 
 For MPL-covered files, preserve license and copyright notices and make the source form of
@@ -31,7 +31,7 @@ combining, vendoring, or changing how any covered dependency is distributed.
 ## Build and test dependencies
 
 The locked development environment also includes `chardet` 5.2.0 under
-`LGPL-2.1-or-later`, plus `fqdn` 1.5.1, `hypothesis` 6.165.10, and `pathspec` 1.1.1
+`LGPL-2.1-or-later`, plus `fqdn` 1.5.1, `hypothesis` 6.167.1, and `pathspec` 1.1.1
 under `MPL-2.0`. They are tools or transitive development dependencies and are not
 installed in the runtime images. Their distribution obligations must be reassessed if
 that boundary changes.
