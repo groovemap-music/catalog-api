@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   release:
-    uses: groovemap-music/automation/.github/workflows/reusable-release.yml@7db8b4c535c79329e3821e32177932b4f9059253
+    uses: groovemap-music/automation/.github/workflows/reusable-release.yml@833cb464507678c38ab78bd4718ce697399463e9
     with:
       repository-name: catalog-api
       setup-command: just setup
@@ -27,7 +27,7 @@ jobs:
       prepare-image-command: just prepare-private-wheels
 
   release-performance:
-    uses: groovemap-music/automation/.github/workflows/reusable-release.yml@7db8b4c535c79329e3821e32177932b4f9059253
+    uses: groovemap-music/automation/.github/workflows/reusable-release.yml@833cb464507678c38ab78bd4718ce697399463e9
     with:
       repository-name: catalog-api
       setup-command: just setup
