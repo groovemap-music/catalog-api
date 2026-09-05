@@ -29,7 +29,7 @@ from api.auth import decrypt_oauth_token
 from api.cache import RecommendCache
 from api.oauth import _build_oauth_header
 from api.oauth import _hmac_sha1_signature as _hmac_sha1
-from api.telemetry import record_sync_duration, timer
+from api.telemetry import SPAN_SYNC, api_span, record_sync_duration, timer
 
 
 logger = structlog.get_logger(__name__)
@@ -608,7 +608,12 @@ async def run_full_sync(
     oauth_encryption_key: str | None = None,
     redis_client: Any | None = None,
 ) -> dict[str, Any]:
-    """Run a full collection + wantlist sync for a user.
+    """Run a full collection + wantlist sync for a user, inside the `api.sync` span.
+
+    A sync runs as a detached background task, so this span is the root of its own trace:
+    the Discogs calls, the PostgreSQL writes, and the Neo4j writes underneath it all hang
+    off it. `record_sync_duration` stamps the terminal outcome on it from the `finally`
+    block below, so the span and `groovemap.api.sync.duration` always agree.
 
     Fetches OAuth credentials from PostgreSQL and app config,
     then syncs collection and wantlist.
@@ -616,6 +621,20 @@ async def run_full_sync(
     Returns:
         dict with sync results (items_synced, pages_fetched, error)
     """
+    with api_span(SPAN_SYNC):
+        return await _run_full_sync(user_uuid, sync_id, pg_pool, neo4j_driver, discogs_user_agent, oauth_encryption_key, redis_client)
+
+
+async def _run_full_sync(
+    user_uuid: UUID,
+    sync_id: str,
+    pg_pool: AsyncPostgreSQLPool,
+    neo4j_driver: AsyncResilientNeo4jDriver,
+    discogs_user_agent: str,
+    oauth_encryption_key: str | None,
+    redis_client: Any | None,
+) -> dict[str, Any]:
+    """Do the sync itself. Split out only so the span above wraps every exit path."""
     error_message = None
     collection_count = 0
     wantlist_count = 0

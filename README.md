@@ -40,12 +40,18 @@ revision; a cross-repository PAT and a reduced dependency-update gate are both r
 
 ## Observability
 
-The service pushes OpenTelemetry metrics over OTLP HTTP/protobuf and never exposes a
-Prometheus scrape endpoint of its own. It reads only the standard OpenTelemetry environment
-variables; with `OTEL_EXPORTER_OTLP_ENDPOINT` unset it installs a no-op meter provider and
-behaves exactly as it did before. The
-[configuration guide](docs/configuration.md#opentelemetry-metrics) lists the variables and
-the metrics the API records.
+The service pushes OpenTelemetry metrics and traces over OTLP HTTP/protobuf and never
+exposes a Prometheus scrape endpoint of its own. It reads only the standard OpenTelemetry
+environment variables; with `OTEL_EXPORTER_OTLP_ENDPOINT` unset it installs a no-op meter
+provider and a no-op tracer provider and behaves exactly as it did before.
+
+Alongside the HTTP, database, cache, sync, and NLQ metrics it records, the service reports
+the process view and event-loop lag that `groovemap-runtime` installs, and it opens two
+domain root spans of its own: `api.sync` for a Discogs collection and wantlist sync, and
+`api.nlq` for a natural-language query. Request, outbound-HTTP, and database spans come from
+the instrumentations and the shared resilient wrappers. The
+[configuration guide](docs/configuration.md#opentelemetry-metrics-and-traces) lists the
+variables, the metrics, and the spans.
 
 ## Contracts
 

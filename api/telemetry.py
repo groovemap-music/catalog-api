@@ -1,9 +1,10 @@
-"""OpenTelemetry instruments owned by catalog-api.
+"""OpenTelemetry instruments and domain spans owned by catalog-api.
 
-The transport, resource, and provider come from ``common.telemetry``; this module owns
-only the instruments this service records and the small helpers that record them. Every
-instrument is created lazily from a single meter so a process that never configures
-``OTEL_EXPORTER_OTLP_ENDPOINT`` pays for one no-op instrument per metric and nothing else.
+The transport, resource, and providers come from ``common.telemetry``; this module owns
+only the instruments this service records, the two domain spans it opens, and the small
+helpers that record them. Every instrument is created lazily from a single meter so a
+process that never configures ``OTEL_EXPORTER_OTLP_ENDPOINT`` pays for one no-op instrument
+per metric and nothing else, and every span is a no-op until a tracer provider is live.
 
 Attribute sets are closed and low-cardinality by construction: the ``cache`` and ``outcome``
 values are the module constants below, never a key, an id, or free text.
@@ -16,23 +17,35 @@ from __future__ import annotations
 
 import inspect
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import structlog
-from common import get_meter
+from common import get_meter, get_tracer
 
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterator
 
     import redis.asyncio as aioredis
 
 
 logger = structlog.get_logger(__name__)
 
-# One meter for the whole service, named after the package the instruments belong to.
+# One meter and one tracer for the whole service, named after the package they belong to.
 METER_NAME = "groovemap.api"
+TRACER_NAME = "groovemap.api"
+
+# The two domain root spans this service opens. Everything else it emits — request spans,
+# outbound HTTP spans, and database spans — comes from the instrumentors and the shared
+# resilience wrappers without a call site here.
+SPAN_NLQ = "api.nlq"
+SPAN_SYNC = "api.sync"
+
+# The single attribute a domain span carries. Its values are the closed outcome sets below.
+OUTCOME_ATTRIBUTE = "outcome"
 
 # Closed attribute vocabularies. Every recorded value comes from one of these sets.
 CACHE_HIT = "hit"
@@ -130,19 +143,70 @@ def reset_instruments() -> None:
     _instruments = None
 
 
+# The domain span the current task is inside. Holding it here, rather than reading whatever
+# span happens to be current, is what keeps `outcome` off the surrounding HTTP server span:
+# only a block that actually opened `api.nlq` or `api.sync` can be stamped with an outcome.
+_domain_span: ContextVar[Any] = ContextVar("api_domain_span", default=None)
+
+
+def _fail_span(span: Any, exc: BaseException) -> None:
+    """Fail a span with `error.type` only — never a message, never a stack trace."""
+    try:
+        from opentelemetry.trace import Status, StatusCode  # noqa: PLC0415
+
+        span.set_attribute("error.type", type(exc).__name__)
+        span.set_status(Status(StatusCode.ERROR))
+    except Exception:
+        logger.debug("⚠️ Could not mark the domain span as failed", span=span)
+
+
+@contextmanager
+def api_span(name: str) -> Iterator[Any]:
+    """Open one catalog-api domain root span and yield it.
+
+    The ``outcome`` attribute is written by whichever ``record_*`` call reports the outcome
+    inside the block, so the span and its metric can never disagree about how the operation
+    ended. An exception leaving the block fails the span; before ``setup_telemetry`` and with
+    tracing off the whole thing is a no-op span from the library's no-op provider.
+
+    Only :class:`Exception` fails the span. Cancellation and a closed generator are how a
+    shutdown and a disconnected streaming client arrive here, and neither is a failure of the
+    operation — the terminal outcome the ``record_*`` call already stamped says what happened.
+    """
+    with get_tracer(TRACER_NAME).start_as_current_span(name, record_exception=False, set_status_on_exception=False) as span:
+        enclosing = _domain_span.get()
+        _domain_span.set(span)
+        try:
+            yield span
+        except Exception as exc:
+            _fail_span(span, exc)
+            raise
+        finally:
+            _domain_span.set(enclosing)
+
+
+def _record_outcome(outcome: str) -> None:
+    """Stamp an outcome on the domain span the caller is inside, if there is one."""
+    span = _domain_span.get()
+    if span is not None:
+        span.set_attribute(OUTCOME_ATTRIBUTE, outcome)
+
+
 def record_cache(cache: str, *, hit: bool) -> None:
     """Count one cache-aside lookup against a named Redis cache."""
     instruments().cache.add(1, {"outcome": CACHE_HIT if hit else CACHE_MISS, "cache": cache})
 
 
 def record_nlq_request(outcome: str) -> None:
-    """Count one natural-language query request."""
+    """Count one natural-language query request, and stamp its `api.nlq` span."""
     instruments().nlq_requests.add(1, {"outcome": outcome})
+    _record_outcome(outcome)
 
 
 def record_sync_duration(seconds: float, outcome: str) -> None:
-    """Record how long a full Discogs sync ran and how it ended."""
+    """Record how long a full Discogs sync ran, and stamp its `api.sync` span."""
     instruments().sync_duration.record(seconds, {"outcome": outcome})
+    _record_outcome(outcome)
 
 
 def record_redis_operation(operation: str, seconds: float, error_type: str | None = None) -> None:

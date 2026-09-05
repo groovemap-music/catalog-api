@@ -25,6 +25,8 @@ from api.telemetry import (
     NLQ_INVALID,
     NLQ_SUCCESS,
     NLQ_UNAVAILABLE,
+    SPAN_NLQ,
+    api_span,
     cache_get,
     record_nlq_request,
 )
@@ -140,25 +142,31 @@ async def nlq_status() -> JSONResponse:
     return JSONResponse(content={"enabled": _nlq_config.is_available})
 
 
+def _refuse(outcome: str, message: str, status_code: int) -> JSONResponse:
+    """Answer a query the engine must never see, counting it in its own `api.nlq` span."""
+    with api_span(SPAN_NLQ):
+        record_nlq_request(outcome)
+    return JSONResponse(content={"error": message}, status_code=status_code)
+
+
 @router.post("/api/nlq/query")
 @limiter.limit("10/minute")
 async def nlq_query(request: Request, body: NLQQueryRequest) -> Any:
-    """Run a natural language query against the knowledge graph."""
+    """Run a natural language query against the knowledge graph.
+
+    Every path through this endpoint reports its outcome from inside one `api.nlq` span.
+    A streaming request opens that span in the event generator rather than here, because
+    the generator runs after this handler has already returned its response object.
+    """
     # Validate query
     if not body.query or not body.query.strip():
-        record_nlq_request(NLQ_INVALID)
-        return JSONResponse(content={"error": "Query must not be empty"}, status_code=400)
+        return _refuse(NLQ_INVALID, "Query must not be empty", 400)
     if len(body.query) > _nlq_config.max_query_length:
-        record_nlq_request(NLQ_INVALID)
-        return JSONResponse(
-            content={"error": f"Query exceeds maximum length of {_nlq_config.max_query_length} characters"},
-            status_code=400,
-        )
+        return _refuse(NLQ_INVALID, f"Query exceeds maximum length of {_nlq_config.max_query_length} characters", 400)
 
     # Check availability
     if not _nlq_config.is_available or _engine is None:
-        record_nlq_request(NLQ_UNAVAILABLE)
-        return JSONResponse(content={"error": "NLQ is not available"}, status_code=503)
+        return _refuse(NLQ_UNAVAILABLE, "NLQ is not available", 503)
 
     # Extract optional user_id from Bearer token
     user_id = await _extract_user_id(request)
@@ -186,44 +194,45 @@ async def nlq_query(request: Request, body: NLQQueryRequest) -> Any:
     if wants_stream:
         return _stream_response(body.query, user_id, body.context, cached=cached_data)
 
-    if cached_data is not None:
-        record_nlq_request(NLQ_CACHED)
-        return JSONResponse(content=cached_data)
+    with api_span(SPAN_NLQ):
+        if cached_data is not None:
+            record_nlq_request(NLQ_CACHED)
+            return JSONResponse(content=cached_data)
 
-    # Build context
-    ctx = NLQContext(
-        user_id=user_id,
-        current_entity_id=body.context.get("entity_id") if body.context else None,
-        current_entity_type=body.context.get("entity_type") if body.context else None,
-    )
+        # Build context
+        ctx = NLQContext(
+            user_id=user_id,
+            current_entity_id=body.context.get("entity_id") if body.context else None,
+            current_entity_type=body.context.get("entity_type") if body.context else None,
+        )
 
-    # Run engine. A raised engine error propagates to FastAPI as a 500, so the outcome is
-    # counted on both sides of the call rather than only on success.
-    try:
-        result = await _engine.run(body.query, ctx)
-    except Exception:
-        record_nlq_request(NLQ_ERROR)
-        raise
-    record_nlq_request(NLQ_SUCCESS)
-
-    response_data = {
-        "query": body.query,
-        "summary": result.summary,
-        "entities": result.entities,
-        "tools_used": result.tools_used,
-        "actions": [action.model_dump(by_alias=True, mode="json") for action in result.actions],
-        "cached": False,
-    }
-
-    # Cache public results
-    if user_id is None and _redis is not None:
-        cache_k = _cache_key(body.query, body.context)
+        # Run engine. A raised engine error propagates to FastAPI as a 500, so the outcome is
+        # counted on both sides of the call rather than only on success.
         try:
-            await _redis.setex(cache_k, _nlq_config.cache_ttl, json.dumps(response_data))
+            result = await _engine.run(body.query, ctx)
         except Exception:
-            logger.debug("⚠️ NLQ cache write failed", key=cache_k)
+            record_nlq_request(NLQ_ERROR)
+            raise
+        record_nlq_request(NLQ_SUCCESS)
 
-    return JSONResponse(content=response_data)
+        response_data = {
+            "query": body.query,
+            "summary": result.summary,
+            "entities": result.entities,
+            "tools_used": result.tools_used,
+            "actions": [action.model_dump(by_alias=True, mode="json") for action in result.actions],
+            "cached": False,
+        }
+
+        # Cache public results
+        if user_id is None and _redis is not None:
+            cache_k = _cache_key(body.query, body.context)
+            try:
+                await _redis.setex(cache_k, _nlq_config.cache_ttl, json.dumps(response_data))
+            except Exception:
+                logger.debug("⚠️ NLQ cache write failed", key=cache_k)
+
+        return JSONResponse(content=response_data)
 
 
 def _stream_response(
@@ -240,114 +249,118 @@ def _stream_response(
     """
 
     async def event_generator() -> Any:
-        # Replay a cached result as synthetic SSE events so a streaming client
-        # never hangs on a plain JSON cache body. See groovemap-cu2.27.
-        if cached is not None:
-            record_nlq_request(NLQ_CACHED)
-            cached_actions = cached.get("actions", [])
-            yield {"event": "actions", "data": json.dumps({"actions": cached_actions})}
-            yield {
-                "event": "result",
-                "data": json.dumps(
-                    {
-                        "query": cached.get("query", query),
-                        "summary": cached.get("summary"),
-                        "entities": cached.get("entities"),
-                        "tools_used": cached.get("tools_used"),
-                        # Mirror the non-streaming JSON body: actions travel on the
-                        # result frame too, not only the sideband event. See
-                        # groovemap-l6fm.
-                        "actions": cached_actions,
-                        "cached": True,
-                    }
-                ),
-            }
-            return
-
-        ctx = NLQContext(
-            user_id=user_id,
-            current_entity_id=context.get("entity_id") if context else None,
-            current_entity_type=context.get("entity_type") if context else None,
-        )
-
-        status_queue: asyncio.Queue[str | None] = asyncio.Queue()
-
-        async def emit_status(step: str) -> None:
-            await status_queue.put(step)
-
-        if _engine is None:  # pragma: no cover — guarded by caller
-            return
-
-        # Run engine in background so status events can be yielded as they arrive
-        engine_task = asyncio.create_task(_engine.run(query, ctx, on_status=emit_status))
-
-        try:
-            # Yield status events as they arrive
-            while not engine_task.done():
-                try:
-                    step = await asyncio.wait_for(status_queue.get(), timeout=0.1)
-                    yield {"event": "status", "data": json.dumps({"step": step})}
-                except TimeoutError:
-                    continue
-
-            # Drain any remaining status events
-            while not status_queue.empty():
-                step = status_queue.get_nowait()
-                yield {"event": "status", "data": json.dumps({"step": step})}
-
-            try:
-                result = await engine_task
-            except Exception as exc:
-                record_nlq_request(NLQ_ERROR)
-                logger.error("❌ NLQ engine error", error=str(exc), exc_info=True)
-                yield {"event": "error", "data": json.dumps({"error": "An internal error occurred"})}
+        # The span opens here rather than in the handler: this generator runs after the
+        # handler has returned its response object, so a span opened there would have
+        # closed before a single event was produced.
+        with api_span(SPAN_NLQ):
+            # Replay a cached result as synthetic SSE events so a streaming client
+            # never hangs on a plain JSON cache body. See groovemap-cu2.27.
+            if cached is not None:
+                record_nlq_request(NLQ_CACHED)
+                cached_actions = cached.get("actions", [])
+                yield {"event": "actions", "data": json.dumps({"actions": cached_actions})}
+                yield {
+                    "event": "result",
+                    "data": json.dumps(
+                        {
+                            "query": cached.get("query", query),
+                            "summary": cached.get("summary"),
+                            "entities": cached.get("entities"),
+                            "tools_used": cached.get("tools_used"),
+                            # Mirror the non-streaming JSON body: actions travel on the
+                            # result frame too, not only the sideband event. See
+                            # groovemap-l6fm.
+                            "actions": cached_actions,
+                            "cached": True,
+                        }
+                    ),
+                }
                 return
 
-            record_nlq_request(NLQ_SUCCESS)
+            ctx = NLQContext(
+                user_id=user_id,
+                current_entity_id=context.get("entity_id") if context else None,
+                current_entity_type=context.get("entity_type") if context else None,
+            )
 
-            # Emit actions event before result so the client can snapshot and apply
-            actions_payload = [action.model_dump(by_alias=True, mode="json") for action in result.actions]
-            yield {
-                "event": "actions",
-                "data": json.dumps({"actions": actions_payload}),
-            }
+            status_queue: asyncio.Queue[str | None] = asyncio.Queue()
 
-            # Emit final result. `actions` is repeated here on purpose: the
-            # non-streaming JSON body and the Redis cache entry both carry it on
-            # the result object, and a client that only subscribes to `result`
-            # would otherwise apply nothing at all. See groovemap-l6fm.
-            response_data = {
-                "query": query,
-                "summary": result.summary,
-                "entities": result.entities,
-                "tools_used": result.tools_used,
-                "actions": actions_payload,
-                "cached": False,
-            }
+            async def emit_status(step: str) -> None:
+                await status_queue.put(step)
 
-            # Cache public results — mirrors the non-streaming branch below.
-            # This is the only client the production UI uses (nlq.js always sends
-            # Accept: text/event-stream), so without this write the query cache and
-            # its cached-replay path above are permanently unpopulated. Written
-            # before the "result" yield: a client disconnect raises GeneratorExit
-            # at that yield, and a write placed after it would never run.
-            # See groovemap-c584.
-            if user_id is None and _redis is not None:
-                cache_k = _cache_key(query, context)
+            if _engine is None:  # pragma: no cover — guarded by caller
+                return
+
+            # Run engine in background so status events can be yielded as they arrive
+            engine_task = asyncio.create_task(_engine.run(query, ctx, on_status=emit_status))
+
+            try:
+                # Yield status events as they arrive
+                while not engine_task.done():
+                    try:
+                        step = await asyncio.wait_for(status_queue.get(), timeout=0.1)
+                        yield {"event": "status", "data": json.dumps({"step": step})}
+                    except TimeoutError:
+                        continue
+
+                # Drain any remaining status events
+                while not status_queue.empty():
+                    step = status_queue.get_nowait()
+                    yield {"event": "status", "data": json.dumps({"step": step})}
+
                 try:
-                    await _redis.setex(cache_k, _nlq_config.cache_ttl, json.dumps(response_data))
-                except Exception:
-                    logger.debug("⚠️ NLQ cache write failed", key=cache_k)
+                    result = await engine_task
+                except Exception as exc:
+                    record_nlq_request(NLQ_ERROR)
+                    logger.error("❌ NLQ engine error", error=str(exc), exc_info=True)
+                    yield {"event": "error", "data": json.dumps({"error": "An internal error occurred"})}
+                    return
 
-            yield {"event": "result", "data": json.dumps(response_data)}
-        finally:
-            # Client disconnect raises GeneratorExit at the current yield; cancel
-            # the still-running engine task so the Anthropic/Neo4j work does not
-            # leak and the pending task cannot be GC'd mid-flight. gather with
-            # return_exceptions swallows the resulting CancelledError. See
-            # groovemap-cu2.28.
-            if not engine_task.done():
-                engine_task.cancel()
-                await asyncio.gather(engine_task, return_exceptions=True)
+                record_nlq_request(NLQ_SUCCESS)
+
+                # Emit actions event before result so the client can snapshot and apply
+                actions_payload = [action.model_dump(by_alias=True, mode="json") for action in result.actions]
+                yield {
+                    "event": "actions",
+                    "data": json.dumps({"actions": actions_payload}),
+                }
+
+                # Emit final result. `actions` is repeated here on purpose: the
+                # non-streaming JSON body and the Redis cache entry both carry it on
+                # the result object, and a client that only subscribes to `result`
+                # would otherwise apply nothing at all. See groovemap-l6fm.
+                response_data = {
+                    "query": query,
+                    "summary": result.summary,
+                    "entities": result.entities,
+                    "tools_used": result.tools_used,
+                    "actions": actions_payload,
+                    "cached": False,
+                }
+
+                # Cache public results — mirrors the non-streaming branch below.
+                # This is the only client the production UI uses (nlq.js always sends
+                # Accept: text/event-stream), so without this write the query cache and
+                # its cached-replay path above are permanently unpopulated. Written
+                # before the "result" yield: a client disconnect raises GeneratorExit
+                # at that yield, and a write placed after it would never run.
+                # See groovemap-c584.
+                if user_id is None and _redis is not None:
+                    cache_k = _cache_key(query, context)
+                    try:
+                        await _redis.setex(cache_k, _nlq_config.cache_ttl, json.dumps(response_data))
+                    except Exception:
+                        logger.debug("⚠️ NLQ cache write failed", key=cache_k)
+
+                yield {"event": "result", "data": json.dumps(response_data)}
+            finally:
+                # Client disconnect raises GeneratorExit at the current yield; cancel
+                # the still-running engine task so the Anthropic/Neo4j work does not
+                # leak and the pending task cannot be GC'd mid-flight. gather with
+                # return_exceptions swallows the resulting CancelledError. See
+                # groovemap-cu2.28.
+                if not engine_task.done():
+                    engine_task.cancel()
+                    await asyncio.gather(engine_task, return_exceptions=True)
 
     return EventSourceResponse(event_generator())

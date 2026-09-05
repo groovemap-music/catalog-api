@@ -27,6 +27,7 @@ from common import (
     setup_logging,
     setup_telemetry,
     shutdown_telemetry,
+    start_event_loop_monitor,
 )
 from common.query_debug import execute_sql
 from fastapi import Depends, FastAPI, HTTPException, Request, status
@@ -239,6 +240,13 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:  # pragma: no cover
     global _pool, _config, _redis, _neo4j
 
     logger.info("🚀 API service starting...")
+
+    # Sample this loop's scheduling delay into groovemap.runtime.event_loop.lag. The
+    # entrypoint already ran setup_telemetry, and this is the first moment there is a
+    # running loop to sample from. It returns None when metrics are not being exported,
+    # and shutdown_telemetry() at the end of this block cancels whatever it started.
+    _app.state.event_loop_monitor = start_event_loop_monitor()
+
     _config = ApiConfig.from_env()
 
     # Start health server on separate port
