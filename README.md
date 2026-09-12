@@ -7,13 +7,19 @@ operator setup CLIs.
 ```mermaid
 flowchart LR
     Clients[GrooveMap clients] --> API[catalog-api]
+    Console[operations-console] --> API
+    Explorer[graph-explorer] --> API
     API --> PG[(PostgreSQL catalog)]
     API --> Neo4j[(Neo4j graph)]
     API --> Redis[(Redis cache)]
     API --> Discogs[Discogs API]
     API --> Analytics[analytics-engine]
-    Console[operations-console] --> API
-    Explorer[graph-explorer] --> API
+    DI[discogs-ingestion] -->|v1 events| DC[Discogs loaders]
+    MI[musicbrainz-ingestion] -->|v1 events| MC[MusicBrainz loaders]
+    DC --> PG
+    DC --> Neo4j
+    MC --> PG
+    MC --> Neo4j
 ```
 
 ## Development
@@ -32,6 +38,11 @@ just image
 `just check` is the authoritative pre-merge gate. It uses fakes and mocks for external
 systems. Live integration, load, and deployment checks are deliberately separate. The
 performance runner is owned here, while deployment owns its environment and orchestration.
+Use `just --summary` to list the complete recipe surface. `just format-check`, `just lint`,
+`just contract-check`, `just test`, and `just coverage` provide focused feedback;
+`just secret-scan` and `just audit` are separate policy capabilities. `just image`,
+`just performance-image`, and `just release-dry-run` build or rehearse locally and never
+publish.
 
 Pull requests, pushes to `main`, the weekly schedule, and Dependabot pull requests all use
 the same required validation graph from the public `groovemap-music/automation` repository.
@@ -55,7 +66,10 @@ variables, the metrics, and the spans.
 
 ## Contracts
 
-- Catalog events are promoted from `catalog-ingestion` and verified by digest.
+- Catalog events are promoted independently from
+  [`discogs-ingestion`](https://github.com/groovemap-music/discogs-ingestion) and
+  [`musicbrainz-ingestion`](https://github.com/groovemap-music/musicbrainz-ingestion) and
+  verified by digest.
 - Persistence compatibility is promoted from `database-schema` and pins the tested runtime.
 - The internal Analytics OpenAPI document and generated consumer binding are owned in
   `api/contracts/internal-insights/v1/`; downstream consumers promote the artifact rather

@@ -11,9 +11,15 @@ The API service:
 
 - Handles user registration and password-based login
 - Issues and validates HS256 JWT access tokens
-- Manages the Discogs OAuth 1.0a OOB flow for users
+- Manages the Discogs OAuth 1.0a flow for users (OOB by default, registered callback when configured)
 - Stores Discogs OAuth access tokens in PostgreSQL
 - Reads Discogs app credentials from the `app_config` table (set via `discogs-setup` CLI)
+
+Catalog data arrives through independently owned
+[`discogs-ingestion`](https://github.com/groovemap-music/discogs-ingestion) and
+[`musicbrainz-ingestion`](https://github.com/groovemap-music/musicbrainz-ingestion) event
+contracts. Their source-matching graph enrichers and SQL loaders populate the stores this API
+reads; Catalog API does not schedule or coordinate those producers.
 
 ## Architecture
 
@@ -86,7 +92,8 @@ The API handles JWT validation locally; `JWT_SECRET_KEY` remains inside the cata
 
 ### Discogs OAuth Flow
 
-The API implements Discogs OAuth 1.0a OOB (out-of-band) flow:
+The API implements a Discogs OAuth 1.0a flow. With `DISCOGS_OAUTH_CALLBACK_URL` unset it uses
+the OOB (out-of-band) verifier flow; when set it sends users through the registered callback:
 
 1. **Start**: `GET /api/oauth/authorize/discogs` — requests a token from Discogs and returns an authorization URL and state token. State is stored in Redis with a TTL.
 1. **Authorize**: User visits the Discogs URL and approves access, receiving a PIN verifier code.
@@ -174,6 +181,7 @@ selected, the command is idempotent — safe to re-run, and safe to run alongsid
 | POST   | `/api/auth/login`    | No            | 5/min      | Login and receive JWT token      |
 | POST   | `/api/auth/logout`   | Yes           | —          | Revoke JWT token (JTI blacklist) |
 | GET    | `/api/auth/me`       | Yes           | —          | Get current user details         |
+| POST   | `/api/auth/change-password` | Yes     | —          | Change password and revoke older sessions |
 
 ### Password Reset
 
@@ -686,7 +694,7 @@ paths retain `/insights/` for API compatibility and are not intended for direct 
 
 ```bash
 # Install dependencies
-uv sync --all-extras
+just setup
 
 # Run the API service
 uv run python -m api.api
@@ -695,11 +703,14 @@ uv run python -m api.api
 ### Running Tests
 
 ```bash
-# Run API tests
-uv run pytest tests/api/ -v
+# Run the repository test suite once
+just test
 
-# Run with coverage
-just test-api
+# Run the same suite and retain coverage.xml
+just coverage
+
+# Run the complete pre-merge gate
+just check
 ```
 
 ## Container image

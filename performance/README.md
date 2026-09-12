@@ -3,11 +3,15 @@
 See the repository [documentation index](../docs/README.md) for API configuration and
 performance guidance.
 
-Sequential performance test runner for all GrooveMap API query endpoints. Measures response times across multiple iterations and produces a detailed report with min/avg/max/p95 statistics per endpoint.
+Sequential performance test runner for a representative, configured set of Catalog API query
+endpoints. It measures response times across multiple iterations and produces a detailed report
+with min/avg/max/p95 statistics per endpoint.
 
 ## What It Tests
 
-The performance test covers all API endpoints that execute database queries (Neo4j, PostgreSQL, or Redis):
+The runner covers the following public read paths that exercise Neo4j, PostgreSQL, Redis, or the
+analytics proxy. `performance/run_perftest.py` is the executable source of truth; this is not an
+exhaustive inventory of every Catalog API route.
 
 ### Static Endpoints (no parameters or fixed parameters)
 
@@ -15,6 +19,8 @@ The performance test covers all API endpoints that execute database queries (Neo
 | --------------------------------------------------- | ------------------------------- |
 | `GET /api/explore/year-range`                       | Neo4j                           |
 | `GET /api/explore/genre-emergence?before_year=2025` | Neo4j                           |
+| `GET /api/genre-tree`                               | Neo4j                           |
+| `GET /api/graph/stats`                              | Neo4j                           |
 | `GET /api/insights/top-artists`                     | Neo4j (via insights proxy)      |
 | `GET /api/insights/genre-trends`                    | Neo4j (via insights proxy)      |
 | `GET /api/insights/label-longevity`                 | Neo4j (via insights proxy)      |
@@ -46,6 +52,15 @@ The performance test covers all API endpoints that execute database queries (Neo
 | `GET /api/recommend/similar/artist/{id}` | Each artist                                   | Neo4j      |
 | `GET /api/node/{id}`                     | Each artist and label                         | Neo4j      |
 | `GET /api/expand`                        | Each artist (releases), each label (releases) | Neo4j      |
+
+### Credits, recommendations, and network endpoints
+
+The configured people and role categories exercise person credits, timelines, profiles,
+connections, autocomplete, shared credits, and role leaderboards. Resolved artists also exercise
+the similar-artist recommendation, direct collaborators, multi-hop collaborators at depths one
+and two, centrality, and cluster routes. Optional `nlq_scenarios` add explicitly configured
+requests such as `POST /api/nlq/query` and `GET /api/nlq/suggestions`; they are skipped only when
+removed from the configuration.
 
 ## Prerequisites
 
