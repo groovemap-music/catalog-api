@@ -71,7 +71,7 @@ def test_ci_uses_one_immutable_graph_for_every_trigger() -> None:
     assert inputs["coverage-command"] == "just coverage"
     assert inputs["audit-command"] == "just audit"
     assert inputs["license-command"] == "just license-check"
-    assert inputs["secret-scan-command"] == "just security"
+    assert inputs["secret-scan-command"] == "just secret-scan"
 
     secrets = required["secrets"]
     assert isinstance(secrets, dict)
