@@ -19,13 +19,17 @@ flowchart LR
 ## Repository gates
 
 ```bash
+just test
+just coverage
 just check
 just performance-image
 ```
 
-`just check` is deterministic and uses fakes. `just performance-image` builds the repository-named
-local runner; it does not start databases, publish an image, or alter a deployment. Run the image
-against a disposable, representative stack provisioned by `deployment`.
+`just test` and its `just coverage` alias execute the test suite once and write `coverage.xml`.
+`just check` is the full deterministic repository gate and uses fakes; it does not run the live
+performance workload. `just performance-image` builds the repository-named local runner; it does
+not start databases, publish an image, or alter a deployment. Run the image against a disposable,
+representative stack provisioned by `deployment`.
 
 The runner configuration and full endpoint matrix are documented in
 [`performance/README.md`](../performance/README.md). Record the catalog-api revision, promoted

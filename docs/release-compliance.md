@@ -19,6 +19,11 @@ flowchart TD
 
 ## Local gates
 
+- `just format-check`, `just lint`, and `just contract-check` are focused, locked source checks;
+  `just source-check` composes those three capabilities.
+- `just test` executes the suite with coverage, while `just coverage` is an alias rather than a
+  second copy of the command.
+- `just secret-scan` is the narrow gitleaks capability used by both local and shared CI gates.
 - `just check` runs formatting, linting, type checks, the complete test suite, secret scans,
   wheel construction, installed-wheel smoke tests, dependency-license policy, and version checks.
 - `just audit` checks the locked environment for known vulnerabilities.

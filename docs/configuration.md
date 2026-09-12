@@ -6,9 +6,15 @@ production secret creation, service discovery, and cross-service defaults.
 
 ```mermaid
 flowchart LR
-    Environment[Environment variables] --> Config[ApiConfig]
-    SecretFiles[NAME_FILE secret files] --> Config
-    Config --> API[catalog-api]
+    Environment[Environment variables] --> APIConfig[ApiConfig]
+    Environment --> NLQConfig[NLQConfig]
+    Environment --> Analysis[Extraction-analysis roots]
+    SecretFiles[NAME_FILE secret files] --> Resolver[Shared secret resolver]
+    Resolver --> APIConfig
+    Resolver --> NLQConfig
+    APIConfig --> API[catalog-api lifespan]
+    NLQConfig --> API
+    Analysis --> API
 ```
 
 ## Required settings
@@ -68,8 +74,10 @@ origin in production so password-reset links do not point at localhost.
 | `RESEND_API_KEY` | unset | Optional transactional-email API key |
 | `RESEND_SENDER_EMAIL` | `noreply@groovemap.music` | Transactional-email sender |
 | `RESEND_SENDER_NAME` | `GrooveMap` | Transactional-email display name |
-| `EXTRACTOR_HOST` | `extractor-discogs` | Ingestion health endpoint host; retained compatibility wire ID |
-| `EXTRACTOR_HEALTH_PORT` | `8000` | Extraction health endpoint port |
+| `EXTRACTOR_HOST` | `extractor-discogs` | Discogs trigger and health host; retained compatibility wire ID |
+| `EXTRACTOR_HEALTH_PORT` | `8000` | Discogs trigger and health port |
+| `DISCOGS_DATA_ROOT` | unset | Mounted Discogs validation-result root exposed by extraction-analysis routes |
+| `MUSICBRAINZ_DATA_ROOT` | unset | Mounted MusicBrainz validation-result root exposed by extraction-analysis routes |
 | `RABBITMQ_MANAGEMENT_HOST` | `RABBITMQ_HOST` or `rabbitmq` | RabbitMQ management endpoint host |
 | `RABBITMQ_MANAGEMENT_PORT` | `15672` | RabbitMQ management endpoint port |
 | `RABBITMQ_USERNAME` | `groovemap` | RabbitMQ management login |
@@ -78,9 +86,11 @@ origin in production so password-reset links do not point at localhost.
 | `METRICS_COLLECTION_INTERVAL` | `300` | Metrics collection interval in seconds |
 
 The internal Analytics secret and RabbitMQ credentials support their corresponding `_FILE`
-forms. Ingestion runtime behavior belongs to
-[`catalog-ingestion`](https://github.com/groovemap-music/catalog-ingestion); the compatibility
-hostname remains part of the deployed wire contract.
+forms. [`discogs-ingestion`](https://github.com/groovemap-music/discogs-ingestion) and
+[`musicbrainz-ingestion`](https://github.com/groovemap-music/musicbrainz-ingestion) independently
+own source acquisition and the result trees mounted at the two data roots. The retained
+`EXTRACTOR_HOST`/`EXTRACTOR_HEALTH_PORT` pair targets the Discogs administrative trigger and
+health compatibility wire; Catalog API does not schedule or coordinate MusicBrainz ingestion.
 
 ## Snapshots, NLQ, and runtime
 

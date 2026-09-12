@@ -567,12 +567,12 @@ curl "http://localhost:8004/api/trends?name=Blue%20Note&type=label"
 # Register a user account
 curl -X POST "http://localhost:8004/api/auth/register" \
   -H "Content-Type: application/json" \
-  -d '{"email": "user@example.com", "password": "secret"}'
+  -d '{"email": "user@example.com", "password": "local-passphrase"}'
 
 # Login to receive a JWT token
 curl -X POST "http://localhost:8004/api/auth/login" \
   -H "Content-Type: application/json" \
-  -d '{"email": "user@example.com", "password": "secret"}'
+  -d '{"email": "user@example.com", "password": "local-passphrase"}'
 
 # Use the token to query your collection
 curl "http://localhost:8004/api/user/collection?limit=50" \

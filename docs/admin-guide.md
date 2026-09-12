@@ -12,7 +12,12 @@ flowchart LR
     Console --> AdminAPI[catalog-api admin endpoints]
     AdminAPI --> PostgreSQL[(PostgreSQL)]
     AdminAPI --> RabbitMQ[RabbitMQ management API]
-    AdminAPI --> Ingestion[catalog-ingestion trigger]
+    AdminAPI -->|retained trigger wire| Discogs[discogs-ingestion]
+    Discogs --> DiscogsResults[Mounted Discogs results]
+    MusicBrainz[musicbrainz-ingestion] --> MusicBrainzResults[Mounted MusicBrainz results]
+    DiscogsResults --> Analysis[Extraction-analysis routes]
+    MusicBrainzResults --> Analysis
+    Analysis --> AdminAPI
 ```
 
 ## Bootstrap an administrator
@@ -47,25 +52,46 @@ an audit entry with the actor, action, target, and non-secret details.
 
 ## Extraction control and analysis
 
-`POST /api/admin/extractions/trigger` records a pending run, calls the configured ingestion
-trigger, and tracks progress through its health contract. The ingestion implementation and its
-data-release schedule are owned by
-[`catalog-ingestion`](https://github.com/groovemap-music/catalog-ingestion). The catalog API owns
-only the authenticated trigger, progress record, and failure translation exposed to clients.
+`POST /api/admin/extractions/trigger` records a pending run, calls the configured
+`EXTRACTOR_HOST` trigger, and tracks progress through its health contract. That retained wire
+targets [`discogs-ingestion`](https://github.com/groovemap-music/discogs-ingestion). The
+independent [`musicbrainz-ingestion`](https://github.com/groovemap-music/musicbrainz-ingestion)
+producer has no Catalog API trigger or scheduling dependency. Each producer owns its extraction
+implementation and release schedule; Catalog API owns only the authenticated Discogs trigger,
+progress record, local result analysis, and failure translation exposed to clients.
 
 | Method | Path | Responsibility |
 | --- | --- | --- |
 | `POST` | `/api/admin/extractions/trigger` | Request a forced ingestion run |
 | `GET` | `/api/admin/extractions` | List tracked runs |
-| `GET` | `/api/admin/extractions/{id}` | Read one tracked run |
+| `GET` | `/api/admin/extractions/{extraction_id}` | Read one tracked run |
 | `GET` | `/api/admin/extraction-analysis/versions` | List locally visible result versions |
 | `GET` | `/api/admin/extraction-analysis/{version}/summary` | Summarize validation results |
 | `GET` | `/api/admin/extraction-analysis/{version}/violations` | Page through violations |
+| `GET` | `/api/admin/extraction-analysis/{version}/violations/{record_id}` | Read one violation record |
 | `GET` | `/api/admin/extraction-analysis/{version}/skipped` | Page through skipped records |
+| `GET` | `/api/admin/extraction-analysis/{version}/parsing-errors` | Page through parsing errors |
+| `GET` | `/api/admin/extraction-analysis/{version}/compare/{other_version}` | Compare two result versions |
 | `POST` | `/api/admin/extraction-analysis/{version}/prompt-context` | Build bounded rule context |
+| `POST` | `/api/admin/extraction-analysis/{version}/generate-ai-prompt` | Generate a bounded prompt from selected rules |
 
 Mounted extraction result paths are a deployment choice. The API bounds file reads, validates
-version and record identifiers, and caches expensive local scans for five minutes.
+version and record identifiers, and caches expensive local scans for five minutes. Prompt
+requests use `PromptContextRequest`: `rules` contains between 1 and 20 `{rule, entity_type}`
+selections, and the API returns bounded, truncated sample context. The route identifiers consumed
+by operations-console are pinned in
+[`api/contracts/operations-console/v1/routes.json`](../api/contracts/operations-console/v1/routes.json).
+
+## Media mapping coverage
+
+| Method | Path | Responsibility |
+| --- | --- | --- |
+| `GET` | `/api/admin/media/unmapped` | Report bounded unmapped-media coverage for one provider |
+
+The route accepts `provider=discogs|musicbrainz` and `limit=1..100` and returns the current
+`UnmappedMediaResponse`: tagged-release count, releases with unmapped names, a bounded rate, and
+the top unmapped format or description names. It reads provider-owned loaded data; it does not
+alter either producer's taxonomy or source records.
 
 ## Dead-letter queue purge
 
@@ -88,10 +114,11 @@ history in PostgreSQL. Collection failures return an empty sample rather than te
 
 | Method | Path | Responsibility |
 | --- | --- | --- |
-| `GET` | `/api/admin/queues/history?range=24h` | Queue depth and rate history |
-| `GET` | `/api/admin/health/history?range=24h` | Health and response-time history |
+| `GET` | `/api/admin/queues/history` | Queue depth and rate history |
+| `GET` | `/api/admin/health/history` | Health and response-time history |
 
-Supported ranges are `1h`, `6h`, `24h`, `7d`, `30d`, `90d`, and `365d`.
+Both history routes accept `range`; supported values are `1h`, `6h`, `24h`, `7d`, `30d`, `90d`,
+and `365d`.
 `METRICS_COLLECTION_INTERVAL` defaults to 300 seconds and `METRICS_RETENTION_DAYS` defaults to
 366 days. The presentation of these records belongs to `operations-console`.
 

@@ -49,6 +49,19 @@ def _indexed_document_paths() -> tuple[Path, ...]:
     return tuple(dict.fromkeys((*targets, api_readme)))
 
 
+def _maintained_document_paths() -> tuple[Path, ...]:
+    return tuple(
+        dict.fromkeys(
+            (
+                ROOT / "README.md",
+                ROOT / "api" / "README.md",
+                ROOT / "performance" / "README.md",
+                *_indexed_document_paths(),
+            )
+        )
+    )
+
+
 def test_ci_uses_one_immutable_graph_for_every_trigger() -> None:
     workflow = _workflow("ci.yml")
     # PyYAML implements YAML 1.1 and parses the plain key ``on`` as ``True``.
@@ -222,6 +235,21 @@ def test_public_documentation_uses_repo_identity_and_mermaid() -> None:
     assert "GrooveMap/1.0 " not in public_documentation
     assert "GrooveMap/1.0-dev" not in public_documentation
 
+    for producer in ("groovemap-music/discogs-ingestion", "groovemap-music/musicbrainz-ingestion"):
+        assert producer in readme
+
+
+def test_maintained_documentation_links_resolve() -> None:
+    for source in _maintained_document_paths():
+        for target in re.findall(r"\[[^]]+\]\(([^)]+)\)", source.read_text()):
+            if "://" in target or target.startswith("#"):
+                continue
+            relative_target = target.split("#", maxsplit=1)[0]
+            if not relative_target:
+                continue
+            resolved = (source.parent / relative_target).resolve()
+            assert resolved.is_file(), f"{source.relative_to(ROOT)} has a broken link: {target}"
+
 
 def test_every_indexed_document_respects_repository_ownership() -> None:
     documents = {path.relative_to(ROOT).as_posix(): path.read_text() for path in _indexed_document_paths()}
@@ -271,6 +299,8 @@ def test_every_indexed_document_respects_repository_ownership() -> None:
         "api/README.md": (
             "groovemap-music/graph-explorer",
             "groovemap-music/analytics-engine",
+            "groovemap-music/discogs-ingestion",
+            "groovemap-music/musicbrainz-ingestion",
             "groovemap-music/discogs-graph-enricher",
             "groovemap-music/musicbrainz-graph-enricher",
             "groovemap-music/musicbrainz-sql-loader",
@@ -280,7 +310,8 @@ def test_every_indexed_document_respects_repository_ownership() -> None:
         "docs/admin-guide.md": (
             "groovemap-music/operations-console",
             "groovemap-music/deployment",
-            "groovemap-music/catalog-ingestion",
+            "groovemap-music/discogs-ingestion",
+            "groovemap-music/musicbrainz-ingestion",
             "groovemap-music/discogs-graph-enricher",
             "groovemap-music/discogs-sql-loader",
             "groovemap-music/musicbrainz-graph-enricher",
@@ -292,7 +323,8 @@ def test_every_indexed_document_respects_repository_ownership() -> None:
             "groovemap-music/operations-console",
             "groovemap-music/database-schema",
             "groovemap-music/analytics-engine",
-            "groovemap-music/catalog-ingestion",
+            "groovemap-music/discogs-ingestion",
+            "groovemap-music/musicbrainz-ingestion",
             "groovemap-music/discogs-graph-enricher",
             "groovemap-music/discogs-sql-loader",
             "groovemap-music/musicbrainz-graph-enricher",
@@ -315,11 +347,40 @@ def test_every_indexed_document_respects_repository_ownership() -> None:
             "groovemap-music/musicbrainz-graph-enricher",
             "groovemap-music/musicbrainz-sql-loader",
         ),
+        "docs/configuration.md": (
+            "groovemap-music/discogs-ingestion",
+            "groovemap-music/musicbrainz-ingestion",
+        ),
     }
     for relative_path, owner_links in required_owner_links.items():
         assert relative_path in documents
         for owner_link in owner_links:
             assert owner_link in documents[relative_path], f"{relative_path} must link the current owner: {owner_link}"
+
+    for path in _maintained_document_paths():
+        assert "https://github.com/groovemap-music/catalog-ingestion" not in path.read_text(), (
+            f"{path.relative_to(ROOT)} links the retired combined producer as a current owner"
+        )
+
+
+def test_admin_and_recipe_documentation_matches_current_contracts() -> None:
+    admin_guide = (ROOT / "docs" / "admin-guide.md").read_text()
+    route_contract = yaml.safe_load((ROOT / "api" / "contracts" / "operations-console" / "v1" / "routes.json").read_text())
+    for operation in route_contract["operations"].values():
+        assert f"`{operation['method']}`" in admin_guide
+        assert operation["path"] in admin_guide
+
+    configuration = (ROOT / "docs" / "configuration.md").read_text()
+    for variable in ("DISCOGS_DATA_ROOT", "MUSICBRAINZ_DATA_ROOT"):
+        assert f"`{variable}`" in configuration
+
+    release_guide = (ROOT / "docs" / "release-compliance.md").read_text()
+    for recipe in ("format-check", "lint", "contract-check", "test", "coverage", "secret-scan", "check"):
+        assert f"`just {recipe}`" in release_guide
+
+    usage = (ROOT / "docs" / "usage-examples.md").read_text()
+    assert '"password": "local-passphrase"' in usage
+    assert '"password": "secret"' not in usage
 
 
 def test_history_rewrite_gate_preserves_external_archive_contract() -> None:
