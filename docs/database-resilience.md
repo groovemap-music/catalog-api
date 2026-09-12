@@ -7,16 +7,18 @@ maintenance windows, restart procedures, and failure injection belong to
 ```mermaid
 stateDiagram-v2
     [*] --> Starting
-    Starting --> Ready: PostgreSQL and Neo4j connect
-    Starting --> Failed: required dependency unavailable
-    Ready --> Degraded: optional dependency unavailable
-    Degraded --> Ready: dependency recovers
+    Starting --> Serving: configuration valid and PostgreSQL pool initialized
+    Starting --> StartupFailed: configuration or PostgreSQL initialization fails
+    Serving --> RequestFailure: a downstream operation fails
+    RequestFailure --> Serving: a later operation succeeds
+    Serving --> Stopped: lifespan shutdown closes owned resources
 ```
 
 ## Required startup dependencies
 
-The API creates its PostgreSQL pool and Neo4j driver during lifespan startup. Missing required
-configuration fails before serving traffic. Connection construction and retry primitives come
+The API initializes its PostgreSQL pool and constructs Redis and Neo4j clients during lifespan
+startup. Missing required configuration or PostgreSQL initialization failure prevents application
+traffic. Redis and Neo4j failures are surfaced when their operations run. Connection construction and retry primitives come
 from the pinned shared runtime in
 [`python-libraries`](https://github.com/groovemap-music/python-libraries).
 
@@ -36,13 +38,16 @@ create or mutate infrastructure schema during ordinary startup.
 | Neo4j | Sessions use the resilient driver and explicit per-query timeouts for expensive paths |
 | Redis | Cache operations degrade to database work where safe; security state that cannot safely degrade fails closed |
 | `analytics-engine` | `/api/insights/*` proxy requests return 503 when the service is unavailable |
-| `catalog-ingestion` | Administrative trigger/tracking endpoints record a terminal failure when the service cannot be reached |
+| `discogs-ingestion` | The retained administrative trigger/tracker records a terminal failure when its configured endpoint cannot be reached |
+| `musicbrainz-ingestion` | Not called by Catalog API; missing or stale loaded data remains visible through ordinary query/analysis results |
 | RabbitMQ management API | Queue collection or purge reports the management failure without stopping request serving |
 
 Analytics computation is owned by
 [`analytics-engine`](https://github.com/groovemap-music/analytics-engine), and ingestion execution is
-owned by [`catalog-ingestion`](https://github.com/groovemap-music/catalog-ingestion). This
-repository owns only its HTTP contracts and error translation.
+owned independently by [`discogs-ingestion`](https://github.com/groovemap-music/discogs-ingestion)
+and [`musicbrainz-ingestion`](https://github.com/groovemap-music/musicbrainz-ingestion), as
+specified by ADR 0005. This repository owns only its HTTP contracts, the retained Discogs trigger
+wire, and error translation; it does not coordinate the two producers.
 
 ## Data-loss boundaries
 

@@ -153,7 +153,7 @@ reset remains functional-but-degraded rather than silently broken.
 flow; DMARC recommended. Comparable to Brevo's existing setup — no new burden.
 
 **Repository files touched by the implementation:** `api/notifications.py`, `api/config.py`,
-`pyproject.toml`, `tests/api/test_notifications.py`, and `docs/configuration.md`.
+`pyproject.toml`, `tests/test_notifications.py`, and `docs/configuration.md`.
 
 ## Verification note
 
