@@ -6,6 +6,7 @@ import math
 import re
 import time
 from collections.abc import Callable, Coroutine
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -189,6 +190,27 @@ def _find_version_root(version: str) -> tuple[Path, str] | None:
         if flagged_version.is_dir():
             return data_root, source
     return None
+
+
+@dataclass(frozen=True, slots=True)
+class _VersionContext:
+    version: str
+    data_root: Path
+    source: str
+
+    @property
+    def flagged_dir(self) -> Path:
+        return self.data_root / "flagged" / self.version
+
+
+def _resolve_version(version: str) -> _VersionContext:
+    """Validate a request version and resolve its source-owned filesystem root."""
+    _validate_version(version)
+    location = _find_version_root(version)
+    if location is None:
+        raise HTTPException(status_code=404, detail=f"Version not found: {version!r}")
+    data_root, source = location
+    return _VersionContext(version=version, data_root=data_root, source=source)
 
 
 # Aggregate caps on the JSONL scan (across every entity's violations.jsonl /
@@ -432,6 +454,52 @@ def _load_record_files(flagged_dir: Path, entity_type: str, record_id: str) -> t
     return raw_xml, parsed_json, truncated
 
 
+def _pipeline_status(raw_state: dict[str, Any] | None) -> dict[str, str]:
+    """Shape extraction phase state for the dashboard contract."""
+    if not raw_state:
+        return {}
+    return {key: value.get("status", "unknown") for key, value in raw_state.items() if key.endswith("_phase") and isinstance(value, dict)}
+
+
+@dataclass(frozen=True, slots=True)
+class _Page:
+    number: int
+    size: int
+
+    def slice[T](self, items: list[T]) -> list[T]:
+        start = (self.number - 1) * self.size
+        return items[start : start + self.size]
+
+
+@dataclass(frozen=True, slots=True)
+class _ViolationFilters:
+    entity_type: str | None
+    severity: str | None
+    rule: str | None
+
+    def apply(self, violations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            violation
+            for violation in violations
+            if (self.entity_type is None or violation.get("entity_type") == self.entity_type)
+            and (self.severity is None or violation.get("severity") == self.severity)
+            and (self.rule is None or violation.get("rule") == self.rule)
+        ]
+
+
+def _violations_response(violations: list[dict[str, Any]], page: _Page) -> dict[str, Any]:
+    total_items = len(violations)
+    return {
+        "violations": page.slice(violations),
+        "pagination": {
+            "page": page.number,
+            "page_size": page.size,
+            "total_items": total_items,
+            "total_pages": max(1, math.ceil(total_items / page.size)),
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -460,40 +528,19 @@ async def get_summary(
     version: str,
     _admin: Annotated[dict[str, Any], Depends(require_admin)],
 ) -> JSONResponse:
-    """Return a violation summary and pipeline status for the given extraction version.
-
-    Path variables are validated against a strict allowlist to prevent path traversal.
-    """
-    _validate_version(version)
-
-    location = _find_version_root(version)
-    if location is None:
-        raise HTTPException(status_code=404, detail=f"Version not found: {version!r}")
-
-    data_root, source = location
-    flagged_version_dir = data_root / "flagged" / version
-
-    violations = await _get_violations(flagged_version_dir)
-    raw_state = _load_state_marker(data_root, version, source)
+    """Return a violation summary and pipeline status for an extraction version."""
+    context = _resolve_version(version)
+    violations = await _get_violations(context.flagged_dir)
+    raw_state = _load_state_marker(context.data_root, version, context.source)
     summary = _build_violation_summary(violations)
-
-    skipped = await _get_skipped(flagged_version_dir)
+    skipped = await _get_skipped(context.flagged_dir)
     skipped_summary = _build_skipped_summary(skipped)
-
-    # Extract phase statuses from the state marker for the frontend.
-    # The raw marker has nested objects for each phase; the dashboard
-    # expects {phase_name: status_string}.
-    pipeline_status: dict[str, str] = {}
-    if raw_state:
-        for key, value in raw_state.items():
-            if key.endswith("_phase") and isinstance(value, dict):
-                pipeline_status[key] = value.get("status", "unknown")
 
     return JSONResponse(
         content={
             "version": version,
-            "source": source,
-            "pipeline_status": pipeline_status,
+            "source": context.source,
+            "pipeline_status": _pipeline_status(raw_state),
             "skipped": skipped_summary,
             **summary,
         }
@@ -509,27 +556,18 @@ async def list_skipped(
     page_size: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> JSONResponse:
     """Return a paginated list of skipped records for the given extraction version."""
-    _validate_version(version)
-
-    location = _find_version_root(version)
-    if location is None:
-        raise HTTPException(status_code=404, detail=f"Version not found: {version!r}")
-
-    data_root, _source = location
-    flagged_version_dir = data_root / "flagged" / version
-
-    skipped = await _get_skipped(flagged_version_dir)
+    context = _resolve_version(version)
+    skipped = await _get_skipped(context.flagged_dir)
 
     if entity_type:
         skipped = [s for s in skipped if s.get("entity_type") == entity_type]
 
+    page_spec = _Page(page, page_size)
     total = len(skipped)
-    start = (page - 1) * page_size
-    page_items = skipped[start : start + page_size]
 
     return JSONResponse(
         content={
-            "skipped": page_items,
+            "skipped": page_spec.slice(skipped),
             "total": total,
             "page": page,
             "page_size": page_size,
@@ -548,42 +586,10 @@ async def list_violations(
     page_size: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> JSONResponse:
     """Return a paginated list of violations for the given extraction version, with optional filters."""
-    _validate_version(version)
-
-    location = _find_version_root(version)
-    if location is None:
-        raise HTTPException(status_code=404, detail=f"Version not found: {version!r}")
-
-    data_root, _source = location
-    flagged_version_dir = data_root / "flagged" / version
-
-    violations = await _get_violations(flagged_version_dir)
-
-    # Apply filters
-    if entity_type is not None:
-        violations = [v for v in violations if v.get("entity_type") == entity_type]
-    if severity is not None:
-        violations = [v for v in violations if v.get("severity") == severity]
-    if rule is not None:
-        violations = [v for v in violations if v.get("rule") == rule]
-
-    total_items = len(violations)
-    total_pages = max(1, math.ceil(total_items / page_size))
-    start = (page - 1) * page_size
-    end = start + page_size
-    page_violations = violations[start:end]
-
-    return JSONResponse(
-        content={
-            "violations": page_violations,
-            "pagination": {
-                "page": page,
-                "page_size": page_size,
-                "total_items": total_items,
-                "total_pages": total_pages,
-            },
-        }
-    )
+    context = _resolve_version(version)
+    violations = await _get_violations(context.flagged_dir)
+    filtered = _ViolationFilters(entity_type, severity, rule).apply(violations)
+    return JSONResponse(content=_violations_response(filtered, _Page(page, page_size)))
 
 
 @router.get("/api/admin/extraction-analysis/{version}/violations/{record_id}")
@@ -604,17 +610,9 @@ async def get_violation_detail(
     violations from every colliding type under one entity's raw data
     (groovemap-tre5).
     """
-    _validate_version(version)
+    context = _resolve_version(version)
     _validate_record_id(record_id)
-
-    location = _find_version_root(version)
-    if location is None:
-        raise HTTPException(status_code=404, detail=f"Version not found: {version!r}")
-
-    data_root, _source = location
-    flagged_version_dir = data_root / "flagged" / version
-
-    all_violations = await _get_violations(flagged_version_dir)
+    all_violations = await _get_violations(context.flagged_dir)
     candidate_violations = [v for v in all_violations if v.get("record_id") == record_id]
 
     if not candidate_violations:
@@ -636,7 +634,7 @@ async def get_violation_detail(
         found_entity_type = sorted({v.get("entity_type", "unknown") for v in candidate_violations})[0]
         record_violations = [v for v in candidate_violations if v.get("entity_type") == found_entity_type]
 
-    raw_xml, parsed_json, truncated = await asyncio.to_thread(_load_record_files, flagged_version_dir, found_entity_type, record_id)
+    raw_xml, parsed_json, truncated = await asyncio.to_thread(_load_record_files, context.flagged_dir, found_entity_type, record_id)
 
     return JSONResponse(
         content={
@@ -651,7 +649,7 @@ async def get_violation_detail(
 
 
 # ---------------------------------------------------------------------------
-# Task 5 — helpers
+# Parsing-error classification
 # ---------------------------------------------------------------------------
 
 
@@ -794,9 +792,25 @@ def _classify_all_violations(
     return parsing_errors, source_issues, indeterminate
 
 
-# ---------------------------------------------------------------------------
-# Task 5 — endpoint
-# ---------------------------------------------------------------------------
+async def _analyze_parsing_errors(context: _VersionContext) -> dict[str, Any]:
+    """Run the filesystem-backed classification policy for one version."""
+    violations = await _get_violations(context.flagged_dir)
+    parsing_errors, source_issues, indeterminate = await asyncio.to_thread(
+        _classify_all_violations,
+        violations,
+        context.flagged_dir,
+    )
+    return {
+        "parsing_errors": parsing_errors,
+        "source_issues": source_issues,
+        "indeterminate": indeterminate,
+        "stats": {
+            "total_analyzed": len(violations),
+            "parsing_errors": len(parsing_errors),
+            "source_issues": len(source_issues),
+            "indeterminate": len(indeterminate),
+        },
+    }
 
 
 @router.get("/api/admin/extraction-analysis/{version}/parsing-errors")
@@ -808,37 +822,72 @@ async def get_parsing_errors(
 
     Results are cached in memory for 5 minutes to avoid repeated filesystem scans.
     """
-    _validate_version(version)
-
-    location = _find_version_root(version)
-    if location is None:
-        raise HTTPException(status_code=404, detail=f"Version not found: {version!r}")
-
-    data_root, _source = location
-    flagged_version_dir = data_root / "flagged" / version
+    context = _resolve_version(version)
 
     async def _compute() -> dict[str, Any]:
-        violations = await _get_violations(flagged_version_dir)
-        parsing_errors, source_issues, indeterminate = await asyncio.to_thread(_classify_all_violations, violations, flagged_version_dir)
-        return {
-            "parsing_errors": parsing_errors,
-            "source_issues": source_issues,
-            "indeterminate": indeterminate,
-            "stats": {
-                "total_analyzed": len(violations),
-                "parsing_errors": len(parsing_errors),
-                "source_issues": len(source_issues),
-                "indeterminate": len(indeterminate),
-            },
-        }
+        return await _analyze_parsing_errors(context)
 
     result = await _parsing_error_cache.get_or_compute(version, _compute)
     return JSONResponse(content=result)
 
 
-# ---------------------------------------------------------------------------
-# Task 6 — endpoints
-# ---------------------------------------------------------------------------
+async def _count_violations(context: _VersionContext) -> dict[tuple[str, str, str], int]:
+    counts: dict[tuple[str, str, str], int] = {}
+    for violation in await _get_violations(context.flagged_dir):
+        key = (
+            violation.get("rule", "unknown"),
+            violation.get("severity", "unknown"),
+            violation.get("entity_type", "unknown"),
+        )
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _count_by_entity(records: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in records:
+        entity_type = record.get("entity_type", "unknown")
+        counts[entity_type] = counts.get(entity_type, 0) + 1
+    return counts
+
+
+def _compare_violation_counts(
+    counts_a: dict[tuple[str, str, str], int],
+    counts_b: dict[tuple[str, str, str], int],
+) -> tuple[dict[str, int], list[dict[str, Any]]]:
+    summary = {"improved": 0, "worsened": 0, "unchanged": 0, "new_rules": 0, "removed_rules": 0}
+    details: list[dict[str, Any]] = []
+
+    for rule, severity, entity_type in sorted(set(counts_a) | set(counts_b)):
+        count_a = counts_a.get((rule, severity, entity_type), 0)
+        count_b = counts_b.get((rule, severity, entity_type), 0)
+
+        if count_a == 0:
+            direction = "worsened"
+            summary["new_rules"] += 1
+        elif count_b == 0:
+            direction = "improved"
+            summary["removed_rules"] += 1
+        elif count_b < count_a:
+            direction = "improved"
+        elif count_b > count_a:
+            direction = "worsened"
+        else:
+            direction = "unchanged"
+        summary[direction] += 1
+
+        details.append(
+            {
+                "rule": rule,
+                "severity": severity,
+                "entity_type": entity_type,
+                "count_a": count_a,
+                "count_b": count_b,
+                "direction": direction,
+            }
+        )
+
+    return summary, details
 
 
 @router.get("/api/admin/extraction-analysis/{version}/compare/{other_version}")
@@ -848,93 +897,22 @@ async def compare_versions(
     _admin: Annotated[dict[str, Any], Depends(require_admin)],
 ) -> JSONResponse:
     """Return a delta between two extraction versions, grouped by (rule, severity, entity_type)."""
+    # Preserve request-validation precedence before either filesystem lookup.
     _validate_version(version)
     _validate_version(other_version)
-
-    loc_a = _find_version_root(version)
-    if loc_a is None:
-        raise HTTPException(status_code=404, detail=f"Version not found: {version!r}")
-    loc_b = _find_version_root(other_version)
-    if loc_b is None:
-        raise HTTPException(status_code=404, detail=f"Version not found: {other_version!r}")
-
-    async def _count_violations(data_root: Path, ver: str) -> dict[tuple[str, str, str], int]:
-        flagged_version_dir = data_root / "flagged" / ver
-        counts: dict[tuple[str, str, str], int] = {}
-        for v in await _get_violations(flagged_version_dir):
-            key = (v.get("rule", "unknown"), v.get("severity", "unknown"), v.get("entity_type", "unknown"))
-            counts[key] = counts.get(key, 0) + 1
-        return counts
-
-    counts_a = await _count_violations(loc_a[0], version)
-    counts_b = await _count_violations(loc_b[0], other_version)
-
-    skipped_a = await _get_skipped(loc_a[0] / "flagged" / version)
-    skipped_b = await _get_skipped(loc_b[0] / "flagged" / other_version)
-
-    def _count_by_entity(skipped: list[dict[str, Any]]) -> dict[str, int]:
-        counts: dict[str, int] = {}
-        for s in skipped:
-            et = s.get("entity_type", "unknown")
-            counts[et] = counts.get(et, 0) + 1
-        return counts
-
-    skipped_counts_a = _count_by_entity(skipped_a)
-    skipped_counts_b = _count_by_entity(skipped_b)
-
-    all_keys = set(counts_a) | set(counts_b)
-
-    improved = 0
-    worsened = 0
-    unchanged = 0
-    new_rules = 0
-    removed_rules = 0
-    details: list[dict[str, Any]] = []
-
-    for rule, sev, etype in sorted(all_keys):
-        count_a = counts_a.get((rule, sev, etype), 0)
-        count_b = counts_b.get((rule, sev, etype), 0)
-
-        if count_a == 0:
-            direction = "worsened"
-            new_rules += 1
-            worsened += 1
-        elif count_b == 0:
-            direction = "improved"
-            removed_rules += 1
-            improved += 1
-        elif count_b < count_a:
-            direction = "improved"
-            improved += 1
-        elif count_b > count_a:
-            direction = "worsened"
-            worsened += 1
-        else:
-            direction = "unchanged"
-            unchanged += 1
-
-        details.append(
-            {
-                "rule": rule,
-                "severity": sev,
-                "entity_type": etype,
-                "count_a": count_a,
-                "count_b": count_b,
-                "direction": direction,
-            }
-        )
+    context_a = _resolve_version(version)
+    context_b = _resolve_version(other_version)
+    counts_a = await _count_violations(context_a)
+    counts_b = await _count_violations(context_b)
+    summary, details = _compare_violation_counts(counts_a, counts_b)
+    skipped_counts_a = _count_by_entity(await _get_skipped(context_a.flagged_dir))
+    skipped_counts_b = _count_by_entity(await _get_skipped(context_b.flagged_dir))
 
     return JSONResponse(
         content={
             "version_a": version,
             "version_b": other_version,
-            "summary": {
-                "improved": improved,
-                "worsened": worsened,
-                "unchanged": unchanged,
-                "new_rules": new_rules,
-                "removed_rules": removed_rules,
-            },
+            "summary": summary,
             "details": details,
             "skipped": {
                 "version_a": skipped_counts_a,
@@ -1000,17 +978,9 @@ async def get_prompt_context(
     _admin: Annotated[dict[str, Any], Depends(require_admin)],
 ) -> JSONResponse:
     """Assemble structured context for AI prompts — violations and sample records grouped by rule+entity_type."""
-    _validate_version(version)
-
-    location = _find_version_root(version)
-    if location is None:
-        raise HTTPException(status_code=404, detail=f"Version not found: {version!r}")
-
-    data_root, _source = location
-    flagged_version_dir = data_root / "flagged" / version
-
-    all_violations = await _get_violations(flagged_version_dir)
-    contexts = await asyncio.to_thread(_build_prompt_contexts, all_violations, flagged_version_dir, body.rules)
+    context = _resolve_version(version)
+    all_violations = await _get_violations(context.flagged_dir)
+    contexts = await asyncio.to_thread(_build_prompt_contexts, all_violations, context.flagged_dir, body.rules)
 
     return JSONResponse(content={"contexts": contexts})
 
@@ -1094,6 +1064,51 @@ def _build_rule_sections(all_violations: list[dict[str, Any]], flagged_version_d
     return rule_sections
 
 
+_AI_SYSTEM_PROMPT = (
+    "You are a data pipeline debugging expert for GrooveMap, a system that parses "
+    "Discogs XML database dumps and MusicBrainz JSONL exports into Neo4j and PostgreSQL.\n\n"
+    "The user will show you data quality violations from the extraction pipeline. "
+    "Each violation has a rule name, severity, affected field, the actual value, "
+    "and sample records with raw XML and parsed JSON.\n\n"
+    "Your task is to produce a **debugging prompt** — a self-contained document that someone "
+    "(or another AI assistant) can use in a future session to:\n"
+    "1. Understand the root cause of each violation\n"
+    "2. Determine if it's a data issue (bad upstream data) or a parser/validation bug\n"
+    "3. Propose concrete fixes or workarounds — heuristics, parser changes, or validation rule adjustments\n\n"
+    "Structure your output as a markdown document with:\n"
+    "- A brief summary of all violations and their likely categories\n"
+    "- Per-rule sections with: root cause analysis, evidence from the sample data, "
+    "and specific recommended actions (code changes, heuristic fixes, rule adjustments)\n"
+    "- For high-volume rules (thousands+ violations), focus on whether the rule itself "
+    "needs adjustment rather than individual records\n"
+    "- Reference specific field values, XML elements, and JSON keys from the samples\n\n"
+    "Be concrete and actionable. Include code snippets for proposed fixes when applicable."
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _AiPromptQuery:
+    system: str
+    user_content: str
+
+
+async def _prepare_ai_prompt_query(context: _VersionContext, rules: list[_RuleSelection]) -> _AiPromptQuery:
+    violations = await _get_violations(context.flagged_dir)
+    sections = await asyncio.to_thread(_build_rule_sections, violations, context.flagged_dir, rules)
+    user_content = f"# Extraction Analysis — Version {context.version} (source: {context.source})\n\n" + "\n\n---\n\n".join(sections)
+    return _AiPromptQuery(system=_AI_SYSTEM_PROMPT, user_content=user_content)
+
+
+async def _query_ai_prompt(client: Any, model: str, query: _AiPromptQuery) -> str:
+    response = await client.messages.create(
+        model=model,
+        system=query.system,
+        messages=[{"role": "user", "content": query.user_content}],
+        max_tokens=4096,
+    )
+    return "".join(block.text for block in response.content if hasattr(block, "text"))
+
+
 @router.post("/api/admin/extraction-analysis/{version}/generate-ai-prompt")
 async def generate_ai_prompt(
     version: str,
@@ -1104,47 +1119,11 @@ async def generate_ai_prompt(
     if _anthropic_client is None:
         raise HTTPException(status_code=503, detail="AI prompt generation unavailable — NLQ_API_KEY not configured")
 
-    _validate_version(version)
-    location = _find_version_root(version)
-    if location is None:
-        raise HTTPException(status_code=404, detail=f"Version not found: {version!r}")
-
-    data_root, source = location
-    flagged_version_dir = data_root / "flagged" / version
-    all_violations = await _get_violations(flagged_version_dir)
-    rule_sections = await asyncio.to_thread(_build_rule_sections, all_violations, flagged_version_dir, body.rules)
-
-    user_content = f"# Extraction Analysis — Version {version} (source: {source})\n\n" + "\n\n---\n\n".join(rule_sections)
-
-    system_prompt = (
-        "You are a data pipeline debugging expert for GrooveMap, a system that parses "
-        "Discogs XML database dumps and MusicBrainz JSONL exports into Neo4j and PostgreSQL.\n\n"
-        "The user will show you data quality violations from the extraction pipeline. "
-        "Each violation has a rule name, severity, affected field, the actual value, "
-        "and sample records with raw XML and parsed JSON.\n\n"
-        "Your task is to produce a **debugging prompt** — a self-contained document that someone "
-        "(or another AI assistant) can use in a future session to:\n"
-        "1. Understand the root cause of each violation\n"
-        "2. Determine if it's a data issue (bad upstream data) or a parser/validation bug\n"
-        "3. Propose concrete fixes or workarounds — heuristics, parser changes, or validation rule adjustments\n\n"
-        "Structure your output as a markdown document with:\n"
-        "- A brief summary of all violations and their likely categories\n"
-        "- Per-rule sections with: root cause analysis, evidence from the sample data, "
-        "and specific recommended actions (code changes, heuristic fixes, rule adjustments)\n"
-        "- For high-volume rules (thousands+ violations), focus on whether the rule itself "
-        "needs adjustment rather than individual records\n"
-        "- Reference specific field values, XML elements, and JSON keys from the samples\n\n"
-        "Be concrete and actionable. Include code snippets for proposed fixes when applicable."
-    )
+    context = _resolve_version(version)
+    query = await _prepare_ai_prompt_query(context, body.rules)
 
     try:
-        response = await _anthropic_client.messages.create(
-            model=_anthropic_model,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_content}],
-            max_tokens=4096,
-        )
-        prompt_text = "".join(block.text for block in response.content if hasattr(block, "text"))
+        prompt_text = await _query_ai_prompt(_anthropic_client, _anthropic_model, query)
         return JSONResponse(content={"prompt": prompt_text, "ai_generated": True})
     except Exception:
         logger.exception("❌ AI prompt generation failed")

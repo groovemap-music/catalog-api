@@ -9,6 +9,7 @@ import re
 import secrets
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
@@ -234,101 +235,95 @@ async def _prewarm_search_cache() -> None:  # pragma: no cover
             logger.debug("⚠️ Search pre-warm failed", term=term)
 
 
-@asynccontextmanager
-async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:  # pragma: no cover
-    """Manage API service lifecycle."""
-    global _pool, _config, _redis, _neo4j
-
-    logger.info("🚀 API service starting...")
-
-    # Sample this loop's scheduling delay into groovemap.runtime.event_loop.lag. The
-    # entrypoint already ran setup_telemetry, and this is the first moment there is a
-    # running loop to sample from. It returns None when metrics are not being exported,
-    # and shutdown_telemetry() at the end of this block cancels whatever it started.
-    _app.state.event_loop_monitor = start_event_loop_monitor()
-
-    _config = ApiConfig.from_env()
-
-    # Start health server on separate port
-    health_srv = HealthServer(API_HEALTH_PORT, get_health_data)
-    health_srv.start_background()
-    logger.info("🏥 Health server started", port=API_HEALTH_PORT)
-
-    # Parse postgres address (POSTGRES_HOST may embed a port, e.g. a pooler)
-    host, port = parse_postgres_host_port(_config.postgres_host)
-    _pool = AsyncPostgreSQLPool(
+async def _create_pool(config: ApiConfig) -> AsyncPostgreSQLPool:
+    host, port = parse_postgres_host_port(config.postgres_host)
+    pool = AsyncPostgreSQLPool(
         connection_params={
             "host": host,
             "port": port,
-            "dbname": _config.postgres_database,
-            "user": _config.postgres_username,
-            "password": _config.postgres_password,
+            "dbname": config.postgres_database,
+            "user": config.postgres_username,
+            "password": config.postgres_password,
         },
-        max_connections=_config.postgres_pool_max_size,
-        min_connections=_config.postgres_pool_min_size,
+        max_connections=config.postgres_pool_max_size,
+        min_connections=config.postgres_pool_min_size,
     )
-    await _pool.initialize()
+    await pool.initialize()
     logger.info("💾 Database pool initialized")
+    await reconcile_stale_sync_history(pool)
+    return pool
 
-    # Reconcile sync_history rows abandoned by a hard process death (SIGKILL/
-    # OOM) between the INSERT and run_full_sync's terminal UPDATE — no
-    # in-process handler survives that to fix them itself (groovemap-pxqw).
-    await reconcile_stale_sync_history(_pool)
 
-    # Initialize Redis for OAuth state storage and token blacklist. Redis is the one
-    # backing store reached without a groovemap-runtime resilient wrapper, so the client is
-    # wrapped here to report db.client.operation.duration for every command the service
-    # issues, wherever the call site lives.
-    _redis = instrument_redis(await aioredis.from_url(_config.redis_host, decode_responses=True))
-    redis_host = _config.redis_host.split("@")[-1] if "@" in _config.redis_host else _config.redis_host.split("://")[-1]
+async def _create_redis(config: ApiConfig) -> aioredis.Redis:
+    redis = instrument_redis(await aioredis.from_url(config.redis_host, decode_responses=True))
+    redis_host = config.redis_host.split("@")[-1] if "@" in config.redis_host else config.redis_host.split("://")[-1]
     logger.info("✅ Redis connected", host=redis_host)
+    return redis
 
-    if _config.neo4j_host and _config.neo4j_username and _config.neo4j_password:
-        _neo4j = AsyncResilientNeo4jDriver(
-            uri=_config.neo4j_host,
-            auth=(_config.neo4j_username, _config.neo4j_password),
-            max_retries=5,
-            **neo4j_security_kwargs(),
-        )
-        logger.info("🔗 Neo4j driver initialized")
-    jwt_secret_for_neo4j = _config.jwt_secret_key if _config.neo4j_host else None
-    _dependencies.configure(jwt_secret_for_neo4j, _redis, pool=_pool)
-    _app_tokens.configure(_pool)
-    _sync_router.configure(_pool, _neo4j, _config, _running_syncs, _redis)
-    _explore_router.configure(_neo4j, jwt_secret_for_neo4j, _redis, pg_pool=_pool)
-    _user_router.configure(_neo4j, jwt_secret_for_neo4j)
-    _taste_router.configure(_neo4j, jwt_secret_for_neo4j)
-    _collection_router.configure(_neo4j, _pool, jwt_secret_for_neo4j)
-    _credits_router.configure(_neo4j, _redis)
-    _label_dna_router.configure(_neo4j, _redis)
-    _recommend_router.configure(_neo4j, jwt_secret_for_neo4j, _redis)
-    _search_router.configure(_pool, _redis)
-    _insights_compute_router.configure(_neo4j, _pool, _redis, _config)
-    _admin_router.configure(_pool, _redis, _config, neo4j_driver=_neo4j)
-    _musicbrainz_router.configure(_pool, _neo4j)
-    _network_router.configure(_neo4j, _redis)
-    _rarity_router.configure(_neo4j, _pool, _redis)
+
+def _create_neo4j(config: ApiConfig) -> AsyncResilientNeo4jDriver | None:
+    if not (config.neo4j_host and config.neo4j_username and config.neo4j_password):
+        return None
+    driver = AsyncResilientNeo4jDriver(
+        uri=config.neo4j_host,
+        auth=(config.neo4j_username, config.neo4j_password),
+        max_retries=5,
+        **neo4j_security_kwargs(),
+    )
+    logger.info("🔗 Neo4j driver initialized")
+    return driver
+
+
+def _notification_channel(config: ApiConfig) -> ResendNotificationChannel | LogNotificationChannel:
+    if not config.resend_api_key:
+        return LogNotificationChannel()
+    return ResendNotificationChannel(
+        api_key=config.resend_api_key,
+        sender_email=config.resend_sender_email,
+        sender_name=config.resend_sender_name,
+    )
+
+
+def _configure_routers(
+    config: ApiConfig,
+    pool: AsyncPostgreSQLPool,
+    redis: aioredis.Redis,
+    neo4j: AsyncResilientNeo4jDriver | None,
+) -> Any:
+    """Wire concrete runtime adapters into the routers and return the optional AI client."""
+    from api.nlq.config import NLQConfig as _NLQConfig  # noqa: PLC0415
+
+    jwt_secret_for_neo4j = config.jwt_secret_key if config.neo4j_host else None
+    _dependencies.configure(jwt_secret_for_neo4j, redis, pool=pool)
+    _app_tokens.configure(pool)
+    _sync_router.configure(pool, neo4j, config, _running_syncs, redis)
+    _explore_router.configure(neo4j, jwt_secret_for_neo4j, redis, pg_pool=pool)
+    _user_router.configure(neo4j, jwt_secret_for_neo4j)
+    _taste_router.configure(neo4j, jwt_secret_for_neo4j)
+    _collection_router.configure(neo4j, pool, jwt_secret_for_neo4j)
+    _credits_router.configure(neo4j, redis)
+    _label_dna_router.configure(neo4j, redis)
+    _recommend_router.configure(neo4j, jwt_secret_for_neo4j, redis)
+    _search_router.configure(pool, redis)
+    _insights_compute_router.configure(neo4j, pool, redis, config)
+    _admin_router.configure(pool, redis, config, neo4j_driver=neo4j)
+    _musicbrainz_router.configure(pool, neo4j)
+    _network_router.configure(neo4j, redis)
+    _rarity_router.configure(neo4j, pool, redis)
     _auth_router.configure(
-        _pool,
-        _redis,
-        _config,
+        pool,
+        redis,
+        config,
         _get_current_user,
         _create_access_token,
-        notification_channel=ResendNotificationChannel(
-            api_key=_config.resend_api_key,
-            sender_email=_config.resend_sender_email,
-            sender_name=_config.resend_sender_name,
-        )
-        if _config.resend_api_key
-        else LogNotificationChannel(),
+        notification_channel=_notification_channel(config),
     )
     _snapshot_router.configure(
-        jwt_secret=_config.jwt_secret_key,
-        redis_client=_redis,
-        ttl_days=_config.snapshot_ttl_days,
-        max_nodes=_config.snapshot_max_nodes,
+        jwt_secret=config.jwt_secret_key,
+        redis_client=redis,
+        ttl_days=config.snapshot_ttl_days,
+        max_nodes=config.snapshot_max_nodes,
     )
-    from api.nlq.config import NLQConfig as _NLQConfig  # noqa: PLC0415
 
     nlq_config = _NLQConfig.from_env()
     nlq_engine = None
@@ -340,88 +335,144 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:  # pragma: no cover
         from api.nlq.tools import NLQToolRunner  # noqa: PLC0415
 
         anthropic_client = AsyncAnthropic(api_key=nlq_config.api_key)
-        tool_runner = NLQToolRunner(neo4j_driver=_neo4j, pg_pool=_pool, redis=_redis)
+        tool_runner = NLQToolRunner(neo4j_driver=neo4j, pg_pool=pool, redis=redis)
         nlq_engine = NLQEngine(config=nlq_config, client=anthropic_client, tool_runner=tool_runner)
         logger.info("🧠 NLQ engine initialized", model=nlq_config.model)
-    _nlq_router.configure(nlq_config, nlq_engine, _redis, jwt_secret=_config.jwt_secret_key)
+
+    _nlq_router.configure(nlq_config, nlq_engine, redis, jwt_secret=config.jwt_secret_key)
     _extraction_analysis_router.configure(
         discogs_root=os.environ.get("DISCOGS_DATA_ROOT"),
         musicbrainz_root=os.environ.get("MUSICBRAINZ_DATA_ROOT"),
         anthropic_client=anthropic_client,
         anthropic_model=nlq_config.model,
     )
+    return anthropic_client
+
+
+@dataclass(frozen=True, slots=True)
+class _LifecycleResources:
+    health_server: HealthServer
+    anthropic_client: Any
+
+
+async def _start_service(_app: FastAPI) -> _LifecycleResources:
+    global _pool, _config, _redis, _neo4j
+
+    logger.info("🚀 API service starting...")
+    _app.state.event_loop_monitor = start_event_loop_monitor()
+    config = ApiConfig.from_env()
+    _config = config
+
+    health_server = HealthServer(API_HEALTH_PORT, get_health_data)
+    health_server.start_background()
+    logger.info("🏥 Health server started", port=API_HEALTH_PORT)
+
+    pool = await _create_pool(config)
+    redis = await _create_redis(config)
+    _pool = pool
+    _redis = redis
+    neo4j = _create_neo4j(config)
+    if neo4j is not None:
+        _neo4j = neo4j
+    anthropic_client = _configure_routers(config, pool, redis, _neo4j)
     logger.info("✅ API service ready", port=API_PORT)
 
-    # Pre-warm search cache for common high-cardinality terms in background.
-    # Store reference on app.state to prevent garbage collection (RUF006).
     _app.state.prewarm_task = asyncio.create_task(_prewarm_search_cache())
-
-    # Start background metrics collector
     metrics_buffer = MetricsBuffer()
     _app.state.metrics_buffer = metrics_buffer
-    _app.state.collector_task = asyncio.create_task(run_collector(_pool, _config, metrics_buffer))
-    logger.info("📊 Metrics collector started", interval=_config.metrics_collection_interval)
+    _app.state.collector_task = asyncio.create_task(run_collector(pool, config, metrics_buffer))
+    logger.info("📊 Metrics collector started", interval=config.metrics_collection_interval)
+    return _LifecycleResources(health_server=health_server, anthropic_client=anthropic_client)
 
-    yield
 
+async def _cancel_tasks(tasks: list[asyncio.Task[Any]]) -> None:
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _stop_service(_app: FastAPI, resources: _LifecycleResources) -> None:
     logger.info("🔧 API service shutting down...")
-    sync_tasks = list(_running_syncs.values())
-    for task in sync_tasks:
-        task.cancel()
-    if sync_tasks:
-        await asyncio.gather(*sync_tasks, return_exceptions=True)
-    admin_tasks = list(_admin_router._tracking_tasks.values())
-    for task in admin_tasks:
-        task.cancel()
-    if admin_tasks:
-        await asyncio.gather(*admin_tasks, return_exceptions=True)
+    await _cancel_tasks(list(_running_syncs.values()))
+    await _cancel_tasks(list(_admin_router._tracking_tasks.values()))
     if hasattr(_app.state, "prewarm_task"):
-        _app.state.prewarm_task.cancel()
-        await asyncio.gather(_app.state.prewarm_task, return_exceptions=True)
+        await _cancel_tasks([_app.state.prewarm_task])
     if hasattr(_app.state, "collector_task"):
-        _app.state.collector_task.cancel()
-        await asyncio.gather(_app.state.collector_task, return_exceptions=True)
+        await _cancel_tasks([_app.state.collector_task])
     if _neo4j:
         await _neo4j.close()
     if _pool:
         await _pool.close()
     if _redis:
         await _redis.aclose()
-    if anthropic_client is not None:
-        # AsyncAnthropic owns an internal httpx.AsyncClient whose connection
-        # pool/keep-alive sockets are never drained unless explicitly
-        # closed — it has no context-manager/finalizer wired up here, so
-        # without this the client just leaks on shutdown (groovemap-8nle).
-        await anthropic_client.close()
-    health_srv.stop()
-    # Flush whatever the periodic reader has not pushed yet before the process exits.
+    if resources.anthropic_client is not None:
+        await resources.anthropic_client.close()
+    resources.health_server.stop()
     shutdown_telemetry()
     logger.info("✅ API service stopped")
 
 
-# Read CORS origins at module load time (config not available yet at this point)
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:  # pragma: no cover
+    """Manage API service lifecycle."""
+    resources = await _start_service(_app)
+    yield
+    await _stop_service(_app, resources)
+
+
 _cors_origins_raw = os.environ.get("CORS_ORIGINS", "")
 _cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()] if _cors_origins_raw else None
 
-app = FastAPI(
-    title="GrooveMap API",
-    version="0.1.0",
-    description="User authentication and Discogs OAuth integration for GrooveMap",
-    license_info={"name": "GNU Affero General Public License v3 only", "identifier": "AGPL-3.0-only"},
-    openapi_external_docs={"description": "Corresponding source for this API revision", "url": SOURCE_URL},
-    default_response_class=JSONResponse,
-    lifespan=lifespan,
+
+_ROUTERS = (
+    _auth_router.router,
+    _sync_router.router,
+    _explore_router.router,
+    _insights_router.router,
+    _insights_compute_router.router,
+    _credits_router.router,
+    _label_dna_router.router,
+    _search_router.router,
+    _snapshot_router.router,
+    _user_router.router,
+    _taste_router.router,
+    _collection_router.router,
+    _recommend_router.router,
+    _admin_router.router,
+    _extraction_analysis_router.router,
+    _nlq_router.router,
+    _rarity_router.router,
+    _network_router.router,
+    _musicbrainz_router.router,
+    _app_tokens_router.router,
 )
 
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_origins or ["http://localhost:3000", "http://localhost:8003"],
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
-)
+def _create_application() -> FastAPI:
+    application = FastAPI(
+        title="GrooveMap API",
+        version="0.1.0",
+        description="User authentication and Discogs OAuth integration for GrooveMap",
+        license_info={"name": "GNU Affero General Public License v3 only", "identifier": "AGPL-3.0-only"},
+        openapi_external_docs={"description": "Corresponding source for this API revision", "url": SOURCE_URL},
+        default_response_class=JSONResponse,
+        lifespan=lifespan,
+    )
+    application.state.limiter = limiter
+    application.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins or ["http://localhost:3000", "http://localhost:8003"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+    for application_router in _ROUTERS:
+        application.include_router(application_router)
+    return application
+
+
+app = _create_application()
 
 
 @app.middleware("http")
@@ -459,28 +510,6 @@ async def metrics_middleware(request: Request, call_next: Any) -> Any:
     if hasattr(app.state, "metrics_buffer"):
         app.state.metrics_buffer.record(path, response.status_code, elapsed_ms)
     return response
-
-
-app.include_router(_auth_router.router)
-app.include_router(_sync_router.router)
-app.include_router(_explore_router.router)
-app.include_router(_insights_router.router)
-app.include_router(_insights_compute_router.router)
-app.include_router(_credits_router.router)
-app.include_router(_label_dna_router.router)
-app.include_router(_search_router.router)
-app.include_router(_snapshot_router.router)
-app.include_router(_user_router.router)
-app.include_router(_taste_router.router)
-app.include_router(_collection_router.router)
-app.include_router(_recommend_router.router)
-app.include_router(_admin_router.router)
-app.include_router(_extraction_analysis_router.router)
-app.include_router(_nlq_router.router)
-app.include_router(_rarity_router.router)
-app.include_router(_network_router.router)
-app.include_router(_musicbrainz_router.router)
-app.include_router(_app_tokens_router.router)
 
 
 @app.get("/health")
