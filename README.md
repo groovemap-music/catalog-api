@@ -24,9 +24,10 @@ flowchart LR
 
 ## Development
 
-This service consumes `groovemap-runtime` and `groovemap-agent-tools` from the private
-`groovemap-music/python-libraries` repository. Local setup requires normal Git credential
-helper access to that repository; the lockfile records the reviewed source revision.
+**Public-library cutover: complete.** This service consumes `groovemap-runtime` and
+`groovemap-agent-tools` from the public `groovemap-music/python-libraries` repository at the
+reviewed revision recorded in the lockfile. Local setup and CI do not require private-package
+credentials.
 
 ```bash
 mise install
@@ -46,8 +47,8 @@ publish.
 
 Pull requests, pushes to `main`, the weekly schedule, and Dependabot pull requests all use
 the same required validation graph from the public `groovemap-music/automation` repository.
-Private library access is minted by a narrowly installed GitHub App at an immutable library
-revision; a cross-repository PAT and a reduced dependency-update gate are both rejected.
+The public Python-library source is pinned at an immutable revision and requires no GitHub App
+credential. A cross-repository PAT and a reduced dependency-update gate are both rejected.
 
 ## Observability
 
