@@ -8,7 +8,7 @@ observability, log collection, retention, and alerting belong to the
 flowchart LR
     Request[Request or background task] --> Logger[catalog-api logger]
     Logger --> Stdout[stdout and stderr]
-    Logger --> File[/logs/api.log]
+    Logger --> File["/logs/api.log"]
     Stdout --> Runtime[container runtime]
     File --> Runtime
 ```
