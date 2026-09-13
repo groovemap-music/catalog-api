@@ -133,7 +133,7 @@ and the other way round. Only the endpoint is shared.
 | `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | Sampler name; a sampled parent always keeps its children |
 | `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Sampling ratio; deployment keeps `1.0` in dev and turns it down in production |
 | `OTEL_SDK_DISABLED` | `false` | `true` makes the SDK itself a no-op |
-| `OTEL_METRIC_EXPORT_INTERVAL` | `15000` in deployment | Push interval in milliseconds |
+| `OTEL_METRIC_EXPORT_INTERVAL` | `60000` | Push interval in milliseconds; the OpenTelemetry SDK default |
 | `OTEL_SERVICE_NAME` | `api` | `service.name`; the compose service key |
 | `OTEL_RESOURCE_ATTRIBUTES` | unset | Extra resource attributes, for example `service.namespace=groovemap,deployment.environment.name=dev` |
 

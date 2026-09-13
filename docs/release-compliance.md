@@ -34,9 +34,11 @@ flowchart TD
   and provenance locally. It does not commit, tag, push, publish, or create a release.
 
 The thin workflow callers pin `groovemap-music/automation` by a reviewed forty-character commit.
-They also pin the private Python-library checkout. Pull requests from Dependabot use the ordinary
-`pull_request` event and the same `required` job, commands, private-library gate, and result job as
-every other pull request.
+**Public-library cutover: complete.** The Python-library checkout is public, pinned to an
+immutable revision, and requires no private-package credentials. Pull requests from Dependabot
+use the ordinary `pull_request` event and the same `required` job, commands, and result job as
+every other pull request. The release callers retain the supported `prepare-image-command`
+interface so both public library wheels are built into the local image context.
 
 ## Publication boundary
 
