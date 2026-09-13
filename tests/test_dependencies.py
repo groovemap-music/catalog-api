@@ -619,6 +619,17 @@ class TestChallengeTokenRejection:
         assert exc_info.value.status_code == 401
 
     @pytest.mark.asyncio
+    async def test_require_user_rejects_refresh_token(self) -> None:
+        """A refresh-purpose JWT can never authenticate an access-token endpoint."""
+        configure(TEST_SECRET)
+        from fastapi import HTTPException
+
+        token = _make_token_with_claims({"type": "refresh", "jti": "refresh-1"})
+        with pytest.raises(HTTPException) as exc_info:
+            await require_user(_make_credentials(token))
+        assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
     async def test_require_user_still_accepts_plain_access_token(self) -> None:
         """A pure access token (no ``type`` claim) is still accepted."""
         configure(TEST_SECRET)
@@ -626,6 +637,27 @@ class TestChallengeTokenRejection:
         creds = _make_credentials(token)
         result = await require_user(creds)
         assert result["sub"] == "user-1"
+
+
+def test_jwt_validation_policy_has_one_implementation() -> None:
+    """Routers and application composition must delegate JWT policy."""
+    from pathlib import Path
+
+    api_root = Path(__file__).parents[1] / "api"
+    policy_calls: dict[str, list[str]] = {"decode_token(": [], "token_revocation_reason(": []}
+    for source in api_root.rglob("*.py"):
+        relative = source.relative_to(api_root).as_posix()
+        if relative == "auth.py":
+            continue
+        text = source.read_text()
+        for marker, locations in policy_calls.items():
+            if marker in text:
+                locations.append(relative)
+
+    assert policy_calls == {
+        "decode_token(": ["dependencies.py"],
+        "token_revocation_reason(": ["dependencies.py"],
+    }
 
 
 class TestUnifiedAuthTouchesLastUsedAt:

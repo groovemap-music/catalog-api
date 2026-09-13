@@ -89,6 +89,9 @@ All tokens are HS256 JWTs containing:
 - `jti`: Unique token ID, used for logout revocation (blacklisted in Redis)
 
 The API handles JWT validation locally; `JWT_SECRET_KEY` remains inside the catalog-api boundary.
+All JWT consumers delegate token-purpose allowlisting and revocation policy to
+`api.dependencies.validate_token`; new routers must import that shared boundary instead of
+decoding tokens locally.
 
 ### Discogs OAuth Flow
 
