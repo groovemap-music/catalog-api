@@ -57,8 +57,8 @@ a grading, a purchase price — asserted by the user rather than derived from a 
 
 | Method | Path | Auth Required | Description |
 | --- | --- | --- | --- |
-| POST | `/api/user/copies/{copy_id}/observations` | Yes | Record one observation about a copy the caller owns |
-| GET | `/api/user/copies/{copy_id}/observations` | Yes | List observations for a copy the caller owns, newest first |
+| POST | `/api/user/copies/{copy_id}/observations` | JWT or `observations:write` token | Record one observation about a copy the caller owns |
+| GET | `/api/user/copies/{copy_id}/observations` | JWT or `observations:read` token | List observations for a copy the caller owns, newest first |
 
 Both endpoints are owner-scoped: the ownership check travels with the query rather than
 preceding it, so a copy that belongs to someone else reads exactly like an unknown one — `404`,
@@ -162,7 +162,7 @@ not exist.
 
 | Method | Path | Auth Required | Description |
 | --- | --- | --- | --- |
-| POST | `/api/activity/events` | Yes | Record one client-reported outcome against an impression |
+| POST | `/api/activity/events` | JWT or `activity:write` token | Record one client-reported outcome against an impression |
 
 The body carries `event_type` (one of the four outcomes above), `impression_id`, and `item_id`;
 any other `event_type` is rejected as a `422` by the request model before it reaches the
@@ -177,14 +177,42 @@ revocable:
 
 | Method | Path | Auth Required | Description |
 | --- | --- | --- | --- |
-| GET | `/api/user/consent` | Yes | Both purposes with their current grant/revocation state |
-| PUT | `/api/user/consent/{purpose}` | Yes | Grant or revoke consent for one purpose |
+| GET | `/api/user/consent` | JWT or `consent:read` token | Both purposes with their current grant/revocation state |
+| PUT | `/api/user/consent/{purpose}` | JWT or `consent:write` token | Grant or revoke consent for one purpose |
 
 `GET` always reports both purposes, granted or not, so a client renders the same two controls
 before and after the first decision. `PUT` is idempotent in both directions — granting what is
 already granted, or revoking what is already revoked, both succeed and change nothing — and
 emits `consent.granted` / `consent.revoked` only when the state actually changed, since a
 repeated request is not a second decision.
+
+## Delegated access (app-token scopes)
+
+An agent acting for a collector — the GRUVAX kiosk, `mcp-server` — has no session, so the
+outcome, consent, and observation endpoints accept either a first-party JWT or a revocable
+app token minted under `POST /api/user/app-tokens` and carrying the matching scope:
+
+| Scope | Route |
+| --- | --- |
+| `activity:write` | `POST /api/activity/events` |
+| `consent:read` | `GET /api/user/consent` |
+| `consent:write` | `PUT /api/user/consent/{purpose}` |
+| `observations:read` | `GET /api/user/copies/{copy_id}/observations` |
+| `observations:write` | `POST /api/user/copies/{copy_id}/observations` |
+
+`require_user_or_app_token` routes on the credential's `dscg_` prefix and resolves either
+path to the same `UnifiedAuth`, from which the handler reads `user_id` — the session's user
+or the token's owner. Both paths therefore write and read the same rows for the same person,
+and an event reported by a delegate is indistinguishable in the record from one the person
+reported themselves. A valid token missing the route's scope is a `403`; a revoked one, or
+one belonging to a deactivated account, is a `401`. Structured logs on these routes carry
+`via` (`jwt` or `app_token`) and never the credential.
+
+**Erasure and export take no scope.** `POST /api/user/erasure` and `GET /api/user/export`
+stay on `require_user`, so an app token presented there is rejected as a `401`. They are
+account-level rights — destroying the account, and taking the whole account in one file — and
+a delegated credential that could exercise them would be handing over more than the user
+meant to delegate.
 
 ## Erasure
 
