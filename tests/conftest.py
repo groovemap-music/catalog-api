@@ -21,13 +21,16 @@ os.environ.setdefault("NEO4J_PASSWORD", "testpassword")
 from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, create_autospec
 
 import fakeredis
 import fakeredis.aioredis as aioredis_fake
 import pytest
+from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from neo4j import AsyncResult, AsyncSession
+from psycopg import AsyncConnection, AsyncCursor, AsyncTransaction
 
 from api.config import ApiConfig
 
@@ -59,45 +62,41 @@ def make_test_jwt(
 
 
 @pytest.fixture
-def mock_cur() -> AsyncMock:
-    """Mock psycopg cursor."""
-    cur = AsyncMock()
-    cur.execute = AsyncMock()
-    cur.fetchone = AsyncMock(return_value=None)
-    cur.fetchall = AsyncMock(return_value=[])
+def mock_cur() -> MagicMock:
+    """Autospecced psycopg cursor with await-faithful query methods."""
+    cur = create_autospec(AsyncCursor, instance=True, spec_set=True)
+    cur.__aenter__.return_value = cur
+    cur.__aexit__.return_value = False
+    cur.fetchone.return_value = None
+    cur.fetchall.return_value = []
     return cur
 
 
 @pytest.fixture
-def mock_conn(mock_cur: AsyncMock) -> AsyncMock:
-    """Mock psycopg connection that yields mock_cur from cursor()."""
-    conn = AsyncMock()
-    cur_ctx = AsyncMock()
-    cur_ctx.__aenter__ = AsyncMock(return_value=mock_cur)
-    cur_ctx.__aexit__ = AsyncMock(return_value=False)
-    conn.cursor = MagicMock(return_value=cur_ctx)
-    conn.set_autocommit = AsyncMock()
-    # `async with conn.transaction():` — a no-op async context manager so
-    # code that opens an explicit transaction (e.g. twofa_verify's atomic
-    # lockout check, groovemap-vjod) round-trips through the same
-    # mock_cur without a real Postgres transaction.
-    tx_ctx = AsyncMock()
-    tx_ctx.__aenter__ = AsyncMock(return_value=None)
-    tx_ctx.__aexit__ = AsyncMock(return_value=False)
-    conn.transaction = MagicMock(return_value=tx_ctx)
+def mock_transaction() -> MagicMock:
+    """Autospecced psycopg transaction context."""
+    transaction = create_autospec(AsyncTransaction, instance=True, spec_set=True)
+    transaction.__aenter__.return_value = transaction
+    transaction.__aexit__.return_value = False
+    return transaction
+
+
+@pytest.fixture
+def mock_conn(mock_cur: MagicMock, mock_transaction: MagicMock) -> MagicMock:
+    """Autospecced psycopg connection that yields the shared cursor."""
+    conn = create_autospec(AsyncConnection, instance=True, spec_set=True)
+    conn.__aenter__.return_value = conn
+    conn.__aexit__.return_value = False
+    conn.cursor.return_value = mock_cur
+    conn.transaction.return_value = mock_transaction
     return conn
 
 
 @pytest.fixture
-def mock_pool(mock_conn: AsyncMock) -> MagicMock:
-    """Mock AsyncPostgreSQLPool that yields mock_conn from connection()."""
-    pool = MagicMock()
-    conn_ctx = AsyncMock()
-    conn_ctx.__aenter__ = AsyncMock(return_value=mock_conn)
-    conn_ctx.__aexit__ = AsyncMock(return_value=False)
-    pool.connection = MagicMock(return_value=conn_ctx)
-    pool.initialize = AsyncMock()
-    pool.close = AsyncMock()
+def mock_pool(mock_conn: MagicMock) -> MagicMock:
+    """Autospecced resilient pool that yields the shared connection."""
+    pool = create_autospec(AsyncPostgreSQLPool, instance=True, spec_set=True)
+    pool.connection.return_value = mock_conn
     return pool
 
 
@@ -113,16 +112,31 @@ def mock_redis() -> AsyncMock:
 
 
 @pytest.fixture
-def mock_neo4j() -> MagicMock:
-    """Mock AsyncResilientNeo4jDriver."""
-    driver = MagicMock()
-    mock_session = AsyncMock()
-    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-    mock_session.__aexit__ = AsyncMock(return_value=False)
-    mock_session.run = AsyncMock()
+def mock_neo4j_result() -> MagicMock:
+    """Autospecced Neo4j result with empty defaults."""
+    result = create_autospec(AsyncResult, instance=True, spec_set=True)
+    result.__aiter__.return_value = []
+    result.data.return_value = []
+    result.single.return_value = None
+    result.values.return_value = []
+    return result
 
-    driver.session = MagicMock(return_value=mock_session)
-    driver.close = AsyncMock()
+
+@pytest.fixture
+def mock_neo4j_session(mock_neo4j_result: MagicMock) -> MagicMock:
+    """Autospecced Neo4j async session that returns the shared result."""
+    session = create_autospec(AsyncSession, instance=True, spec_set=True)
+    session.__aenter__.return_value = session
+    session.__aexit__.return_value = False
+    session.run.return_value = mock_neo4j_result
+    return session
+
+
+@pytest.fixture
+def mock_neo4j(mock_neo4j_session: MagicMock) -> MagicMock:
+    """Autospecced resilient Neo4j driver that yields the shared session."""
+    driver = create_autospec(AsyncResilientNeo4jDriver, instance=True, spec_set=True)
+    driver.session.return_value = mock_neo4j_session
     return driver
 
 
@@ -216,19 +230,16 @@ def test_client(
     # Build a dedicated pool for require_admin DB verification that always returns
     # {"is_admin": True} so admin-token tests pass without conflicting with
     # per-test mock_cur.fetchone configuration.
-    _admin_verify_cur = AsyncMock()
-    _admin_verify_cur.execute = AsyncMock()
-    _admin_verify_cur.fetchone = AsyncMock(return_value={"is_admin": True})
-    _admin_verify_cur_ctx = AsyncMock()
-    _admin_verify_cur_ctx.__aenter__ = AsyncMock(return_value=_admin_verify_cur)
-    _admin_verify_cur_ctx.__aexit__ = AsyncMock(return_value=False)
-    _admin_verify_conn = AsyncMock()
-    _admin_verify_conn.cursor = MagicMock(return_value=_admin_verify_cur_ctx)
-    _admin_verify_conn_ctx = AsyncMock()
-    _admin_verify_conn_ctx.__aenter__ = AsyncMock(return_value=_admin_verify_conn)
-    _admin_verify_conn_ctx.__aexit__ = AsyncMock(return_value=False)
-    _admin_verify_pool = MagicMock()
-    _admin_verify_pool.connection = MagicMock(return_value=_admin_verify_conn_ctx)
+    _admin_verify_cur = create_autospec(AsyncCursor, instance=True, spec_set=True)
+    _admin_verify_cur.__aenter__.return_value = _admin_verify_cur
+    _admin_verify_cur.__aexit__.return_value = False
+    _admin_verify_cur.fetchone.return_value = {"is_admin": True}
+    _admin_verify_conn = create_autospec(AsyncConnection, instance=True, spec_set=True)
+    _admin_verify_conn.__aenter__.return_value = _admin_verify_conn
+    _admin_verify_conn.__aexit__.return_value = False
+    _admin_verify_conn.cursor.return_value = _admin_verify_cur
+    _admin_verify_pool = create_autospec(AsyncPostgreSQLPool, instance=True, spec_set=True)
+    _admin_verify_pool.connection.return_value = _admin_verify_conn
 
     import api.dependencies as _deps
 
