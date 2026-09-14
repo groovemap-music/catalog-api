@@ -46,6 +46,14 @@ Use `just --summary` to list the complete recipe surface. `just format-check`, `
 publish. The repository-owned [coverage policy](docs/coverage-policy.md) records and enforces
 the measured floor used by both local checks and CI.
 
+`just test-integration` starts disposable PostgreSQL and Neo4j containers on random
+loopback ports, runs the engine-backed query and collection-write regressions, and removes
+both containers on exit. It requires a running Docker engine and never targets configured
+development or production databases. The suite covers the historical credits-query grouping
+failure, collection-upsert preservation, query-helper result handling, invalid Cypher, and a
+real server-side query timeout. Pull-request CI supplies this command as the repository's
+separate integration lane; `just check` remains network-free.
+
 Pull requests, pushes to `main`, the weekly schedule, and Dependabot pull requests all use
 the same required validation graph from the public `groovemap-music/automation` repository.
 The public Python-library source is pinned at an immutable revision and requires no GitHub App

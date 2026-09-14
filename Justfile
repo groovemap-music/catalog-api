@@ -33,7 +33,10 @@ typecheck:
     uv run mypy
 
 test:
-    uv run pytest --cov=api --cov-report=term-missing --cov-report=xml
+    uv run pytest -m "not integration" --cov=api --cov-report=term-missing --cov-report=xml
+
+test-integration:
+    bash scripts/test-integration.sh
 
 coverage: test
 
