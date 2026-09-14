@@ -20,6 +20,7 @@ flowchart TD
 - [Log emoji conventions](emoji-guide.md)
 - [Database resilience](database-resilience.md)
 - [Performance](performance-guide.md)
+- [Coverage policy](coverage-policy.md)
 - [Query performance optimizations](query-performance-optimizations.md)
 - [Transactional email decision](transactional-email-provider-decision.md)
 - [Architecture decisions](architecture-decisions.md)

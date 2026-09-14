@@ -43,7 +43,8 @@ Use `just --summary` to list the complete recipe surface. `just format-check`, `
 `just contract-check`, `just test`, and `just coverage` provide focused feedback;
 `just secret-scan` and `just audit` are separate policy capabilities. `just image`,
 `just performance-image`, and `just release-dry-run` build or rehearse locally and never
-publish.
+publish. The repository-owned [coverage policy](docs/coverage-policy.md) records and enforces
+the measured floor used by both local checks and CI.
 
 Pull requests, pushes to `main`, the weekly schedule, and Dependabot pull requests all use
 the same required validation graph from the public `groovemap-music/automation` repository.

@@ -164,6 +164,8 @@ source = ["api"]
 omit = ["*/tests/*", "*/__init__.py"]
 
 [tool.coverage.report]
+fail_under = 98.46
+precision = 2
 exclude_lines = [
     "def __repr__",
     "if __name__ == .__main__.:",
