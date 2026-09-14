@@ -17,6 +17,7 @@
     "admin_extraction_trigger": {"method": "POST", "path": "/api/admin/extractions/trigger"},
     "admin_extractions": {"method": "GET", "path": "/api/admin/extractions"},
     "admin_health_history": {"method": "GET", "path": "/api/admin/health/history"},
+    "admin_identity_project": {"method": "POST", "path": "/api/admin/identity/project"},
     "admin_login": {"method": "POST", "path": "/api/admin/auth/login"},
     "admin_logout": {"method": "POST", "path": "/api/admin/auth/logout"},
     "admin_queue_history": {"method": "GET", "path": "/api/admin/queues/history"},
