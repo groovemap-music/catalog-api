@@ -360,7 +360,8 @@ class TestScopeRegistry:
         """No erasure or export scope exists — the rejection above is not merely a routing choice."""
         from api.routers.app_tokens import ALLOWED_SCOPES
 
-        assert ALLOWED_SCOPES == {"collection:read", *_NEW_SCOPES}
+        registry = set(ALLOWED_SCOPES)
+        assert registry == {"collection:read", *_NEW_SCOPES}
 
     @pytest.mark.parametrize("scope", _NEW_SCOPES)
     def test_minting_accepts_each_new_scope(
