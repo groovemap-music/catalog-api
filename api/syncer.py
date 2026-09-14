@@ -10,17 +10,20 @@ Key Discogs API gotchas:
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import time
 import urllib.parse
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 from uuid import UUID
 
 import httpx
 import structlog
 from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver
+from common.identity import AliasRef, resolve_aliases
 from common.media import map_discogs_formats
 from common.query_debug import execute_sql, log_cypher_query
 from psycopg.rows import dict_row
@@ -48,6 +51,380 @@ class DiscogsSyncError(Exception):
     sync as 'failed' with a populated error_message instead of silently
     reporting a partial/zero-item sync as 'completed'.
     """
+
+
+# ---------------------------------------------------------------------------
+# Native identity, owned copies, snapshots, and change events (ADR 0009/0010)
+# ---------------------------------------------------------------------------
+#
+# The sync is the only writer of user_collections and user_wantlists, so it is
+# the only place a native catalog item, an owned copy, a collection snapshot,
+# or a collection/wantlist change event can originate.
+
+# The recorder api/activity.py wires in at startup. It stays a narrow callable
+# rather than a direct import so this module keeps no dependency on the
+# activity plumbing, and so a test can observe exactly which events a sync
+# emits. The default drops events, which is what keeps every existing caller
+# (and every test that never wires one) working unchanged.
+EventRecorder = Callable[[str, str, dict[str, Any]], Awaitable[None]]
+
+
+async def _discard_event(user_id: str, event_type: str, payload: dict[str, Any]) -> None:
+    """Default recorder: accept the event and drop it."""
+
+
+_event_recorder: EventRecorder = _discard_event
+
+
+def configure(event_recorder: EventRecorder | None = None) -> None:
+    """Wire the activity event recorder the sync emits change events through.
+
+    Passing ``None`` restores the no-op default, so a test that configures a
+    recorder can put the module back the way it found it.
+    """
+    global _event_recorder
+    _event_recorder = _discard_event if event_recorder is None else event_recorder
+
+
+# The provider-facing fields a re-sync can legitimately see change on an
+# instance the user already holds. Provider metadata corrections (title,
+# artist, year, label, media) are not user changes, so they do not raise
+# collection.item_updated — the event type means "a user changed what they
+# record about an item they hold".
+COLLECTION_TRACKED_FIELDS: Final[tuple[str, ...]] = ("folder_id", "rating", "date_added")
+
+# The two page upserts. `COALESCE(EXCLUDED.gm_item_id, ...)` on both so a page
+# whose resolve came back short can never blank an id a previous run wrote.
+_UPSERT_COLLECTION: Final = """
+    INSERT INTO user_collections (
+        user_id, release_id, instance_id, folder_id,
+        title, artist, year, formats, label,
+        rating, date_added, metadata, media, gm_item_id, updated_at
+    ) VALUES (
+        %s::uuid, %s, %s, %s,
+        %s, %s, %s, %s::jsonb, %s,
+        %s, %s, %s::jsonb, %s::jsonb, %s::uuid, %s
+    )
+    ON CONFLICT (user_id, release_id, instance_id) DO UPDATE SET
+        folder_id = EXCLUDED.folder_id,
+        title = EXCLUDED.title,
+        artist = EXCLUDED.artist,
+        year = EXCLUDED.year,
+        formats = COALESCE(EXCLUDED.formats, user_collections.formats),
+        label = EXCLUDED.label,
+        rating = EXCLUDED.rating,
+        date_added = EXCLUDED.date_added,
+        metadata = COALESCE(EXCLUDED.metadata, user_collections.metadata),
+        media = EXCLUDED.media,
+        gm_item_id = COALESCE(EXCLUDED.gm_item_id, user_collections.gm_item_id),
+        updated_at = EXCLUDED.updated_at
+"""
+
+_UPSERT_WANTLIST: Final = """
+    INSERT INTO user_wantlists (
+        user_id, release_id,
+        title, artist, year, format,
+        rating, notes, date_added, media, gm_item_id, updated_at
+    ) VALUES (
+        %s::uuid, %s,
+        %s, %s, %s, %s,
+        %s, %s, %s, %s::jsonb, %s::uuid, %s
+    )
+    ON CONFLICT (user_id, release_id) DO UPDATE SET
+        title = EXCLUDED.title,
+        artist = EXCLUDED.artist,
+        year = EXCLUDED.year,
+        format = EXCLUDED.format,
+        rating = EXCLUDED.rating,
+        notes = EXCLUDED.notes,
+        date_added = EXCLUDED.date_added,
+        media = EXCLUDED.media,
+        gm_item_id = COALESCE(EXCLUDED.gm_item_id, user_wantlists.gm_item_id),
+        updated_at = EXCLUDED.updated_at
+"""
+
+# Both the before-state and the after-state of a page are read with this one
+# statement, so the diff compares values of identical types straight from
+# PostgreSQL rather than a datetime against the ISO string Discogs sent.
+_SELECT_COLLECTION_PAGE: Final = """
+    SELECT id, release_id, instance_id, gm_item_id, owned_copy_id, folder_id, rating, date_added
+    FROM user_collections
+    WHERE user_id = %s::uuid AND release_id = ANY(%s::bigint[])
+"""
+
+_SELECT_WANTLIST_PAGE: Final = """
+    SELECT release_id
+    FROM user_wantlists
+    WHERE user_id = %s::uuid AND release_id = ANY(%s::bigint[])
+"""
+
+# One owned copy per collection row, enforced by the partial unique index on
+# `collection_row_id`; ON CONFLICT names that index by repeating its predicate.
+# The DO UPDATE's WHERE clause is what makes a re-sync free: a page whose copies
+# are already correct writes no rows at all, so re-syncing is idempotent rather
+# than merely convergent.
+_MINT_OWNED_COPIES: Final = """
+    INSERT INTO owned_copies (user_id, item_id, collection_row_id, acquired_at)
+    SELECT %s::uuid, minted.item_id, minted.row_id, minted.acquired_at
+    FROM unnest(%s::uuid[], %s::uuid[], %s::timestamptz[]) AS minted(item_id, row_id, acquired_at)
+    ON CONFLICT (collection_row_id) WHERE collection_row_id IS NOT NULL
+    DO UPDATE SET item_id = EXCLUDED.item_id, acquired_at = EXCLUDED.acquired_at, updated_at = NOW()
+    WHERE owned_copies.item_id IS DISTINCT FROM EXCLUDED.item_id
+       OR owned_copies.acquired_at IS DISTINCT FROM EXCLUDED.acquired_at
+"""
+
+# The back-link. `IS DISTINCT FROM` keeps an unchanged row untouched, and the
+# RETURNING rows are exactly the links this statement established — the ones it
+# skipped were already correct in the page read above.
+_LINK_OWNED_COPIES: Final = """
+    UPDATE user_collections AS uc
+    SET owned_copy_id = oc.id
+    FROM owned_copies AS oc
+    WHERE oc.collection_row_id = uc.id
+      AND uc.id = ANY(%s::uuid[])
+      AND uc.owned_copy_id IS DISTINCT FROM oc.id
+    RETURNING uc.id, uc.owned_copy_id
+"""
+
+# A copy whose collection row was removed keeps existing (the FK nulls
+# `collection_row_id` rather than cascading), and drops out of the snapshot
+# here — the snapshot is the collection as it stands, not every copy ever held.
+# The sweeps return what they removed so the diff that emits
+# collection.item_removed / wantlist.item_removed is the delete itself rather
+# than a second read of rows that are already gone.
+_DELETE_STALE_COLLECTION: Final = """
+    DELETE FROM user_collections WHERE user_id = %s::uuid AND updated_at < %s
+    RETURNING gm_item_id, owned_copy_id
+"""
+
+_DELETE_STALE_WANTLIST: Final = """
+    DELETE FROM user_wantlists WHERE user_id = %s::uuid AND updated_at < %s
+    RETURNING gm_item_id
+"""
+
+_SELECT_SNAPSHOT_COPY_IDS: Final = """
+    SELECT id FROM owned_copies
+    WHERE user_id = %s::uuid AND collection_row_id IS NOT NULL
+    ORDER BY id
+"""
+
+_INSERT_COLLECTION_SNAPSHOT: Final = """
+    INSERT INTO collection_snapshots (user_id, taken_at, item_count, copy_ids, content_hash)
+    VALUES (%s::uuid, %s, %s, %s::uuid[], %s)
+"""
+
+
+def _content_hash(copy_ids: Sequence[UUID]) -> bytes:
+    """Hash a snapshot's copy ids: sha256 over the sorted ids, newline separated.
+
+    Newline separated rather than concatenated so the digest cannot collide
+    across two different id lists that share a character sequence, and over the
+    canonical lower-case hyphenated text of each id so the digest does not
+    depend on how psycopg happened to return them.
+    """
+    return hashlib.sha256("\n".join(str(copy_id) for copy_id in copy_ids).encode("utf-8")).digest()
+
+
+def _as_text(value: UUID | None) -> str | None:
+    """Render a native id for a JSONB event payload."""
+    return None if value is None else str(value)
+
+
+async def _emit_events(user_uuid: UUID, events: Sequence[tuple[str, dict[str, Any]]]) -> None:
+    """Hand each change event to the configured recorder.
+
+    Never raises: a sync that wrote its rows has done its job, and losing an
+    analytics event must not turn a completed sync into a failed one.
+    """
+    for event_type, payload in events:
+        try:
+            await _event_recorder(str(user_uuid), event_type, payload)
+        except Exception:
+            logger.warning("⚠️ Failed to record sync event", event_type=event_type, exc_info=True)
+
+
+def _alias_refs(release_ids: Sequence[int]) -> list[AliasRef]:
+    """Build the Discogs release refs for one page."""
+    return [AliasRef("discogs", "release", str(release_id)) for release_id in release_ids]
+
+
+def _native_ids_by_release(resolved: dict[AliasRef, UUID]) -> dict[int, UUID]:
+    """Key a resolve result back onto the Discogs release ids that produced it."""
+    return {int(ref.external_id): native_id for ref, native_id in resolved.items()}
+
+
+async def _ensure_owned_copies(
+    cur: Any,
+    user_uuid: UUID,
+    page_rows: list[dict[str, Any]],
+) -> dict[UUID, UUID]:
+    """Ensure one owned copy per collection row on this page, and link it back.
+
+    Returns the owned copy id of every row on the page, whether this call
+    created the copy, corrected it, or found it already right.
+
+    A row that resolved to no native id is skipped: `owned_copies.item_id` is
+    NOT NULL, so there is no copy to mint for an item with no identity.
+    """
+    identified = [row for row in page_rows if row["gm_item_id"] is not None]
+    if not identified:
+        return {}
+
+    await execute_sql(
+        cur,
+        _MINT_OWNED_COPIES,
+        (
+            str(user_uuid),
+            [row["gm_item_id"] for row in identified],
+            [row["id"] for row in identified],
+            [row["date_added"] for row in identified],
+        ),
+    )
+    copy_ids: dict[UUID, UUID] = {row["id"]: row["owned_copy_id"] for row in identified if row["owned_copy_id"] is not None}
+    await execute_sql(cur, _LINK_OWNED_COPIES, ([row["id"] for row in identified],))
+    for linked in await cur.fetchall():
+        copy_ids[linked["id"]] = linked["owned_copy_id"]
+    return copy_ids
+
+
+# Payloads are exactly what the vendored event vocabulary declares —
+# `collection_item_change` and `collection_item_updated` are
+# additionalProperties: false, so the native `item_id` is the only identifier a
+# payload carries. A consumer that needs the Discogs release id resolves it
+# back through `provider_aliases`; ADR 0009 demotes the provider id to evidence
+# precisely so it does not travel on every record that mentions an item.
+def _collection_page_events(
+    page_keys: Sequence[tuple[int, int | None]],
+    before: dict[tuple[int, int | None], dict[str, Any]],
+    after: dict[tuple[int, int | None], dict[str, Any]],
+    copy_ids: dict[UUID, UUID],
+) -> list[tuple[str, dict[str, Any]]]:
+    """Diff one page's before-state against its after-state into change events.
+
+    A key absent from the before-state is an addition; a key present in both
+    whose tracked fields moved is an update. Removals come from the
+    reconciliation sweep, not from here — a page only carries what Discogs
+    still holds.
+    """
+    events: list[tuple[str, dict[str, Any]]] = []
+    for key in dict.fromkeys(page_keys):
+        row = after.get(key)
+        if row is None or row["gm_item_id"] is None:
+            continue
+        payload: dict[str, Any] = {
+            "item_id": _as_text(row["gm_item_id"]),
+            "artifact_id": None,
+            "owned_copy_id": _as_text(copy_ids.get(row["id"])),
+        }
+        previous = before.get(key)
+        if previous is None:
+            events.append(("collection.item_added", payload))
+            continue
+        changed = [field for field in COLLECTION_TRACKED_FIELDS if previous[field] != row[field]]
+        if changed:
+            events.append(("collection.item_updated", {**payload, "changed_fields": changed}))
+    return events
+
+
+async def _persist_collection_page(
+    user_uuid: UUID,
+    pg_pool: AsyncPostgreSQLPool,
+    batch_params: list[tuple[Any, ...]],
+) -> list[tuple[str, dict[str, Any]]]:
+    """Write one fetched collection page and return the change events it caused.
+
+    One transaction per page, on one connection. The pool hands out autocommit
+    connections, so the explicit transaction is what makes the page atomic and
+    what lets `resolve_aliases` mint inside the same unit of work as the rows
+    that reference what it minted — it opens no SAVEPOINT of its own, by
+    design, so its failure is this transaction's failure.
+
+    The before-state is read before the upsert and the after-state after it,
+    with the same statement, because the upsert is an `executemany` whose
+    `RETURNING` rows have no defined correspondence to the input tuples.
+    """
+    release_ids = [params[1] for params in batch_params]
+    page_keys = [(params[1], params[2]) for params in batch_params]
+
+    async with pg_pool.connection() as conn, conn.transaction():
+        # One resolve for the whole page: three round trips for a hundred
+        # releases rather than a hundred lookups.
+        native_ids = _native_ids_by_release(await resolve_aliases(conn, _alias_refs(release_ids)))
+
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await execute_sql(cur, _SELECT_COLLECTION_PAGE, (str(user_uuid), release_ids))
+            before = {(row["release_id"], row["instance_id"]): row for row in await cur.fetchall()}
+
+            # gm_item_id goes second-to-last so `updated_at` stays the last
+            # tuple element the reconciliation cutoff is read from.
+            await cur.executemany(
+                _UPSERT_COLLECTION,
+                [(*params[:-1], native_ids.get(params[1]), params[-1]) for params in batch_params],
+            )
+
+            await execute_sql(cur, _SELECT_COLLECTION_PAGE, (str(user_uuid), release_ids))
+            after = {(row["release_id"], row["instance_id"]): row for row in await cur.fetchall()}
+            copy_ids = await _ensure_owned_copies(cur, user_uuid, [after[key] for key in page_keys if key in after])
+
+    return _collection_page_events(page_keys, before, after, copy_ids)
+
+
+async def _persist_wantlist_page(
+    user_uuid: UUID,
+    pg_pool: AsyncPostgreSQLPool,
+    batch_params: list[tuple[Any, ...]],
+) -> list[tuple[str, dict[str, Any]]]:
+    """Write one fetched wantlist page and return the change events it caused.
+
+    Same one-transaction-per-page shape as the collection half, minus the
+    owned copy: a wantlist entry is an intention, not a thing the user holds,
+    so it has a native item and no copy. Only the before-state is read — the
+    wantlist row's identity is the resolve result, not a generated key.
+    """
+    release_ids = [params[1] for params in batch_params]
+
+    async with pg_pool.connection() as conn, conn.transaction():
+        native_ids = _native_ids_by_release(await resolve_aliases(conn, _alias_refs(release_ids)))
+
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await execute_sql(cur, _SELECT_WANTLIST_PAGE, (str(user_uuid), release_ids))
+            before = {row["release_id"] for row in await cur.fetchall()}
+
+            await cur.executemany(
+                _UPSERT_WANTLIST,
+                [(*params[:-1], native_ids.get(params[1]), params[-1]) for params in batch_params],
+            )
+
+    events: list[tuple[str, dict[str, Any]]] = []
+    for release_id in dict.fromkeys(release_ids):
+        native_id = native_ids.get(release_id)
+        if release_id in before or native_id is None:
+            continue
+        events.append(("wantlist.item_added", {"item_id": str(native_id)}))
+    return events
+
+
+async def _write_collection_snapshot(
+    user_uuid: UUID,
+    pg_pool: AsyncPostgreSQLPool,
+    taken_at: datetime,
+) -> None:
+    """Record the collection as this run left it: one row per successful sync.
+
+    Written after reconciliation, so a copy whose collection row this run
+    removed is already unlinked and out of the snapshot. `taken_at` is the
+    run's own `sync_started` clock rather than a fresh reading, so the snapshot
+    is attributable to the run whose rows it describes.
+    """
+    async with pg_pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+        await execute_sql(cur, _SELECT_SNAPSHOT_COPY_IDS, (str(user_uuid),))
+        copy_ids = sorted(row[0] for row in await cur.fetchall())
+        await execute_sql(
+            cur,
+            _INSERT_COLLECTION_SNAPSHOT,
+            (str(user_uuid), taken_at, len(copy_ids), copy_ids, _content_hash(copy_ids)),
+        )
+    logger.info("📸 Collection snapshot recorded", user_id=str(user_uuid), item_count=len(copy_ids))
 
 
 def _auth_header(
@@ -217,36 +594,13 @@ async def sync_collection(
                     )
                 )
 
-            # Upsert to PostgreSQL — one executemany per page instead of N round-trips
+            # Upsert to PostgreSQL — one executemany per page instead of N
+            # round-trips, inside the page transaction that also resolves the
+            # native ids and mints the owned copies (ADR 0009).
             if batch_params:
-                async with pg_pool.connection() as conn, conn.cursor() as cur:
-                    await cur.executemany(
-                        """
-                            INSERT INTO user_collections (
-                                user_id, release_id, instance_id, folder_id,
-                                title, artist, year, formats, label,
-                                rating, date_added, metadata, media, updated_at
-                            ) VALUES (
-                                %s::uuid, %s, %s, %s,
-                                %s, %s, %s, %s::jsonb, %s,
-                                %s, %s, %s::jsonb, %s::jsonb, %s
-                            )
-                            ON CONFLICT (user_id, release_id, instance_id) DO UPDATE SET
-                                folder_id = EXCLUDED.folder_id,
-                                title = EXCLUDED.title,
-                                artist = EXCLUDED.artist,
-                                year = EXCLUDED.year,
-                                formats = COALESCE(EXCLUDED.formats, user_collections.formats),
-                                label = EXCLUDED.label,
-                                rating = EXCLUDED.rating,
-                                date_added = EXCLUDED.date_added,
-                                metadata = COALESCE(EXCLUDED.metadata, user_collections.metadata),
-                                media = EXCLUDED.media,
-                                updated_at = EXCLUDED.updated_at
-                        """,
-                        batch_params,
-                    )
+                page_events = await _persist_collection_page(user_uuid, pg_pool, batch_params)
                 total_synced += len(batch_params)
+                await _emit_events(user_uuid, page_events)
 
             # Upsert to Neo4j — ensure User node and COLLECTED relationships.
             # `SET r += rel.metadata` merges only the keys present in the bag —
@@ -321,7 +675,12 @@ async def sync_collection(
     # above) — reconcile away rows/edges this run never touched: items removed
     # from Discogs since the last sync, and stale duplicate instance_id rows
     # left behind when an item was removed and re-added.
-    await _reconcile_stale_collection(user_uuid, pg_pool, neo4j_driver, sync_started)
+    removed = await _reconcile_stale_collection(user_uuid, pg_pool, neo4j_driver, sync_started)
+    await _emit_events(user_uuid, removed)
+
+    # After reconciliation, so the snapshot is the collection as this run left
+    # it rather than as it stood mid-sweep (ADR 0009).
+    await _write_collection_snapshot(user_uuid, pg_pool, sync_started)
 
     logger.info("✅ Collection sync complete", user=discogs_username, total=total_synced)
     return total_synced
@@ -332,7 +691,7 @@ async def _reconcile_stale_collection(
     pg_pool: AsyncPostgreSQLPool,
     neo4j_driver: AsyncResilientNeo4jDriver,
     sync_started: datetime,
-) -> None:
+) -> list[tuple[str, dict[str, Any]]]:
     """Delete collection rows/edges for this user untouched by the current sync run.
 
     Every row/edge touched by sync_collection gets updated_at=NOW() (PG) /
@@ -341,13 +700,19 @@ async def _reconcile_stale_collection(
     the item was removed from the collection, or it was removed-and-re-added
     under a new instance_id (leaving the old instance_id row/edge orphaned).
     Only called after a fully successful pagination run (see sync_collection).
+
+    Returns the collection.item_removed events the sweep earned. The deleted
+    row's owned copy is NOT deleted with it — the FK nulls `collection_row_id`
+    instead, so the copy and everything observed about it survive a removal —
+    which is why the event can still name the copy it left behind.
     """
-    async with pg_pool.connection() as conn, conn.cursor() as cur:
+    async with pg_pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         await execute_sql(
             cur,
-            "DELETE FROM user_collections WHERE user_id = %s::uuid AND updated_at < %s",
+            _DELETE_STALE_COLLECTION,
             (str(user_uuid), sync_started),
         )
+        removed = await cur.fetchall()
 
     cypher = """
     MATCH (u:User {id: $user_id})-[c:COLLECTED]->()
@@ -357,6 +722,19 @@ async def _reconcile_stale_collection(
     async with neo4j_driver.session() as session:
         result = await session.run(cypher, {"user_id": str(user_uuid), "sync_started": sync_started.isoformat()})
         await result.consume()
+
+    return [
+        (
+            "collection.item_removed",
+            {
+                "item_id": _as_text(row["gm_item_id"]),
+                "artifact_id": None,
+                "owned_copy_id": _as_text(row["owned_copy_id"]),
+            },
+        )
+        for row in removed
+        if row["gm_item_id"] is not None
+    ]
 
 
 async def sync_wantlist(
@@ -466,34 +844,13 @@ async def sync_wantlist(
                     )
                 )
 
-            # Upsert to PostgreSQL — one executemany per page instead of N round-trips
+            # Upsert to PostgreSQL — one executemany per page instead of N
+            # round-trips, inside the page transaction that also resolves the
+            # native ids (ADR 0009).
             if batch_params:
-                async with pg_pool.connection() as conn, conn.cursor() as cur:
-                    await cur.executemany(
-                        """
-                            INSERT INTO user_wantlists (
-                                user_id, release_id,
-                                title, artist, year, format,
-                                rating, notes, date_added, media, updated_at
-                            ) VALUES (
-                                %s::uuid, %s,
-                                %s, %s, %s, %s,
-                                %s, %s, %s, %s::jsonb, %s
-                            )
-                            ON CONFLICT (user_id, release_id) DO UPDATE SET
-                                title = EXCLUDED.title,
-                                artist = EXCLUDED.artist,
-                                year = EXCLUDED.year,
-                                format = EXCLUDED.format,
-                                rating = EXCLUDED.rating,
-                                notes = EXCLUDED.notes,
-                                date_added = EXCLUDED.date_added,
-                                media = EXCLUDED.media,
-                                updated_at = EXCLUDED.updated_at
-                        """,
-                        batch_params,
-                    )
+                page_events = await _persist_wantlist_page(user_uuid, pg_pool, batch_params)
                 total_synced += len(batch_params)
+                await _emit_events(user_uuid, page_events)
 
             # Upsert to Neo4j — ensure User node and WANTS relationships.
             # Same metadata-bag pattern as the collection sync: `SET r += w.metadata`
@@ -563,7 +920,8 @@ async def sync_wantlist(
     # this run never touched (items removed from the wantlist since the last
     # sync). See sync_collection's _reconcile_stale_collection for the same
     # pattern.
-    await _reconcile_stale_wantlist(user_uuid, pg_pool, neo4j_driver, sync_started)
+    removed = await _reconcile_stale_wantlist(user_uuid, pg_pool, neo4j_driver, sync_started)
+    await _emit_events(user_uuid, removed)
 
     logger.info("✅ Wantlist sync complete", user=discogs_username, total=total_synced)
     return total_synced
@@ -574,20 +932,23 @@ async def _reconcile_stale_wantlist(
     pg_pool: AsyncPostgreSQLPool,
     neo4j_driver: AsyncResilientNeo4jDriver,
     sync_started: datetime,
-) -> None:
+) -> list[tuple[str, dict[str, Any]]]:
     """Delete wantlist rows/edges for this user untouched by the current sync run.
 
     Same reconciliation pattern as _reconcile_stale_collection: anything still
     stamped from before sync_started was not present in the freshly-fetched
     Discogs wantlist (removed from the wantlist, typically after purchase).
     Only called after a fully successful pagination run (see sync_wantlist).
+
+    Returns the wantlist.item_removed events the sweep earned.
     """
-    async with pg_pool.connection() as conn, conn.cursor() as cur:
+    async with pg_pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         await execute_sql(
             cur,
-            "DELETE FROM user_wantlists WHERE user_id = %s::uuid AND updated_at < %s",
+            _DELETE_STALE_WANTLIST,
             (str(user_uuid), sync_started),
         )
+        removed = await cur.fetchall()
 
     cypher = """
     MATCH (u:User {id: $user_id})-[wnt:WANTS]->()
@@ -597,6 +958,8 @@ async def _reconcile_stale_wantlist(
     async with neo4j_driver.session() as session:
         result = await session.run(cypher, {"user_id": str(user_uuid), "sync_started": sync_started.isoformat()})
         await result.consume()
+
+    return [("wantlist.item_removed", {"item_id": _as_text(row["gm_item_id"])}) for row in removed if row["gm_item_id"] is not None]
 
 
 async def run_full_sync(
