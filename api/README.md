@@ -306,10 +306,14 @@ User-captured evidence about a copy the caller holds — a matrix inscription, a
 purchase price. Owner-scoped: a copy belonging to someone else reads as `404`, the same as an
 unknown one.
 
-| Method | Path                                       | Auth Required | Description                                |
-| ------ | ------------------------------------------- | -------------- | ------------------------------------------- |
-| POST   | `/api/user/copies/{copy_id}/observations`  | Yes            | Record one observation about an owned copy |
-| GET    | `/api/user/copies/{copy_id}/observations`  | Yes            | List observations for an owned copy        |
+| Method | Path                                      | Auth Required                     | Description                                |
+| ------ | ----------------------------------------- | --------------------------------- | ------------------------------------------ |
+| POST   | `/api/user/copies/{copy_id}/observations` | JWT or `observations:write` token | Record one observation about an owned copy |
+| GET    | `/api/user/copies/{copy_id}/observations` | JWT or `observations:read` token  | List observations for an owned copy        |
+
+Both accept a first-party JWT or an app token carrying the matching scope; the owner the
+copy is scoped to is the session's user or the token's owner, so the `404` on someone
+else's copy is the same either way.
 
 ### Activity, Consent, Erasure, and Export
 
@@ -319,13 +323,18 @@ See [Native identity and first-party activity](../docs/identity-and-activity.md)
 recorder's emission points (search, recommendations, sync), the erasure procedure and its
 cross-store failure reporting, and the export's NDJSON section order.
 
-| Method | Path                          | Auth Required | Description                                                    |
-| ------ | ----------------------------- | -------------- | ---------------------------------------------------------------- |
-| POST   | `/api/activity/events`        | Yes            | Report a client-side outcome against a recommendation impression |
-| GET    | `/api/user/consent`           | Yes            | Both consent purposes with their current grant/revocation state |
-| PUT    | `/api/user/consent/{purpose}` | Yes            | Grant or revoke consent for one purpose                         |
-| POST   | `/api/user/erasure`           | Yes            | Erase everything keyed to the caller, across every store         |
-| GET    | `/api/user/export`            | Yes            | Stream everything keyed to the caller as NDJSON                  |
+| Method | Path                          | Auth Required                  | Description                                                      |
+| ------ | ----------------------------- | ------------------------------ | ---------------------------------------------------------------- |
+| POST   | `/api/activity/events`        | JWT or `activity:write` token  | Report a client-side outcome against a recommendation impression |
+| GET    | `/api/user/consent`           | JWT or `consent:read` token    | Both consent purposes with their current grant/revocation state  |
+| PUT    | `/api/user/consent/{purpose}` | JWT or `consent:write` token   | Grant or revoke consent for one purpose                          |
+| POST   | `/api/user/erasure`           | JWT only                       | Erase everything keyed to the caller, across every store         |
+| GET    | `/api/user/export`            | JWT only                       | Stream everything keyed to the caller as NDJSON                  |
+
+A delegated agent reports outcomes and reads consent with a scoped app token instead of a
+session, and the recorder sees the token owner's id — so the row is identical to one the
+owner wrote themselves. Erasure and export stay JWT-only on purpose: they are
+account-level rights no scope reaches, and an app token presented there is a `401`.
 
 ### App Tokens
 
@@ -337,7 +346,19 @@ Manage third-party app tokens for the authenticated user. The plaintext token is
 | GET    | `/api/user/app-tokens`        | Yes           | List active and revoked tokens for the user     |
 | DELETE | `/api/user/app-tokens/{id}`   | Yes           | Revoke (tombstone) a token                      |
 
-**Allowed scopes:** `collection:read`
+**Allowed scopes:** every scope below, and only these — an unknown scope is rejected at
+mint time with a `400`.
+
+| Scope                | Grants                                             |
+| -------------------- | -------------------------------------------------- |
+| `collection:read`    | `GET /api/user/collection`, `/collection/stats`, `/collection/timeline` |
+| `activity:write`     | `POST /api/activity/events`                        |
+| `consent:read`       | `GET /api/user/consent`                            |
+| `consent:write`      | `PUT /api/user/consent/{purpose}`                  |
+| `observations:read`  | `GET /api/user/copies/{copy_id}/observations`      |
+| `observations:write` | `POST /api/user/copies/{copy_id}/observations`     |
+
+No scope reaches `POST /api/user/erasure` or `GET /api/user/export`.
 
 ### Collection Gap Analysis
 

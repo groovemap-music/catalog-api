@@ -35,7 +35,21 @@ router = APIRouter()
 
 # Public scope vocabulary. Centralized here so future scopes are added in one place
 # and the settings UI can enumerate options without hardcoding.
-ALLOWED_SCOPES = frozenset({"collection:read"})
+#
+# A delegated agent (GRUVAX, mcp-server) reports outcomes and reads consent without
+# holding a session, so the activity, consent, and observation routes are reachable
+# with a scoped token. Erasure and export deliberately have NO scope: they are
+# account-level rights the account holder exercises in person, never by delegation.
+ALLOWED_SCOPES = frozenset(
+    {
+        "collection:read",
+        "activity:write",
+        "consent:read",
+        "consent:write",
+        "observations:read",
+        "observations:write",
+    }
+)
 
 
 @router.post("/api/user/app-tokens", status_code=status.HTTP_201_CREATED)
