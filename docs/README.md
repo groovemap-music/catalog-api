@@ -15,6 +15,7 @@ flowchart TD
 
 - [Configuration](configuration.md)
 - [Administration](admin-guide.md)
+- [Native identity and first-party activity](identity-and-activity.md)
 - [Usage examples](usage-examples.md)
 - [Logging](logging-guide.md)
 - [Log emoji conventions](emoji-guide.md)

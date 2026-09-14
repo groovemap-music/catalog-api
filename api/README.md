@@ -290,6 +290,43 @@ Personalized endpoints that return data from the user's synced Discogs collectio
 | GET    | `/api/user/collection/stats` | Yes           | Collection statistics summary            |
 | GET    | `/api/user/status`           | Optional      | Check collection/wantlist status for IDs |
 
+**Native identity ([ADR 0009](https://github.com/groovemap-music/design/blob/main/docs/adr/0009-native-identity-and-provider-aliases.md)):**
+collection, wantlist, and collection-gap items carry `gm_item_id` — the native id of the
+release, read from the sync-written column — and collection items additionally carry
+`owned_copy_id`, the native id of the physical copy the sync minted for that row. Both are
+`null` when the sync has not resolved a native id for that row yet. Search hits and every
+recommendation shape (`SimilarArtist`, explore's `EntityRef`/`DiscoveryNode`, and
+`EnhancedRecommendation`) carry the equivalent `gm_id` field for the same reason. See
+[Native identity and first-party activity](../docs/identity-and-activity.md) for the full
+resolution model, owned copies, and observations.
+
+### Observations
+
+User-captured evidence about a copy the caller holds — a matrix inscription, a grading, a
+purchase price. Owner-scoped: a copy belonging to someone else reads as `404`, the same as an
+unknown one.
+
+| Method | Path                                       | Auth Required | Description                                |
+| ------ | ------------------------------------------- | -------------- | ------------------------------------------- |
+| POST   | `/api/user/copies/{copy_id}/observations`  | Yes            | Record one observation about an owned copy |
+| GET    | `/api/user/copies/{copy_id}/observations`  | Yes            | List observations for an owned copy        |
+
+### Activity, Consent, Erasure, and Export
+
+First-party behavioural events, recommendation impression tracking, consent, and GDPR-style
+erasure and export, per [ADR 0010](https://github.com/groovemap-music/design/blob/main/docs/adr/0010-first-party-activity-events.md).
+See [Native identity and first-party activity](../docs/identity-and-activity.md) for the
+recorder's emission points (search, recommendations, sync), the erasure procedure and its
+cross-store failure reporting, and the export's NDJSON section order.
+
+| Method | Path                          | Auth Required | Description                                                    |
+| ------ | ----------------------------- | -------------- | ---------------------------------------------------------------- |
+| POST   | `/api/activity/events`        | Yes            | Report a client-side outcome against a recommendation impression |
+| GET    | `/api/user/consent`           | Yes            | Both consent purposes with their current grant/revocation state |
+| PUT    | `/api/user/consent/{purpose}` | Yes            | Grant or revoke consent for one purpose                         |
+| POST   | `/api/user/erasure`           | Yes            | Erase everything keyed to the caller, across every store         |
+| GET    | `/api/user/export`            | Yes            | Stream everything keyed to the caller as NDJSON                  |
+
 ### App Tokens
 
 Manage third-party app tokens for the authenticated user. The plaintext token is returned exactly once, at creation; only its SHA-256 hash is persisted thereafter.
@@ -345,6 +382,11 @@ Full-text search across all entity types using PostgreSQL, with facet counts and
 - `types` — Comma-separated entity types to search (default: `artist,label,master,release`)
 - `genres` — Comma-separated genre filter
 - `media` — Repeated media family or medium id to filter release results (e.g. `?media=vinyl&media=optical_cd`). Ids come from the ADR 0007 canonical media taxonomy vendored in `common.media` (`family_ids()` / `medium_ids()`); an unrecognised id returns `400` listing the unknown id(s). Family and medium ids are OR-combined with each other and AND-combined with `genres`/`year_min`/`year_max`. Only release results carry media — the filter is a no-op for artist/label/master results.
+
+A signed-in caller's search is recorded as first-party activity (ADR 0010): one `search.query`
+event plus one `search.result_impression` event per hit shown. See
+[Native identity and first-party activity](../docs/identity-and-activity.md) for the emission
+detail, including how the `types` filter is represented in the recorded payload.
 - `year_min` — Minimum release year (1000–9999)
 - `year_max` — Maximum release year (1000–9999)
 - `limit` — Results per page (1–100, default: 20)
@@ -415,6 +457,15 @@ Artist similarity and personalized graph-traversal discovery, ranked by multi-di
 - `entity_type` — One of `artist`, `label`, `genre`, `style`
 - `hops` — Number of hops to traverse (1–3, default: 2)
 - `limit` — Maximum discoveries to return (1–50, default: 10)
+
+**Impression tracking ([ADR 0010](https://github.com/groovemap-music/design/blob/main/docs/adr/0010-first-party-activity-events.md)):**
+every served item on a ranked recommendation surface carries an `impression_id`, minted after
+the response body is filled so a cached response never reuses an id across viewers; it is
+`null` when the candidate had no native id or the write failed. Report an outcome against it
+with `POST /api/activity/events` (see [Activity, Consent, Erasure, and Export](#activity-consent-erasure-and-export)).
+Each surface writes under its own policy id: `similar_artist_weighted_cosine_v1`,
+`explore_personalized_v1`, `user_recommendations_artist_v1` (`strategy=artist`, the default),
+and `user_recommendations_multi_v1` (`strategy=multi`).
 
 ### Genre Tree
 
@@ -768,6 +819,9 @@ The API service uses the following tables. Their DDL and initialization image ar
 - `oauth_tokens` — Discogs OAuth tokens (`user_id`, `provider`, `access_token`, `access_secret`, `provider_username`, `provider_user_id`, `updated_at`)
 - `app_config` — admin key-value configuration (`key`, `value`, `updated_at`)
 - `app_tokens` — revocable third-party app tokens (`id`, `user_id`, `name`, `scope`, `token_hash`, `created_at`, `last_used_at`, `revoked_at`)
+- `provider_aliases` — native id mapping (`provider`, `entity_kind`, `external_id`, `native_id`, `valid_to`) — see [ADR 0009](https://github.com/groovemap-music/design/blob/main/docs/adr/0009-native-identity-and-provider-aliases.md)
+- `owned_copies`, `observations`, `collection_snapshots` — the physical-copy and evidence tables ADR 0009 adds; see [Native identity and first-party activity](../docs/identity-and-activity.md)
+- `activity.events`, `activity.impressions`, `activity.user_subjects`, `activity.consent_grants`, `activity.erasures` — the month-partitioned behavioural record and its consent/erasure bookkeeping; see [ADR 0010](https://github.com/groovemap-music/design/blob/main/docs/adr/0010-first-party-activity-events.md)
 
 ## Deprecations
 

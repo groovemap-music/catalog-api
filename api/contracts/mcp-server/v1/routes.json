@@ -1,6 +1,7 @@
 {
   "consumer": "groovemap-music/mcp-server",
   "operations": {
+    "activity_events": {"method": "POST", "path": "/api/activity/events"},
     "collaborators": {"method": "GET", "path": "/api/collaborators/{artist_id}"},
     "genre_tree": {"method": "GET", "path": "/api/genre-tree"},
     "graph_stats": {"method": "GET", "path": "/api/graph/stats"},
@@ -8,7 +9,13 @@
     "node": {"method": "GET", "path": "/api/node/{node_id}"},
     "path": {"method": "GET", "path": "/api/path"},
     "search": {"method": "GET", "path": "/api/search"},
-    "trends": {"method": "GET", "path": "/api/trends"}
+    "trends": {"method": "GET", "path": "/api/trends"},
+    "user_consent_get": {"method": "GET", "path": "/api/user/consent"},
+    "user_consent_set": {"method": "PUT", "path": "/api/user/consent/{purpose}"},
+    "user_copies_observations_create": {"method": "POST", "path": "/api/user/copies/{copy_id}/observations"},
+    "user_copies_observations_list": {"method": "GET", "path": "/api/user/copies/{copy_id}/observations"},
+    "user_erasure": {"method": "POST", "path": "/api/user/erasure"},
+    "user_export": {"method": "GET", "path": "/api/user/export"}
   },
   "version": 1
 }

@@ -1,6 +1,7 @@
 {
   "consumer": "groovemap-music/graph-explorer",
   "operations": {
+    "activity_events": {"method": "POST", "path": "/api/activity/events"},
     "auth_2fa_confirm": {"method": "POST", "path": "/api/auth/2fa/confirm"},
     "auth_2fa_disable": {"method": "POST", "path": "/api/auth/2fa/disable"},
     "auth_2fa_recovery": {"method": "POST", "path": "/api/auth/2fa/recovery"},
@@ -55,6 +56,12 @@
     "user_app_tokens_list": {"method": "GET", "path": "/api/user/app-tokens"},
     "user_collection": {"method": "GET", "path": "/api/user/collection"},
     "user_collection_stats": {"method": "GET", "path": "/api/user/collection/stats"},
+    "user_consent_get": {"method": "GET", "path": "/api/user/consent"},
+    "user_consent_set": {"method": "PUT", "path": "/api/user/consent/{purpose}"},
+    "user_copies_observations_create": {"method": "POST", "path": "/api/user/copies/{copy_id}/observations"},
+    "user_copies_observations_list": {"method": "GET", "path": "/api/user/copies/{copy_id}/observations"},
+    "user_erasure": {"method": "POST", "path": "/api/user/erasure"},
+    "user_export": {"method": "GET", "path": "/api/user/export"},
     "user_recommendations": {"method": "GET", "path": "/api/user/recommendations"},
     "user_status": {"method": "GET", "path": "/api/user/status"},
     "user_taste_card": {"method": "GET", "path": "/api/user/taste/card"},
