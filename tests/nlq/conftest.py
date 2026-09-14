@@ -6,15 +6,15 @@ import pytest
 
 
 @pytest.fixture
-def mock_neo4j_driver() -> MagicMock:
-    """Mock Neo4j driver for NLQ tool tests."""
-    return MagicMock()
+def mock_neo4j_driver(mock_neo4j: MagicMock) -> MagicMock:
+    """Reuse the interface-faithful Neo4j driver chain for NLQ tests."""
+    return mock_neo4j
 
 
 @pytest.fixture
-def mock_pg_pool() -> MagicMock:
-    """Mock PostgreSQL pool for NLQ tool tests."""
-    return MagicMock()
+def mock_pg_pool(mock_pool: MagicMock) -> MagicMock:
+    """Reuse the interface-faithful PostgreSQL pool chain for NLQ tests."""
+    return mock_pool
 
 
 @pytest.fixture
