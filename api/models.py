@@ -518,6 +518,13 @@ class ExtractionTriggerResponse(BaseModel):
     status: str
 
 
+class ProjectionTriggerResponse(BaseModel):
+    """Response to POST /api/admin/identity/project — the gm_id projection job's job id."""
+
+    id: UUID
+    status: str
+
+
 class DlqPurgeResponse(BaseModel):
     queue: str
     messages_purged: int

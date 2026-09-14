@@ -171,6 +171,41 @@ format's name (the deprecated `format` column), so they're mapped via the best-e
 selected, the command is idempotent — safe to re-run, and safe to run alongside new syncs
 (which always write `media` themselves).
 
+### Projecting `gm_id` onto Neo4j Nodes
+
+[ADR 0009](https://github.com/groovemap-music/design/blob/main/docs/adr/0009-native-identity-and-provider-aliases.md)
+demotes provider identifiers to evidence: PostgreSQL's `provider_aliases` table is the
+authority for native identity, and Neo4j nodes carry an additive `gm_id` property that is
+only ever a projection of it. `run_gm_id_projection` (`api/projection.py`) keeps that
+projection current — for each catalog kind (artist, label, master, release) it pages the
+currently-valid Discogs aliases with a keyset cursor on `external_id` and, per page, runs
+one `UNWIND` Cypher statement that sets `gm_id` on the matching nodes. The job's scope is
+that one property: it creates no node, writes no relationship, and touches no other
+property, so a failed or lagging run leaves a stale property rather than a mutated graph.
+
+Two ways to run it:
+
+- **Admin API**: `POST /api/admin/identity/project` (admin JWT required) starts the job as
+  a tracked background task and returns `202` immediately with a job id:
+
+  ```bash
+  curl -X POST -H "Authorization: Bearer <admin-jwt>" \
+    https://api.groovemap.music/api/admin/identity/project
+  # {"id": "...", "status": "running"}
+  ```
+
+- **CLI**: `catalog-identity-projection` is a one-shot tool, included in the API container,
+  that runs the job once and prints the per-label counts:
+
+  ```bash
+  docker exec <api-container> catalog-identity-projection
+  docker exec <api-container> catalog-identity-projection --batch-size 500
+  ```
+
+Both entry points call the same `run_gm_id_projection`, so the API trigger and the CLI stay
+behaviorally identical. Re-running is safe: nodes without a currently-valid alias are simply
+not matched, and a node whose `gm_id` is already correct is set to the same value again.
+
 ## API Endpoints
 
 ### Authentication

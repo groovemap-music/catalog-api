@@ -11,7 +11,7 @@ import secrets
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -228,6 +228,114 @@ class TestExtractionTrigger:
     def test_unauthorized(self, test_client: TestClient) -> None:
         resp = test_client.post("/api/admin/extractions/trigger")
         assert resp.status_code in (401, 403)
+
+
+class TestGmIdProjectionTrigger:
+    """Tests for POST /api/admin/identity/project (ADR 0009 gm_id projection)."""
+
+    @patch("api.routers.admin.run_gm_id_projection", new_callable=AsyncMock)
+    def test_success_returns_202_with_job_id(self, mock_projection: AsyncMock, test_client: TestClient) -> None:
+        mock_projection.return_value = {"Artist": 0, "Label": 0, "Master": 0, "Release": 3}
+
+        resp = test_client.post(
+            "/api/admin/identity/project",
+            headers=_admin_auth_headers(),
+        )
+        assert resp.status_code == 202
+        data = resp.json()
+        assert data["status"] == "running"
+        # A valid UUID job id.
+        assert UUID(data["id"])
+
+    @patch("api.routers.admin.run_gm_id_projection", new_callable=AsyncMock)
+    @patch("api.routers.admin.record_audit_entry", new_callable=AsyncMock)
+    def test_success_records_audit_entry(self, mock_audit: AsyncMock, mock_projection: AsyncMock, test_client: TestClient) -> None:
+        mock_projection.return_value = {"Artist": 0, "Label": 0, "Master": 0, "Release": 0}
+
+        resp = test_client.post(
+            "/api/admin/identity/project",
+            headers=_admin_auth_headers(),
+        )
+        assert resp.status_code == 202
+        job_id = resp.json()["id"]
+
+        mock_audit.assert_called_once()
+        assert mock_audit.call_args.kwargs["action"] == "identity.project.trigger"
+        assert mock_audit.call_args.kwargs["details"] == {"job_id": job_id}
+
+    def test_unauthorized(self, test_client: TestClient) -> None:
+        resp = test_client.post("/api/admin/identity/project")
+        assert resp.status_code in (401, 403)
+
+    def test_not_ready(self, test_client: TestClient) -> None:
+        import api.routers.admin as admin_mod
+
+        original_pool = admin_mod._pool
+        admin_mod._pool = None
+        try:
+            resp = test_client.post(
+                "/api/admin/identity/project",
+                headers=_admin_auth_headers(),
+            )
+            assert resp.status_code == 503
+        finally:
+            admin_mod._pool = original_pool
+
+
+class TestRunProjectionJob:
+    """Tests for _run_projection_job, the background task POST /api/admin/identity/project starts."""
+
+    @pytest.mark.asyncio
+    @patch("api.routers.admin.run_gm_id_projection", new_callable=AsyncMock)
+    async def test_success_is_tracked_and_untracked(self, mock_projection: AsyncMock) -> None:
+        import api.routers.admin as admin_mod
+
+        mock_projection.return_value = {"Artist": 1, "Label": 0, "Master": 0, "Release": 2}
+
+        original_pool, original_driver = admin_mod._pool, admin_mod._neo4j_driver
+        fake_pool, fake_driver = MagicMock(), MagicMock()
+        admin_mod._pool, admin_mod._neo4j_driver = fake_pool, fake_driver
+        job_id = str(uuid4())
+        admin_mod._projection_tasks[job_id] = MagicMock()
+        try:
+            await admin_mod._run_projection_job(job_id)
+        finally:
+            admin_mod._pool, admin_mod._neo4j_driver = original_pool, original_driver
+
+        mock_projection.assert_awaited_once_with(fake_pool, fake_driver)
+        # The job id must be dropped from the tracking dict once the run finishes.
+        assert job_id not in admin_mod._projection_tasks
+
+    @pytest.mark.asyncio
+    @patch("api.routers.admin.run_gm_id_projection", new_callable=AsyncMock)
+    async def test_failure_is_swallowed_and_untracked(self, mock_projection: AsyncMock) -> None:
+        """A failing projection run must not raise out of the background task, and must
+        still be dropped from _projection_tasks (mirrors _track_extraction's safety net)."""
+        import api.routers.admin as admin_mod
+
+        mock_projection.side_effect = RuntimeError("neo4j unreachable")
+
+        original_pool, original_driver = admin_mod._pool, admin_mod._neo4j_driver
+        admin_mod._pool, admin_mod._neo4j_driver = MagicMock(), MagicMock()
+        job_id = str(uuid4())
+        admin_mod._projection_tasks[job_id] = MagicMock()
+        try:
+            await admin_mod._run_projection_job(job_id)  # must not raise
+        finally:
+            admin_mod._pool, admin_mod._neo4j_driver = original_pool, original_driver
+
+        assert job_id not in admin_mod._projection_tasks
+
+    @pytest.mark.asyncio
+    async def test_noop_when_pool_or_driver_missing(self) -> None:
+        import api.routers.admin as admin_mod
+
+        original_pool, original_driver = admin_mod._pool, admin_mod._neo4j_driver
+        admin_mod._pool, admin_mod._neo4j_driver = None, None
+        try:
+            await admin_mod._run_projection_job(str(uuid4()))  # must not raise
+        finally:
+            admin_mod._pool, admin_mod._neo4j_driver = original_pool, original_driver
 
 
 class TestExtractionList:

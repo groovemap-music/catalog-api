@@ -51,6 +51,7 @@ catalog-api = "api.api:main"
 catalog-setup = "api.setup:main"
 catalog-admin-setup = "api.admin_setup:main"
 catalog-media-backfill = "api.media_backfill:main"
+catalog-identity-projection = "api.projection:main"
 
 [project.urls]
 Homepage = "https://groovemap.music"
@@ -121,6 +122,7 @@ lines-after-imports = 2
 "api/admin_setup.py" = ["T201"]
 "api/setup.py" = ["T201"]
 "api/media_backfill.py" = ["T201"]
+"api/projection.py" = ["T201"]
 "scripts/*.py" = ["S108", "T201"]
 "performance/*.py" = ["PLC0415", "T201"]
 "tests/**/*.py" = ["PLC", "S105", "T201"]

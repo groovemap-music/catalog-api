@@ -1,10 +1,10 @@
-"""Admin router — login, logout, extraction history, trigger, and DLQ purge."""
+"""Admin router — login, logout, extraction history, trigger, gm_id projection, and DLQ purge."""
 
 import asyncio
 import json
 from datetime import UTC, datetime
 from typing import Annotated, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import structlog
@@ -33,7 +33,9 @@ from api.models import (
     ExtractionHistoryResponse,
     ExtractionListResponse,
     ExtractionTriggerResponse,
+    ProjectionTriggerResponse,
 )
+from api.projection import run_gm_id_projection
 from api.queries.admin_queries import (
     get_audit_log,
     get_neo4j_storage,
@@ -641,6 +643,62 @@ async def trigger_extraction(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Extractor service unavailable",
         ) from exc
+
+
+# ---------------------------------------------------------------------------
+# gm_id projection (ADR 0009 "Graph projection")
+# ---------------------------------------------------------------------------
+
+# Background tracking tasks for in-flight projection runs, keyed by job id — mirrors
+# _tracking_tasks above so a task's own reference doesn't need to survive anywhere else
+# for the event loop to keep running it.
+_projection_tasks: dict[str, asyncio.Task[Any]] = {}
+
+
+async def _run_projection_job(job_id: str) -> None:
+    """Background task: run the gm_id projection job once and log the outcome.
+
+    Never raises out of the task — a failure is logged and the job id is dropped from
+    _projection_tasks either way, mirroring _track_extraction's safety-net shape.
+    """
+    if _pool is None or _neo4j_driver is None:
+        return
+    try:
+        counts = await run_gm_id_projection(_pool, _neo4j_driver)
+        logger.info("✅ gm_id projection finished", job_id=job_id, counts=counts)
+    except Exception as exc:
+        logger.error("❌ gm_id projection failed", job_id=job_id, error=describe_exception(exc), exc_info=True)
+    finally:
+        _projection_tasks.pop(job_id, None)
+
+
+@router.post("/api/admin/identity/project", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_gm_id_projection(
+    current_admin: Annotated[dict[str, Any], Depends(require_admin)],
+) -> JSONResponse:
+    """Trigger a gm_id projection run as a tracked background task.
+
+    Returns 202 with a job id immediately; the projection itself (paging
+    provider_aliases per catalog kind and setting gm_id on the matching Neo4j nodes,
+    see api/projection.py) runs in the background, the same way trigger_extraction
+    tracks its own run in _tracking_tasks above.
+    """
+    if _pool is None or _neo4j_driver is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
+
+    admin_id = current_admin.get("sub")
+    job_id = str(uuid4())
+
+    task = asyncio.create_task(_run_projection_job(job_id))
+    _projection_tasks[job_id] = task
+
+    logger.info("🚀 gm_id projection triggered", job_id=job_id, admin_id=admin_id)
+    await record_audit_entry(pool=_pool, admin_id=str(admin_id), action="identity.project.trigger", details={"job_id": job_id})
+
+    return JSONResponse(
+        content=ProjectionTriggerResponse(id=UUID(job_id), status="running").model_dump(mode="json"),
+        status_code=status.HTTP_202_ACCEPTED,
+    )
 
 
 # ---------------------------------------------------------------------------
