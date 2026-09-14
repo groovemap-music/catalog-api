@@ -13,7 +13,8 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from psycopg.rows import dict_row
 
-from api.auth import decode_token, get_oauth_encryption_key, token_revocation_reason
+from api.auth import get_oauth_encryption_key
+from api.dependencies import validate_token
 from api.limiter import limiter
 from api.syncer import run_full_sync
 
@@ -50,31 +51,7 @@ async def _get_current_user(
 ) -> dict[str, Any]:
     if _config is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
-    try:
-        payload = decode_token(credentials.credentials, _config.jwt_secret_key)
-        user_id: str | None = payload.get("sub")
-        if user_id is None:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-        # Revocation (jti blacklist via logout + password change) — shared with
-        # every other auth site so no site can silently drift out of lockstep.
-        if await token_revocation_reason(payload, _redis) is not None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token has been revoked",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        # Allowlist: only pure access tokens (which carry NO `type` claim) may
-        # authenticate. Admin tokens and 2FA challenge tokens (type="2fa_challenge")
-        # are rejected — a challenge token proves only the password, not the second factor.
-        if payload.get("type") is not None:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-        return payload
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-            headers={"WWW-Authenticate": "Bearer"},
-        ) from exc
+    return await validate_token(credentials.credentials, _config.jwt_secret_key, _redis)
 
 
 @router.post("/api/sync", status_code=status.HTTP_202_ACCEPTED)

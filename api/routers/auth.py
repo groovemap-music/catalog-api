@@ -17,17 +17,16 @@ from api.auth import (
     _hash_password,
     _verify_password,
     create_challenge_token,
-    decode_token,
     decrypt_totp_secret,
     encrypt_totp_secret,
     generate_recovery_codes,
     generate_totp_secret,
     get_totp_encryption_key,
     hash_recovery_code,
-    token_revocation_reason,
     verify_totp_code,
 )
 from api.config import ApiConfig
+from api.dependencies import JwtKind, validate_token
 from api.limiter import limiter
 from api.models import (
     ChangePasswordRequest,
@@ -56,25 +55,6 @@ _create_access_token_fn: Any = None
 _notification_channel: Any = None
 
 _security = HTTPBearer()
-
-
-async def _reject_stale_challenge(payload: dict[str, Any]) -> None:
-    """Reject a 2FA challenge that the user's credentials have outlived.
-
-    A challenge token proves knowledge of the password that was current when it
-    was minted, and it stays redeemable for its full 5-minute TTL. Redeeming it
-    mints a fresh access token whose `iat` is necessarily AFTER the
-    `password_changed:{user_id}` marker, so the marker — enforced only at
-    access-token validation — could never invalidate it. The invariant ("no
-    credential derived from the pre-change password may be honored") has to be
-    enforced at the MINT site too, against the challenge's own `iat`
-    (groovemap-jxmn).
-    """
-    if await token_revocation_reason(payload, _redis) is not None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Challenge invalidated by password change",
-        )
 
 
 def configure(
@@ -212,9 +192,14 @@ async def login(request: Request, body: LoginRequest) -> JSONResponse:  # noqa: 
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Service not ready (Redis required for 2FA)",
             )
-        challenge = create_challenge_token(str(user["id"]), user["email"], _config.jwt_secret_key, issued_at=credential_issued_at)
-        challenge_payload = decode_token(challenge, _config.jwt_secret_key)
-        jti = challenge_payload["jti"]
+        jti = secrets.token_hex(16)
+        challenge = create_challenge_token(
+            str(user["id"]),
+            user["email"],
+            _config.jwt_secret_key,
+            issued_at=credential_issued_at,
+            jti=jti,
+        )
         # Store challenge JTI in Redis with 5 min TTL
         await _redis.setex(f"2fa_challenge:{jti}", 300, str(user["id"]))
         return JSONResponse(
@@ -574,20 +559,11 @@ async def twofa_verify(request: Request, body: TwoFactorVerifyModel) -> JSONResp
     if _pool is None or _config is None or _redis is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
 
-    # Validate challenge token
-    try:
-        payload = decode_token(body.challenge_token, _config.jwt_secret_key)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired challenge token") from exc
-
-    if payload.get("type") != "2fa_challenge":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid challenge token type")
+    payload = await validate_token(body.challenge_token, _config.jwt_secret_key, _redis, kind=JwtKind.TWO_FACTOR_CHALLENGE)
 
     jti = payload.get("jti")
     if not jti:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid challenge token")
-
-    await _reject_stale_challenge(payload)
 
     # Verify challenge exists (without consuming) before checking lockout,
     # so locked-out users don't waste their challenge token.
@@ -725,20 +701,11 @@ async def twofa_recovery(request: Request, body: TwoFactorRecoveryModel) -> JSON
     if _pool is None or _config is None or _redis is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
 
-    # Validate challenge token
-    try:
-        payload = decode_token(body.challenge_token, _config.jwt_secret_key)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired challenge token") from exc
-
-    if payload.get("type") != "2fa_challenge":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid challenge token type")
+    payload = await validate_token(body.challenge_token, _config.jwt_secret_key, _redis, kind=JwtKind.TWO_FACTOR_CHALLENGE)
 
     jti = payload.get("jti")
     if not jti:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid challenge token")
-
-    await _reject_stale_challenge(payload)
 
     # Verify the challenge EXISTS (without consuming) before validating the code,
     # so a mistyped recovery code does not burn the challenge token. The challenge

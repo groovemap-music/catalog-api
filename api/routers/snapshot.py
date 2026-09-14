@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from api.auth import REASON_CREDENTIALS_CHANGED, REASON_REVOKED, decode_token, token_revocation_reason
+from api.dependencies import validate_token
 from api.limiter import bearer_token_key_func, limiter
 from api.models import SnapshotRequest, SnapshotResponse, SnapshotRestoreResponse
 from api.snapshot_store import SnapshotQuotaExceededError, SnapshotStore, SnapshotTooLargeError
@@ -37,42 +37,7 @@ async def _get_current_user(
 ) -> dict[str, Any]:
     if _jwt_secret is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not configured")
-    try:
-        payload = decode_token(credentials.credentials, _jwt_secret)
-        # Reject admin tokens
-        if payload.get("type") == "admin":
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin tokens cannot be used for user endpoints")
-        # Allowlist: only pure access tokens (which carry NO `type` claim) may
-        # authenticate. A 2FA challenge token (type="2fa_challenge") proves only the
-        # password and must be rejected before TOTP verification.
-        if payload.get("type") is not None:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token", headers={"WWW-Authenticate": "Bearer"})
-        # Validate sub claim presence
-        user_id: str | None = payload.get("sub")
-        if user_id is None:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token", headers={"WWW-Authenticate": "Bearer"})
-        # Revocation (jti blacklist via logout + password change) — shared with
-        # every other auth site so no site can silently drift out of lockstep.
-        reason = await token_revocation_reason(payload, _redis)
-        if reason == REASON_REVOKED:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token has been revoked",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        if reason == REASON_CREDENTIALS_CHANGED:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token invalidated by password change",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        return payload
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-            headers={"WWW-Authenticate": "Bearer"},
-        ) from exc
+    return await validate_token(credentials.credentials, _jwt_secret, _redis, expose_admin_mismatch=True)
 
 
 @router.post("/api/snapshot", status_code=201)

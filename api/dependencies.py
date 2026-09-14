@@ -3,6 +3,7 @@
 import asyncio
 import hmac
 from dataclasses import dataclass
+from enum import StrEnum, auto
 from typing import Annotated, Any, Literal
 
 from fastapi import Depends, HTTPException, status
@@ -34,11 +35,86 @@ _redis: Any = None
 _pool: Any = None
 
 
+class JwtKind(StrEnum):
+    """JWT purposes recognized by the shared validation boundary."""
+
+    ACCESS = auto()
+    ADMIN = auto()
+    TWO_FACTOR_CHALLENGE = auto()
+
+
 def configure(jwt_secret: str | None, redis: Any = None, pool: Any = None) -> None:
     global _jwt_secret, _redis, _pool
     _jwt_secret = jwt_secret
     _redis = redis
     _pool = pool
+
+
+async def validate_token(
+    token: str,
+    jwt_secret: str | None,
+    redis: Any = None,
+    *,
+    kind: JwtKind = JwtKind.ACCESS,
+    expose_admin_mismatch: bool = False,
+) -> dict[str, Any]:
+    """Decode a JWT and apply the complete policy for its intended use.
+
+    This is the single JWT validation boundary. Callers may choose whether an
+    access endpoint exposes the admin/user distinction, or adapt an error for
+    optional authentication, but must not repeat signature, token-kind,
+    subject, or revocation checks locally.
+    """
+    if jwt_secret is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Authentication not configured")
+
+    try:
+        payload = decode_token(token, jwt_secret)
+    except ValueError as exc:
+        detail = "Invalid or expired challenge token" if kind is JwtKind.TWO_FACTOR_CHALLENGE else "Invalid or expired token"
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=detail,
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+
+    actual_type = payload.get("type")
+    if kind is JwtKind.ACCESS:
+        # Access tokens are allowlisted by the absence of a type claim. Every
+        # typed token is reserved for another purpose and denied by default.
+        if actual_type == "admin" and expose_admin_mismatch:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin tokens cannot be used for user endpoints")
+        if actual_type is not None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    else:
+        expected_type = "admin" if kind is JwtKind.ADMIN else "2fa_challenge"
+        if actual_type != expected_type:
+            detail = "Admin access required" if kind is JwtKind.ADMIN else "Invalid challenge token type"
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN if kind is JwtKind.ADMIN else status.HTTP_401_UNAUTHORIZED,
+                detail=detail,
+            )
+
+    user_id = payload.get("sub")
+    if not user_id:
+        detail = "Invalid challenge token" if kind is JwtKind.TWO_FACTOR_CHALLENGE else "Invalid token"
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail, headers={"WWW-Authenticate": "Bearer"})
+
+    reason = await token_revocation_reason(payload, redis)
+    if reason == REASON_REVOKED:
+        detail = "Challenge invalidated by password change" if kind is JwtKind.TWO_FACTOR_CHALLENGE else "Token has been revoked"
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail, headers={"WWW-Authenticate": "Bearer"})
+    if reason == REASON_CREDENTIALS_CHANGED:
+        detail = (
+            "Challenge invalidated by password change" if kind is JwtKind.TWO_FACTOR_CHALLENGE else "Token invalidated by password change (revoked)"
+        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail, headers={"WWW-Authenticate": "Bearer"})
+
+    return payload
 
 
 async def get_optional_user(
@@ -47,17 +123,9 @@ async def get_optional_user(
     if credentials is None or _jwt_secret is None:
         return None
     try:
-        payload = decode_token(credentials.credentials, _jwt_secret)
-    except ValueError:
+        return await validate_token(credentials.credentials, _jwt_secret, _redis)
+    except HTTPException:
         return None
-    # Allowlist: only pure access tokens (no `type` claim) resolve to a user.
-    # Admin and 2FA challenge tokens must not be treated as an authenticated user.
-    if payload.get("type") is not None:
-        return None
-    # Revocation (jti blacklist + password change) — shared with every other auth site
-    if await token_revocation_reason(payload, _redis) is not None:
-        return None
-    return payload
 
 
 async def require_user(
@@ -67,33 +135,7 @@ async def require_user(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Personalized endpoints not enabled")
     if credentials is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required", headers={"WWW-Authenticate": "Bearer"})
-    try:
-        payload = decode_token(credentials.credentials, _jwt_secret)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"}
-        ) from exc
-    # Reject admin tokens on user endpoints
-    if payload.get("type") == "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin tokens cannot be used for user endpoints")
-    # Allowlist: only pure access tokens (which carry NO `type` claim) may
-    # authenticate user endpoints. A 2FA challenge token (type="2fa_challenge")
-    # proves only the password — it must NOT grant access before TOTP is verified.
-    if payload.get("type") is not None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token", headers={"WWW-Authenticate": "Bearer"})
-    # Validate sub claim presence
-    user_id: str | None = payload.get("sub")
-    if user_id is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token", headers={"WWW-Authenticate": "Bearer"})
-    # Revocation (jti blacklist + password change) — shared with every other auth site
-    reason = await token_revocation_reason(payload, _redis)
-    if reason == REASON_REVOKED:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token has been revoked", headers={"WWW-Authenticate": "Bearer"})
-    if reason == REASON_CREDENTIALS_CHANGED:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Token invalidated by password change", headers={"WWW-Authenticate": "Bearer"}
-        )
-    return payload
+    return await validate_token(credentials.credentials, _jwt_secret, _redis, expose_admin_mismatch=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,22 +247,7 @@ async def require_admin(
         raise HTTPException(status_code=503, detail="Admin endpoints not configured")
     if credentials is None:
         raise HTTPException(status_code=401, detail="Authentication required")
-    try:
-        payload = decode_token(credentials.credentials, _jwt_secret)
-    except ValueError as exc:
-        raise HTTPException(status_code=401, detail="Invalid or expired token") from exc
-    if payload.get("type") != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-    # Validate sub claim presence
-    user_id: str | None = payload.get("sub")
-    if user_id is None:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    # Revocation (jti blacklist + password change) — shared with every other auth site
-    reason = await token_revocation_reason(payload, _redis)
-    if reason == REASON_REVOKED:
-        raise HTTPException(status_code=401, detail="Token has been revoked")
-    if reason == REASON_CREDENTIALS_CHANGED:
-        raise HTTPException(status_code=401, detail="Token invalidated by password change")
+    payload = await validate_token(credentials.credentials, _jwt_secret, _redis, kind=JwtKind.ADMIN)
     # DB verification: confirm user exists and is_admin=True
     if _pool is not None:
         async with _pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:

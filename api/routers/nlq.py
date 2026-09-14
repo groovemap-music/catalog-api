@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+from api.dependencies import validate_token
 from api.limiter import limiter
 from api.nlq.config import NLQConfig
 from api.nlq.engine import NLQContext, NLQEngine
@@ -71,21 +72,11 @@ async def _extract_user_id(request: Request) -> str | None:
         return None
     token = auth_header[7:]
     try:
-        from api.auth import decode_token, token_revocation_reason  # noqa: PLC0415
-
         if _jwt_secret is None:
             return None
-        payload = decode_token(token, _jwt_secret)
-        # Allowlist: only pure access tokens (no `type` claim) resolve to a user.
-        # Admin and 2FA challenge tokens must not be treated as an authenticated user.
-        if payload.get("type") is not None:
-            return None
-        # Signature and exp alone do not make a token current — logout and
-        # password change revoke it in Redis, exactly as every other auth site checks.
-        if await token_revocation_reason(payload, _redis) is not None:
-            return None
+        payload = await validate_token(token, _jwt_secret, _redis)
         return payload.get("sub")
-    except ValueError, Exception:
+    except Exception:
         return None
 
 

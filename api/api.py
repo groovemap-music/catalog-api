@@ -68,14 +68,7 @@ import api.routers.taste as _taste_router
 import api.routers.user as _user_router
 import api.syncer as _syncer
 from api import __version__
-from api.auth import (
-    b64url_encode,
-    decode_token,
-    decrypt_oauth_token,
-    encrypt_oauth_token,
-    get_oauth_encryption_key,
-    token_revocation_reason,
-)
+from api.auth import b64url_encode, decrypt_oauth_token, encrypt_oauth_token, get_oauth_encryption_key
 from api.config import ApiConfig
 from api.limiter import limiter
 from api.metrics_collector import MetricsBuffer, normalize_path, run_collector
@@ -185,37 +178,7 @@ async def _get_current_user(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Service not ready",
         )
-    try:
-        payload = decode_token(credentials.credentials, _config.jwt_secret_key)
-        # Allowlist: only pure access tokens (which carry NO `type` claim) may
-        # authenticate. Admin tokens and 2FA challenge tokens (type="2fa_challenge")
-        # must never be accepted here — a challenge token proves only the password.
-        if payload.get("type") is not None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token",
-            )
-        user_id: str | None = payload.get("sub")
-        if user_id is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token",
-            )
-        # Revocation (jti blacklist via logout + password change) — shared with
-        # every other auth site so no site can silently drift out of lockstep.
-        if await token_revocation_reason(payload, _redis) is not None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token has been revoked",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        return payload
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-            headers={"WWW-Authenticate": "Bearer"},
-        ) from exc
+    return await _dependencies.validate_token(credentials.credentials, _config.jwt_secret_key, _redis)
 
 
 # Common search terms that produce high-cardinality FTS results (~9s for "Rock").

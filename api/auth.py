@@ -76,7 +76,8 @@ async def token_revocation_reason(payload: Mapping[str, Any], redis: Any) -> str
         if pw_changed:
             issued_at = payload.get("iat", 0)
             # Inclusive: a token issued in the same second as the password change
-            # MUST be invalidated (see CLAUDE.md timestamp comparison convention).
+            # MUST be invalidated. api.dependencies.validate_token is the single
+            # policy boundary that applies this helper to every JWT consumer.
             if issued_at <= int(pw_changed):
                 return REASON_CREDENTIALS_CHANGED
 
@@ -192,7 +193,14 @@ def hash_recovery_code(code: str) -> str:
     return hashlib.sha256(code.encode("utf-8")).hexdigest()
 
 
-def create_challenge_token(user_id: str, email: str, secret_key: str, issued_at: int | None = None) -> str:
+def create_challenge_token(
+    user_id: str,
+    email: str,
+    secret_key: str,
+    issued_at: int | None = None,
+    *,
+    jti: str | None = None,
+) -> str:
     """Create a short-lived 2FA challenge JWT (5 min TTL).
 
     This token proves the password was correct but is NOT a full access token.
@@ -211,7 +219,7 @@ def create_challenge_token(user_id: str, email: str, secret_key: str, issued_at:
         "type": "2fa_challenge",
         "exp": int(expire.timestamp()),
         "iat": issued_at if issued_at is not None else int(datetime.now(UTC).timestamp()),
-        "jti": secrets.token_hex(16),
+        "jti": jti if jti is not None else secrets.token_hex(16),
     }
     header = b64url_encode(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
     body = b64url_encode(json.dumps(payload, separators=(",", ":")).encode())
