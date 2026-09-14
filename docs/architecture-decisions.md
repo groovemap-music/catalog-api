@@ -46,7 +46,7 @@ flowchart LR
   key every catalog entity by a native id that `provider_aliases` maps a provider's id onto;
   mint only on the write side (the Discogs sync), never from a read path. See
   [Native identity and first-party activity](identity-and-activity.md).
-- Follow [ADR 0010](https://github.com/groovemap-music/design/blob/main/docs/adr/0010-first-party-activity-events.md):
+- Follow [ADR 0010](https://github.com/groovemap-music/design/blob/main/docs/adr/0010-first-party-events-consent-and-deletion.md):
   record first-party behavioural events and recommendation impressions in process, pseudonymised
   by subject, against the closed published vocabulary; consent, erasure, and export are this
   repository's endpoints over that same record. See

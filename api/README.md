@@ -321,7 +321,7 @@ else's copy is the same either way.
 ### Activity, Consent, Erasure, and Export
 
 First-party behavioural events, recommendation impression tracking, consent, and GDPR-style
-erasure and export, per [ADR 0010](https://github.com/groovemap-music/design/blob/main/docs/adr/0010-first-party-activity-events.md).
+erasure and export, per [ADR 0010](https://github.com/groovemap-music/design/blob/main/docs/adr/0010-first-party-events-consent-and-deletion.md).
 See [Native identity and first-party activity](../docs/identity-and-activity.md) for the
 recorder's emission points (search, recommendations, sync), the erasure procedure and its
 cross-store failure reporting, and the export's NDJSON section order.
@@ -482,7 +482,7 @@ Artist similarity and personalized graph-traversal discovery, ranked by multi-di
 - `hops` — Number of hops to traverse (1–3, default: 2)
 - `limit` — Maximum discoveries to return (1–50, default: 10)
 
-**Impression tracking ([ADR 0010](https://github.com/groovemap-music/design/blob/main/docs/adr/0010-first-party-activity-events.md)):**
+**Impression tracking ([ADR 0010](https://github.com/groovemap-music/design/blob/main/docs/adr/0010-first-party-events-consent-and-deletion.md)):**
 every served item on a ranked recommendation surface carries an `impression_id`, minted after
 the response body is filled so a cached response never reuses an id across viewers; it is
 `null` when the candidate had no native id or the write failed. Report an outcome against it
@@ -845,7 +845,7 @@ The API service uses the following tables. Their DDL and initialization image ar
 - `app_tokens` — revocable third-party app tokens (`id`, `user_id`, `name`, `scope`, `token_hash`, `created_at`, `last_used_at`, `revoked_at`)
 - `provider_aliases` — native id mapping (`provider`, `entity_kind`, `external_id`, `native_id`, `valid_to`) — see [ADR 0009](https://github.com/groovemap-music/design/blob/main/docs/adr/0009-native-identity-and-provider-aliases.md)
 - `owned_copies`, `observations`, `collection_snapshots` — the physical-copy and evidence tables ADR 0009 adds; see [Native identity and first-party activity](../docs/identity-and-activity.md)
-- `activity.events`, `activity.impressions`, `activity.user_subjects`, `activity.consent_grants`, `activity.erasures` — the month-partitioned behavioural record and its consent/erasure bookkeeping; see [ADR 0010](https://github.com/groovemap-music/design/blob/main/docs/adr/0010-first-party-activity-events.md)
+- `activity.events`, `activity.impressions`, `activity.user_subjects`, `activity.consent_grants`, `activity.erasures` — the month-partitioned behavioural record and its consent/erasure bookkeeping; see [ADR 0010](https://github.com/groovemap-music/design/blob/main/docs/adr/0010-first-party-events-consent-and-deletion.md)
 
 ## Deprecations
 
