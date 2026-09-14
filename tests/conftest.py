@@ -249,11 +249,17 @@ def test_client(
 
     _app_tokens_module.configure(mock_pool)
 
+    import api.activity as _activity_module
     import api.identity as _identity_module
     import api.routers.observations as _observations_router
 
     _identity_module.configure(mock_pool)
     _observations_router.configure(mock_pool)
+    _activity_module.configure(mock_pool, mock_redis)
+
+    import api.routers.activity as _activity_router
+
+    _activity_router.configure(mock_pool, mock_redis, mock_neo4j, test_api_config)
 
     import api.routers.nlq as _nlq_router
     from api.nlq.config import NLQConfig
@@ -317,6 +323,23 @@ def reset_identity_pool() -> Generator[None]:
     import api.identity as _identity_module
 
     _identity_module.configure(None)
+
+
+@pytest.fixture(autouse=True)
+def reset_activity_recorder() -> Generator[None]:
+    """Unwire the activity recorder between tests.
+
+    `api.activity` holds its pool, its subject cache, and its partition cache at module
+    scope. Leaving a finished test's mock pool wired would let a later test resolve a
+    subject through it, and leaving the caches populated would hide the get-or-create and
+    the partition-ensure the next test is asserting.
+    """
+    yield
+    import api.activity as _activity_module
+    import api.syncer as _syncer_module
+
+    _activity_module.configure(None, None)
+    _syncer_module.configure(None)
 
 
 @pytest.fixture(autouse=True)

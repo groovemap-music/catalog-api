@@ -1,11 +1,14 @@
 """Search endpoint -- unified full-text search across all entity types."""
 
-from typing import Any
+from typing import Annotated, Any
 
 import structlog
-from fastapi import APIRouter, Query, Request
+from common.identity import new_id
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
+import api.activity as activity
+from api.dependencies import get_optional_user
 from api.limiter import limiter
 from api.queries.search_queries import ALL_TYPES, execute_search, split_media_filter
 
@@ -27,11 +30,83 @@ def configure(pool: Any, redis: Any) -> None:
 
 _VALID_TYPES = set(ALL_TYPES)
 
+# The two event types this surface emits (ADR 0010).
+EVENT_SEARCH_QUERY = "search.query"
+EVENT_SEARCH_RESULT_IMPRESSION = "search.result_impression"
+
+
+def _search_filters(
+    requested_types: list[str],
+    genres: list[str],
+    media: list[str],
+    year_min: int | None,
+    year_max: int | None,
+) -> list[str]:
+    """Render everything that narrowed the search as the schema's flat string array.
+
+    The published `search.query` payload is closed over `query`, `filters`,
+    `result_count`, and `request_id`, so the entity-type restriction the epic design named
+    as its own `types` field has nowhere of its own to go. It is a filter on the query in
+    every sense that matters to an analysis, so it travels in `filters` under a `type:`
+    prefix beside the genre, media, and year bounds rather than being dropped.
+    """
+    applied = {f"type:{entity_type}" for entity_type in requested_types}
+    applied.update(f"genre:{genre}" for genre in genres)
+    applied.update(f"media:{medium}" for medium in media)
+    if year_min is not None:
+        applied.add(f"year_min:{year_min}")
+    if year_max is not None:
+        applied.add(f"year_max:{year_max}")
+    return sorted(applied)
+
+
+async def _record_search(user_id: str, request_id: str, q: str, filters: list[str], results: list[dict[str, Any]]) -> None:
+    """Record the query and one result impression per hit shown.
+
+    `search.result_impression` is per result rather than one event carrying the ordered
+    ids: the published payload is closed over `impression_id`, `item_id`, `position`, and
+    `request_id`, and its description names a single result at a single position. The
+    whole page therefore goes down as one batch, which keeps a twenty-hit page at one
+    round trip.
+
+    The `impression_id` identifies the shown-result event itself. Search is not a ranked
+    recommendation surface, so it has no row in `activity.impressions` for the id to name,
+    and it is stamped onto the hit so a client can report an outcome against it.
+
+    A hit whose provider id has no native id yet is counted and skipped: the payload
+    requires `item_id` and carries no provider-id field.
+    """
+    await activity.record_event(
+        user_id,
+        EVENT_SEARCH_QUERY,
+        {"query": q, "filters": filters, "result_count": len(results), "request_id": request_id},
+        idempotency_key=f"{EVENT_SEARCH_QUERY}:{request_id}",
+    )
+
+    impressions = []
+    for position, hit in enumerate(results, start=1):
+        native_id = hit.get("gm_id")
+        if not native_id:
+            hit["impression_id"] = None
+            activity.count_unidentified_candidate()
+            continue
+        impression_id = str(new_id())
+        hit["impression_id"] = impression_id
+        impressions.append(
+            (
+                EVENT_SEARCH_RESULT_IMPRESSION,
+                {"impression_id": impression_id, "item_id": native_id, "position": position, "request_id": request_id},
+                f"{EVENT_SEARCH_RESULT_IMPRESSION}:{request_id}:{position}",
+            )
+        )
+    await activity.record_events(user_id, impressions)
+
 
 @router.get("/api/search")
 @limiter.limit("30/minute")
 async def search(
     request: Request,  # noqa: ARG001 -- required by slowapi
+    current_user: Annotated[dict[str, Any] | None, Depends(get_optional_user)] = None,
     q: str = Query(..., min_length=3, description="Search query (minimum 3 characters)"),
     types: str = Query(
         default="artist,label,master,release",
@@ -102,5 +177,18 @@ async def search(
         media_families=media_families,
         media_mediums=media_mediums,
     )
+
+    # ADR 0010 records the search only for a caller the service can pseudonymise. An
+    # anonymous search has no subject, so it leaves no behavioural record at all rather
+    # than an unattributable one.
+    user_id = (current_user or {}).get("sub", "")
+    if user_id:
+        await _record_search(
+            user_id,
+            str(new_id()),
+            q,
+            _search_filters(requested_types, genre_list, media_list, year_min, year_max),
+            result.get("results", []),
+        )
 
     return JSONResponse(content=result)
