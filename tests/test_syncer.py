@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+from collections.abc import Generator
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
@@ -106,12 +108,45 @@ def mock_pg_pool() -> MagicMock:
     cur_ctx.__aexit__ = AsyncMock(return_value=False)
     mock_conn.cursor = MagicMock(return_value=cur_ctx)
 
+    # The pool hands out autocommit connections, so every page opens an
+    # explicit transaction around its resolve + upsert + copy-minting. On a
+    # bare AsyncMock, conn.transaction() would return a coroutine rather than
+    # a context manager, so it is wired the same way conn.cursor() is.
+    tx_ctx = AsyncMock()
+    tx_ctx.__aenter__ = AsyncMock(return_value=tx_ctx)
+    tx_ctx.__aexit__ = AsyncMock(return_value=False)
+    mock_conn.transaction = MagicMock(return_value=tx_ctx)
+
     conn_ctx = AsyncMock()
     conn_ctx.__aenter__ = AsyncMock(return_value=mock_conn)
     conn_ctx.__aexit__ = AsyncMock(return_value=False)
     pool.connection = MagicMock(return_value=conn_ctx)
     pool._mock_cur = mock_cur
     return pool
+
+
+@pytest.fixture(autouse=True)
+def resolve_aliases_mock() -> Generator[AsyncMock]:
+    """Stand in for common.identity.resolve_aliases on every sync test.
+
+    The real function would run its own five statements against the shared mock
+    cursor and still resolve nothing, which would bury the statements a test is
+    actually asserting on. Tests that care about native ids set a return value;
+    the rest get the empty resolve, under which a row stays identity-less and
+    mints no copy and no event.
+    """
+    with patch("api.syncer.resolve_aliases", new_callable=AsyncMock) as resolver:
+        resolver.return_value = {}
+        yield resolver
+
+
+def pg_calls(mock_pg_pool: MagicMock, fragment: str) -> list[Any]:
+    """Every cursor.execute call whose statement contains `fragment`.
+
+    A sync page now issues several statements per connection, so a test that
+    wants one of them names it instead of assuming it is the only one.
+    """
+    return [call for call in mock_pg_pool._mock_cur.execute.await_args_list if fragment in call.args[0]]
 
 
 @pytest.fixture
@@ -528,11 +563,12 @@ class TestSyncCollection:
                 mock_neo4j,
             )
 
-        # PG: a DELETE ... WHERE updated_at < <sync_started> sweep.
-        mock_pg_pool._mock_cur.execute.assert_awaited_once()
-        pg_call = mock_pg_pool._mock_cur.execute.await_args
+        # PG: a DELETE ... WHERE updated_at < <sync_started> sweep — exactly
+        # one of the several statements a page now issues.
+        sweeps = pg_calls(mock_pg_pool, "DELETE FROM user_collections")
+        assert len(sweeps) == 1
+        pg_call = sweeps[0]
         pg_sql = pg_call.args[0]
-        assert "DELETE FROM user_collections" in pg_sql
         assert "updated_at" in pg_sql
         assert str(TEST_USER_UUID) in pg_call.args[1]
 
@@ -595,7 +631,7 @@ class TestSyncCollection:
 
         # And the reconciliation DELETE cutoff (both PG and Neo4j) must be that
         # exact same sync_started value — one clock, three consumers.
-        pg_delete_call = mock_pg_pool._mock_cur.execute.await_args
+        pg_delete_call = pg_calls(mock_pg_pool, "DELETE FROM user_collections")[0]
         pg_cutoff = pg_delete_call.args[1][1]
         assert pg_cutoff == upserted_updated_at
 
@@ -999,9 +1035,9 @@ class TestSyncWantlist:
                 mock_neo4j,
             )
 
-        mock_pg_pool._mock_cur.execute.assert_awaited_once()
-        pg_sql = mock_pg_pool._mock_cur.execute.await_args.args[0]
-        assert "DELETE FROM user_wantlists" in pg_sql
+        sweeps = pg_calls(mock_pg_pool, "DELETE FROM user_wantlists")
+        assert len(sweeps) == 1
+        pg_sql = sweeps[0].args[0]
         assert "updated_at" in pg_sql
 
         assert mock_neo4j._mock_session.run.await_count == 2
@@ -1047,7 +1083,7 @@ class TestSyncWantlist:
         neo4j_synced_at = upsert_cypher_call[0][1]["synced_at"]
         assert upserted_updated_at.isoformat() == neo4j_synced_at
 
-        pg_delete_call = mock_pg_pool._mock_cur.execute.await_args
+        pg_delete_call = pg_calls(mock_pg_pool, "DELETE FROM user_wantlists")[0]
         pg_cutoff = pg_delete_call.args[1][1]
         assert pg_cutoff == upserted_updated_at
 
