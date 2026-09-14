@@ -249,6 +249,12 @@ def test_client(
 
     _app_tokens_module.configure(mock_pool)
 
+    import api.identity as _identity_module
+    import api.routers.observations as _observations_router
+
+    _identity_module.configure(mock_pool)
+    _observations_router.configure(mock_pool)
+
     import api.routers.nlq as _nlq_router
     from api.nlq.config import NLQConfig
 
@@ -296,6 +302,21 @@ def test_client(
     api_module._neo4j = original_neo4j
     api_module._running_syncs.clear()
     app.router.lifespan_context = original_lifespan
+
+
+@pytest.fixture(autouse=True)
+def reset_identity_pool() -> Generator[None]:
+    """Drop the identity pool between tests.
+
+    `api.identity` holds its pool at module scope, and the `test_client` fixture wires a
+    per-test mock into it. Without this, a query-layer test that runs after an endpoint
+    test would resolve native ids through a stale mock from a finished test instead of
+    through no pool at all.
+    """
+    yield
+    import api.identity as _identity_module
+
+    _identity_module.configure(None)
 
 
 @pytest.fixture(autouse=True)

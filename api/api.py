@@ -42,6 +42,7 @@ from slowapi.errors import RateLimitExceeded
 
 import api.app_tokens as _app_tokens
 import api.dependencies as _dependencies
+import api.identity as _identity
 import api.routers.admin as _admin_router
 import api.routers.app_tokens as _app_tokens_router
 import api.routers.auth as _auth_router
@@ -55,6 +56,7 @@ import api.routers.label_dna as _label_dna_router
 import api.routers.musicbrainz as _musicbrainz_router
 import api.routers.network as _network_router
 import api.routers.nlq as _nlq_router
+import api.routers.observations as _observations_router
 import api.routers.rarity as _rarity_router
 import api.routers.recommend as _recommend_router
 import api.routers.search as _search_router
@@ -296,6 +298,8 @@ def _configure_routers(
     jwt_secret_for_neo4j = config.jwt_secret_key if config.neo4j_host else None
     _dependencies.configure(jwt_secret_for_neo4j, redis, pool=pool)
     _app_tokens.configure(pool)
+    _identity.configure(pool)
+    _observations_router.configure(pool)
     _sync_router.configure(pool, neo4j, config, _running_syncs, redis)
     _explore_router.configure(neo4j, jwt_secret_for_neo4j, redis, pg_pool=pool)
     _user_router.configure(neo4j, jwt_secret_for_neo4j)
@@ -446,6 +450,7 @@ _ROUTERS = (
     _network_router.router,
     _musicbrainz_router.router,
     _app_tokens_router.router,
+    _observations_router.router,
 )
 
 

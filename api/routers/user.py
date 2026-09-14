@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
 from api.dependencies import UnifiedAuth, get_optional_user, require_user, require_user_or_app_token
+from api.identity import native_ids_for
 from api.limiter import bearer_token_key_func, limiter
 from api.queries.recommend_queries import (
     get_blindspot_candidates,
@@ -44,6 +45,21 @@ _timeline_cache_lock: asyncio.Lock | None = None  # lazy init to avoid binding t
 def configure(neo4j: Any, jwt_secret: str | None) -> None:  # noqa: ARG001
     global _neo4j_driver
     _neo4j_driver = neo4j
+
+
+async def _attach_recommendation_identity(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Add the ADR 0009 native id to each recommended release.
+
+    One alias lookup for the whole page. A candidate whose Discogs id has no valid alias
+    yet keeps its provider `id` and carries `gm_id: None`, so a consumer can adopt native
+    identity incrementally instead of waiting for the projection to be complete.
+    """
+    if not items:
+        return items
+    gm_ids = await native_ids_for("release", [item["id"] for item in items if item.get("id")])
+    for item in items:
+        item["gm_id"] = gm_ids.get(str(item.get("id")))
+    return items
 
 
 def _get_cached(key: str) -> dict[str, Any] | None:
@@ -123,6 +139,7 @@ async def user_recommendations(
             if max_score > 0:
                 for r in results:
                     r["score"] = round(r.get("score", 0) / max_score, 4)
+        await _attach_recommendation_identity(results)
         return JSONResponse(content={"recommendations": results, "total": len(results)})
 
     # Multi-signal strategy
@@ -158,6 +175,8 @@ async def user_recommendations(
         collector_counts=collector_counts,
         limit=limit,
     )
+
+    await _attach_recommendation_identity(merged)
 
     return JSONResponse(
         content={

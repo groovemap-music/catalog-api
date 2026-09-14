@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from api.cache import RecommendCache
 from api.dependencies import require_user
+from api.identity import NativeIdCache, catalog_ref, native_ids_for, native_ids_for_pairs
 from api.limiter import limiter
 from api.models import (
     DiscoveryNode,
@@ -87,10 +88,14 @@ async def similar_artists(
 
     ranked = compute_similar_artists(target_profile, candidates, limit=50)
 
+    # One alias lookup for the ranked page. The similarity itself is computed on the graph,
+    # where identity is only a projection, so the native id comes from the alias table.
+    gm_ids = await native_ids_for("artist", [r["artist_id"] for r in ranked if r.get("artist_id")])
+
     response = SimilarArtistsResponse(
         artist_id=identity["artist_id"],
         artist_name=identity["artist_name"],
-        similar=[SimilarArtist(**r) for r in ranked],
+        similar=[SimilarArtist(**r, gm_id=gm_ids.get(str(r.get("artist_id")))) for r in ranked],
     )
     response_data = response.model_dump()
 
@@ -157,10 +162,26 @@ async def explore_from_here(
     if traversal_results and traversal_results[0].get("path_names"):
         from_name = str(traversal_results[0]["path_names"][0])
 
+    # The traversal's starting entity is frequently named again among the discoveries, and
+    # a request-scoped cache is what keeps that from costing a second lookup.
+    identity_cache = NativeIdCache()
+    gm_ids = await native_ids_for_pairs(
+        [(entity_type, entity_id), *((s["type"], s["id"]) for s in scored)],
+        cache=identity_cache,
+    )
+    # Genre and style nodes are name-keyed rather than catalog entities, so `catalog_ref`
+    # returns None for them and their `gm_id` stays None by construction.
+    from_ref = catalog_ref(entity_type, entity_id)
+
     response = ExploreFromHereResponse.model_validate(
         {
-            "from": EntityRef(id=entity_id, name=from_name, type=entity_type),
-            "discoveries": [DiscoveryNode(**s) for s in scored],
+            "from": EntityRef(
+                id=entity_id,
+                name=from_name,
+                type=entity_type,
+                gm_id=gm_ids.get((entity_type, from_ref.external_id)) if from_ref else None,
+            ),
+            "discoveries": [DiscoveryNode(**s, gm_id=gm_ids.get((s["type"], str(s["id"])))) for s in scored],
         }
     )
     response_data = response.model_dump(by_alias=True)
