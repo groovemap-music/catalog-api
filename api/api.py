@@ -40,8 +40,11 @@ from pydantic import BaseModel
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
+import api.activity as _activity
 import api.app_tokens as _app_tokens
 import api.dependencies as _dependencies
+import api.identity as _identity
+import api.routers.activity as _activity_router
 import api.routers.admin as _admin_router
 import api.routers.app_tokens as _app_tokens_router
 import api.routers.auth as _auth_router
@@ -55,6 +58,7 @@ import api.routers.label_dna as _label_dna_router
 import api.routers.musicbrainz as _musicbrainz_router
 import api.routers.network as _network_router
 import api.routers.nlq as _nlq_router
+import api.routers.observations as _observations_router
 import api.routers.rarity as _rarity_router
 import api.routers.recommend as _recommend_router
 import api.routers.search as _search_router
@@ -62,6 +66,7 @@ import api.routers.snapshot as _snapshot_router
 import api.routers.sync as _sync_router
 import api.routers.taste as _taste_router
 import api.routers.user as _user_router
+import api.syncer as _syncer
 from api import __version__
 from api.auth import (
     b64url_encode,
@@ -296,6 +301,13 @@ def _configure_routers(
     jwt_secret_for_neo4j = config.jwt_secret_key if config.neo4j_host else None
     _dependencies.configure(jwt_secret_for_neo4j, redis, pool=pool)
     _app_tokens.configure(pool)
+    _identity.configure(pool)
+    _observations_router.configure(pool)
+    # One writer for every event and impression, and the sync's change events flow through
+    # the same one: `api.syncer` holds a no-op recorder until this hands it the real thing.
+    _activity.configure(pool, redis)
+    _syncer.configure(_activity.record_event)
+    _activity_router.configure(pool, redis, neo4j, config)
     _sync_router.configure(pool, neo4j, config, _running_syncs, redis)
     _explore_router.configure(neo4j, jwt_secret_for_neo4j, redis, pg_pool=pool)
     _user_router.configure(neo4j, jwt_secret_for_neo4j)
@@ -377,6 +389,7 @@ async def _start_service(_app: FastAPI) -> _LifecycleResources:
     anthropic_client = _configure_routers(config, pool, redis, _neo4j)
     logger.info("✅ API service ready", port=API_PORT)
 
+    await _activity.ensure_startup_partitions()
     _app.state.prewarm_task = asyncio.create_task(_prewarm_search_cache())
     metrics_buffer = MetricsBuffer()
     _app.state.metrics_buffer = metrics_buffer
@@ -426,6 +439,7 @@ _cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()] i
 
 
 _ROUTERS = (
+    _activity_router.router,
     _auth_router.router,
     _sync_router.router,
     _explore_router.router,
@@ -446,6 +460,7 @@ _ROUTERS = (
     _network_router.router,
     _musicbrainz_router.router,
     _app_tokens_router.router,
+    _observations_router.router,
 )
 
 

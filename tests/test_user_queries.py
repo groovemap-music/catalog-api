@@ -146,7 +146,9 @@ class TestGetUserCollection:
             ]
         )
         results, total = await get_user_collection(driver, "user-1", limit=50, offset=0)
-        assert results == releases
+        # Additive only: every provider field survives, and the two native identity fields
+        # are None because no alias table is reachable from a bare query-layer test.
+        assert results == [{**release, "gm_item_id": None, "owned_copy_id": None} for release in releases]
         assert total == 1
 
     @pytest.mark.asyncio
@@ -285,7 +287,9 @@ class TestGetUserWantlist:
             ]
         )
         results, total = await get_user_wantlist(driver, "user-2", limit=50, offset=0)
-        assert results == wants
+        # A wantlist row names a release the user does not hold, so it gains `gm_item_id`
+        # and no owned copy.
+        assert results == [{**want, "gm_item_id": None} for want in wants]
         assert total == 1
 
     @pytest.mark.asyncio

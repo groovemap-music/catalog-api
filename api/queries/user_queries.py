@@ -16,7 +16,40 @@ from typing import Any
 
 from common import AsyncResilientNeo4jDriver
 
+from api.identity import lookup_owned_copy_ids, native_ids_for
 from api.queries.helpers import run_count, run_query
+
+
+async def attach_release_identity(
+    rows: list[dict[str, Any]],
+    *,
+    user_id: str | None = None,
+    include_owned_copy: bool = False,
+) -> list[dict[str, Any]]:
+    """Add the native identity of ADR 0009 to release rows read out of Neo4j.
+
+    These rows come from the graph, where the node is keyed by its Discogs id and the
+    native id is at best a lagging projection, so `gm_item_id` is resolved from the alias
+    table in PostgreSQL — the authority — rather than read off the node.
+
+    `owned_copy_id` is different in kind: no provider ever named the physical copy, so it
+    is read from the collection row the sync minted it against, and only for the caller's
+    own rows. Both fields are additive and both are `None` when nothing resolves; every
+    provider id on the row is untouched.
+    """
+    if not rows:
+        return rows
+
+    release_ids = [row["id"] for row in rows if row.get("id")]
+    gm_ids = await native_ids_for("release", release_ids)
+    copy_ids = await lookup_owned_copy_ids(user_id, release_ids) if include_owned_copy and user_id else {}
+
+    for row in rows:
+        key = str(row.get("id"))
+        row["gm_item_id"] = gm_ids.get(key)
+        if include_owned_copy:
+            row["owned_copy_id"] = copy_ids.get(key)
+    return rows
 
 
 async def get_user_collection(
@@ -57,7 +90,7 @@ async def get_user_collection(
         run_query(driver, cypher, user_id=user_id, limit=limit, offset=offset),
         run_count(driver, count_cypher, user_id=user_id),
     )
-    return results, total
+    return await attach_release_identity(results, user_id=user_id, include_owned_copy=True), total
 
 
 async def get_user_wantlist(
@@ -97,7 +130,7 @@ async def get_user_wantlist(
         run_query(driver, cypher, user_id=user_id, limit=limit, offset=offset),
         run_count(driver, count_cypher, user_id=user_id),
     )
-    return results, total
+    return await attach_release_identity(results), total
 
 
 async def get_user_recommendations(

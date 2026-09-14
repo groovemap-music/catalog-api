@@ -87,7 +87,9 @@ class TestGetLabelGaps:
             ]
         )
         results, total = await get_label_gaps(driver, "user-1", "label-1", limit=50, offset=0)
-        assert results == releases
+        # Gap rows are additive: every provider field is unchanged and `gm_item_id` is
+        # None because no alias table is reachable from a bare query-layer test.
+        assert results == [{**release, "gm_item_id": None} for release in releases]
         assert total == 1
 
     @pytest.mark.asyncio
@@ -140,7 +142,9 @@ class TestGetLabelGaps:
             ]
         )
         results, total = await get_label_gaps(driver, "user-1", "label-1", families=["vinyl"])
-        assert results == releases
+        # Gap rows are additive: every provider field is unchanged and `gm_item_id` is
+        # None because no alias table is reachable from a bare query-layer test.
+        assert results == [{**release, "gm_item_id": None} for release in releases]
         assert total == 1
 
     @pytest.mark.asyncio
@@ -165,7 +169,9 @@ class TestGetLabelGaps:
             ]
         )
         results, total = await get_label_gaps(driver, "user-1", "label-1", mediums=["vinyl_12"])
-        assert results == releases
+        # Gap rows are additive: every provider field is unchanged and `gm_item_id` is
+        # None because no alias table is reachable from a bare query-layer test.
+        assert results == [{**release, "gm_item_id": None} for release in releases]
         assert total == 1
 
 
@@ -233,7 +239,9 @@ class TestGetArtistGaps:
             ]
         )
         results, total = await get_artist_gaps(driver, "user-1", "artist-1", limit=50, offset=0)
-        assert results == releases
+        # Gap rows are additive: every provider field is unchanged and `gm_item_id` is
+        # None because no alias table is reachable from a bare query-layer test.
+        assert results == [{**release, "gm_item_id": None} for release in releases]
         assert total == 5
 
     @pytest.mark.asyncio
@@ -262,7 +270,9 @@ class TestGetArtistGaps:
             ]
         )
         results, total = await get_artist_gaps(driver, "user-1", "artist-1", families=["optical"])
-        assert results == releases
+        # Gap rows are additive: every provider field is unchanged and `gm_item_id` is
+        # None because no alias table is reachable from a bare query-layer test.
+        assert results == [{**release, "gm_item_id": None} for release in releases]
         assert total == 1
 
     @pytest.mark.asyncio
@@ -277,7 +287,9 @@ class TestGetArtistGaps:
             ]
         )
         results, total = await get_artist_gaps(driver, "user-1", "artist-1", mediums=["optical_cd"])
-        assert results == releases
+        # Gap rows are additive: every provider field is unchanged and `gm_item_id` is
+        # None because no alias table is reachable from a bare query-layer test.
+        assert results == [{**release, "gm_item_id": None} for release in releases]
         assert total == 1
 
 
@@ -350,7 +362,9 @@ class TestGetMasterGaps:
             ]
         )
         results, total = await get_master_gaps(driver, "user-1", "master-1", limit=50, offset=0)
-        assert results == releases
+        # Gap rows are additive: every provider field is unchanged and `gm_item_id` is
+        # None because no alias table is reachable from a bare query-layer test.
+        assert results == [{**release, "gm_item_id": None} for release in releases]
         assert total == 3
 
     @pytest.mark.asyncio
@@ -379,7 +393,9 @@ class TestGetMasterGaps:
             ]
         )
         results, total = await get_master_gaps(driver, "user-1", "master-1", families=["vinyl"])
-        assert results == releases
+        # Gap rows are additive: every provider field is unchanged and `gm_item_id` is
+        # None because no alias table is reachable from a bare query-layer test.
+        assert results == [{**release, "gm_item_id": None} for release in releases]
         assert total == 1
 
     @pytest.mark.asyncio
@@ -394,7 +410,9 @@ class TestGetMasterGaps:
             ]
         )
         results, total = await get_master_gaps(driver, "user-1", "master-1", mediums=["vinyl_12"])
-        assert results == releases
+        # Gap rows are additive: every provider field is unchanged and `gm_item_id` is
+        # None because no alias table is reachable from a bare query-layer test.
+        assert results == [{**release, "gm_item_id": None} for release in releases]
         assert total == 1
 
 

@@ -17,7 +17,23 @@ from typing import Any
 
 from common import AsyncResilientNeo4jDriver
 
+from api.identity import native_ids_for
 from api.queries.helpers import run_count, run_query
+
+
+async def attach_gap_identity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Add the ADR 0009 native id to gap rows.
+
+    A gap row names a release the user does *not* own, so it gains `gm_item_id` and no
+    owned copy: there is no copy to identify. The native id is resolved from the alias
+    table rather than read off the graph node, which holds only a projection of identity.
+    """
+    if not rows:
+        return rows
+    gm_ids = await native_ids_for("release", [row["id"] for row in rows if row.get("id")])
+    for row in rows:
+        row["gm_item_id"] = gm_ids.get(str(row.get("id")))
+    return rows
 
 
 def _build_filters(exclude_wantlist: bool, families: list[str] | None, mediums: list[str] | None) -> str:
@@ -86,7 +102,7 @@ async def get_label_gaps(
         params["mediums"] = mediums
     results = await run_query(driver, cypher, **params)
     total = await run_count(driver, count_cypher, **params)
-    return results, total
+    return await attach_gap_identity(results), total
 
 
 async def get_label_gap_summary(
@@ -160,7 +176,7 @@ async def get_artist_gaps(
         params["mediums"] = mediums
     results = await run_query(driver, cypher, **params)
     total = await run_count(driver, count_cypher, **params)
-    return results, total
+    return await attach_gap_identity(results), total
 
 
 async def get_artist_gap_summary(
@@ -237,7 +253,7 @@ async def get_master_gaps(
         params["mediums"] = mediums
     results = await run_query(driver, cypher, **params)
     total = await run_count(driver, count_cypher, **params)
-    return results, total
+    return await attach_gap_identity(results), total
 
 
 async def get_master_gap_summary(

@@ -7,8 +7,10 @@ import structlog
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
+import api.activity as activity
 from api.cache import RecommendCache
-from api.dependencies import require_user
+from api.dependencies import get_optional_user, require_user
+from api.identity import NativeIdCache, catalog_ref, native_ids_for, native_ids_for_pairs
 from api.limiter import limiter
 from api.models import (
     DiscoveryNode,
@@ -51,14 +53,29 @@ _SIMILARITY_CACHE_TTL = 86400  # 24 hours
 _EXPLORE_CACHE_TTL = 3600  # 1 hour
 
 
+async def _record_similar_impressions(current_user: dict[str, Any] | None, similar: list[dict[str, Any]]) -> None:
+    """Record the similar-artist list as shown, keyed on its own similarity score."""
+    await activity.stamp_recommendation_impressions(
+        (current_user or {}).get("sub", ""),
+        activity.POLICY_SIMILAR_ARTIST,
+        similar,
+        score_key="similarity",
+    )
+
+
 @router.get("/api/recommend/similar/artist/{artist_id}")
 @limiter.limit("30/minute")
 async def similar_artists(
     request: Request,  # noqa: ARG001 -- required by slowapi
     artist_id: str,
+    current_user: Annotated[dict[str, Any] | None, Depends(get_optional_user)] = None,
     limit: int = Query(20, ge=1, le=50),
 ) -> JSONResponse:
-    """Find artists with the closest multi-dimensional similarity to the given artist."""
+    """Find artists with the closest multi-dimensional similarity to the given artist.
+
+    Open to anonymous callers, so the impression is recorded only when the caller carries
+    a token: a showing the service cannot pseudonymise leaves no behavioural record.
+    """
     if not _neo4j_driver:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
@@ -68,6 +85,7 @@ async def similar_artists(
         cached = await _cache.get(cache_key)
         if cached is not None:
             cached["similar"] = cached["similar"][:limit]
+            await _record_similar_impressions(current_user, cached["similar"])
             return JSONResponse(content=cached)
 
     identity = await get_artist_identity(_neo4j_driver, artist_id)
@@ -87,17 +105,25 @@ async def similar_artists(
 
     ranked = compute_similar_artists(target_profile, candidates, limit=50)
 
+    # One alias lookup for the ranked page. The similarity itself is computed on the graph,
+    # where identity is only a projection, so the native id comes from the alias table.
+    gm_ids = await native_ids_for("artist", [r["artist_id"] for r in ranked if r.get("artist_id")])
+
     response = SimilarArtistsResponse(
         artist_id=identity["artist_id"],
         artist_name=identity["artist_name"],
-        similar=[SimilarArtist(**r) for r in ranked],
+        similar=[SimilarArtist(**r, gm_id=gm_ids.get(str(r.get("artist_id")))) for r in ranked],
     )
     response_data = response.model_dump()
 
+    # Cached before the ids are stamped, so the body in Redis never carries one: an
+    # impression records a list having been shown, and the request that filled the cache
+    # is not the request that shows it to the next caller.
     if _cache:
         await _cache.set(cache_key, response_data, ttl=_SIMILARITY_CACHE_TTL)
 
     response_data["similar"] = response_data["similar"][:limit]
+    await _record_similar_impressions(current_user, response_data["similar"])
     return JSONResponse(content=response_data)
 
 
@@ -131,6 +157,7 @@ async def explore_from_here(
         cached = await _cache.get(cache_key)
         if cached is not None:
             cached["discoveries"] = cached["discoveries"][:limit]
+            await activity.stamp_recommendation_impressions(user_id, activity.POLICY_EXPLORE, cached["discoveries"])
             return JSONResponse(content=cached)
 
     # Run traversal and user taste queries in parallel
@@ -157,16 +184,34 @@ async def explore_from_here(
     if traversal_results and traversal_results[0].get("path_names"):
         from_name = str(traversal_results[0]["path_names"][0])
 
+    # The traversal's starting entity is frequently named again among the discoveries, and
+    # a request-scoped cache is what keeps that from costing a second lookup.
+    identity_cache = NativeIdCache()
+    gm_ids = await native_ids_for_pairs(
+        [(entity_type, entity_id), *((s["type"], s["id"]) for s in scored)],
+        cache=identity_cache,
+    )
+    # Genre and style nodes are name-keyed rather than catalog entities, so `catalog_ref`
+    # returns None for them and their `gm_id` stays None by construction.
+    from_ref = catalog_ref(entity_type, entity_id)
+
     response = ExploreFromHereResponse.model_validate(
         {
-            "from": EntityRef(id=entity_id, name=from_name, type=entity_type),
-            "discoveries": [DiscoveryNode(**s) for s in scored],
+            "from": EntityRef(
+                id=entity_id,
+                name=from_name,
+                type=entity_type,
+                gm_id=gm_ids.get((entity_type, from_ref.external_id)) if from_ref else None,
+            ),
+            "discoveries": [DiscoveryNode(**s, gm_id=gm_ids.get((s["type"], str(s["id"])))) for s in scored],
         }
     )
     response_data = response.model_dump(by_alias=True)
 
+    # Cached before the ids are stamped, for the same reason as the similarity body above.
     if _cache:
         await _cache.set(cache_key, response_data, ttl=_EXPLORE_CACHE_TTL)
 
     response_data["discoveries"] = response_data["discoveries"][:limit]
+    await activity.stamp_recommendation_impressions(user_id, activity.POLICY_EXPLORE, response_data["discoveries"])
     return JSONResponse(content=response_data)

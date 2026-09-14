@@ -32,6 +32,7 @@ from common.query_debug import execute_sql
 from psycopg import sql
 from psycopg.rows import dict_row
 
+from api.identity import native_ids_for_pairs
 from api.telemetry import CACHE_SEARCH, cache_get
 
 
@@ -488,8 +489,14 @@ async def _run_media_facets(pool: AsyncPostgreSQLPool, q: str) -> dict[str, int]
     return {row["family"]: int(row["cnt"]) for row in rows}
 
 
-def _format_result(row: dict[str, Any]) -> dict[str, Any]:
-    """Convert a DB row into the API result shape."""
+def _format_result(row: dict[str, Any], gm_ids: dict[tuple[str, str], str] | None = None) -> dict[str, Any]:
+    """Convert a DB row into the API result shape.
+
+    `gm_ids` maps (type, id) onto the native id ADR 0009 mints for the entity. A hit whose
+    provider id has no valid alias yet carries `gm_id: None` — the provider `id` above it
+    is unchanged either way, so a consumer that has not adopted native identity reads the
+    same response it always did.
+    """
     metadata: dict[str, Any] = {}
     if row.get("year"):
         with contextlib.suppress(ValueError, TypeError):
@@ -501,6 +508,7 @@ def _format_result(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "type": row["type"],
         "id": row["id"],
+        "gm_id": (gm_ids or {}).get((row["type"], str(row["id"]))),
         "name": row["name"] or "",
         "highlight": row["highlight"] or row["name"] or "",
         "relevance": round(float(row["rank"]), 4) if row.get("rank") else 0.0,
@@ -558,6 +566,10 @@ async def execute_search(
         _run_media_facets(pool, q),
     )
 
+    # One alias lookup for the whole page, after the six searches settle: the hits carry
+    # mixed kinds, so the batch is keyed by (type, id) rather than by id alone.
+    gm_ids = await native_ids_for_pairs(((row["type"], row["id"]) for row in results_rows), pool=pool)
+
     response: dict[str, Any] = {
         "query": q,
         "total": total,
@@ -567,7 +579,7 @@ async def execute_search(
             "decade": decade_facets,
             "media": media_facets,
         },
-        "results": [_format_result(r) for r in results_rows],
+        "results": [_format_result(r, gm_ids) for r in results_rows],
         "pagination": {
             "limit": limit,
             "offset": offset,

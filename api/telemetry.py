@@ -66,6 +66,22 @@ CACHE_RECOMMEND = "recommend"
 CACHE_SEARCH = "search"
 CACHE_TRENDS = "trends"
 
+# Why an activity write did not happen. ADR 0010 keeps observability thin: the event
+# tables are the analytical record and the metrics only say whether the writer is working,
+# so these are the whole closed vocabulary of the `outcome` attribute on the failure
+# counter — never a subject, a session, an item, or a request id.
+ACTIVITY_INVALID = "invalid"
+ACTIVITY_NOT_CONFIGURED = "not_configured"
+ACTIVITY_NO_NATIVE_ID = "no_native_id"
+ACTIVITY_NO_SUBJECT = "no_subject"
+ACTIVITY_WRITE_FAILED = "write_failed"
+
+# Impressions are rows of `activity.impressions` rather than typed events, so they have no
+# `event_type` of their own. Counting them under this one extra low-cardinality value is
+# what keeps the impression writer as observable as the event writer through the single
+# counter ADR 0010 allows.
+IMPRESSION_EVENT_LABEL = "impression"
+
 # NLQ request outcomes.
 NLQ_CACHED = "cached"
 NLQ_ERROR = "error"
@@ -86,6 +102,8 @@ _UNTIMED_REDIS_METHODS = frozenset({"aclose", "close", "disconnect", "initialize
 class _Instruments:
     """The service's instruments, built once against the installed MeterProvider."""
 
+    activity_events: Any
+    activity_failures: Any
     cache: Any
     db_operation_duration: Any
     nlq_requests: Any
@@ -101,6 +119,16 @@ def _build_instruments() -> _Instruments:
     """Create every instrument from one meter."""
     meter = get_meter(METER_NAME)
     return _Instruments(
+        activity_events=meter.create_counter(
+            "groovemap.api.activity_events",
+            unit="{event}",
+            description="First-party activity rows written, by event type",
+        ),
+        activity_failures=meter.create_counter(
+            "groovemap.api.activity_failures",
+            unit="{event}",
+            description="First-party activity rows not written, by outcome",
+        ),
         cache=meter.create_counter(
             "groovemap.api.cache",
             unit="{event}",
@@ -190,6 +218,22 @@ def _record_outcome(outcome: str) -> None:
     span = _domain_span.get()
     if span is not None:
         span.set_attribute(OUTCOME_ATTRIBUTE, outcome)
+
+
+def record_activity_event(event_type: str) -> None:
+    """Count one activity row written, attributed by event type only.
+
+    ``event_type`` is the closed version 1 vocabulary plus
+    :data:`IMPRESSION_EVENT_LABEL`, so the attribute stays low-cardinality by
+    construction. The write itself is what the counter reports; nothing about who it
+    belonged to reaches the metric.
+    """
+    instruments().activity_events.add(1, {"event_type": event_type})
+
+
+def record_activity_failure(outcome: str) -> None:
+    """Count one activity row that was not written, attributed by outcome only."""
+    instruments().activity_failures.add(1, {OUTCOME_ATTRIBUTE: outcome})
 
 
 def record_cache(cache: str, *, hit: bool) -> None:
