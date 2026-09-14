@@ -29,7 +29,7 @@ from psycopg.rows import dict_row
 import api.activity as activity
 from api.auth import _hash_password, _verify_password, decrypt_totp_secret, get_totp_encryption_key, verify_totp_code
 from api.cache import RecommendCache
-from api.dependencies import require_user
+from api.dependencies import UnifiedAuth, require_user, require_user_or_app_token
 from api.models import ActivityOutcomeRequest, ConsentUpdateRequest, ErasureRequest
 from api.snapshot_store import SnapshotStore
 
@@ -71,7 +71,7 @@ def _caller_id(current_user: dict[str, Any]) -> str:
 @router.post("/api/activity/events", status_code=status.HTTP_202_ACCEPTED)
 async def record_outcome(
     body: ActivityOutcomeRequest,
-    current_user: Annotated[dict[str, Any], Depends(require_user)],
+    auth: Annotated[UnifiedAuth, Depends(require_user_or_app_token(["activity:write"]))],
 ) -> JSONResponse:
     """Record one client-reported outcome against a recommendation that was shown.
 
@@ -89,8 +89,13 @@ async def record_outcome(
 
     Returns 202: the row is written before the response, but the caller is being told the
     outcome was accepted, not that an analysis has seen it.
+
+    A delegated agent reports outcomes with an ``activity:write`` app token instead of a
+    session, and the recorder sees the token owner's id — the same id the owner's own
+    session would carry — so an outcome reported on the user's behalf is the user's
+    outcome, indistinguishable in the record from one they reported themselves.
     """
-    user_id = _caller_id(current_user)
+    user_id = auth.user_id
     impression_id = str(body.impression_id)
 
     await activity.record_event(
@@ -200,9 +205,13 @@ def _consent_state(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 @router.get("/api/user/consent")
-async def get_consent(current_user: Annotated[dict[str, Any], Depends(require_user)]) -> JSONResponse:
-    """Return both consent purposes with their current grant and revocation times."""
-    user_id = _caller_id(current_user)
+async def get_consent(auth: Annotated[UnifiedAuth, Depends(require_user_or_app_token(["consent:read"]))]) -> JSONResponse:
+    """Return both consent purposes with their current grant and revocation times.
+
+    Readable with a ``consent:read`` app token: an agent that writes on a user's behalf
+    has to be able to see what the user permitted before it writes.
+    """
+    user_id = auth.user_id
     pool = _require_pool()
 
     async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -216,7 +225,7 @@ async def get_consent(current_user: Annotated[dict[str, Any], Depends(require_us
 async def set_consent(
     purpose: str,
     body: ConsentUpdateRequest,
-    current_user: Annotated[dict[str, Any], Depends(require_user)],
+    auth: Annotated[UnifiedAuth, Depends(require_user_or_app_token(["consent:write"]))],
 ) -> JSONResponse:
     """Grant or revoke consent for one purpose.
 
@@ -225,7 +234,7 @@ async def set_consent(
     state actually changed, because ADR 0010 makes each change itself an event and a
     repeated request is not a second decision.
     """
-    user_id = _caller_id(current_user)
+    user_id = auth.user_id
     purpose = _validated_purpose(purpose)
     pool = _require_pool()
 
@@ -244,7 +253,10 @@ async def set_consent(
             {"purpose": purpose},
             idempotency_key=f"{event_type}:{purpose}:{datetime.now(UTC).isoformat()}",
         )
-        logger.info("🔏 Consent updated", purpose=purpose, granted=body.granted)
+        # `via` names the auth path, never the credential: an app token's plaintext is
+        # not in the process and its id is not the fact an operator reading a consent
+        # change needs — whether the decision came from a session or a delegate is.
+        logger.info("🔏 Consent updated", purpose=purpose, granted=body.granted, via=auth.via)
 
     return JSONResponse(content={"purpose": purpose, "granted": body.granted, "changed": changed})
 
@@ -586,6 +598,11 @@ async def request_erasure(
 
     Consent does not have to be revoked first; erasure implies it.
 
+    `require_user`, not `require_user_or_app_token`, and no scope exists that would reach
+    here: erasure is an account-level right, and a delegated token that could erase the
+    account would be a credential the user handed out without meaning to hand that over.
+    An app token presented here is not a first-party token and is rejected as a 401.
+
     Returns 202 with the erasure id. A failed Neo4j or Redis step is reported in
     `incomplete` rather than hidden, because the relational half has already committed.
     """
@@ -648,6 +665,10 @@ async def export_account(current_user: Annotated[dict[str, Any], Depends(require
     owned copies, observations, snapshot ids, consent grants — so two exports of unchanged
     data are the same file. Snapshots carry their ids and shape only, because a snapshot's
     copy id array repeats copies the previous section already exported in full.
+
+    JWT-only for the same reason erasure is: an export is the whole account in one file,
+    which is the account holder's right to take and not a delegate's to read. An app token
+    presented here is rejected as a 401.
     """
     user_id = _caller_id(current_user)
     _require_pool()

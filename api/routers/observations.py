@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
 
-from api.dependencies import require_user
+from api.dependencies import UnifiedAuth, require_user_or_app_token
 from api.models import CreateObservationRequest
 
 
@@ -64,13 +64,6 @@ SELECT id FROM owned_copies WHERE id = %s::uuid AND user_id = %s::uuid
 """
 
 _COPY_NOT_FOUND = "Copy not found"
-
-
-def _caller_id(current_user: dict[str, Any]) -> str:
-    user_id: str = current_user.get("sub", "")
-    if not user_id:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    return user_id
 
 
 def _validated_copy_id(copy_id: str) -> str:
@@ -121,10 +114,16 @@ def _require_pool() -> Any:
 async def create_observation(
     copy_id: str,
     body: CreateObservationRequest,
-    current_user: Annotated[dict[str, Any], Depends(require_user)],
+    auth: Annotated[UnifiedAuth, Depends(require_user_or_app_token(["observations:write"]))],
 ) -> JSONResponse:
-    """Record one observation about a copy the caller owns."""
-    user_id = _caller_id(current_user)
+    """Record one observation about a copy the caller owns.
+
+    Reachable with an ``observations:write`` app token, which is how a kiosk or an agent
+    records what it read off a sleeve. The owner id comes from the token's owner, so the
+    ownership predicate below is the same predicate either way and a delegate can no more
+    write against somebody else's copy than a session can.
+    """
+    user_id = auth.user_id
     copy_id = _validated_copy_id(copy_id)
     pool = _require_pool()
 
@@ -141,17 +140,23 @@ async def create_observation(
         # no row. Unknown copy and someone else's copy are the same answer on purpose.
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_COPY_NOT_FOUND)
 
-    logger.info("🔍 Observation recorded", user_id=user_id, copy_id=copy_id, kind=body.kind, source=body.source)
+    # `via` records which auth path wrote the row — never the token itself, whose
+    # plaintext is not in the process and whose id says nothing an operator needs.
+    logger.info("🔍 Observation recorded", user_id=user_id, copy_id=copy_id, kind=body.kind, source=body.source, via=auth.via)
     return JSONResponse(status_code=status.HTTP_201_CREATED, content=_shape(row))
 
 
 @router.get("/api/user/copies/{copy_id}/observations")
 async def list_observations(
     copy_id: str,
-    current_user: Annotated[dict[str, Any], Depends(require_user)],
+    auth: Annotated[UnifiedAuth, Depends(require_user_or_app_token(["observations:read"]))],
 ) -> JSONResponse:
-    """Return every observation recorded against a copy the caller owns, newest first."""
-    user_id = _caller_id(current_user)
+    """Return every observation recorded against a copy the caller owns, newest first.
+
+    Reachable with an ``observations:read`` app token; the listing is owner-scoped to the
+    token's owner exactly as it is to a session's user.
+    """
+    user_id = auth.user_id
     copy_id = _validated_copy_id(copy_id)
     pool = _require_pool()
 
