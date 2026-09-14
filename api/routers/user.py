@@ -9,6 +9,7 @@ import structlog
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
+import api.activity as activity
 from api.dependencies import UnifiedAuth, get_optional_user, require_user, require_user_or_app_token
 from api.identity import native_ids_for
 from api.limiter import bearer_token_key_func, limiter
@@ -127,6 +128,13 @@ async def user_recommendations(
     limit: int = Query(20, ge=1, le=100),
     strategy: str = Query("artist", pattern="^(artist|multi)$"),
 ) -> JSONResponse:
+    """Recommend releases from the caller's collection, by one of two strategies.
+
+    Each strategy is its own ranking policy under ADR 0010, so the impressions it writes
+    carry their own policy id and every returned item carries the `impression_id` a client
+    reports an outcome against. This response is not cached, so the ids are minted on the
+    one request that shows the list.
+    """
     if not _neo4j_driver:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     user_id: str = current_user.get("sub", "")
@@ -140,6 +148,7 @@ async def user_recommendations(
                 for r in results:
                     r["score"] = round(r.get("score", 0) / max_score, 4)
         await _attach_recommendation_identity(results)
+        await activity.stamp_recommendation_impressions(user_id, activity.POLICY_USER_RECOMMENDATIONS_ARTIST, results)
         return JSONResponse(content={"recommendations": results, "total": len(results)})
 
     # Multi-signal strategy
@@ -177,6 +186,7 @@ async def user_recommendations(
     )
 
     await _attach_recommendation_identity(merged)
+    await activity.stamp_recommendation_impressions(user_id, activity.POLICY_USER_RECOMMENDATIONS_MULTI, merged)
 
     return JSONResponse(
         content={

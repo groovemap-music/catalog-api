@@ -257,6 +257,10 @@ def test_client(
     _observations_router.configure(mock_pool)
     _activity_module.configure(mock_pool, mock_redis)
 
+    import api.routers.activity as _activity_router
+
+    _activity_router.configure(mock_pool, mock_redis, mock_neo4j)
+
     import api.routers.nlq as _nlq_router
     from api.nlq.config import NLQConfig
 

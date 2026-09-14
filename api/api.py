@@ -44,6 +44,7 @@ import api.activity as _activity
 import api.app_tokens as _app_tokens
 import api.dependencies as _dependencies
 import api.identity as _identity
+import api.routers.activity as _activity_router
 import api.routers.admin as _admin_router
 import api.routers.app_tokens as _app_tokens_router
 import api.routers.auth as _auth_router
@@ -306,6 +307,7 @@ def _configure_routers(
     # the same one: `api.syncer` holds a no-op recorder until this hands it the real thing.
     _activity.configure(pool, redis)
     _syncer.configure(_activity.record_event)
+    _activity_router.configure(pool, redis, neo4j)
     _sync_router.configure(pool, neo4j, config, _running_syncs, redis)
     _explore_router.configure(neo4j, jwt_secret_for_neo4j, redis, pg_pool=pool)
     _user_router.configure(neo4j, jwt_secret_for_neo4j)
@@ -437,6 +439,7 @@ _cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()] i
 
 
 _ROUTERS = (
+    _activity_router.router,
     _auth_router.router,
     _sync_router.router,
     _explore_router.router,

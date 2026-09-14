@@ -44,6 +44,7 @@ from uuid import UUID
 
 import structlog
 from common.events import (
+    Event,
     EventValidationError,
     consent_purposes,
     new_event,
@@ -76,15 +77,23 @@ __all__ = [
     "DETERMINISTIC_PROPENSITY",
     "EVENTS_TABLE",
     "IMPRESSIONS_TABLE",
+    "POLICY_EXPLORE",
+    "POLICY_SIMILAR_ARTIST",
+    "POLICY_USER_RECOMMENDATIONS_ARTIST",
+    "POLICY_USER_RECOMMENDATIONS_MULTI",
     "PRODUCER",
     "SURFACE_RECOMMENDATION",
     "active_purposes",
     "configure",
+    "count_unidentified_candidate",
     "ensure_startup_partitions",
+    "forget_subject",
     "record_event",
+    "record_events",
     "record_impressions",
     "redis_client",
     "reset_caches",
+    "stamp_recommendation_impressions",
     "subject_for",
 ]
 
@@ -99,6 +108,15 @@ IMPRESSIONS_TABLE: Final = "impressions"
 
 # The one surface this service records impressions against today.
 SURFACE_RECOMMENDATION: Final = "recommendation"
+
+# The ranking policy each recommendation surface ran, named and versioned so an offline
+# evaluation can tell which decision procedure produced a row. A change to how a surface
+# ranks is a new constant, never a redefinition of an old one: the policy id on a stored
+# impression is historical data the immutability trigger will not let anyone rewrite.
+POLICY_SIMILAR_ARTIST: Final = "similar_artist_weighted_cosine_v1"
+POLICY_EXPLORE: Final = "explore_personalized_v1"
+POLICY_USER_RECOMMENDATIONS_ARTIST: Final = "user_recommendations_artist_v1"
+POLICY_USER_RECOMMENDATIONS_MULTI: Final = "user_recommendations_multi_v1"
 
 # The probability a deterministic top-N policy assigned to choosing a shown item. See the
 # module docstring: this is a fact about the policies that exist, not a filler value.
@@ -233,6 +251,62 @@ def _validate_payload(event_type: str, payload: Mapping[str, Any]) -> None:
             raise EventValidationError(f"payload.{name}", f"is not part of the {event_type} payload")
 
 
+def _build_event(
+    event_type: str,
+    subject: UUID,
+    purposes: tuple[str, ...],
+    payload: Mapping[str, Any] | None,
+    *,
+    session_id: Any = None,
+    model_version: str | None = None,
+    feature_version: str | None = None,
+    idempotency_key: str | None = None,
+    occurred_at: datetime | None = None,
+) -> Event | None:
+    """Validate and mint one event, or count the rejection and return ``None``."""
+    try:
+        body = dict(payload or {})
+        _validate_payload(event_type, body)
+        return new_event(
+            event_type=event_type,
+            subject_id=subject,
+            producer=PRODUCER,
+            consent_purposes=purposes,
+            idempotency_key=idempotency_key or str(new_id()),
+            payload=body,
+            occurred_at=occurred_at,
+            session_id=_as_uuid(session_id),
+            model_version=model_version,
+            feature_version=feature_version,
+        )
+    except (EventValidationError, KeyError, TypeError, ValueError) as exc:
+        # KeyError is how the vendored vocabulary reports an event type it does not carry,
+        # which is a caller mistake in exactly the way a malformed payload is.
+        logger.warning("⚠️ Activity event rejected", event_type=event_type, reason=str(exc))
+        record_activity_failure(ACTIVITY_INVALID)
+        return None
+
+
+def _event_parameters(event: Event) -> tuple[Any, ...]:
+    """Return one event's row as the parameter tuple :data:`_INSERT_EVENT` expects."""
+    row = event.to_row()
+    return (
+        row["event_id"],
+        row["event_type"],
+        row["schema_version"],
+        row["subject_id"],
+        row["session_id"],
+        row["occurred_at"],
+        row["recorded_at"],
+        row["producer"],
+        row["consent_purposes"],
+        row["model_version"],
+        row["feature_version"],
+        row["idempotency_key"],
+        json.dumps(row["payload"]),
+    )
+
+
 async def subject_for(user_id: str) -> UUID | None:
     """Return the pseudonymous subject for a user, creating the link on first use.
 
@@ -362,57 +436,82 @@ async def record_event(
         record_activity_failure(ACTIVITY_NO_SUBJECT)
         return
 
-    try:
-        body = dict(payload or {})
-        _validate_payload(event_type, body)
-        event = new_event(
-            event_type=event_type,
-            subject_id=subject,
-            producer=PRODUCER,
-            consent_purposes=await active_purposes(user_id),
-            idempotency_key=idempotency_key or str(new_id()),
-            payload=body,
-            occurred_at=occurred_at,
-            session_id=_as_uuid(session_id),
-            model_version=model_version,
-            feature_version=feature_version,
-        )
-    except (EventValidationError, KeyError, TypeError, ValueError) as exc:
-        # KeyError is how the vendored vocabulary reports an event type it does not carry,
-        # which is a caller mistake in exactly the way a malformed payload is.
-        logger.warning("⚠️ Activity event rejected", event_type=event_type, reason=str(exc))
-        record_activity_failure(ACTIVITY_INVALID)
+    event = _build_event(
+        event_type,
+        subject,
+        await active_purposes(user_id),
+        payload,
+        session_id=session_id,
+        model_version=model_version,
+        feature_version=feature_version,
+        idempotency_key=idempotency_key,
+        occurred_at=occurred_at,
+    )
+    if event is None:
         return
 
-    row = event.to_row()
     try:
         async with pool.connection() as conn, conn.cursor() as cursor:
             await _ensure_partition(cursor, EVENTS_TABLE, event.occurred_at)
-            await execute_sql(
-                cursor,
-                _INSERT_EVENT,
-                (
-                    row["event_id"],
-                    row["event_type"],
-                    row["schema_version"],
-                    row["subject_id"],
-                    row["session_id"],
-                    row["occurred_at"],
-                    row["recorded_at"],
-                    row["producer"],
-                    row["consent_purposes"],
-                    row["model_version"],
-                    row["feature_version"],
-                    row["idempotency_key"],
-                    json.dumps(row["payload"]),
-                ),
-            )
+            await execute_sql(cursor, _INSERT_EVENT, _event_parameters(event))
     except Exception:
         logger.warning("⚠️ Activity event write failed", event_type=event_type, exc_info=True)
         record_activity_failure(ACTIVITY_WRITE_FAILED)
         return
 
     record_activity_event(event_type)
+
+
+async def record_events(user_id: str, events: Sequence[tuple[str, Mapping[str, Any], str | None]]) -> None:
+    """Record a batch of events in one round trip. Never raises into the request.
+
+    A search page emits one ``search.result_impression`` per hit shown, so the batch is
+    what keeps a twenty-result page from costing twenty round trips on the request path.
+    The subject and the consent snapshot are resolved once for the whole batch, which is
+    correct as well as cheaper: every row of one batch describes one moment.
+
+    An event that fails validation is dropped and counted; the rest of the batch is still
+    written, because one malformed payload is not a reason to lose the page.
+
+    Args:
+        user_id: The account every event in the batch belongs to.
+        events: ``(event_type, payload, idempotency_key)`` per event. A ``None`` key mints
+            a fresh one.
+    """
+    pool = _pool
+    if pool is None:
+        record_activity_failure(ACTIVITY_NOT_CONFIGURED)
+        return
+    if not events:
+        return
+
+    subject = await subject_for(user_id)
+    if subject is None:
+        logger.warning("⚠️ Activity events dropped: no subject", count=len(events))
+        record_activity_failure(ACTIVITY_NO_SUBJECT)
+        return
+
+    purposes = await active_purposes(user_id)
+    moment = datetime.now(UTC)
+    built = [
+        event
+        for event_type, payload, idempotency_key in events
+        if (event := _build_event(event_type, subject, purposes, payload, idempotency_key=idempotency_key, occurred_at=moment)) is not None
+    ]
+    if not built:
+        return
+
+    try:
+        async with pool.connection() as conn, conn.cursor() as cursor:
+            await _ensure_partition(cursor, EVENTS_TABLE, moment)
+            await cursor.executemany(_INSERT_EVENT, [_event_parameters(event) for event in built])
+    except Exception:
+        logger.warning("⚠️ Activity event batch write failed", count=len(built), exc_info=True)
+        record_activity_failure(ACTIVITY_WRITE_FAILED)
+        return
+
+    for event in built:
+        record_activity_event(event.event_type)
 
 
 async def record_impressions(
@@ -531,6 +630,61 @@ async def record_impressions(
     for _ in rows:
         record_activity_event(IMPRESSION_EVENT_LABEL)
     return identifiers
+
+
+async def stamp_recommendation_impressions(
+    user_id: str,
+    policy_id: str,
+    items: Sequence[dict[str, Any]],
+    *,
+    score_key: str = "score",
+) -> None:
+    """Record one impression per served candidate and stamp each item with its id.
+
+    This runs per request served rather than per candidate list computed. Two of the three
+    recommendation surfaces cache their response body in Redis, and an impression is a
+    record of a list having been *shown*: reusing the ids from the request that filled the
+    cache would report one showing where there were many, and would hand every later
+    viewer an id belonging to somebody else's impression. So the cached body never carries
+    an ``impression_id``, and the ids are minted here, after the cache is read.
+
+    Every item ends up with an ``impression_id`` key. It is ``None`` when the candidate had
+    no native id, or when the write failed, so a client can never report an outcome
+    against a row that does not exist.
+
+    Args:
+        user_id: The account the list was shown to. An empty id records nothing.
+        policy_id: The ranking policy constant for this surface.
+        items: The served items, mutated in place. Each needs ``gm_id`` and a score.
+        score_key: Which key on an item carries the score the policy gave it.
+    """
+    for item in items:
+        item["impression_id"] = None
+    if not user_id or not items:
+        return
+
+    entries: list[tuple[int, Any, float, float | None]] = []
+    identified: list[dict[str, Any]] = []
+    for position, item in enumerate(items, start=1):
+        native_id = item.get("gm_id")
+        if not native_id:
+            count_unidentified_candidate()
+            continue
+        entries.append((position, native_id, float(item.get(score_key) or 0.0), None))
+        identified.append(item)
+
+    if not entries:
+        return
+
+    identifiers = await record_impressions(
+        user_id,
+        SURFACE_RECOMMENDATION,
+        policy_id,
+        new_id(),
+        entries,
+    )
+    for item, impression_id in zip(identified, identifiers, strict=True):
+        item["impression_id"] = impression_id
 
 
 def count_unidentified_candidate() -> None:

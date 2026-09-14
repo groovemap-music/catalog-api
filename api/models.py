@@ -972,3 +972,39 @@ class ObservationResponse(BaseModel):
     confidence: float | None = None
     observed_at: datetime
     created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# First-party activity, consent, and erasure (ADR 0010)
+# ---------------------------------------------------------------------------
+
+# The four outcomes a client may report against a recommendation it was shown. Everything
+# else in the version 1 vocabulary is written server side from the surface that produced
+# it, so the closed set here is what keeps a client from minting, say, a consent event.
+RECOMMENDATION_OUTCOMES: tuple[str, ...] = (
+    "recommendation.opened",
+    "recommendation.saved",
+    "recommendation.dismissed",
+    "recommendation.hidden",
+)
+
+
+class ActivityOutcomeRequest(BaseModel):
+    """Request body for POST /api/activity/events.
+
+    `item_id` is required alongside `impression_id` because the published
+    `impression_outcome` payload requires both and names no other key.
+    """
+
+    event_type: str = Field(description=f"One of: {', '.join(RECOMMENDATION_OUTCOMES)}")
+    impression_id: UUID = Field(description="The impression the outcome is reported against")
+    item_id: UUID = Field(description="The native id of the item the impression showed")
+
+    @field_validator("event_type")
+    @classmethod
+    def validate_event_type(cls, v: str) -> str:
+        """Reject any type outside the four client-reportable outcomes."""
+        v = v.strip()
+        if v not in RECOMMENDATION_OUTCOMES:
+            raise ValueError(f"Unknown event_type {v!r}; must be one of: {', '.join(RECOMMENDATION_OUTCOMES)}")
+        return v
