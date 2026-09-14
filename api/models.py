@@ -1008,3 +1008,9 @@ class ActivityOutcomeRequest(BaseModel):
         if v not in RECOMMENDATION_OUTCOMES:
             raise ValueError(f"Unknown event_type {v!r}; must be one of: {', '.join(RECOMMENDATION_OUTCOMES)}")
         return v
+
+
+class ConsentUpdateRequest(BaseModel):
+    """Request body for PUT /api/user/consent/{purpose}."""
+
+    granted: bool = Field(description="True to grant the purpose, false to revoke it")
