@@ -194,12 +194,12 @@ _LINK_OWNED_COPIES: Final = """
 # than a second read of rows that are already gone.
 _DELETE_STALE_COLLECTION: Final = """
     DELETE FROM user_collections WHERE user_id = %s::uuid AND updated_at < %s
-    RETURNING release_id, gm_item_id, owned_copy_id
+    RETURNING gm_item_id, owned_copy_id
 """
 
 _DELETE_STALE_WANTLIST: Final = """
     DELETE FROM user_wantlists WHERE user_id = %s::uuid AND updated_at < %s
-    RETURNING release_id, gm_item_id
+    RETURNING gm_item_id
 """
 
 _SELECT_SNAPSHOT_COPY_IDS: Final = """
@@ -287,6 +287,12 @@ async def _ensure_owned_copies(
     return copy_ids
 
 
+# Payloads are exactly what the vendored event vocabulary declares —
+# `collection_item_change` and `collection_item_updated` are
+# additionalProperties: false, so the native `item_id` is the only identifier a
+# payload carries. A consumer that needs the Discogs release id resolves it
+# back through `provider_aliases`; ADR 0009 demotes the provider id to evidence
+# precisely so it does not travel on every record that mentions an item.
 def _collection_page_events(
     page_keys: Sequence[tuple[int, int | None]],
     before: dict[tuple[int, int | None], dict[str, Any]],
@@ -309,7 +315,6 @@ def _collection_page_events(
             "item_id": _as_text(row["gm_item_id"]),
             "artifact_id": None,
             "owned_copy_id": _as_text(copy_ids.get(row["id"])),
-            "release_id": row["release_id"],
         }
         previous = before.get(key)
         if previous is None:
@@ -395,7 +400,7 @@ async def _persist_wantlist_page(
         native_id = native_ids.get(release_id)
         if release_id in before or native_id is None:
             continue
-        events.append(("wantlist.item_added", {"item_id": str(native_id), "release_id": release_id}))
+        events.append(("wantlist.item_added", {"item_id": str(native_id)}))
     return events
 
 
@@ -725,7 +730,6 @@ async def _reconcile_stale_collection(
                 "item_id": _as_text(row["gm_item_id"]),
                 "artifact_id": None,
                 "owned_copy_id": _as_text(row["owned_copy_id"]),
-                "release_id": row["release_id"],
             },
         )
         for row in removed
@@ -955,11 +959,7 @@ async def _reconcile_stale_wantlist(
         result = await session.run(cypher, {"user_id": str(user_uuid), "sync_started": sync_started.isoformat()})
         await result.consume()
 
-    return [
-        ("wantlist.item_removed", {"item_id": _as_text(row["gm_item_id"]), "release_id": row["release_id"]})
-        for row in removed
-        if row["gm_item_id"] is not None
-    ]
+    return [("wantlist.item_removed", {"item_id": _as_text(row["gm_item_id"])}) for row in removed if row["gm_item_id"] is not None]
 
 
 async def run_full_sync(

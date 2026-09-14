@@ -7,6 +7,10 @@ exercised here against a scripted cursor rather than the blanket mock in
 ``test_syncer.py``: these tests care which statement produced which rows, and a
 cursor that answers every query with ``[]`` cannot express a re-sync.
 
+Payloads are asserted whole rather than key by key: the published payload
+schemas are additionalProperties: false, so an extra key is a contract break
+and a test that only checked the keys it expected would not catch one.
+
 Offline, like the rest of the suite — no PostgreSQL, no Neo4j, no Discogs.
 """
 
@@ -350,14 +354,8 @@ class TestFirstCollectionSync:
         await run_collection(pool, mock_neo4j, [collection_page([release_item(1), release_item(2)])], {})
 
         assert events_of(recorder) == [
-            (
-                "collection.item_added",
-                {"item_id": str(ITEM_1), "artifact_id": None, "owned_copy_id": str(COPY_1), "release_id": 1},
-            ),
-            (
-                "collection.item_added",
-                {"item_id": str(ITEM_2), "artifact_id": None, "owned_copy_id": str(COPY_2), "release_id": 2},
-            ),
+            ("collection.item_added", {"item_id": str(ITEM_1), "artifact_id": None, "owned_copy_id": str(COPY_1)}),
+            ("collection.item_added", {"item_id": str(ITEM_2), "artifact_id": None, "owned_copy_id": str(COPY_2)}),
         ]
         assert all(call.args[0] == str(TEST_USER_UUID) for call in recorder.await_args_list)
 
@@ -414,7 +412,6 @@ class TestCollectionResync:
                     "item_id": str(ITEM_1),
                     "artifact_id": None,
                     "owned_copy_id": str(COPY_1),
-                    "release_id": 1,
                     "changed_fields": ["folder_id", "rating"],
                 },
             )
@@ -447,12 +444,7 @@ class TestCollectionResync:
 
         await run_collection(pool, mock_neo4j, [collection_page([release_item(1), release_item(2)])], {})
 
-        assert events_of(recorder) == [
-            (
-                "collection.item_added",
-                {"item_id": str(ITEM_2), "artifact_id": None, "owned_copy_id": str(COPY_2), "release_id": 2},
-            )
-        ]
+        assert events_of(recorder) == [("collection.item_added", {"item_id": str(ITEM_2), "artifact_id": None, "owned_copy_id": str(COPY_2)})]
 
 
 class TestCollectionRemoval:
@@ -463,7 +455,7 @@ class TestCollectionRemoval:
     async def test_removed_row_emits_item_removed_naming_its_copy(self, mock_neo4j: MagicMock, recorder: AsyncMock) -> None:
         cursor = ScriptedCursor(
             {
-                SWEEP_COLLECTION: [[{"release_id": 7, "gm_item_id": ITEM_2, "owned_copy_id": COPY_2}]],
+                SWEEP_COLLECTION: [[{"gm_item_id": ITEM_2, "owned_copy_id": COPY_2}]],
                 SNAPSHOT_COPIES: [[]],
             }
         )
@@ -472,17 +464,12 @@ class TestCollectionRemoval:
         await run_collection(pool, mock_neo4j, [collection_page([])], {})
 
         sweep_sql, _ = cursor.only(SWEEP_COLLECTION)
-        assert "RETURNING release_id, gm_item_id, owned_copy_id" in sweep_sql
-        assert events_of(recorder) == [
-            (
-                "collection.item_removed",
-                {"item_id": str(ITEM_2), "artifact_id": None, "owned_copy_id": str(COPY_2), "release_id": 7},
-            )
-        ]
+        assert "RETURNING gm_item_id, owned_copy_id" in sweep_sql
+        assert events_of(recorder) == [("collection.item_removed", {"item_id": str(ITEM_2), "artifact_id": None, "owned_copy_id": str(COPY_2)})]
 
     @pytest.mark.asyncio
     async def test_the_sweep_never_deletes_owned_copies(self, mock_neo4j: MagicMock) -> None:
-        cursor = ScriptedCursor({SWEEP_COLLECTION: [[{"release_id": 7, "gm_item_id": ITEM_2, "owned_copy_id": COPY_2}]]})
+        cursor = ScriptedCursor({SWEEP_COLLECTION: [[{"gm_item_id": ITEM_2, "owned_copy_id": COPY_2}]]})
         pool = scripted_pool(cursor)
 
         await run_collection(pool, mock_neo4j, [collection_page([])], {})
@@ -495,7 +482,7 @@ class TestCollectionRemoval:
         of `SELECT ... WHERE collection_row_id IS NOT NULL`."""
         cursor = ScriptedCursor(
             {
-                SWEEP_COLLECTION: [[{"release_id": 7, "gm_item_id": ITEM_2, "owned_copy_id": COPY_2}]],
+                SWEEP_COLLECTION: [[{"gm_item_id": ITEM_2, "owned_copy_id": COPY_2}]],
                 SNAPSHOT_COPIES: [[(COPY_1,)]],
             }
         )
@@ -527,7 +514,7 @@ class TestWantlistIdentity:
         upsert_sql, batch = cursor.executed_many[0]
         assert "gm_item_id" in upsert_sql
         assert batch[0][-2] == ITEM_1
-        assert events_of(recorder) == [("wantlist.item_added", {"item_id": str(ITEM_1), "release_id": 456})]
+        assert events_of(recorder) == [("wantlist.item_added", {"item_id": str(ITEM_1)})]
 
     @pytest.mark.asyncio
     async def test_resync_of_a_held_want_emits_nothing(self, mock_neo4j: MagicMock, recorder: AsyncMock) -> None:
@@ -541,14 +528,14 @@ class TestWantlistIdentity:
 
     @pytest.mark.asyncio
     async def test_removed_want_emits_item_removed(self, mock_neo4j: MagicMock, recorder: AsyncMock) -> None:
-        cursor = ScriptedCursor({SWEEP_WANTLIST: [[{"release_id": 456, "gm_item_id": ITEM_1}]]})
+        cursor = ScriptedCursor({SWEEP_WANTLIST: [[{"gm_item_id": ITEM_1}]]})
         pool = scripted_pool(cursor)
 
         await run_wantlist(pool, mock_neo4j, [wantlist_page([])], {})
 
         sweep_sql, _ = cursor.only(SWEEP_WANTLIST)
-        assert "RETURNING release_id, gm_item_id" in sweep_sql
-        assert events_of(recorder) == [("wantlist.item_removed", {"item_id": str(ITEM_1), "release_id": 456})]
+        assert "RETURNING gm_item_id" in sweep_sql
+        assert events_of(recorder) == [("wantlist.item_removed", {"item_id": str(ITEM_1)})]
 
     @pytest.mark.asyncio
     async def test_wantlist_mints_no_owned_copy_and_no_snapshot(self, mock_neo4j: MagicMock) -> None:
@@ -578,7 +565,7 @@ class TestUnresolvedItems:
 
     @pytest.mark.asyncio
     async def test_unresolved_removal_emits_no_event(self, mock_neo4j: MagicMock, recorder: AsyncMock) -> None:
-        cursor = ScriptedCursor({SWEEP_COLLECTION: [[{"release_id": 7, "gm_item_id": None, "owned_copy_id": None}]]})
+        cursor = ScriptedCursor({SWEEP_COLLECTION: [[{"gm_item_id": None, "owned_copy_id": None}]]})
         pool = scripted_pool(cursor)
 
         await run_collection(pool, mock_neo4j, [collection_page([])], {})
