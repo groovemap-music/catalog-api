@@ -3,7 +3,7 @@
 This guide covers the native-identity and first-party-events program:
 [ADR 0009](https://github.com/groovemap-music/design/blob/main/docs/adr/0009-native-identity-and-provider-aliases.md)
 (native identity, owned copies, observations, and the `gm_id` graph projection) and
-[ADR 0010](https://github.com/groovemap-music/design/blob/main/docs/adr/0010-first-party-activity-events.md)
+[ADR 0010](https://github.com/groovemap-music/design/blob/main/docs/adr/0010-first-party-events-consent-and-deletion.md)
 (the activity recorder, consent, erasure, and export). Endpoint auth and rate limits for
 everything below live with the rest of the API in [`api/README.md`](../api/README.md#api-endpoints);
 this page is the "what it does and why" companion.
