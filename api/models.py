@@ -1014,3 +1014,15 @@ class ConsentUpdateRequest(BaseModel):
     """Request body for PUT /api/user/consent/{purpose}."""
 
     granted: bool = Field(description="True to grant the purpose, false to revoke it")
+
+
+class ErasureRequest(BaseModel):
+    """Request body for POST /api/user/erasure.
+
+    Erasure is irreversible across every store, so it is re-authenticated rather than
+    taken on the bearer token alone: the current password always, and the current TOTP
+    code as well when the account has 2FA enabled.
+    """
+
+    password: str = Field(description="The caller's current password")
+    code: str | None = Field(default=None, pattern=r"^\d{6}$", description="Current TOTP code, required when 2FA is enabled")

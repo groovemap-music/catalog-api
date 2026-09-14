@@ -143,6 +143,21 @@ class TestSearchEmission:
         assert record_event.await_count == 0
         assert record_events.await_count == 0
 
+    def test_an_empty_type_list_falls_back_to_every_type_in_the_filters(self, test_client: TestClient, auth_headers: dict[str, str]) -> None:
+        from api.queries.search_queries import ALL_TYPES
+
+        with (
+            patch("api.routers.search.execute_search", AsyncMock(return_value=search_payload([]))),
+            patch("api.activity.record_event", AsyncMock()) as record_event,
+            patch("api.activity.record_events", AsyncMock()),
+        ):
+            response = test_client.get("/api/search?q=miles&types=,&year_max=1999", headers=auth_headers)
+
+        assert response.status_code == 200
+        filters = payload_for(record_event, "search.query")["filters"]
+        assert "year_max:1999" in filters
+        assert {f"type:{entity_type}" for entity_type in ALL_TYPES} <= set(filters)
+
     def test_an_invalid_request_records_nothing(self, test_client: TestClient, auth_headers: dict[str, str]) -> None:
         with patch("api.activity.record_event", AsyncMock()) as record_event:
             response = test_client.get("/api/search?q=miles&types=nonsense", headers=auth_headers)

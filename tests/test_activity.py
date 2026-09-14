@@ -546,3 +546,27 @@ class TestPayloadConformance:
 
         with pytest.raises(EventValidationError, match="is required"):
             activity._validate_payload(event_type, payload)
+
+
+class TestServiceWiring:
+    """The recorder reaches the sync and the partitions through `api.api` startup."""
+
+    def test_startup_makes_the_recorder_the_syncs_event_hook(self, mock_pool: MagicMock, mock_redis: Any) -> None:
+        """The collection sync holds a no-op recorder until startup hands it the real one.
+
+        That indirection is what keeps `api.syncer` free of any dependency on the activity
+        plumbing, and it only pays off if something actually replaces the default.
+        """
+        import api.api as api_module
+        import api.syncer as syncer
+
+        original = syncer._event_recorder
+        try:
+            syncer.configure(None)
+            assert syncer._event_recorder is syncer._discard_event
+
+            api_module._configure_routers(api_module.ApiConfig.from_env(), mock_pool, mock_redis, None)
+
+            assert syncer._event_recorder is activity.record_event
+        finally:
+            syncer.configure(None if original is syncer._discard_event else original)

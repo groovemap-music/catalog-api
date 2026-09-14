@@ -307,7 +307,7 @@ def _configure_routers(
     # the same one: `api.syncer` holds a no-op recorder until this hands it the real thing.
     _activity.configure(pool, redis)
     _syncer.configure(_activity.record_event)
-    _activity_router.configure(pool, redis, neo4j)
+    _activity_router.configure(pool, redis, neo4j, config)
     _sync_router.configure(pool, neo4j, config, _running_syncs, redis)
     _explore_router.configure(neo4j, jwt_secret_for_neo4j, redis, pg_pool=pool)
     _user_router.configure(neo4j, jwt_secret_for_neo4j)

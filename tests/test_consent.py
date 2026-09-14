@@ -76,6 +76,16 @@ class TestReadConsent:
         assert "DISTINCT ON (purpose)" in select
         assert "ORDER BY purpose, granted_at DESC" in select
 
+    def test_a_timestamp_that_is_not_a_datetime_still_renders(
+        self, test_client: TestClient, auth_headers: dict[str, str], mock_cur: MagicMock
+    ) -> None:
+        mock_cur.fetchall.return_value = [{"purpose": "product_analytics", "granted_at": "2026-05-01", "revoked_at": None}]
+
+        response = test_client.get("/api/user/consent", headers=auth_headers)
+
+        analytics = next(entry for entry in response.json()["purposes"] if entry["purpose"] == "product_analytics")
+        assert analytics["granted_at"] == "2026-05-01"
+
     def test_the_endpoint_requires_a_user(self, test_client: TestClient) -> None:
         assert test_client.get("/api/user/consent").status_code == 401
 
