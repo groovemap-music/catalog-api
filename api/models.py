@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from common.identity import alias_sources, is_valid_alias_source
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -297,6 +298,9 @@ class SimilarArtist(BaseModel):
     release_count: int
     shared_genres: list[str]
     shared_labels: list[str]
+    # ADR 0009: the native id beside the provider id, so a consumer can key on identity
+    # GrooveMap owns. None when the alias table carries no valid alias for the artist.
+    gm_id: str | None = None
 
 
 class SimilarArtistsResponse(BaseModel):
@@ -313,6 +317,9 @@ class EntityRef(BaseModel):
     id: str
     name: str
     type: str
+    # Genre and style nodes are name-keyed rather than catalog entities, so they carry no
+    # native id at all; for them this stays None even when the alias table is healthy.
+    gm_id: str | None = None
 
 
 class DiscoveryNode(BaseModel):
@@ -324,6 +331,7 @@ class DiscoveryNode(BaseModel):
     score: float
     path: list[str]
     reason: str
+    gm_id: str | None = None
 
 
 class ExploreFromHereResponse(BaseModel):
@@ -346,6 +354,7 @@ class EnhancedRecommendation(BaseModel):
     genres: list[str] = Field(default_factory=list)
     score: float
     reasons: list[str] = Field(default_factory=list)
+    gm_id: str | None = None
 
 
 class EnhancedRecommendationsResponse(BaseModel):
@@ -913,3 +922,53 @@ class PersonProfileResponse(BaseModel):
     artist_id: str | None = None
     artist_name: str | None = None
     role_breakdown: list[dict[str, Any]] = Field(default_factory=list)
+
+
+# --- Observation Models (ADR 0009) ---
+
+
+class CreateObservationRequest(BaseModel):
+    """Request body for POST /api/user/copies/{copy_id}/observations.
+
+    An observation is user-captured evidence about a copy the caller holds — a matrix
+    inscription, a grading, a purchase price. `source` separates a fact a person asserted
+    from one a matching heuristic proposed, so it is validated against the identity
+    vocabulary rather than accepted free-form.
+    """
+
+    kind: str = Field(min_length=1, max_length=100, description='What is being observed, e.g. "matrix" or "grading"')
+    value: str = Field(min_length=1, description="The observed value, as the user recorded it")
+    source: str = Field(description=f"Who asserted it — one of: {', '.join(alias_sources())}")
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0, description="Optional confidence in the observation, 0-1")
+    observed_at: datetime | None = Field(default=None, description="When it was observed; defaults to now")
+
+    @field_validator("kind", "value")
+    @classmethod
+    def strip_text(cls, v: str) -> str:
+        """Trim surrounding whitespace and reject a value that was only whitespace."""
+        v = v.strip()
+        if not v:
+            raise ValueError("must not be blank")
+        return v
+
+    @field_validator("source")
+    @classmethod
+    def validate_source(cls, v: str) -> str:
+        """Reject a source outside the closed identity vocabulary."""
+        v = v.strip().lower()
+        if not is_valid_alias_source(v):
+            raise ValueError(f"Unknown source {v!r}; must be one of: {', '.join(alias_sources())}")
+        return v
+
+
+class ObservationResponse(BaseModel):
+    """One observation row, as both observation endpoints return it."""
+
+    id: UUID
+    owned_copy_id: UUID
+    kind: str
+    value: str
+    source: str
+    confidence: float | None = None
+    observed_at: datetime
+    created_at: datetime
