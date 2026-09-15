@@ -52,6 +52,7 @@ import api.routers.collection as _collection_router
 import api.routers.credits as _credits_router
 import api.routers.explore as _explore_router
 import api.routers.extraction_analysis as _extraction_analysis_router
+import api.routers.fit as _fit_router
 import api.routers.insights as _insights_router
 import api.routers.insights_compute as _insights_compute_router
 import api.routers.label_dna as _label_dna_router
@@ -279,6 +280,7 @@ def _configure_routers(
     _credits_router.configure(neo4j, redis)
     _label_dna_router.configure(neo4j, redis)
     _recommend_router.configure(neo4j, jwt_secret_for_neo4j, redis)
+    _fit_router.configure(neo4j, pool, redis)
     _search_router.configure(pool, redis)
     _insights_compute_router.configure(neo4j, pool, redis, config)
     _admin_router.configure(pool, redis, config, neo4j_driver=neo4j)
@@ -416,6 +418,7 @@ _ROUTERS = (
     _taste_router.router,
     _collection_router.router,
     _recommend_router.router,
+    _fit_router.router,
     _admin_router.router,
     _extraction_analysis_router.router,
     _nlq_router.router,

@@ -29,6 +29,7 @@
     "credits_timeline": {"method": "GET", "path": "/api/credits/person/{name}/timeline"},
     "expand": {"method": "GET", "path": "/api/expand"},
     "explore": {"method": "GET", "path": "/api/explore"},
+    "fit_release": {"method": "GET", "path": "/api/fit/release/{release_id}"},
     "genre_emergence": {"method": "GET", "path": "/api/explore/genre-emergence"},
     "genre_tree": {"method": "GET", "path": "/api/genre-tree"},
     "insights_completeness": {"method": "GET", "path": "/api/insights/data-completeness"},
