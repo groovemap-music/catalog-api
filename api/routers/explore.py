@@ -34,7 +34,7 @@ from api.queries.neo4j_queries import (
 from api.queries.neo4j_queries import (
     MAX_PATH_DEPTH as _MAX_PATH_DEPTH,
 )
-from api.queries.release_media_queries import get_release_media
+from api.queries.release_media_queries import get_release_catalog_blocks, get_release_media
 from api.telemetry import CACHE_EXPLORE, CACHE_TRENDS, cache_get
 
 
@@ -319,6 +319,25 @@ async def _resolve_release_media(release_id: str, formats: list[Any] | None) -> 
     return legacy_format_names_to_media(formats or [])
 
 
+# What a release detail response carries when PostgreSQL is not configured: the three keys
+# are additive and always present, so a consumer renders "no markings recorded" rather than
+# branching on whether the field exists.
+_NO_CATALOG_BLOCKS: dict[str, Any] = {"identifiers": [], "companies": [], "country": None}
+
+
+async def _resolve_release_blocks(release_id: str) -> dict[str, Any]:
+    """Resolve the ADR 0011 ``identifiers``, ``companies``, and ``country`` for a release.
+
+    Read from ``releases.data`` in PostgreSQL exactly as :func:`_resolve_release_media`
+    reads the media block, and deliberately *not* from the Neo4j ``CREDITED_TO`` edges the
+    graph enricher writes: the edges are a projection of this same block, so reading the
+    block is one indexed row rather than a traversal, and the two cannot disagree.
+    """
+    if _pg_pool is None:
+        return dict(_NO_CATALOG_BLOCKS)
+    return await get_release_catalog_blocks(_pg_pool, release_id)
+
+
 @router.get("/api/node/{node_id}")
 async def get_node_details(
     node_id: str,
@@ -334,7 +353,12 @@ async def get_node_details(
     if not result:
         return JSONResponse(content={"error": f"{type.capitalize()} '{node_id}' not found"}, status_code=404)
     if entity_type == "release":
-        result["media"] = await _resolve_release_media(node_id, result.get("formats"))
+        media, blocks = await asyncio.gather(
+            _resolve_release_media(node_id, result.get("formats")),
+            _resolve_release_blocks(node_id),
+        )
+        result["media"] = media
+        result.update(blocks)
     return JSONResponse(content=result)
 
 
