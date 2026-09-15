@@ -40,6 +40,14 @@ test-integration:
 
 coverage: test
 
+# Run the offline evaluation harness against the committed golden set.
+evaluate:
+    uv run python -m api.evaluation.report
+
+# Regenerate the committed synthetic golden set (deterministic; commit the result).
+generate-golden-set:
+    uv run python scripts/generate_golden_set.py
+
 build:
     uv build --out-dir dist --clear
 

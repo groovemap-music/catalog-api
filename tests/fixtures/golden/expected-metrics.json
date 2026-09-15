@@ -1,0 +1,114 @@
+{
+  "baseline_version": "heuristics-2026-09",
+  "current_year": 2026,
+  "golden_set_generator_version": "golden-2026-09",
+  "split_cut": "2023-01-01",
+  "metrics": {
+    "recommendation": {
+      "collectors": 12,
+      "held_out_total": 76,
+      "overall": {
+        "precision_at_10": 0.125,
+        "recall_at_10": 0.1878968253968254,
+        "precision_at_25": 0.11,
+        "recall_at_25": 0.43111772486772487,
+        "hit_rate": 0.9166666666666666
+      },
+      "coverage": {
+        "catalog_releases": 120,
+        "recommended_releases": 95,
+        "catalogue_coverage": 0.7916666666666666
+      },
+      "by_format": {
+        "vinyl": {
+          "catalog_releases": 40,
+          "recommended": 103,
+          "recommended_share": 0.3433333333333333,
+          "held_out": 27,
+          "held_out_share": 0.35526315789473684,
+          "hits_at_25": 14,
+          "recall_at_25": 0.5185185185185185
+        },
+        "optical": {
+          "catalog_releases": 40,
+          "recommended": 79,
+          "recommended_share": 0.2633333333333333,
+          "held_out": 26,
+          "held_out_share": 0.34210526315789475,
+          "hits_at_25": 8,
+          "recall_at_25": 0.3076923076923077
+        },
+        "tape": {
+          "catalog_releases": 40,
+          "recommended": 118,
+          "recommended_share": 0.3933333333333333,
+          "held_out": 23,
+          "held_out_share": 0.3026315789473684,
+          "hits_at_25": 11,
+          "recall_at_25": 0.4782608695652174
+        }
+      },
+      "by_collector_size": {
+        "large": {
+          "collectors": 4,
+          "precision_at_10": 0.2,
+          "recall_at_10": 0.25297619047619047,
+          "precision_at_25": 0.15,
+          "recall_at_25": 0.4826388888888889,
+          "hit_rate": 1.0
+        },
+        "medium": {
+          "collectors": 4,
+          "precision_at_10": 0.1,
+          "recall_at_10": 0.1607142857142857,
+          "precision_at_25": 0.1,
+          "recall_at_25": 0.4107142857142857,
+          "hit_rate": 1.0
+        },
+        "small": {
+          "collectors": 4,
+          "precision_at_10": 0.07500000000000001,
+          "recall_at_10": 0.15000000000000002,
+          "precision_at_25": 0.08,
+          "recall_at_25": 0.4,
+          "hit_rate": 0.75
+        }
+      }
+    },
+    "rarity": {
+      "releases": 120,
+      "score": {
+        "min": 20.0,
+        "max": 70.8,
+        "mean": 44.81583333333333
+      },
+      "tier_distribution": {
+        "rare": 11,
+        "scarce": 66,
+        "uncommon": 43
+      },
+      "tier_distribution_by_format": {
+        "vinyl": {
+          "rare": 9,
+          "scarce": 23,
+          "uncommon": 8
+        },
+        "optical": {
+          "scarce": 18,
+          "uncommon": 22
+        },
+        "tape": {
+          "rare": 2,
+          "scarce": 25,
+          "uncommon": 13
+        }
+      },
+      "grooved_releases": 40
+    },
+    "stability": {
+      "releases": 120,
+      "spearman": 1.0,
+      "identical": true
+    }
+  }
+}

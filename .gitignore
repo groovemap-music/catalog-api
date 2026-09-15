@@ -8,6 +8,9 @@
 .coverage
 coverage.xml
 /coverage/
+# Raw evaluation run artifacts. The recipe and the expected-metrics snapshot are committed;
+# the reports themselves stay outside the repository.
+/reports/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
