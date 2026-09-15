@@ -18,6 +18,7 @@ flowchart TD
 - [Administration](admin-guide.md)
 - [Native identity and first-party activity](identity-and-activity.md)
 - [CrateFit item-in-hand fit profile](cratefit.md)
+- [Catalogue identifiers, credits, and country](catalog-identifiers.md)
 - [Usage examples](usage-examples.md)
 - [Logging](logging-guide.md)
 - [Log emoji conventions](emoji-guide.md)

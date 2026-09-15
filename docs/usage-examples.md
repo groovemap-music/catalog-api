@@ -658,6 +658,30 @@ curl "http://localhost:8004/api/search?q=warp&types=artist,label&limit=10&offset
 # Search releases narrowed to a canonical media family or medium id (ADR 0007); the
 # response's facets.media counts every matching release by family id regardless of filter
 curl "http://localhost:8004/api/search?q=blue&types=release&media=vinyl&media=optical_cd&limit=20"
+
+# Search releases narrowed to one or more issue countries (ADR 0011), matched exactly as
+# the catalog stores them; every hit carries `country` beside `gm_id`
+curl "http://localhost:8004/api/search?q=blue&types=release&country=UK&country=Germany&limit=20"
+```
+
+### Identifier lookup
+
+Resolve a barcode, catalogue number, or matrix inscription to the release that carries it
+(ADR 0011). Public and rate limited like search — see
+[Catalogue identifiers, credits, and country](catalog-identifiers.md).
+
+```bash
+# A barcode, spaces and all (normalized to digits only before the lookup)
+curl "http://localhost:8004/api/lookup/barcode/5%20012394%20144777"
+
+# A catalogue number, in whatever case it was typed (upper-cased, whitespace collapsed)
+curl "http://localhost:8004/api/lookup/catalog_number/pb%2041447"
+
+# A run-out inscription (whitespace collapsed, case preserved; percent-encode any slash)
+curl "http://localhost:8004/api/lookup/matrix/PB%2041447-A2%20UTOPIA%20MS"
+
+# Release detail carries `identifiers`, `companies`, and `country` beside `media`
+curl "http://localhost:8004/api/node/249504?type=release"
 ```
 
 ### Path Finder
