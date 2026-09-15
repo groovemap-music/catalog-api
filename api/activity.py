@@ -77,11 +77,13 @@ __all__ = [
     "DETERMINISTIC_PROPENSITY",
     "EVENTS_TABLE",
     "IMPRESSIONS_TABLE",
+    "POLICY_CRATEFIT",
     "POLICY_EXPLORE",
     "POLICY_SIMILAR_ARTIST",
     "POLICY_USER_RECOMMENDATIONS_ARTIST",
     "POLICY_USER_RECOMMENDATIONS_MULTI",
     "PRODUCER",
+    "SURFACE_FIT",
     "SURFACE_RECOMMENDATION",
     "active_purposes",
     "configure",
@@ -109,6 +111,20 @@ IMPRESSIONS_TABLE: Final = "impressions"
 # The one surface this service records impressions against today.
 SURFACE_RECOMMENDATION: Final = "recommendation"
 
+# The surface the CrateFit item-in-hand profile is recorded against.
+#
+# The epic design asked for a literal ``"fit"``, and it cannot be one yet. The surface
+# vocabulary is vendored from `groovemap-runtime` at a pinned revision, it is closed over
+# search / recommendation / collection / wantlist / consent / account, and
+# `common.events.validate_impression` rejects anything outside it — so an impression
+# stamped against ``"fit"`` today would be dropped and counted as invalid rather than
+# written, which is precisely the record the surface exists to keep. A fit profile *is* a
+# ranked showing of one candidate, which is what the vocabulary's `recommendation` surface
+# names, and :data:`POLICY_CRATEFIT` is what tells a fit row apart from an explore or
+# similar-artist row. When the vocabulary gains a `fit` surface, this constant is the only
+# line that changes.
+SURFACE_FIT: Final = SURFACE_RECOMMENDATION
+
 # The ranking policy each recommendation surface ran, named and versioned so an offline
 # evaluation can tell which decision procedure produced a row. A change to how a surface
 # ranks is a new constant, never a redefinition of an old one: the policy id on a stored
@@ -117,6 +133,13 @@ POLICY_SIMILAR_ARTIST: Final = "similar_artist_weighted_cosine_v1"
 POLICY_EXPLORE: Final = "explore_personalized_v1"
 POLICY_USER_RECOMMENDATIONS_ARTIST: Final = "user_recommendations_artist_v1"
 POLICY_USER_RECOMMENDATIONS_MULTI: Final = "user_recommendations_multi_v1"
+
+# The CrateFit decision procedure. Deliberately the same string as
+# :data:`api.fit.FIT_VERSION`: the fit version *is* the policy, because every constant and
+# every formula that produced the score lives in that one module. `api.activity` states it
+# rather than importing it, so the recorder keeps no dependency on the scoring, and a test
+# pins the two together.
+POLICY_CRATEFIT: Final = "cratefit_v0"
 
 # The probability a deterministic top-N policy assigned to choosing a shown item. See the
 # module docstring: this is a fact about the policies that exist, not a filler value.

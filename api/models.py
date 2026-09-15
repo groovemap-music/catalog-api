@@ -1026,3 +1026,69 @@ class ErasureRequest(BaseModel):
 
     password: str = Field(description="The caller's current password")
     code: str | None = Field(default=None, pattern=r"^\d{6}$", description="Current TOTP code, required when 2FA is enabled")
+
+
+# ---------------------------------------------------------------------------
+# CrateFit — the item-in-hand fit profile
+# ---------------------------------------------------------------------------
+
+
+class FitComponent(BaseModel):
+    """One dimension of a fit answer: a score in [0, 1] and the facts behind it."""
+
+    score: float = Field(ge=0.0, le=1.0, description="This dimension's score, 0 to 1")
+    evidence: list[str] = Field(default_factory=list, description="Facts about the caller's own collection that produced the score")
+
+
+class FitComponents(BaseModel):
+    """The five dimensions a fit answer decomposes into.
+
+    Closed rather than a free dictionary: the decomposition is the product, and a consumer
+    that renders five named panes should break loudly if a version ever drops one.
+    """
+
+    affinity: FitComponent
+    novelty: FitComponent
+    bridge: FitComponent
+    depth: FitComponent
+    redundancy: FitComponent
+
+
+class FitRarity(BaseModel):
+    """The precomputed rarity of the candidate, read from the insights tables."""
+
+    score: float | None = None
+    tier: str | None = None
+
+
+class FitRelease(BaseModel):
+    """The release a fit profile is about, as the caller needs to recognise it."""
+
+    id: str
+    # ADR 0009: the native id beside the Discogs id, so a client reports outcomes against
+    # identity GrooveMap owns. None when the alias table carries no alias for the release.
+    gm_id: str | None = None
+    title: str | None = None
+    artist: str | None = None
+    year: int | None = None
+    media_families: list[str] = Field(default_factory=list)
+    # Read from `insights.release_rarity`, never computed on the request path, and never an
+    # input to any v0 component: rarity is a fact about the record, fit is a fact about the
+    # record *and this collector*, and conflating them would make a common record the
+    # collector obviously wants look like a worse buy than a rare one they do not.
+    rarity: FitRarity | None = None
+
+
+class FitProfile(BaseModel):
+    """Response for GET /api/fit/release/{release_id}."""
+
+    release: FitRelease
+    fit: float = Field(ge=0.0, le=1.0, description="The combined fit, 0 to 1")
+    components: FitComponents
+    confidence: str = Field(description="How the candidate was identified: 'exact' or 'master'")
+    policy_id: str
+    fit_version: str
+    # Minted per request served, after the cached body is read, so a client can report an
+    # outcome against the showing it actually saw. None when the release has no native id
+    # or the impression could not be written.
+    impression_id: str | None = None

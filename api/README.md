@@ -471,6 +471,7 @@ Artist similarity and personalized graph-traversal discovery, ranked by multi-di
 | ------ | ---------------------------------------------- | ------------- | ---------- | ---------------------------------------------------------------- |
 | GET    | `/api/recommend/similar/artist/{artist_id}`    | No            | 30/min     | Artists with the closest multi-dimensional similarity           |
 | GET    | `/api/recommend/explore/{entity_type}/{id}`    | Yes           | 30/min     | Personalized multi-hop traversal from an entity, ranked by taste |
+| GET    | `/api/fit/release/{release_id}`                | JWT or `fit:read` token | 30/min | CrateFit: the decomposed fit of one candidate release for the caller |
 
 **Query parameters for `/api/recommend/similar/artist/{artist_id}`:**
 
@@ -490,6 +491,13 @@ with `POST /api/activity/events` (see [Activity, Consent, Erasure, and Export](#
 Each surface writes under its own policy id: `similar_artist_weighted_cosine_v1`,
 `explore_personalized_v1`, `user_recommendations_artist_v1` (`strategy=artist`, the default),
 and `user_recommendations_multi_v1` (`strategy=multi`).
+
+**CrateFit** (`/api/fit/release/{release_id}`) is a different shape from the ranked
+surfaces above: one candidate, five named components with evidence, and an identity
+confidence reported beside the fit rather than folded into it. It writes one impression
+per request served under the `cratefit_v0` policy. See
+[the CrateFit guide](../docs/cratefit.md) for the components, the v0 heuristics, and the
+limits of version 0.
 
 ### Genre Tree
 

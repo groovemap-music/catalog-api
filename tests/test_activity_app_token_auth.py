@@ -361,7 +361,10 @@ class TestScopeRegistry:
         from api.routers.app_tokens import ALLOWED_SCOPES
 
         registry = set(ALLOWED_SCOPES)
-        assert registry == {"collection:read", *_NEW_SCOPES}
+        # `fit:read` joined the registry with the CrateFit endpoint and is pinned here for
+        # the same reason the others are: the point of this assertion is that the set is
+        # enumerated, so a new scope is a deliberate line rather than a silent widening.
+        assert registry == {"collection:read", "fit:read", *_NEW_SCOPES}
 
     @pytest.mark.parametrize("scope", _NEW_SCOPES)
     def test_minting_accepts_each_new_scope(

@@ -197,6 +197,7 @@ app token minted under `POST /api/user/app-tokens` and carrying the matching sco
 | `activity:write` | `POST /api/activity/events` |
 | `consent:read` | `GET /api/user/consent` |
 | `consent:write` | `PUT /api/user/consent/{purpose}` |
+| `fit:read` | `GET /api/fit/release/{release_id}` |
 | `observations:read` | `GET /api/user/copies/{copy_id}/observations` |
 | `observations:write` | `POST /api/user/copies/{copy_id}/observations` |
 

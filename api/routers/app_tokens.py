@@ -48,6 +48,11 @@ ALLOWED_SCOPES = frozenset(
         "consent:write",
         "observations:read",
         "observations:write",
+        # The CrateFit profile reads the caller's whole collection to answer, so it is a
+        # read of the collection by another name and is delegated on its own scope rather
+        # than folded into `collection:read`: a kiosk that scores a record in a shop has
+        # no business listing what the collector owns.
+        "fit:read",
     }
 )
 
