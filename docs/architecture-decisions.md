@@ -51,6 +51,12 @@ flowchart LR
   by subject, against the closed published vocabulary; consent, erasure, and export are this
   repository's endpoints over that same record. See
   [Native identity and first-party activity](identity-and-activity.md).
+- Follow [ADR 0011](https://github.com/groovemap-music/design/blob/main/docs/adr/0011-catalog-identifiers-and-manufacturing-credits.md):
+  serve catalogue identifiers, manufacturing credits, and release country from the blocks the
+  loaders write, and resolve a barcode, catalogue number, or matrix inscription through
+  `provider_aliases` rather than through search. The reader normalizes an identifier with the
+  same vendored vocabulary the writer minted it from. See
+  [Catalogue identifiers, credits, and country](catalog-identifiers.md).
 
 Historical references to the combined `catalog-ingestion` repository describe the pre-split
 lineage retained by ADR 0005. They are migration records, not the name of a current producer or

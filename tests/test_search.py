@@ -1066,3 +1066,205 @@ class TestSearchQueryAsyncFunctions:
         # carries the unique `data_id` tiebreaker.
         assert "ORDER BY rank DESC, id" in rendered
         assert "ORDER BY rank DESC, data_id LIMIT" in rendered
+
+
+class TestSearchCountryFacet:
+    """The ADR 0011 `country` facet on the releases branch of the union."""
+
+    def test_country_filter_clause_empty(self) -> None:
+        from api.queries.search_queries import _country_filter_clause
+
+        clause, params = _country_filter_clause([])
+        assert clause.as_string(None) == "TRUE"
+        assert params == []
+
+    def test_country_filter_clause_uses_any_over_the_indexed_expression(self) -> None:
+        from api.queries.search_queries import _country_filter_clause
+
+        clause, params = _country_filter_clause(["UK"])
+        rendered = clause.as_string(None)
+        assert "= ANY(%s::text[])" in rendered
+        assert params == [["UK"]]
+
+    def test_country_filter_clause_two_countries_are_one_any(self) -> None:
+        """One facet's multiple selected values OR-combine, as everywhere else here."""
+        from api.queries.search_queries import _country_filter_clause
+
+        clause, params = _country_filter_clause(["UK", "Germany"])
+        assert clause.as_string(None).count("ANY") == 1
+        assert params == [["UK", "Germany"]]
+
+    def test_country_filter_clause_null_passthrough_for_non_release_types(self) -> None:
+        """Entity types without a country column pass the filter (NULL IS NULL)."""
+        from api.queries.search_queries import _country_filter_clause
+
+        clause, _params = _country_filter_clause(["UK"], column=None)
+        assert "country IS NULL OR" in clause.as_string(None)
+
+    def test_entity_select_pushes_country_filter_before_limit(self) -> None:
+        from api.queries.search_queries import _entity_select
+
+        frag, params = _entity_select("release", "title", has_year=False, has_genres=False, per_table_limit=40, has_country=True, countries=["UK"])
+        rendered = frag.as_string(None)
+        where_idx = rendered.index("WHERE")
+        limit_idx = rendered.index("ORDER BY rank DESC, data_id LIMIT")
+        assert where_idx < limit_idx
+        assert "data->>'country'" in rendered[where_idx:limit_idx]
+        assert params == [["UK"]]
+
+    def test_entity_select_projects_null_country_when_has_country_false(self) -> None:
+        from api.queries.search_queries import _entity_select
+
+        frag, _params = _entity_select("artist", "name", has_year=False, has_genres=False, per_table_limit=40)
+        rendered = frag.as_string(None)
+        assert "NULL::text AS country" in rendered
+
+    def test_build_union_combines_country_with_the_other_facets(self) -> None:
+        from api.queries.search_queries import _build_union
+
+        frag, params = _build_union(["release"], per_table_limit=40, genres=["Rock"], media_families=["vinyl"], countries=["UK"])
+        rendered = frag.as_string(None)
+        assert "data->>'country'" in rendered
+        assert params == [["Rock"], ["vinyl"], ["UK"]]
+
+    @pytest.mark.asyncio
+    async def test_run_results_applies_one_country(self) -> None:
+        from api.queries.search_queries import _run_results
+
+        mock_pool = TestSearchQueryAsyncFunctions._db_mocks()
+        with patch("api.queries.search_queries.execute_sql", new_callable=AsyncMock) as mock_exec:
+            await _run_results(mock_pool, "love", ["release"], [], None, None, 10, 0, [], [], ["UK"])
+
+        rendered = mock_exec.call_args[0][1].as_string(None)
+        assert "data->>'country'" in rendered
+        assert mock_exec.call_args[0][2][1] == ["UK"]
+
+    @pytest.mark.asyncio
+    async def test_run_results_applies_two_countries(self) -> None:
+        from api.queries.search_queries import _run_results
+
+        mock_pool = TestSearchQueryAsyncFunctions._db_mocks()
+        with patch("api.queries.search_queries.execute_sql", new_callable=AsyncMock) as mock_exec:
+            await _run_results(mock_pool, "love", ["release"], [], None, None, 10, 0, [], [], ["UK", "Germany"])
+
+        executed_params = mock_exec.call_args[0][2]
+        rendered = mock_exec.call_args[0][1].as_string(None)
+        assert executed_params[1] == ["UK", "Germany"]
+        assert rendered.count("%s") == len(executed_params)
+
+    @pytest.mark.asyncio
+    async def test_run_results_selects_country_on_the_outer_query(self) -> None:
+        """The hit shape carries `country`, so the outer projection has to name it."""
+        from api.queries.search_queries import _run_results
+
+        mock_pool = TestSearchQueryAsyncFunctions._db_mocks()
+        with patch("api.queries.search_queries.execute_sql", new_callable=AsyncMock) as mock_exec:
+            await _run_results(mock_pool, "love", ["release"], [], None, None, 10, 0)
+
+        assert "SELECT type, id, name, rank, highlight, year, genres, country" in mock_exec.call_args[0][1].as_string(None)
+
+    @pytest.mark.asyncio
+    async def test_run_total_applies_the_country_filter(self) -> None:
+        from api.queries.search_queries import _run_total
+
+        mock_pool = TestSearchQueryAsyncFunctions._db_mocks()
+        with patch("api.queries.search_queries.execute_sql", new_callable=AsyncMock) as mock_exec:
+            await _run_total(mock_pool, "love", ["release"], [], None, None, [], [], ["UK"])
+
+        assert "data->>'country'" in mock_exec.call_args[0][1].as_string(None)
+
+    def test_format_result_carries_country(self) -> None:
+        from api.queries.search_queries import _format_result
+
+        hit = _format_result({"type": "release", "id": "10", "name": "A", "rank": 0.5, "highlight": "A", "country": "UK"})
+        assert hit["country"] == "UK"
+
+    def test_format_result_country_is_none_for_a_row_without_one(self) -> None:
+        from api.queries.search_queries import _format_result
+
+        hit = _format_result({"type": "artist", "id": "1", "name": "A", "rank": 0.5, "highlight": "A", "country": None})
+        assert hit["country"] is None
+
+    def test_cache_key_differs_on_country_filter(self) -> None:
+        from api.queries.search_queries import cache_key
+
+        k1 = cache_key("blue", ["release"], [], None, None, 20, 0, countries=["UK"])
+        k2 = cache_key("blue", ["release"], [], None, None, 20, 0, countries=["Germany"])
+        k3 = cache_key("blue", ["release"], [], None, None, 20, 0)
+        assert len({k1, k2, k3}) == 3
+
+    def test_cache_key_country_order_independent(self) -> None:
+        from api.queries.search_queries import cache_key
+
+        k1 = cache_key("blue", ["release"], [], None, None, 20, 0, countries=["UK", "Germany"])
+        k2 = cache_key("blue", ["release"], [], None, None, 20, 0, countries=["Germany", "UK"])
+        assert k1 == k2
+
+    @pytest.mark.asyncio
+    async def test_execute_search_accepts_countries_end_to_end(self) -> None:
+        from api.queries.search_queries import execute_search
+
+        mock_pool = TestSearchQueryAsyncFunctions._db_mocks()
+        with patch("api.queries.search_queries.execute_sql", new_callable=AsyncMock):
+            result = await execute_search(mock_pool, None, "blue", ["release"], [], None, None, 20, 0, countries=["UK"])
+
+        assert result["query"] == "blue"
+        assert result["results"] == []
+
+
+class TestSearchCountryEndpoint:
+    """Router-level behaviour for GET /api/search?country=..."""
+
+    @staticmethod
+    def _capture(captured: dict[str, Any]) -> Any:
+        async def _run(**kwargs: Any) -> dict[str, Any]:
+            captured.update(kwargs)
+            return {
+                "query": "blue",
+                "total": 0,
+                "facets": {"type": {}, "genre": {}, "decade": {}, "media": {}},
+                "results": [],
+                "pagination": {"limit": 20, "offset": 0, "has_more": False},
+            }
+
+        return _run
+
+    def test_one_country_forwarded(self, test_client: TestClient) -> None:
+        captured: dict[str, Any] = {}
+        with patch("api.routers.search.execute_search", side_effect=self._capture(captured)):
+            response = test_client.get("/api/search?q=blue&country=UK")
+
+        assert response.status_code == 200
+        assert captured["countries"] == ["UK"]
+
+    def test_two_countries_forwarded_in_order(self, test_client: TestClient) -> None:
+        captured: dict[str, Any] = {}
+        with patch("api.routers.search.execute_search", side_effect=self._capture(captured)):
+            response = test_client.get("/api/search?q=blue&country=UK&country=Germany")
+
+        assert response.status_code == 200
+        assert captured["countries"] == ["UK", "Germany"]
+
+    def test_blank_country_values_are_dropped(self, test_client: TestClient) -> None:
+        captured: dict[str, Any] = {}
+        with patch("api.routers.search.execute_search", side_effect=self._capture(captured)):
+            response = test_client.get("/api/search?q=blue&country=&country=%20UK%20")
+
+        assert response.status_code == 200
+        assert captured["countries"] == ["UK"]
+
+    def test_no_country_is_an_empty_filter(self, test_client: TestClient) -> None:
+        captured: dict[str, Any] = {}
+        with patch("api.routers.search.execute_search", side_effect=self._capture(captured)):
+            test_client.get("/api/search?q=blue")
+
+        assert captured["countries"] == []
+
+    def test_country_travels_in_the_recorded_filters(self) -> None:
+        from api.routers.search import _search_filters
+
+        assert _search_filters(["release"], [], [], None, None, ["UK", "Germany"]) == [
+            "country:Germany",
+            "country:UK",
+            "type:release",
+        ]

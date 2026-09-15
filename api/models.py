@@ -1092,3 +1092,32 @@ class FitProfile(BaseModel):
     # outcome against the showing it actually saw. None when the release has no native id
     # or the impression could not be written.
     impression_id: str | None = None
+
+
+class LookupRelease(BaseModel):
+    """One release an identifier resolved to, as the caller needs to recognise it.
+
+    ``source`` names the catalog the row came from rather than the catalog the identifier
+    belongs to: a barcode is printed on the object, and both catalogs describe the same
+    object, so one lookup can legitimately return a Discogs row and a MusicBrainz row for
+    the same pressing.
+    """
+
+    id: str
+    source: str = Field(description="The catalog the row came from: 'discogs' or 'musicbrainz'")
+    title: str | None = None
+    artist: str | None = None
+    year: int | None = None
+    media_families: list[str] = Field(default_factory=list)
+
+
+class LookupResponse(BaseModel):
+    """Response for GET /api/lookup/{provider}/{value} (ADR 0011)."""
+
+    provider: str = Field(description="The alias namespace the value was resolved under")
+    value: str = Field(description="The value exactly as the caller supplied it")
+    normalized: str = Field(description="The value under the namespace's declared normalization")
+    # ADR 0009: the identity the alias resolved to. Always present — a response is only
+    # returned once a valid alias row named a native id.
+    gm_id: str
+    releases: list[LookupRelease] = Field(default_factory=list)

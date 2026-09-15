@@ -56,6 +56,7 @@ import api.routers.fit as _fit_router
 import api.routers.insights as _insights_router
 import api.routers.insights_compute as _insights_compute_router
 import api.routers.label_dna as _label_dna_router
+import api.routers.lookup as _lookup_router
 import api.routers.musicbrainz as _musicbrainz_router
 import api.routers.network as _network_router
 import api.routers.nlq as _nlq_router
@@ -282,6 +283,7 @@ def _configure_routers(
     _recommend_router.configure(neo4j, jwt_secret_for_neo4j, redis)
     _fit_router.configure(neo4j, pool, redis)
     _search_router.configure(pool, redis)
+    _lookup_router.configure(pool)
     _insights_compute_router.configure(neo4j, pool, redis, config)
     _admin_router.configure(pool, redis, config, neo4j_driver=neo4j)
     _musicbrainz_router.configure(pool, neo4j)
@@ -413,6 +415,7 @@ _ROUTERS = (
     _credits_router.router,
     _label_dna_router.router,
     _search_router.router,
+    _lookup_router.router,
     _snapshot_router.router,
     _user_router.router,
     _taste_router.router,
