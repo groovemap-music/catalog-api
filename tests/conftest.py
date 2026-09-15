@@ -203,6 +203,7 @@ def test_client(
     import api.routers.explore as _explore_router
     import api.routers.fit as _fit_router
     import api.routers.label_dna as _label_dna_router
+    import api.routers.lookup as _lookup_router
     import api.routers.recommend as _recommend_router
     import api.routers.search as _search_router
     import api.routers.snapshot as _snapshot_router
@@ -221,6 +222,7 @@ def test_client(
     import api.routers.insights_compute as _insights_compute_router
 
     _search_router.configure(mock_pool, mock_redis)
+    _lookup_router.configure(mock_pool)
     _recommend_router.configure(mock_neo4j, test_api_config.jwt_secret_key, mock_redis)
     _fit_router.configure(mock_neo4j, mock_pool, mock_redis)
     _insights_compute_router.configure(mock_neo4j, mock_pool, mock_redis, test_api_config)
