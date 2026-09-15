@@ -201,6 +201,7 @@ def test_client(
     import api.routers.admin as _admin_router
     import api.routers.collection as _collection_router
     import api.routers.explore as _explore_router
+    import api.routers.fit as _fit_router
     import api.routers.label_dna as _label_dna_router
     import api.routers.recommend as _recommend_router
     import api.routers.search as _search_router
@@ -221,6 +222,7 @@ def test_client(
 
     _search_router.configure(mock_pool, mock_redis)
     _recommend_router.configure(mock_neo4j, test_api_config.jwt_secret_key, mock_redis)
+    _fit_router.configure(mock_neo4j, mock_pool, mock_redis)
     _insights_compute_router.configure(mock_neo4j, mock_pool, mock_redis, test_api_config)
     _admin_router.configure(mock_pool, mock_redis, test_api_config, neo4j_driver=mock_neo4j)
     import api.routers.extraction_analysis as _extraction_analysis_router

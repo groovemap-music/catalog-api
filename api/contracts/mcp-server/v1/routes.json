@@ -3,6 +3,7 @@
   "operations": {
     "activity_events": {"method": "POST", "path": "/api/activity/events"},
     "collaborators": {"method": "GET", "path": "/api/collaborators/{artist_id}"},
+    "fit_release": {"method": "GET", "path": "/api/fit/release/{release_id}"},
     "genre_tree": {"method": "GET", "path": "/api/genre-tree"},
     "graph_stats": {"method": "GET", "path": "/api/graph/stats"},
     "nlq_query": {"method": "POST", "path": "/api/nlq/query"},
