@@ -86,8 +86,8 @@ packages = ["api"]
 exclude-newer = "2 days"
 
 [tool.uv.sources]
-groovemap-runtime = { git = "https://github.com/groovemap-music/python-libraries.git", rev = "2d7b1a5b8766ff915a39e66a3e70013d092c1bc1" }
-groovemap-agent-tools = { git = "https://github.com/groovemap-music/python-libraries.git", subdirectory = "agent-tools", rev = "2d7b1a5b8766ff915a39e66a3e70013d092c1bc1" }
+groovemap-runtime = { git = "https://github.com/groovemap-music/python-libraries.git", rev = "e372b6a7598ae31ee6578fdff39bc920bedd7136" }
+groovemap-agent-tools = { git = "https://github.com/groovemap-music/python-libraries.git", subdirectory = "agent-tools", rev = "e372b6a7598ae31ee6578fdff39bc920bedd7136" }
 
 [tool.ruff]
 extend-exclude = [
