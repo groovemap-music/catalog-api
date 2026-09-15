@@ -1,0 +1,1404 @@
+{
+  "generator_version": "golden-2026-09",
+  "seed": 20260915,
+  "split_cut": "2023-01-01",
+  "collectors": [
+    {
+      "id": "u001",
+      "name": "Collector 01",
+      "taste_genres": [
+        "Classical",
+        "Folk World & Country",
+        "Funk / Soul"
+      ],
+      "collected": [
+        {
+          "release_id": "r0026",
+          "date_added": "2018-01-25"
+        },
+        {
+          "release_id": "r0061",
+          "date_added": "2018-02-01"
+        },
+        {
+          "release_id": "r0015",
+          "date_added": "2018-04-07"
+        },
+        {
+          "release_id": "r0068",
+          "date_added": "2018-04-12"
+        },
+        {
+          "release_id": "r0081",
+          "date_added": "2018-04-17"
+        },
+        {
+          "release_id": "r0052",
+          "date_added": "2018-07-10"
+        },
+        {
+          "release_id": "r0057",
+          "date_added": "2018-12-30"
+        },
+        {
+          "release_id": "r0018",
+          "date_added": "2019-04-16"
+        },
+        {
+          "release_id": "r0050",
+          "date_added": "2019-06-10"
+        },
+        {
+          "release_id": "r0069",
+          "date_added": "2019-06-20"
+        },
+        {
+          "release_id": "r0029",
+          "date_added": "2019-08-11"
+        },
+        {
+          "release_id": "r0108",
+          "date_added": "2019-10-30"
+        },
+        {
+          "release_id": "r0096",
+          "date_added": "2020-03-31"
+        },
+        {
+          "release_id": "r0001",
+          "date_added": "2020-07-11"
+        },
+        {
+          "release_id": "r0027",
+          "date_added": "2020-12-09"
+        },
+        {
+          "release_id": "r0032",
+          "date_added": "2021-02-01"
+        },
+        {
+          "release_id": "r0019",
+          "date_added": "2021-02-13"
+        },
+        {
+          "release_id": "r0025",
+          "date_added": "2021-07-09"
+        },
+        {
+          "release_id": "r0110",
+          "date_added": "2021-10-29"
+        },
+        {
+          "release_id": "r0058",
+          "date_added": "2022-03-17"
+        },
+        {
+          "release_id": "r0089",
+          "date_added": "2022-03-18"
+        },
+        {
+          "release_id": "r0051",
+          "date_added": "2022-06-16"
+        },
+        {
+          "release_id": "r0082",
+          "date_added": "2022-06-26"
+        },
+        {
+          "release_id": "r0099",
+          "date_added": "2022-10-28"
+        },
+        {
+          "release_id": "r0062",
+          "date_added": "2023-01-21"
+        },
+        {
+          "release_id": "r0060",
+          "date_added": "2023-06-28"
+        },
+        {
+          "release_id": "r0067",
+          "date_added": "2023-07-16"
+        },
+        {
+          "release_id": "r0080",
+          "date_added": "2023-10-13"
+        },
+        {
+          "release_id": "r0054",
+          "date_added": "2024-04-11"
+        },
+        {
+          "release_id": "r0056",
+          "date_added": "2024-04-20"
+        },
+        {
+          "release_id": "r0003",
+          "date_added": "2024-05-23"
+        }
+      ],
+      "wants": []
+    },
+    {
+      "id": "u002",
+      "name": "Collector 02",
+      "taste_genres": [
+        "Electronic",
+        "Hip Hop",
+        "Jazz"
+      ],
+      "collected": [
+        {
+          "release_id": "r0042",
+          "date_added": "2018-05-14"
+        },
+        {
+          "release_id": "r0100",
+          "date_added": "2018-05-21"
+        },
+        {
+          "release_id": "r0083",
+          "date_added": "2018-06-07"
+        },
+        {
+          "release_id": "r0013",
+          "date_added": "2018-08-07"
+        },
+        {
+          "release_id": "r0112",
+          "date_added": "2018-10-23"
+        },
+        {
+          "release_id": "r0002",
+          "date_added": "2019-02-23"
+        },
+        {
+          "release_id": "r0019",
+          "date_added": "2019-07-31"
+        },
+        {
+          "release_id": "r0105",
+          "date_added": "2019-08-01"
+        },
+        {
+          "release_id": "r0007",
+          "date_added": "2019-09-28"
+        },
+        {
+          "release_id": "r0015",
+          "date_added": "2019-12-30"
+        },
+        {
+          "release_id": "r0005",
+          "date_added": "2020-01-23"
+        },
+        {
+          "release_id": "r0072",
+          "date_added": "2020-04-05"
+        },
+        {
+          "release_id": "r0036",
+          "date_added": "2020-06-27"
+        },
+        {
+          "release_id": "r0106",
+          "date_added": "2020-07-02"
+        },
+        {
+          "release_id": "r0087",
+          "date_added": "2020-07-23"
+        },
+        {
+          "release_id": "r0004",
+          "date_added": "2021-04-03"
+        },
+        {
+          "release_id": "r0047",
+          "date_added": "2021-08-16"
+        },
+        {
+          "release_id": "r0043",
+          "date_added": "2021-09-17"
+        },
+        {
+          "release_id": "r0077",
+          "date_added": "2022-01-04"
+        },
+        {
+          "release_id": "r0037",
+          "date_added": "2022-01-12"
+        },
+        {
+          "release_id": "r0075",
+          "date_added": "2022-03-03"
+        },
+        {
+          "release_id": "r0076",
+          "date_added": "2022-05-02"
+        },
+        {
+          "release_id": "r0101",
+          "date_added": "2022-05-10"
+        },
+        {
+          "release_id": "r0066",
+          "date_added": "2022-06-22"
+        },
+        {
+          "release_id": "r0119",
+          "date_added": "2022-07-13"
+        },
+        {
+          "release_id": "r0022",
+          "date_added": "2022-08-17"
+        },
+        {
+          "release_id": "r0039",
+          "date_added": "2022-08-18"
+        },
+        {
+          "release_id": "r0020",
+          "date_added": "2022-11-06"
+        },
+        {
+          "release_id": "r0046",
+          "date_added": "2022-11-11"
+        },
+        {
+          "release_id": "r0012",
+          "date_added": "2023-02-01"
+        },
+        {
+          "release_id": "r0107",
+          "date_added": "2023-04-22"
+        },
+        {
+          "release_id": "r0064",
+          "date_added": "2023-09-15"
+        },
+        {
+          "release_id": "r0034",
+          "date_added": "2023-11-07"
+        },
+        {
+          "release_id": "r0038",
+          "date_added": "2023-12-22"
+        },
+        {
+          "release_id": "r0014",
+          "date_added": "2024-02-02"
+        },
+        {
+          "release_id": "r0065",
+          "date_added": "2024-06-08"
+        },
+        {
+          "release_id": "r0078",
+          "date_added": "2024-06-15"
+        },
+        {
+          "release_id": "r0074",
+          "date_added": "2024-11-05"
+        }
+      ],
+      "wants": [
+        "r0040"
+      ]
+    },
+    {
+      "id": "u003",
+      "name": "Collector 03",
+      "taste_genres": [
+        "Hip Hop",
+        "Jazz",
+        "Reggae"
+      ],
+      "collected": [
+        {
+          "release_id": "r0044",
+          "date_added": "2018-12-18"
+        },
+        {
+          "release_id": "r0008",
+          "date_added": "2019-01-06"
+        },
+        {
+          "release_id": "r0002",
+          "date_added": "2019-01-07"
+        },
+        {
+          "release_id": "r0006",
+          "date_added": "2019-08-20"
+        },
+        {
+          "release_id": "r0119",
+          "date_added": "2019-10-24"
+        },
+        {
+          "release_id": "r0117",
+          "date_added": "2019-12-31"
+        },
+        {
+          "release_id": "r0042",
+          "date_added": "2020-06-22"
+        },
+        {
+          "release_id": "r0098",
+          "date_added": "2020-07-18"
+        },
+        {
+          "release_id": "r0089",
+          "date_added": "2020-09-12"
+        },
+        {
+          "release_id": "r0021",
+          "date_added": "2020-10-16"
+        },
+        {
+          "release_id": "r0118",
+          "date_added": "2020-10-20"
+        },
+        {
+          "release_id": "r0010",
+          "date_added": "2020-11-07"
+        },
+        {
+          "release_id": "r0009",
+          "date_added": "2020-12-10"
+        },
+        {
+          "release_id": "r0074",
+          "date_added": "2020-12-17"
+        },
+        {
+          "release_id": "r0017",
+          "date_added": "2021-01-08"
+        },
+        {
+          "release_id": "r0085",
+          "date_added": "2021-01-28"
+        },
+        {
+          "release_id": "r0111",
+          "date_added": "2021-06-11"
+        },
+        {
+          "release_id": "r0045",
+          "date_added": "2021-09-27"
+        },
+        {
+          "release_id": "r0047",
+          "date_added": "2021-12-15"
+        },
+        {
+          "release_id": "r0055",
+          "date_added": "2021-12-31"
+        },
+        {
+          "release_id": "r0046",
+          "date_added": "2022-02-28"
+        },
+        {
+          "release_id": "r0016",
+          "date_added": "2022-04-15"
+        },
+        {
+          "release_id": "r0048",
+          "date_added": "2022-05-14"
+        },
+        {
+          "release_id": "r0033",
+          "date_added": "2022-09-08"
+        },
+        {
+          "release_id": "r0005",
+          "date_added": "2022-12-19"
+        },
+        {
+          "release_id": "r0100",
+          "date_added": "2023-01-14"
+        },
+        {
+          "release_id": "r0035",
+          "date_added": "2023-01-27"
+        },
+        {
+          "release_id": "r0084",
+          "date_added": "2023-05-08"
+        },
+        {
+          "release_id": "r0101",
+          "date_added": "2023-06-28"
+        },
+        {
+          "release_id": "r0072",
+          "date_added": "2023-07-05"
+        },
+        {
+          "release_id": "r0077",
+          "date_added": "2023-11-08"
+        },
+        {
+          "release_id": "r0015",
+          "date_added": "2024-07-09"
+        },
+        {
+          "release_id": "r0004",
+          "date_added": "2024-11-25"
+        }
+      ],
+      "wants": [
+        "r0020",
+        "r0079"
+      ]
+    },
+    {
+      "id": "u004",
+      "name": "Collector 04",
+      "taste_genres": [
+        "Electronic",
+        "Funk / Soul",
+        "Jazz"
+      ],
+      "collected": [
+        {
+          "release_id": "r0001",
+          "date_added": "2018-02-13"
+        },
+        {
+          "release_id": "r0076",
+          "date_added": "2018-02-21"
+        },
+        {
+          "release_id": "r0046",
+          "date_added": "2018-08-01"
+        },
+        {
+          "release_id": "r0107",
+          "date_added": "2018-09-23"
+        },
+        {
+          "release_id": "r0111",
+          "date_added": "2018-10-29"
+        },
+        {
+          "release_id": "r0120",
+          "date_added": "2019-04-25"
+        },
+        {
+          "release_id": "r0065",
+          "date_added": "2019-08-18"
+        },
+        {
+          "release_id": "r0040",
+          "date_added": "2019-11-21"
+        },
+        {
+          "release_id": "r0036",
+          "date_added": "2019-11-25"
+        },
+        {
+          "release_id": "r0088",
+          "date_added": "2020-01-10"
+        },
+        {
+          "release_id": "r0080",
+          "date_added": "2020-01-11"
+        },
+        {
+          "release_id": "r0106",
+          "date_added": "2020-03-04"
+        },
+        {
+          "release_id": "r0087",
+          "date_added": "2021-01-01"
+        },
+        {
+          "release_id": "r0025",
+          "date_added": "2021-01-23"
+        },
+        {
+          "release_id": "r0030",
+          "date_added": "2021-02-16"
+        },
+        {
+          "release_id": "r0081",
+          "date_added": "2021-03-21"
+        },
+        {
+          "release_id": "r0077",
+          "date_added": "2021-07-14"
+        },
+        {
+          "release_id": "r0031",
+          "date_added": "2021-12-12"
+        },
+        {
+          "release_id": "r0103",
+          "date_added": "2022-01-23"
+        },
+        {
+          "release_id": "r0115",
+          "date_added": "2022-10-31"
+        },
+        {
+          "release_id": "r0075",
+          "date_added": "2023-09-10"
+        },
+        {
+          "release_id": "r0012",
+          "date_added": "2024-01-14"
+        },
+        {
+          "release_id": "r0078",
+          "date_added": "2024-03-27"
+        },
+        {
+          "release_id": "r0104",
+          "date_added": "2024-05-31"
+        },
+        {
+          "release_id": "r0086",
+          "date_added": "2024-07-20"
+        },
+        {
+          "release_id": "r0099",
+          "date_added": "2024-08-16"
+        }
+      ],
+      "wants": [
+        "r0022",
+        "r0041",
+        "r0066",
+        "r0079"
+      ]
+    },
+    {
+      "id": "u005",
+      "name": "Collector 05",
+      "taste_genres": [
+        "Classical",
+        "Hip Hop",
+        "Jazz"
+      ],
+      "collected": [
+        {
+          "release_id": "r0021",
+          "date_added": "2018-01-18"
+        },
+        {
+          "release_id": "r0050",
+          "date_added": "2018-02-08"
+        },
+        {
+          "release_id": "r0074",
+          "date_added": "2018-09-25"
+        },
+        {
+          "release_id": "r0077",
+          "date_added": "2020-03-04"
+        },
+        {
+          "release_id": "r0073",
+          "date_added": "2020-05-05"
+        },
+        {
+          "release_id": "r0057",
+          "date_added": "2020-08-12"
+        },
+        {
+          "release_id": "r0047",
+          "date_added": "2021-09-27"
+        },
+        {
+          "release_id": "r0089",
+          "date_added": "2022-06-03"
+        },
+        {
+          "release_id": "r0023",
+          "date_added": "2022-06-18"
+        },
+        {
+          "release_id": "r0061",
+          "date_added": "2022-11-28"
+        },
+        {
+          "release_id": "r0027",
+          "date_added": "2023-04-02"
+        },
+        {
+          "release_id": "r0108",
+          "date_added": "2023-08-23"
+        },
+        {
+          "release_id": "r0055",
+          "date_added": "2024-05-07"
+        },
+        {
+          "release_id": "r0075",
+          "date_added": "2024-08-07"
+        },
+        {
+          "release_id": "r0068",
+          "date_added": "2024-09-23"
+        }
+      ],
+      "wants": [
+        "r0019",
+        "r0059",
+        "r0062",
+        "r0110"
+      ]
+    },
+    {
+      "id": "u006",
+      "name": "Collector 06",
+      "taste_genres": [
+        "Classical",
+        "Jazz",
+        "Rock"
+      ],
+      "collected": [
+        {
+          "release_id": "r0029",
+          "date_added": "2018-08-29"
+        },
+        {
+          "release_id": "r0111",
+          "date_added": "2018-12-11"
+        },
+        {
+          "release_id": "r0048",
+          "date_added": "2019-03-28"
+        },
+        {
+          "release_id": "r0089",
+          "date_added": "2019-05-20"
+        },
+        {
+          "release_id": "r0053",
+          "date_added": "2019-06-19"
+        },
+        {
+          "release_id": "r0062",
+          "date_added": "2019-11-06"
+        },
+        {
+          "release_id": "r0073",
+          "date_added": "2020-01-26"
+        },
+        {
+          "release_id": "r0103",
+          "date_added": "2020-07-28"
+        },
+        {
+          "release_id": "r0027",
+          "date_added": "2020-08-07"
+        },
+        {
+          "release_id": "r0074",
+          "date_added": "2020-10-11"
+        },
+        {
+          "release_id": "r0078",
+          "date_added": "2021-02-07"
+        },
+        {
+          "release_id": "r0054",
+          "date_added": "2021-08-15"
+        },
+        {
+          "release_id": "r0009",
+          "date_added": "2022-08-30"
+        },
+        {
+          "release_id": "r0011",
+          "date_added": "2022-08-31"
+        },
+        {
+          "release_id": "r0021",
+          "date_added": "2023-04-19"
+        },
+        {
+          "release_id": "r0091",
+          "date_added": "2023-07-15"
+        },
+        {
+          "release_id": "r0082",
+          "date_added": "2023-12-28"
+        },
+        {
+          "release_id": "r0076",
+          "date_added": "2024-07-01"
+        },
+        {
+          "release_id": "r0114",
+          "date_added": "2024-11-24"
+        }
+      ],
+      "wants": [
+        "r0058",
+        "r0060",
+        "r0088",
+        "r0108"
+      ]
+    },
+    {
+      "id": "u007",
+      "name": "Collector 07",
+      "taste_genres": [
+        "Electronic",
+        "Funk / Soul",
+        "Rock"
+      ],
+      "collected": [
+        {
+          "release_id": "r0038",
+          "date_added": "2018-01-14"
+        },
+        {
+          "release_id": "r0113",
+          "date_added": "2018-09-12"
+        },
+        {
+          "release_id": "r0063",
+          "date_added": "2019-01-24"
+        },
+        {
+          "release_id": "r0014",
+          "date_added": "2019-05-08"
+        },
+        {
+          "release_id": "r0064",
+          "date_added": "2019-07-25"
+        },
+        {
+          "release_id": "r0090",
+          "date_added": "2019-09-05"
+        },
+        {
+          "release_id": "r0077",
+          "date_added": "2019-12-30"
+        },
+        {
+          "release_id": "r0001",
+          "date_added": "2021-01-12"
+        },
+        {
+          "release_id": "r0068",
+          "date_added": "2021-05-22"
+        },
+        {
+          "release_id": "r0040",
+          "date_added": "2021-11-15"
+        },
+        {
+          "release_id": "r0115",
+          "date_added": "2022-04-17"
+        },
+        {
+          "release_id": "r0099",
+          "date_added": "2023-01-22"
+        },
+        {
+          "release_id": "r0030",
+          "date_added": "2023-04-06"
+        },
+        {
+          "release_id": "r0024",
+          "date_added": "2023-11-22"
+        },
+        {
+          "release_id": "r0066",
+          "date_added": "2024-03-23"
+        },
+        {
+          "release_id": "r0067",
+          "date_added": "2024-10-18"
+        }
+      ],
+      "wants": [
+        "r0039"
+      ]
+    },
+    {
+      "id": "u008",
+      "name": "Collector 08",
+      "taste_genres": [
+        "Folk World & Country",
+        "Jazz",
+        "Reggae"
+      ],
+      "collected": [
+        {
+          "release_id": "r0117",
+          "date_added": "2018-02-09"
+        },
+        {
+          "release_id": "r0079",
+          "date_added": "2018-04-26"
+        },
+        {
+          "release_id": "r0078",
+          "date_added": "2018-08-08"
+        },
+        {
+          "release_id": "r0008",
+          "date_added": "2019-02-12"
+        },
+        {
+          "release_id": "r0098",
+          "date_added": "2019-04-30"
+        },
+        {
+          "release_id": "r0009",
+          "date_added": "2020-04-01"
+        },
+        {
+          "release_id": "r0010",
+          "date_added": "2020-05-10"
+        },
+        {
+          "release_id": "r0097",
+          "date_added": "2020-06-15"
+        },
+        {
+          "release_id": "r0077",
+          "date_added": "2020-07-01"
+        },
+        {
+          "release_id": "r0074",
+          "date_added": "2020-10-01"
+        },
+        {
+          "release_id": "r0003",
+          "date_added": "2020-11-11"
+        },
+        {
+          "release_id": "r0103",
+          "date_added": "2021-05-14"
+        },
+        {
+          "release_id": "r0036",
+          "date_added": "2021-08-19"
+        },
+        {
+          "release_id": "r0017",
+          "date_added": "2021-11-14"
+        },
+        {
+          "release_id": "r0089",
+          "date_added": "2022-01-07"
+        },
+        {
+          "release_id": "r0015",
+          "date_added": "2022-02-16"
+        },
+        {
+          "release_id": "r0119",
+          "date_added": "2022-04-26"
+        },
+        {
+          "release_id": "r0093",
+          "date_added": "2022-08-15"
+        },
+        {
+          "release_id": "r0096",
+          "date_added": "2022-08-25"
+        },
+        {
+          "release_id": "r0088",
+          "date_added": "2022-09-25"
+        },
+        {
+          "release_id": "r0118",
+          "date_added": "2022-11-25"
+        },
+        {
+          "release_id": "r0076",
+          "date_added": "2023-04-30"
+        },
+        {
+          "release_id": "r0023",
+          "date_added": "2023-05-01"
+        },
+        {
+          "release_id": "r0046",
+          "date_added": "2023-08-20"
+        },
+        {
+          "release_id": "r0035",
+          "date_added": "2023-09-08"
+        },
+        {
+          "release_id": "r0011",
+          "date_added": "2023-12-29"
+        },
+        {
+          "release_id": "r0094",
+          "date_added": "2024-09-03"
+        },
+        {
+          "release_id": "r0022",
+          "date_added": "2024-09-11"
+        }
+      ],
+      "wants": [
+        "r0016",
+        "r0048",
+        "r0111",
+        "r0112"
+      ]
+    },
+    {
+      "id": "u009",
+      "name": "Collector 09",
+      "taste_genres": [
+        "Electronic",
+        "Jazz",
+        "Rock"
+      ],
+      "collected": [
+        {
+          "release_id": "r0009",
+          "date_added": "2018-07-28"
+        },
+        {
+          "release_id": "r0022",
+          "date_added": "2018-09-05"
+        },
+        {
+          "release_id": "r0039",
+          "date_added": "2018-09-24"
+        },
+        {
+          "release_id": "r0074",
+          "date_added": "2018-10-11"
+        },
+        {
+          "release_id": "r0076",
+          "date_added": "2019-05-03"
+        },
+        {
+          "release_id": "r0091",
+          "date_added": "2019-06-24"
+        },
+        {
+          "release_id": "r0011",
+          "date_added": "2019-07-30"
+        },
+        {
+          "release_id": "r0099",
+          "date_added": "2020-03-06"
+        },
+        {
+          "release_id": "r0048",
+          "date_added": "2020-03-26"
+        },
+        {
+          "release_id": "r0068",
+          "date_added": "2020-06-06"
+        },
+        {
+          "release_id": "r0104",
+          "date_added": "2020-06-27"
+        },
+        {
+          "release_id": "r0024",
+          "date_added": "2020-11-24"
+        },
+        {
+          "release_id": "r0046",
+          "date_added": "2020-12-25"
+        },
+        {
+          "release_id": "r0023",
+          "date_added": "2021-03-08"
+        },
+        {
+          "release_id": "r0088",
+          "date_added": "2021-04-01"
+        },
+        {
+          "release_id": "r0115",
+          "date_added": "2021-08-28"
+        },
+        {
+          "release_id": "r0097",
+          "date_added": "2022-01-01"
+        },
+        {
+          "release_id": "r0041",
+          "date_added": "2022-01-21"
+        },
+        {
+          "release_id": "r0063",
+          "date_added": "2022-03-01"
+        },
+        {
+          "release_id": "r0010",
+          "date_added": "2022-03-26"
+        },
+        {
+          "release_id": "r0064",
+          "date_added": "2022-05-20"
+        },
+        {
+          "release_id": "r0021",
+          "date_added": "2022-07-02"
+        },
+        {
+          "release_id": "r0103",
+          "date_added": "2022-11-03"
+        },
+        {
+          "release_id": "r0106",
+          "date_added": "2023-01-19"
+        },
+        {
+          "release_id": "r0047",
+          "date_added": "2023-02-27"
+        },
+        {
+          "release_id": "r0040",
+          "date_added": "2023-06-10"
+        },
+        {
+          "release_id": "r0087",
+          "date_added": "2023-07-16"
+        },
+        {
+          "release_id": "r0013",
+          "date_added": "2024-01-08"
+        },
+        {
+          "release_id": "r0112",
+          "date_added": "2024-08-07"
+        },
+        {
+          "release_id": "r0090",
+          "date_added": "2024-09-16"
+        }
+      ],
+      "wants": [
+        "r0034",
+        "r0092"
+      ]
+    },
+    {
+      "id": "u010",
+      "name": "Collector 10",
+      "taste_genres": [
+        "Classical",
+        "Funk / Soul",
+        "Reggae"
+      ],
+      "collected": [
+        {
+          "release_id": "r0056",
+          "date_added": "2018-11-16"
+        },
+        {
+          "release_id": "r0109",
+          "date_added": "2019-02-17"
+        },
+        {
+          "release_id": "r0018",
+          "date_added": "2019-06-21"
+        },
+        {
+          "release_id": "r0120",
+          "date_added": "2019-07-03"
+        },
+        {
+          "release_id": "r0068",
+          "date_added": "2019-10-30"
+        },
+        {
+          "release_id": "r0051",
+          "date_added": "2019-11-06"
+        },
+        {
+          "release_id": "r0082",
+          "date_added": "2020-02-01"
+        },
+        {
+          "release_id": "r0119",
+          "date_added": "2020-03-11"
+        },
+        {
+          "release_id": "r0098",
+          "date_added": "2020-03-16"
+        },
+        {
+          "release_id": "r0020",
+          "date_added": "2020-10-22"
+        },
+        {
+          "release_id": "r0061",
+          "date_added": "2021-01-06"
+        },
+        {
+          "release_id": "r0062",
+          "date_added": "2021-02-14"
+        },
+        {
+          "release_id": "r0059",
+          "date_added": "2021-05-08"
+        },
+        {
+          "release_id": "r0031",
+          "date_added": "2021-09-10"
+        },
+        {
+          "release_id": "r0036",
+          "date_added": "2021-10-16"
+        },
+        {
+          "release_id": "r0025",
+          "date_added": "2022-08-08"
+        },
+        {
+          "release_id": "r0054",
+          "date_added": "2022-08-17"
+        },
+        {
+          "release_id": "r0032",
+          "date_added": "2022-09-01"
+        },
+        {
+          "release_id": "r0058",
+          "date_added": "2022-12-01"
+        },
+        {
+          "release_id": "r0099",
+          "date_added": "2022-12-01"
+        },
+        {
+          "release_id": "r0019",
+          "date_added": "2023-05-11"
+        },
+        {
+          "release_id": "r0001",
+          "date_added": "2023-05-26"
+        },
+        {
+          "release_id": "r0112",
+          "date_added": "2023-10-02"
+        },
+        {
+          "release_id": "r0118",
+          "date_added": "2023-12-06"
+        },
+        {
+          "release_id": "r0117",
+          "date_added": "2024-01-05"
+        },
+        {
+          "release_id": "r0053",
+          "date_added": "2024-06-16"
+        }
+      ],
+      "wants": [
+        "r0026",
+        "r0027",
+        "r0035"
+      ]
+    },
+    {
+      "id": "u011",
+      "name": "Collector 11",
+      "taste_genres": [
+        "Classical",
+        "Hip Hop",
+        "Rock"
+      ],
+      "collected": [
+        {
+          "release_id": "r0119",
+          "date_added": "2018-01-14"
+        },
+        {
+          "release_id": "r0033",
+          "date_added": "2018-02-03"
+        },
+        {
+          "release_id": "r0059",
+          "date_added": "2018-05-02"
+        },
+        {
+          "release_id": "r0007",
+          "date_added": "2018-05-10"
+        },
+        {
+          "release_id": "r0060",
+          "date_added": "2018-08-13"
+        },
+        {
+          "release_id": "r0103",
+          "date_added": "2018-10-31"
+        },
+        {
+          "release_id": "r0061",
+          "date_added": "2018-12-28"
+        },
+        {
+          "release_id": "r0018",
+          "date_added": "2018-12-31"
+        },
+        {
+          "release_id": "r0117",
+          "date_added": "2019-03-24"
+        },
+        {
+          "release_id": "r0057",
+          "date_added": "2020-04-05"
+        },
+        {
+          "release_id": "r0113",
+          "date_added": "2020-08-17"
+        },
+        {
+          "release_id": "r0028",
+          "date_added": "2020-08-21"
+        },
+        {
+          "release_id": "r0082",
+          "date_added": "2021-01-22"
+        },
+        {
+          "release_id": "r0116",
+          "date_added": "2021-09-29"
+        },
+        {
+          "release_id": "r0045",
+          "date_added": "2021-10-25"
+        },
+        {
+          "release_id": "r0110",
+          "date_added": "2021-12-31"
+        },
+        {
+          "release_id": "r0083",
+          "date_added": "2022-07-28"
+        },
+        {
+          "release_id": "r0005",
+          "date_added": "2022-09-25"
+        },
+        {
+          "release_id": "r0006",
+          "date_added": "2022-12-12"
+        },
+        {
+          "release_id": "r0091",
+          "date_added": "2023-03-11"
+        },
+        {
+          "release_id": "r0055",
+          "date_added": "2023-03-27"
+        },
+        {
+          "release_id": "r0049",
+          "date_added": "2023-10-17"
+        },
+        {
+          "release_id": "r0100",
+          "date_added": "2024-01-10"
+        },
+        {
+          "release_id": "r0026",
+          "date_added": "2024-05-13"
+        },
+        {
+          "release_id": "r0090",
+          "date_added": "2024-09-12"
+        }
+      ],
+      "wants": [
+        "r0097",
+        "r0101"
+      ]
+    },
+    {
+      "id": "u012",
+      "name": "Collector 12",
+      "taste_genres": [
+        "Hip Hop",
+        "Reggae",
+        "Rock"
+      ],
+      "collected": [
+        {
+          "release_id": "r0018",
+          "date_added": "2018-04-26"
+        },
+        {
+          "release_id": "r0103",
+          "date_added": "2018-10-15"
+        },
+        {
+          "release_id": "r0005",
+          "date_added": "2019-09-08"
+        },
+        {
+          "release_id": "r0045",
+          "date_added": "2019-09-08"
+        },
+        {
+          "release_id": "r0033",
+          "date_added": "2021-06-28"
+        },
+        {
+          "release_id": "r0117",
+          "date_added": "2021-09-07"
+        },
+        {
+          "release_id": "r0102",
+          "date_added": "2022-03-26"
+        },
+        {
+          "release_id": "r0119",
+          "date_added": "2022-06-20"
+        },
+        {
+          "release_id": "r0090",
+          "date_added": "2022-07-19"
+        },
+        {
+          "release_id": "r0036",
+          "date_added": "2022-07-22"
+        },
+        {
+          "release_id": "r0068",
+          "date_added": "2022-11-22"
+        },
+        {
+          "release_id": "r0069",
+          "date_added": "2023-05-15"
+        },
+        {
+          "release_id": "r0115",
+          "date_added": "2023-11-12"
+        },
+        {
+          "release_id": "r0043",
+          "date_added": "2024-04-09"
+        },
+        {
+          "release_id": "r0083",
+          "date_added": "2024-10-28"
+        },
+        {
+          "release_id": "r0092",
+          "date_added": "2024-12-12"
+        }
+      ],
+      "wants": [
+        "r0085",
+        "r0101",
+        "r0114"
+      ]
+    }
+  ]
+}
