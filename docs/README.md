@@ -9,6 +9,7 @@ flowchart TD
     Overview[README] --> Configure[Configuration]
     Overview --> Operate[Administration]
     Overview --> Develop[Usage and performance]
+    Overview --> Evaluate[Offline evaluation]
     Overview --> Decide[Architecture decisions]
     Overview --> Release[Release compliance]
 ```
@@ -23,6 +24,7 @@ flowchart TD
 - [Performance](performance-guide.md)
 - [Coverage policy](coverage-policy.md)
 - [Query performance optimizations](query-performance-optimizations.md)
+- [Offline evaluation harness](evaluation.md)
 - [Transactional email decision](transactional-email-provider-decision.md)
 - [Architecture decisions](architecture-decisions.md)
 - [Release compliance](release-compliance.md)
