@@ -1279,3 +1279,83 @@ class TestGenreTreeQueries:
         mock_run.assert_called_once()
         _, kwargs = mock_run.call_args
         assert kwargs["timeout"] == 30.0
+
+
+_NEO4J_RELEASE: dict[str, Any] = {"id": "10", "name": "Selected Ambient Works", "year": 1992, "formats": ["Vinyl"]}
+_MEDIA_BLOCK: dict[str, Any] = {"taxonomy_version": "1", "items": [], "families": ["vinyl"]}
+_IDENTIFIER_ITEMS: list[dict[str, Any]] = [
+    {"type": "barcode", "value": "5 012394 144777", "description": None},
+    {"type": "matrix_runout", "value": "PB 41447-A2", "description": "A side runout"},
+]
+_COMPANY_ITEMS: list[dict[str, Any]] = [{"name": "Damont", "discogs_id": 12345, "role": "Pressed By", "role_category": "pressing", "catno": None}]
+
+
+class TestReleaseDetailCatalogBlocks:
+    """ADR 0011: release detail carries `identifiers`, `companies`, and `country`."""
+
+    def _get(self, test_client: TestClient, blocks: dict[str, Any]) -> dict[str, Any]:
+        with (
+            patch.dict("api.routers.explore.DETAILS_DISPATCH", {"release": AsyncMock(return_value=dict(_NEO4J_RELEASE))}),
+            patch("api.routers.explore.get_release_media", AsyncMock(return_value=_MEDIA_BLOCK)),
+            patch("api.routers.explore.get_release_catalog_blocks", AsyncMock(return_value=blocks)),
+        ):
+            response = test_client.get("/api/node/10?type=release")
+        assert response.status_code == 200
+        return dict(response.json())
+
+    def test_release_detail_carries_all_three_blocks(self, test_client: TestClient) -> None:
+        body = self._get(
+            test_client,
+            {"identifiers": _IDENTIFIER_ITEMS, "companies": _COMPANY_ITEMS, "country": "UK"},
+        )
+
+        assert body["identifiers"] == _IDENTIFIER_ITEMS
+        assert body["companies"] == _COMPANY_ITEMS
+        assert body["country"] == "UK"
+
+    def test_release_without_blocks_still_carries_the_keys(self, test_client: TestClient) -> None:
+        """Empty lists and a null country, so a consumer never branches on key presence."""
+        body = self._get(test_client, {"identifiers": [], "companies": [], "country": None})
+
+        assert body["identifiers"] == []
+        assert body["companies"] == []
+        assert body["country"] is None
+
+    def test_the_blocks_are_additive_beside_media(self, test_client: TestClient) -> None:
+        body = self._get(test_client, {"identifiers": [], "companies": [], "country": "UK"})
+
+        assert body["media"] == _MEDIA_BLOCK
+        assert body["name"] == "Selected Ambient Works"
+        assert body["formats"] == ["Vinyl"]
+
+    def test_blocks_are_read_for_the_requested_release(self, test_client: TestClient) -> None:
+        mock_blocks = AsyncMock(return_value={"identifiers": [], "companies": [], "country": None})
+        with (
+            patch.dict("api.routers.explore.DETAILS_DISPATCH", {"release": AsyncMock(return_value=dict(_NEO4J_RELEASE))}),
+            patch("api.routers.explore.get_release_media", AsyncMock(return_value=_MEDIA_BLOCK)),
+            patch("api.routers.explore.get_release_catalog_blocks", mock_blocks),
+        ):
+            test_client.get("/api/node/10?type=release")
+
+        mock_blocks.assert_awaited_once_with(ANY, "10")
+
+    def test_non_release_detail_gains_none_of_them(self, test_client: TestClient) -> None:
+        result = {"id": "1", "name": "Aphex Twin", "release_count": 50, "label_count": 5, "alias_count": 2}
+        with patch.dict("api.routers.explore.DETAILS_DISPATCH", {"artist": AsyncMock(return_value=result)}):
+            response = test_client.get("/api/node/1?type=artist")
+
+        assert response.json() == result
+
+    @pytest.mark.asyncio
+    async def test_no_postgres_pool_yields_the_empty_answer(self) -> None:
+        """The three keys are present even with no relational store configured."""
+        import api.routers.explore as explore_router
+
+        original = explore_router._pg_pool
+        try:
+            explore_router._pg_pool = None
+            blocks = await explore_router._resolve_release_blocks("10")
+        finally:
+            explore_router._pg_pool = original
+
+        assert blocks == {"identifiers": [], "companies": [], "country": None}

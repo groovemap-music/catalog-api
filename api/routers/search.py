@@ -41,6 +41,7 @@ def _search_filters(
     media: list[str],
     year_min: int | None,
     year_max: int | None,
+    countries: list[str] | None = None,
 ) -> list[str]:
     """Render everything that narrowed the search as the schema's flat string array.
 
@@ -48,11 +49,12 @@ def _search_filters(
     `result_count`, and `request_id`, so the entity-type restriction the epic design named
     as its own `types` field has nowhere of its own to go. It is a filter on the query in
     every sense that matters to an analysis, so it travels in `filters` under a `type:`
-    prefix beside the genre, media, and year bounds rather than being dropped.
+    prefix beside the genre, media, country, and year bounds rather than being dropped.
     """
     applied = {f"type:{entity_type}" for entity_type in requested_types}
     applied.update(f"genre:{genre}" for genre in genres)
     applied.update(f"media:{medium}" for medium in media)
+    applied.update(f"country:{country}" for country in countries or [])
     if year_min is not None:
         applied.add(f"year_min:{year_min}")
     if year_max is not None:
@@ -117,6 +119,10 @@ async def search(
         default=[],
         description="Repeated media family or medium id (ADR 0007) to filter release results",
     ),
+    country: list[str] = Query(
+        default=[],
+        description="Repeated release country (ADR 0011), matched exactly as the catalog stores it, to filter release results",
+    ),
     year_min: int | None = Query(default=None, ge=1000, le=9999, description="Minimum release year"),
     year_max: int | None = Query(default=None, ge=1000, le=9999, description="Maximum release year"),
     limit: int = Query(default=20, ge=1, le=100, description="Results per page"),
@@ -148,6 +154,12 @@ async def search(
     # Parse and validate media filter (ADR 0007 family/medium ids)
     media_list = [m.strip() for m in media if m and m.strip()]
     media_families, media_mediums, unknown_media = split_media_filter(media_list)
+
+    # Countries are an open vocabulary -- Discogs writes country names, MusicBrainz writes
+    # ISO codes, and neither is a closed set this service owns -- so an unknown value is a
+    # filter that matches nothing rather than a 400. Blanks are dropped so a trailing
+    # `&country=` cannot empty a page.
+    country_list = [c.strip() for c in country if c and c.strip()]
     if unknown_media:
         return JSONResponse(
             content={"error": f"Invalid media id(s): {', '.join(unknown_media)}"},
@@ -162,6 +174,7 @@ async def search(
         media=media_list,
         year_min=year_min,
         year_max=year_max,
+        country=country_list,
     )
 
     result = await execute_search(
@@ -176,6 +189,7 @@ async def search(
         offset=offset,
         media_families=media_families,
         media_mediums=media_mediums,
+        countries=country_list,
     )
 
     # ADR 0010 records the search only for a caller the service can pseudonymise. An
@@ -187,7 +201,7 @@ async def search(
             user_id,
             str(new_id()),
             q,
-            _search_filters(requested_types, genre_list, media_list, year_min, year_max),
+            _search_filters(requested_types, genre_list, media_list, year_min, year_max, country_list),
             result.get("results", []),
         )
 

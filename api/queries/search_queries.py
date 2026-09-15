@@ -7,6 +7,7 @@ Entity tables all have schema:
 Name fields: artists/labels → data->>'name', masters/releases → data->>'title'
 Genres field (JSONB array): releases.data->'genres'
 Year field (text): masters/releases.data->>'year'
+Country field (text): releases.data->>'country' (ADR 0011)
 
 Runs 6 concurrent queries per uncached search:
   1. Paginated results
@@ -44,12 +45,12 @@ ALL_TYPES: list[str] = ["artist", "label", "master", "release"]
 # frequency for high-cardinality terms like "Rock" that take ~9s to compute)
 _SEARCH_CACHE_TTL = 3600
 
-# Maps entity type → (table, name_field, has_year, has_genres, has_media)
-_ENTITY_CONFIG: dict[str, tuple[str, str, bool, bool, bool]] = {
-    "artist": ("artists", "name", False, False, False),
-    "label": ("labels", "name", False, False, False),
-    "master": ("masters", "title", True, False, False),
-    "release": ("releases", "title", True, True, True),
+# Maps entity type → (table, name_field, has_year, has_genres, has_media, has_country)
+_ENTITY_CONFIG: dict[str, tuple[str, str, bool, bool, bool, bool]] = {
+    "artist": ("artists", "name", False, False, False, False),
+    "label": ("labels", "name", False, False, False, False),
+    "master": ("masters", "title", True, False, False, False),
+    "release": ("releases", "title", True, True, True, True),
 }
 
 
@@ -89,6 +90,7 @@ def cache_key(
     limit: int,
     offset: int,
     media: list[str] | None = None,
+    countries: list[str] | None = None,
 ) -> str:
     """Stable Redis cache key for the given search parameters."""
     params = {
@@ -100,6 +102,7 @@ def cache_key(
         "limit": limit,
         "offset": offset,
         "media": sorted(media) if media else [],
+        "countries": sorted(countries) if countries else [],
     }
     digest = hashlib.md5(json.dumps(params, sort_keys=True).encode(), usedforsecurity=False).hexdigest()
     return f"search:{digest}"
@@ -179,6 +182,31 @@ def _media_filter_clause(families: list[str], mediums: list[str], column: sql.Co
     return (sql.SQL("({c} IS NULL OR ({match}))").format(c=col, match=match_clause), params)
 
 
+def _country_filter_clause(countries: list[str], column: sql.Composable | None = None) -> tuple[sql.Composable, list[Any]]:
+    """Return (SQL_clause, params) for optional release-country filtering (ADR 0011).
+
+    Only the releases table carries a country, so the clause is applied on the releases
+    branch of the union and the other branches pass it on ``NULL IS NULL`` — the same
+    shape :func:`_genre_filter_clause` and :func:`_media_filter_clause` use, and the reason
+    a country filter narrows release hits without silently emptying the artist and label
+    hits beside them.
+
+    Requested countries are OR-combined through ``= ANY``, which is how one facet's
+    multiple selected values combine everywhere else on this surface, and which the
+    existing ``releases.data->>'country'`` index answers. The value is matched exactly as
+    the catalog stores it: Discogs writes country names rather than ISO codes, and folding
+    them here would invent an equivalence the catalog never asserted.
+
+    ``column`` lets callers point the clause at a raw column expression instead of the
+    default ``country`` identifier — needed to push the filter into a per-table subquery
+    *before* its rank LIMIT, same as the other three filters.
+    """
+    if not countries:
+        return (sql.SQL("TRUE"), [])
+    col = column if column is not None else sql.SQL("country")
+    return (sql.SQL("({c} IS NULL OR {c} = ANY(%s::text[]))").format(c=col), [countries])
+
+
 def _entity_select(
     entity_type: str,
     name_field: str,
@@ -192,6 +220,8 @@ def _entity_select(
     has_media: bool = False,
     media_families: list[str] | None = None,
     media_mediums: list[str] | None = None,
+    has_country: bool = False,
+    countries: list[str] | None = None,
 ) -> tuple[sql.Composable, list[Any]]:
     """Return a (SELECT fragment, params) for one entity type in the UNION ALL.
 
@@ -199,15 +229,20 @@ def _entity_select(
     rows (ordered by ts_rank DESC).  This prevents high-cardinality terms
     like "Rock" from materializing 100K+ rows in the UNION ALL CTE.
 
-    year_min/year_max/genres/media — when given — are applied INSIDE this
-    subquery's WHERE, before its ORDER BY rank LIMIT, so the rank cap is
+    year_min/year_max/genres/media/countries — when given — are applied INSIDE
+    this subquery's WHERE, before its ORDER BY rank LIMIT, so the rank cap is
     applied to already-filtered rows. Applying them only in an outer WHERE
     (after the cap) would silently drop/empty filtered results for
-    high-cardinality terms, since rank is uncorrelated with year/genre/media.
+    high-cardinality terms, since rank is uncorrelated with those facets.
+
+    The fragment always projects a ``country`` column so every branch of the
+    UNION ALL has the same shape; only releases carry one, and the rest
+    project NULL.
     """
     year_col = sql.SQL("(data->>'year')") if has_year else sql.SQL("NULL::text")
     genres_col = sql.SQL("(data->'genres')") if has_genres else sql.SQL("NULL::jsonb")
     media_col = sql.SQL("media") if has_media else sql.SQL("NULL::jsonb")
+    country_col = sql.SQL("(data->>'country')") if has_country else sql.SQL("NULL::text")
     table = sql.Identifier(_ENTITY_CONFIG[entity_type][0])
     name_lit = sql.Literal(name_field)
     # data_id is a unique tiebreaker so the per-table rank cap selects a
@@ -217,14 +252,19 @@ def _entity_select(
     year_clause, year_params = _year_filter_clause(year_min, year_max, column=year_col)
     genre_clause, genre_params = _genre_filter_clause(genres or [], column=genres_col)
     media_clause, media_params = _media_filter_clause(media_families or [], media_mediums or [], column=media_col)
-    filter_params = [*year_params, *genre_params, *media_params]
-    filter_clause = sql.SQL(" AND {y} AND {g} AND {m}").format(y=year_clause, g=genre_clause, m=media_clause) if filter_params else sql.SQL("")
+    country_clause, country_params = _country_filter_clause(countries or [], column=country_col)
+    filter_params = [*year_params, *genre_params, *media_params, *country_params]
+    filter_clause = (
+        sql.SQL(" AND {y} AND {g} AND {m} AND {c}").format(y=year_clause, g=genre_clause, m=media_clause, c=country_clause)
+        if filter_params
+        else sql.SQL("")
+    )
 
     select_sql = sql.SQL(
         "(SELECT {entity_type}::text AS type, data_id AS id, data->>{name} AS name,"
         " ts_rank(to_tsvector('english', COALESCE(data->>{name}, '')), q.tsq) AS rank,"
         " ts_headline('english', COALESCE(data->>{name}, ''), q.tsq) AS highlight,"
-        " {year_col} AS year, {genres_col} AS genres"
+        " {year_col} AS year, {genres_col} AS genres, {country_col} AS country"
         " FROM {table}, q"
         " WHERE to_tsvector('english', COALESCE(data->>{name}, '')) @@ q.tsq"
         "{filter_clause}"
@@ -234,6 +274,7 @@ def _entity_select(
         name=name_lit,
         year_col=year_col,
         genres_col=genres_col,
+        country_col=country_col,
         table=table,
         filter_clause=filter_clause,
         limit_clause=limit_clause,
@@ -250,6 +291,7 @@ def _build_union(
     genres: list[str] | None = None,
     media_families: list[str] | None = None,
     media_mediums: list[str] | None = None,
+    countries: list[str] | None = None,
 ) -> tuple[sql.Composable, list[Any]]:
     """Build UNION ALL of SELECT fragments for the requested entity types.
 
@@ -259,6 +301,8 @@ def _build_union(
     the rank cap is applied to already-filtered rows (see _entity_select).
     media_families/media_mediums are ignored for entity types with no media
     column (only "release" has one) — see _entity_select's has_media flag.
+    countries is likewise ignored for entity types with no country column
+    (again only "release") — see _entity_select's has_country flag.
 
     Returns (UNION_ALL SQL fragment, flattened params list in emission order).
     """
@@ -267,7 +311,7 @@ def _build_union(
     parts: list[sql.Composable] = []
     params: list[Any] = []
     for t in types:
-        _table, name_field, has_year, has_genres, has_media = _ENTITY_CONFIG[t]
+        _table, name_field, has_year, has_genres, has_media, has_country = _ENTITY_CONFIG[t]
         select_sql, select_params = _entity_select(
             t,
             name_field,
@@ -280,6 +324,8 @@ def _build_union(
             has_media=has_media,
             media_families=media_families,
             media_mediums=media_mediums,
+            has_country=has_country,
+            countries=countries,
         )
         parts.append(select_sql)
         params.extend(select_params)
@@ -297,6 +343,7 @@ async def _run_results(
     offset: int,
     media_families: list[str] | None = None,
     media_mediums: list[str] | None = None,
+    countries: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch paginated search results.
 
@@ -321,12 +368,13 @@ async def _run_results(
         genres=genres,
         media_families=media_families,
         media_mediums=media_mediums,
+        countries=countries,
     )
 
     query = sql.SQL(
         "WITH q AS (SELECT plainto_tsquery('english', %s) AS tsq),"
         " results AS ({union_sql})"
-        " SELECT type, id, name, rank, highlight, year, genres"
+        " SELECT type, id, name, rank, highlight, year, genres, country"
         " FROM results"
         " ORDER BY rank DESC, id"
         " LIMIT %s OFFSET %s"
@@ -350,6 +398,7 @@ async def _run_total(
     year_max: int | None,
     media_families: list[str] | None = None,
     media_mediums: list[str] | None = None,
+    countries: list[str] | None = None,
 ) -> int:
     """Count total matching results (ignoring pagination).
 
@@ -368,6 +417,7 @@ async def _run_total(
         genres=genres,
         media_families=media_families,
         media_mediums=media_mediums,
+        countries=countries,
     )
 
     query = sql.SQL(
@@ -388,7 +438,7 @@ async def _run_type_counts(pool: AsyncPostgreSQLPool, q: str, types: list[str]) 
     """
     union_parts = []
     for t in types:
-        table, name_field, _, _, _ = _ENTITY_CONFIG[t]
+        table, name_field, _, _, _, _ = _ENTITY_CONFIG[t]
         union_parts.append(
             sql.SQL(
                 "SELECT {type}::text AS type,"
@@ -509,6 +559,11 @@ def _format_result(row: dict[str, Any], gm_ids: dict[tuple[str, str], str] | Non
         "type": row["type"],
         "id": row["id"],
         "gm_id": (gm_ids or {}).get((row["type"], str(row["id"]))),
+        # ADR 0011, top-level beside `gm_id` rather than inside `metadata`: the country
+        # facet filters on it, so a hit has to be able to show what it was filtered by.
+        # None for every entity type but a release, and for a release the catalog never
+        # gave a country.
+        "country": row.get("country"),
         "name": row["name"] or "",
         "highlight": row["highlight"] or row["name"] or "",
         "relevance": round(float(row["rank"]), 4) if row.get("rank") else 0.0,
@@ -528,6 +583,7 @@ async def execute_search(
     offset: int,
     media_families: list[str] | None = None,
     media_mediums: list[str] | None = None,
+    countries: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run full search and return structured response dict.
 
@@ -537,13 +593,19 @@ async def execute_search(
     media_families/media_mediums (ADR 0007 family/medium ids, already
     validated by the caller via :func:`split_media_filter`) filter release
     results and are OR-combined with each other, AND-combined with genres.
+
+    countries (ADR 0011, matched against ``releases.data->>'country'`` exactly
+    as stored) filter release results the same way: OR-combined with each
+    other, AND-combined with every other facet. They are part of the cache key,
+    so a filtered page never serves an unfiltered body.
     """
     if not types:
         raise ValueError("types must not be empty")
 
     media_families = media_families or []
     media_mediums = media_mediums or []
-    key = cache_key(q, types, genres, year_min, year_max, limit, offset, media=[*media_families, *media_mediums])
+    countries = countries or []
+    key = cache_key(q, types, genres, year_min, year_max, limit, offset, media=[*media_families, *media_mediums], countries=countries)
 
     # Cache-aside read — Redis is a pure optimization. A Redis outage (or a
     # corrupt cache entry) must degrade to a fresh PostgreSQL query, never 500.
@@ -558,8 +620,8 @@ async def execute_search(
     logger.debug("🔍 Search cache miss, querying DB", q=q, types=types)
 
     results_rows, total, type_counts, genre_facets, decade_facets, media_facets = await asyncio.gather(
-        _run_results(pool, q, types, genres, year_min, year_max, limit, offset, media_families, media_mediums),
-        _run_total(pool, q, types, genres, year_min, year_max, media_families, media_mediums),
+        _run_results(pool, q, types, genres, year_min, year_max, limit, offset, media_families, media_mediums, countries),
+        _run_total(pool, q, types, genres, year_min, year_max, media_families, media_mediums, countries),
         _run_type_counts(pool, q, types),
         _run_genre_facets(pool, q),
         _run_decade_facets(pool, q),
