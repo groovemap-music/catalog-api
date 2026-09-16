@@ -199,6 +199,7 @@ request that filled the cache is not the request that shows it to the next calle
 
 | Field | Value |
 | --- | --- |
+| `surface` | `fit` |
 | `policy_id` | `cratefit_v0` |
 | `position` | `1` — CrateFit ranks nothing; it answers about the one record the caller named |
 | `score` | The combined `fit` |
@@ -209,14 +210,10 @@ A release the alias table does not carry has no native id and therefore no impre
 profile is still returned, `impression_id` is `null`, and the gap is counted — the same
 way the recommendation surfaces count theirs.
 
-**One deviation from the epic design is recorded here.** The design named a new impression
-surface, `"fit"`. The surface vocabulary is vendored from `groovemap-runtime` at a pinned
-revision, it is closed over `search` / `recommendation` / `collection` / `wantlist` /
-`consent` / `account`, and `common.events.validate_impression` rejects anything outside
-it — so an impression stamped against a literal `"fit"` today would be *dropped and
-counted as invalid* rather than written, which is precisely the record the surface exists
-to keep. A fit profile is a ranked showing of one candidate, which is what the
-vocabulary's `recommendation` surface names, and `policy_id` is what tells a fit row apart
-from an explore or similar-artist row. `api.activity.SURFACE_FIT` is therefore aliased to
-`SURFACE_RECOMMENDATION`, and it is the only line that changes when the vocabulary gains a
-`fit` surface.
+The surface vocabulary is vendored from `groovemap-runtime` at a pinned revision and now
+carries its own `fit` surface, with `fit.shown`, `fit.opened`, `fit.saved`,
+`fit.dismissed`, and `fit.hidden` event types alongside it. `api.activity.SURFACE_FIT` is
+the literal `"fit"`, and `policy_id` is still what tells a fit row apart from an explore or
+similar-artist row within that surface. `fit.opened`, `fit.saved`, `fit.dismissed`, and
+`fit.hidden` are reportable by a client through `POST /api/activity/events`, the same way
+the equivalent `recommendation.*` outcomes are.
