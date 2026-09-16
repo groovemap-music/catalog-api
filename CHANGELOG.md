@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v0.4.0 (2026-09-15)
+
+### Feat
+
+- **activity**: record fit impressions against the literal fit surface
+- **fit**: add structured evidence_items beside each component's sentences
+
 ## v0.3.0 (2026-09-15)
 
 ### Feat
