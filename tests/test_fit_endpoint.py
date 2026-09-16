@@ -249,9 +249,7 @@ def test_cache_hit_still_stamps_a_fresh_impression(test_client: TestClient, auth
     items = impression_mock.await_args.args[4]
     assert policy_id == "cratefit_v0"
     assert items == [(1, _NATIVE_ID, 0.75, 1.0)]
-    from common.events import surfaces
-
-    assert surface in surfaces()
+    assert surface == "fit"
 
 
 def test_impression_is_stamped_at_position_one_with_the_fit_as_its_score(test_client: TestClient, auth_headers: dict[str, str]) -> None:
@@ -358,17 +356,17 @@ def test_the_policy_id_is_the_fit_version() -> None:
     assert activity.POLICY_CRATEFIT == FIT_VERSION
 
 
-def test_the_fit_surface_is_one_the_vocabulary_accepts() -> None:
-    """The real invariant behind SURFACE_FIT, and what will keep holding when it changes.
+def test_the_fit_surface_is_the_literal_the_vocabulary_carries() -> None:
+    """SURFACE_FIT is the literal `fit`, and the vendored vocabulary accepts it.
 
     ADR 0010's vendored vocabulary closes the surface set and `validate_impression`
     rejects anything outside it, so a surface constant that is not a member would drop
-    every fit impression silently. This is the assertion that catches that, whether the
-    constant stays aliased to `recommendation` or becomes a literal `fit` the day the
-    vocabulary carries one.
+    every fit impression silently. This pins both halves: the constant is the literal
+    the epic design asked for, and that literal is one `common.events.surfaces` accepts.
     """
     from common.events import surfaces
 
     import api.activity as activity
 
+    assert activity.SURFACE_FIT == "fit"
     assert activity.SURFACE_FIT in surfaces()

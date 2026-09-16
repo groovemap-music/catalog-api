@@ -988,6 +988,20 @@ RECOMMENDATION_OUTCOMES: tuple[str, ...] = (
     "recommendation.hidden",
 )
 
+# The same four outcomes, for the `fit` surface. `fit.shown` is excluded for the same
+# reason `recommendation.shown` is: it is written server side alongside the impression
+# (see `api.routers.fit._stamp_impression`), never client-reported.
+FIT_OUTCOMES: tuple[str, ...] = (
+    "fit.opened",
+    "fit.saved",
+    "fit.dismissed",
+    "fit.hidden",
+)
+
+# The full set of event types a client may report through POST /api/activity/events,
+# across every surface that has client-reportable outcomes.
+CLIENT_REPORTABLE_OUTCOMES: tuple[str, ...] = RECOMMENDATION_OUTCOMES + FIT_OUTCOMES
+
 
 class ActivityOutcomeRequest(BaseModel):
     """Request body for POST /api/activity/events.
@@ -996,17 +1010,17 @@ class ActivityOutcomeRequest(BaseModel):
     `impression_outcome` payload requires both and names no other key.
     """
 
-    event_type: str = Field(description=f"One of: {', '.join(RECOMMENDATION_OUTCOMES)}")
+    event_type: str = Field(description=f"One of: {', '.join(CLIENT_REPORTABLE_OUTCOMES)}")
     impression_id: UUID = Field(description="The impression the outcome is reported against")
     item_id: UUID = Field(description="The native id of the item the impression showed")
 
     @field_validator("event_type")
     @classmethod
     def validate_event_type(cls, v: str) -> str:
-        """Reject any type outside the four client-reportable outcomes."""
+        """Reject any type outside the client-reportable outcomes."""
         v = v.strip()
-        if v not in RECOMMENDATION_OUTCOMES:
-            raise ValueError(f"Unknown event_type {v!r}; must be one of: {', '.join(RECOMMENDATION_OUTCOMES)}")
+        if v not in CLIENT_REPORTABLE_OUTCOMES:
+            raise ValueError(f"Unknown event_type {v!r}; must be one of: {', '.join(CLIENT_REPORTABLE_OUTCOMES)}")
         return v
 
 

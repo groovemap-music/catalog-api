@@ -334,7 +334,16 @@ class TestOutcomeEndpoint:
 
     @pytest.mark.parametrize(
         "event_type",
-        ["recommendation.opened", "recommendation.saved", "recommendation.dismissed", "recommendation.hidden"],
+        [
+            "recommendation.opened",
+            "recommendation.saved",
+            "recommendation.dismissed",
+            "recommendation.hidden",
+            "fit.opened",
+            "fit.saved",
+            "fit.dismissed",
+            "fit.hidden",
+        ],
     )
     def test_each_outcome_is_accepted_and_recorded(self, test_client: TestClient, auth_headers: dict[str, str], event_type: str) -> None:
         with patch("api.activity.record_event", AsyncMock()) as record_event:
@@ -359,9 +368,13 @@ class TestOutcomeEndpoint:
             {"event_type": "recommendation.opened", "item_id": ITEM_ID},
             {"event_type": "recommendation.opened", "impression_id": "not-a-uuid", "item_id": ITEM_ID},
             {"event_type": "recommendation.opened", "impression_id": IMPRESSION_ID},
+            {"event_type": "fit.shown", "impression_id": IMPRESSION_ID, "item_id": ITEM_ID},
+            {"event_type": "fit.invented", "impression_id": IMPRESSION_ID, "item_id": ITEM_ID},
         ],
     )
-    def test_anything_but_the_four_outcomes_is_rejected(self, test_client: TestClient, auth_headers: dict[str, str], body: dict[str, Any]) -> None:
+    def test_anything_but_the_client_reportable_outcomes_is_rejected(
+        self, test_client: TestClient, auth_headers: dict[str, str], body: dict[str, Any]
+    ) -> None:
         with patch("api.activity.record_event", AsyncMock()) as record_event:
             response = test_client.post("/api/activity/events", json=body, headers=auth_headers)
 
@@ -380,6 +393,12 @@ class TestOutcomeEndpoint:
 
         assert set(RECOMMENDATION_OUTCOMES) < set(event_types())
         assert all(payload_schema_for(outcome)["required"] == ["impression_id", "item_id"] for outcome in RECOMMENDATION_OUTCOMES)
+
+    def test_the_fit_outcomes_are_the_vocabulary_types_a_client_may_write(self) -> None:
+        from api.models import FIT_OUTCOMES
+
+        assert set(FIT_OUTCOMES) < set(event_types())
+        assert all(payload_schema_for(outcome)["required"] == ["impression_id", "item_id"] for outcome in FIT_OUTCOMES)
 
 
 class TestBatchWriter:

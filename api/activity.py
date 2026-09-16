@@ -113,17 +113,12 @@ SURFACE_RECOMMENDATION: Final = "recommendation"
 
 # The surface the CrateFit item-in-hand profile is recorded against.
 #
-# The epic design asked for a literal ``"fit"``, and it cannot be one yet. The surface
-# vocabulary is vendored from `groovemap-runtime` at a pinned revision, it is closed over
-# search / recommendation / collection / wantlist / consent / account, and
-# `common.events.validate_impression` rejects anything outside it — so an impression
-# stamped against ``"fit"`` today would be dropped and counted as invalid rather than
-# written, which is precisely the record the surface exists to keep. A fit profile *is* a
-# ranked showing of one candidate, which is what the vocabulary's `recommendation` surface
-# names, and :data:`POLICY_CRATEFIT` is what tells a fit row apart from an explore or
-# similar-artist row. When the vocabulary gains a `fit` surface, this constant is the only
-# line that changes.
-SURFACE_FIT: Final = SURFACE_RECOMMENDATION
+# The vendored vocabulary now carries its own `fit` surface, with `fit.shown`,
+# `fit.opened`, `fit.saved`, `fit.dismissed`, and `fit.hidden` alongside it, so this is the
+# literal the epic design asked for rather than an alias to `recommendation`.
+# :data:`POLICY_CRATEFIT` is still what tells a fit row apart from an explore or
+# similar-artist row within its own surface.
+SURFACE_FIT: Final = "fit"
 
 # The ranking policy each recommendation surface ran, named and versioned so an offline
 # evaluation can tell which decision procedure produced a row. A change to how a surface
