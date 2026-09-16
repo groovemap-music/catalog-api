@@ -64,6 +64,7 @@ dev = [
     "commitizen>=4.18.0",
     "cyclonedx-bom>=7.3.1",
     "fakeredis>=2.37.1",
+    "groovemap-database-schema==0.3.0",
     "hypothesis>=6.167.1",
     "mypy>=2.3.1",
     "pip-audit>=2.10.1",
@@ -88,6 +89,7 @@ exclude-newer = "2 days"
 [tool.uv.sources]
 groovemap-runtime = { git = "https://github.com/groovemap-music/python-libraries.git", rev = "e372b6a7598ae31ee6578fdff39bc920bedd7136" }
 groovemap-agent-tools = { git = "https://github.com/groovemap-music/python-libraries.git", subdirectory = "agent-tools", rev = "e372b6a7598ae31ee6578fdff39bc920bedd7136" }
+groovemap-database-schema = { git = "https://github.com/groovemap-music/database-schema.git", rev = "03e8aba11f72d26237f7dfbbecf234ae9437e85e" }
 
 [tool.ruff]
 extend-exclude = [
