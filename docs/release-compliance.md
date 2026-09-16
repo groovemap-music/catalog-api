@@ -22,7 +22,15 @@ flowchart TD
 - `just format-check`, `just lint`, and `just contract-check` are focused, locked source checks;
   `just source-check` composes those three capabilities.
 - `just test` executes the suite with coverage, while `just coverage` is an alias rather than a
-  second copy of the command.
+  second copy of the command. It excludes the `integration` marker, so nothing it runs needs a
+  live database.
+- `just test-integration` is the engine-backed suite and is **not** part of `just check` or of
+  shared CI. It needs Docker, starts throwaway PostgreSQL and Neo4j containers, applies the
+  authoritative schema from `groovemap-music/database-schema` at the revision
+  `contracts/persistence/v1/source.json` records, and runs `tests/test_real_databases.py`
+  against them. Run it locally before submitting a change to the collection sync or to the
+  native identity read paths; it is the only gate that proves those statements against the
+  real tables rather than a mock.
 - `just secret-scan` is the narrow gitleaks capability used by both local and shared CI gates.
 - `just check` runs formatting, linting, type checks, the complete test suite, secret scans,
   wheel construction, installed-wheel smoke tests, dependency-license policy, and version checks.
