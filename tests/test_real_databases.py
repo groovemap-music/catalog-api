@@ -12,6 +12,7 @@ import pytest
 import pytest_asyncio
 import respx
 from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver, parse_postgres_host_port
+from groovemap_schema.postgres import create_postgres_schema
 from neo4j.exceptions import Neo4jError
 from psycopg.rows import dict_row
 
@@ -24,6 +25,23 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 TEST_USER_ID = UUID("00000000-0000-0000-0000-000000000042")
 TEST_RELEASE_ID = 4828001
+TEST_USER_EMAIL = "integration@catalog-api.invalid"
+
+# The tables a single test must start clean on. `users` and `catalog_items` are the
+# roots of the foreign keys the sync writes through, so truncating them with CASCADE
+# also empties user_collections, user_wantlists, owned_copies, artifacts, observations,
+# and collection_snapshots. `provider_aliases` is named explicitly because nothing
+# references it and CASCADE therefore never reaches it.
+_RESET_TABLES = "TRUNCATE users, catalog_items, provider_aliases CASCADE"
+
+# The collection sync writes through `user_collections.user_id`, which the real schema
+# constrains to `users(id)`. The fixture seeds the account the tests sync as; the
+# password column is NOT NULL and is never read by anything under test.
+_SEED_USER = """
+    INSERT INTO users (id, email, hashed_password, is_active)
+    VALUES (%s, %s, %s, TRUE)
+    ON CONFLICT (id) DO NOTHING
+"""
 
 
 def _required_env(name: str) -> str:
@@ -55,6 +73,16 @@ async def neo4j_driver() -> AsyncIterator[AsyncResilientNeo4jDriver]:
 
 @pytest_asyncio.fixture
 async def postgres_pool() -> AsyncIterator[AsyncPostgreSQLPool]:
+    """Apply the real PostgreSQL schema to the integration container, then reset it.
+
+    The schema comes from ``groovemap_schema.postgres.create_postgres_schema``, pinned as
+    a dev dependency on database-schema revision
+    ``03e8aba11f72d26237f7dfbbecf234ae9437e85e`` — the same producer revision
+    ``contracts/persistence/v1/source.json`` records this repository as tested against.
+    Applying the producer's own DDL is what keeps the fixture from drifting behind the
+    tables the syncer, identity, and projection paths read; a hand-rolled subset is what
+    let ``provider_aliases`` go missing after ADR 0009.
+    """
     host, port = parse_postgres_host_port(_required_env("POSTGRES_HOST"))
     pool = AsyncPostgreSQLPool(
         connection_params={
@@ -70,29 +98,15 @@ async def postgres_pool() -> AsyncIterator[AsyncPostgreSQLPool]:
         health_check_interval=3600,
     )
     await pool.initialize()
+    # The authoritative DDL, not a hand-rolled subset: every statement is IF NOT EXISTS,
+    # so this is a no-op once the container already carries the schema. A non-zero
+    # failure count means the producer and this image disagree, which is a fixture bug
+    # rather than something a test should be left to discover as a missing relation.
+    failures = await create_postgres_schema(pool)
+    assert failures == 0, f"{failures} schema statements failed against the integration container"
     async with pool.connection() as conn, conn.cursor() as cursor:
-        await cursor.execute("DROP TABLE IF EXISTS user_collections")
-        await cursor.execute(
-            """
-            CREATE TABLE user_collections (
-                user_id UUID NOT NULL,
-                release_id BIGINT NOT NULL,
-                instance_id BIGINT,
-                folder_id INTEGER,
-                title VARCHAR(500),
-                artist VARCHAR(500),
-                year INTEGER,
-                formats JSONB,
-                media JSONB,
-                label VARCHAR(255),
-                rating SMALLINT,
-                date_added TIMESTAMP WITH TIME ZONE,
-                metadata JSONB,
-                updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
-                UNIQUE NULLS NOT DISTINCT (user_id, release_id, instance_id)
-            )
-            """
-        )
+        await cursor.execute(_RESET_TABLES)
+        await cursor.execute(_SEED_USER, (TEST_USER_ID, TEST_USER_EMAIL, "integration-fixture-not-a-hash"))
     try:
         yield pool
     finally:
