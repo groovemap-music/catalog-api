@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v0.3.0 (2026-09-15)
+
+### Feat
+
+- **search**: add the country facet and identifiers, companies, and country on release detail
+- **lookup**: resolve barcodes, catalogue numbers, and matrix inscriptions through provider_aliases
+- **fit**: serve GET /api/fit/release/{release_id} with caching and impressions
+- **fit**: implement the CrateFit v0 scoring with evidence and confidence
+- **fit**: add the collection id-set and release-context queries
+- **evaluation**: add the time split, metrics, report recipe, and snapshot
+- **evaluation**: freeze the heuristic weights as a versioned baseline
+- **evaluation**: answer the query shapes from an in-memory golden graph
+- **evaluation**: add the format-balanced synthetic golden set
+
 ## v0.2.0 (2026-09-14)
 
 ### Feat

@@ -599,7 +599,7 @@ dependencies = [
 
 [[package]]
 name = "groovemap-catalog-api"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
@@ -628,6 +628,7 @@ dev = [
     { name = "commitizen" },
     { name = "cyclonedx-bom" },
     { name = "fakeredis" },
+    { name = "groovemap-database-schema" },
     { name = "hypothesis" },
     { name = "mypy" },
     { name = "pip-audit" },
@@ -671,6 +672,7 @@ dev = [
     { name = "commitizen", specifier = ">=4.18.0" },
     { name = "cyclonedx-bom", specifier = ">=7.3.1" },
     { name = "fakeredis", specifier = ">=2.37.1" },
+    { name = "groovemap-database-schema", git = "https://github.com/groovemap-music/database-schema.git?rev=03e8aba11f72d26237f7dfbbecf234ae9437e85e" },
     { name = "hypothesis", specifier = ">=6.167.1" },
     { name = "mypy", specifier = ">=2.3.1" },
     { name = "pip-audit", specifier = ">=2.10.1" },
@@ -684,6 +686,15 @@ dev = [
     { name = "ruff", specifier = ">=0.16.6" },
     { name = "types-defusedxml", specifier = ">=0.7.0.20260504" },
     { name = "types-pyyaml", specifier = ">=6.0.12.20260815" },
+]
+
+[[package]]
+name = "groovemap-database-schema"
+version = "0.3.0"
+source = { git = "https://github.com/groovemap-music/database-schema.git?rev=03e8aba11f72d26237f7dfbbecf234ae9437e85e#03e8aba11f72d26237f7dfbbecf234ae9437e85e" }
+dependencies = [
+    { name = "groovemap-runtime", extra = ["neo4j", "otel", "postgres"] },
+    { name = "psycopg", extra = ["binary"] },
 ]
 
 [[package]]

@@ -1915,20 +1915,30 @@ class TestChallengeSurvivesPasswordChange:
         """The login mint is stamped before hashed_password is read.
 
         PBKDF2 verification takes ~100ms; a password change committing inside
-        that window must invalidate the token it produces.
+        that window must invalidate the token it produces. The reference
+        instant is captured inside the mocked cursor, i.e. at the moment the
+        router actually reads the user row, rather than before the request is
+        even sent — the router mints `iat` before that read (see
+        `credential_issued_at` in api/routers/auth.py), so real-time ordering
+        guarantees `iat <= read_at` regardless of which side of a second
+        boundary either timestamp lands on. A fixed pre-request snapshot has
+        no such guarantee and can tick over a second between capture and mint.
         """
         from api.auth import _hash_password, decode_token
 
-        before = int(datetime.now(UTC).timestamp())
-        mock_cur.fetchone = AsyncMock(
-            return_value={
+        read_at: list[int] = []
+
+        async def _fetchone() -> dict[str, object]:
+            read_at.append(int(datetime.now(UTC).timestamp()))
+            return {
                 "id": TEST_USER_ID,
                 "email": TEST_USER_EMAIL,
                 "hashed_password": _hash_password("testpassword"),
                 "is_active": True,
                 "totp_enabled": False,
             }
-        )
+
+        mock_cur.fetchone = AsyncMock(side_effect=_fetchone)
 
         response = test_client.post(
             "/api/auth/login",
@@ -1937,4 +1947,5 @@ class TestChallengeSurvivesPasswordChange:
 
         assert response.status_code == 200
         minted = decode_token(response.json()["access_token"], TEST_JWT_SECRET)
-        assert minted["iat"] <= before
+        assert len(read_at) == 1
+        assert minted["iat"] <= read_at[0]
