@@ -988,6 +988,20 @@ RECOMMENDATION_OUTCOMES: tuple[str, ...] = (
     "recommendation.hidden",
 )
 
+# The same four outcomes, for the `fit` surface. `fit.shown` is excluded for the same
+# reason `recommendation.shown` is: it is written server side alongside the impression
+# (see `api.routers.fit._stamp_impression`), never client-reported.
+FIT_OUTCOMES: tuple[str, ...] = (
+    "fit.opened",
+    "fit.saved",
+    "fit.dismissed",
+    "fit.hidden",
+)
+
+# The full set of event types a client may report through POST /api/activity/events,
+# across every surface that has client-reportable outcomes.
+CLIENT_REPORTABLE_OUTCOMES: tuple[str, ...] = RECOMMENDATION_OUTCOMES + FIT_OUTCOMES
+
 
 class ActivityOutcomeRequest(BaseModel):
     """Request body for POST /api/activity/events.
@@ -996,17 +1010,17 @@ class ActivityOutcomeRequest(BaseModel):
     `impression_outcome` payload requires both and names no other key.
     """
 
-    event_type: str = Field(description=f"One of: {', '.join(RECOMMENDATION_OUTCOMES)}")
+    event_type: str = Field(description=f"One of: {', '.join(CLIENT_REPORTABLE_OUTCOMES)}")
     impression_id: UUID = Field(description="The impression the outcome is reported against")
     item_id: UUID = Field(description="The native id of the item the impression showed")
 
     @field_validator("event_type")
     @classmethod
     def validate_event_type(cls, v: str) -> str:
-        """Reject any type outside the four client-reportable outcomes."""
+        """Reject any type outside the client-reportable outcomes."""
         v = v.strip()
-        if v not in RECOMMENDATION_OUTCOMES:
-            raise ValueError(f"Unknown event_type {v!r}; must be one of: {', '.join(RECOMMENDATION_OUTCOMES)}")
+        if v not in CLIENT_REPORTABLE_OUTCOMES:
+            raise ValueError(f"Unknown event_type {v!r}; must be one of: {', '.join(CLIENT_REPORTABLE_OUTCOMES)}")
         return v
 
 
@@ -1033,11 +1047,31 @@ class ErasureRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class FitEvidenceItem(BaseModel):
+    """One structured fact behind a component's score, paired with its evidence sentence.
+
+    The pairing is by position: entry ``i`` of a component's ``evidence_items`` is exactly
+    what ``api.fit._render_entry`` turned into the string at position ``i`` of that
+    component's ``evidence``, so a consumer that wants to key on the claim rather than
+    parse the sentence reads the same fact the sentence states, never a second guess at it.
+    """
+
+    dimension: str = Field(description="The facet the claim is about: artist, label, genre, style, release, or similar")
+    entity: str = Field(description="The name or id of the thing the claim is about")
+    kind: str = Field(description="The shape of the claim: shared, unheld, thread, duplicate, bridge, or a component-specific kind")
+    count: int | None = Field(default=None, description="The collector's held count for this facet, when the claim is about a holding")
+    release_id: str | None = Field(default=None, description="The matched release id, when the claim is about a specific held release")
+    detail: str | None = Field(default=None, description="Extra text a few claim kinds need to complete their sentence, e.g. a shared media family")
+
+
 class FitComponent(BaseModel):
     """One dimension of a fit answer: a score in [0, 1] and the facts behind it."""
 
     score: float = Field(ge=0.0, le=1.0, description="This dimension's score, 0 to 1")
     evidence: list[str] = Field(default_factory=list, description="Facts about the caller's own collection that produced the score")
+    evidence_items: list[FitEvidenceItem] = Field(
+        default_factory=list, description="The same facts as `evidence`, structured, and capped by the same evidence limit"
+    )
 
 
 class FitComponents(BaseModel):

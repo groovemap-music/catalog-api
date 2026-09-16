@@ -592,7 +592,7 @@ wheels = [
 [[package]]
 name = "groovemap-agent-tools"
 version = "0.1.0"
-source = { git = "https://github.com/groovemap-music/python-libraries.git?subdirectory=agent-tools&rev=e372b6a7598ae31ee6578fdff39bc920bedd7136#e372b6a7598ae31ee6578fdff39bc920bedd7136" }
+source = { git = "https://github.com/groovemap-music/python-libraries.git?subdirectory=agent-tools&rev=6e84fe9acfd9551bd3bba2f2e78fef0ec1ef38ef#6e84fe9acfd9551bd3bba2f2e78fef0ec1ef38ef" }
 dependencies = [
     { name = "groovemap-runtime" },
 ]
@@ -650,8 +650,8 @@ requires-dist = [
     { name = "cryptography", specifier = ">=50.0.1" },
     { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "fastapi", specifier = ">=0.141.1" },
-    { name = "groovemap-agent-tools", git = "https://github.com/groovemap-music/python-libraries.git?subdirectory=agent-tools&rev=e372b6a7598ae31ee6578fdff39bc920bedd7136" },
-    { name = "groovemap-runtime", extras = ["neo4j", "otel", "otel-http", "postgres"], git = "https://github.com/groovemap-music/python-libraries.git?rev=e372b6a7598ae31ee6578fdff39bc920bedd7136" },
+    { name = "groovemap-agent-tools", git = "https://github.com/groovemap-music/python-libraries.git?subdirectory=agent-tools&rev=6e84fe9acfd9551bd3bba2f2e78fef0ec1ef38ef" },
+    { name = "groovemap-runtime", extras = ["neo4j", "otel", "otel-http", "postgres"], git = "https://github.com/groovemap-music/python-libraries.git?rev=6e84fe9acfd9551bd3bba2f2e78fef0ec1ef38ef" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "neo4j-rust-ext", specifier = ">=6.3.0.0" },
     { name = "orjson", specifier = ">=3.12.0" },
@@ -672,7 +672,7 @@ dev = [
     { name = "commitizen", specifier = ">=4.18.0" },
     { name = "cyclonedx-bom", specifier = ">=7.3.1" },
     { name = "fakeredis", specifier = ">=2.37.1" },
-    { name = "groovemap-database-schema", git = "https://github.com/groovemap-music/database-schema.git?rev=03e8aba11f72d26237f7dfbbecf234ae9437e85e" },
+    { name = "groovemap-database-schema", git = "https://github.com/groovemap-music/database-schema.git?rev=57b43be2f087771914f7c8408ed0f0a35a672b91" },
     { name = "hypothesis", specifier = ">=6.167.1" },
     { name = "mypy", specifier = ">=2.3.1" },
     { name = "pip-audit", specifier = ">=2.10.1" },
@@ -691,7 +691,7 @@ dev = [
 [[package]]
 name = "groovemap-database-schema"
 version = "0.3.0"
-source = { git = "https://github.com/groovemap-music/database-schema.git?rev=03e8aba11f72d26237f7dfbbecf234ae9437e85e#03e8aba11f72d26237f7dfbbecf234ae9437e85e" }
+source = { git = "https://github.com/groovemap-music/database-schema.git?rev=57b43be2f087771914f7c8408ed0f0a35a672b91#57b43be2f087771914f7c8408ed0f0a35a672b91" }
 dependencies = [
     { name = "groovemap-runtime", extra = ["neo4j", "otel", "postgres"] },
     { name = "psycopg", extra = ["binary"] },
@@ -700,7 +700,7 @@ dependencies = [
 [[package]]
 name = "groovemap-runtime"
 version = "0.1.0"
-source = { git = "https://github.com/groovemap-music/python-libraries.git?rev=e372b6a7598ae31ee6578fdff39bc920bedd7136#e372b6a7598ae31ee6578fdff39bc920bedd7136" }
+source = { git = "https://github.com/groovemap-music/python-libraries.git?rev=6e84fe9acfd9551bd3bba2f2e78fef0ec1ef38ef#6e84fe9acfd9551bd3bba2f2e78fef0ec1ef38ef" }
 dependencies = [
     { name = "orjson" },
     { name = "structlog" },

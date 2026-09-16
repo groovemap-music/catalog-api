@@ -84,8 +84,9 @@ async def record_outcome(
     back from ``activity.impressions`` instead would mean scanning a table partitioned by
     occurrence time for a key that does not carry the partition column.
 
-    Any type outside the four outcomes is rejected by the request model as a 422, so a
-    client can never reach the recorder with a type from elsewhere in the vocabulary.
+    Any type outside the client-reportable outcomes — the four for `recommendation` and
+    the four for `fit` — is rejected by the request model as a 422, so a client can never
+    reach the recorder with a type from elsewhere in the vocabulary.
 
     Returns 202: the row is written before the response, but the caller is being told the
     outcome was accepted, not that an analysis has seen it.
