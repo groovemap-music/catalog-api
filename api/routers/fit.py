@@ -156,6 +156,10 @@ async def release_fit(
         }
     )
     body = response.model_dump()
+    for component in body["components"].values():
+        # Trim the unset fields Pydantic fills in as null: `api.fit` only ever sets the
+        # keys an entry's kind actually uses, and the wire shape should read the same way.
+        component["evidence_items"] = [{key: value for key, value in item.items() if value is not None} for item in component["evidence_items"]]
 
     # Cached before the impression is stamped, so the body in Redis never carries one.
     if _cache:

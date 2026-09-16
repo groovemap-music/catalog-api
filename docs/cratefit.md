@@ -28,11 +28,14 @@ will eventually replace the guesses with learned weights.
   },
   "fit": 0.82,
   "components": {
-    "affinity":   {"score": 0.55, "evidence": ["shares label Blue Note with 3 releases you hold"]},
-    "novelty":    {"score": 0.25, "evidence": ["John Coltrane is an artist your collection has never held"]},
-    "bridge":     {"score": 0.0,  "evidence": []},
-    "depth":      {"score": 0.6,  "evidence": ["deepens label Blue Note (3 held)"]},
-    "redundancy": {"score": 0.0,  "evidence": []}
+    "affinity":   {"score": 0.55, "evidence": ["shares label Blue Note with 3 releases you hold"],
+                   "evidence_items": [{"dimension": "label", "entity": "Blue Note", "kind": "shared", "count": 3}]},
+    "novelty":    {"score": 0.25, "evidence": ["John Coltrane is an artist your collection has never held"],
+                   "evidence_items": [{"dimension": "artist", "entity": "John Coltrane", "kind": "unheld"}]},
+    "bridge":     {"score": 0.0,  "evidence": [], "evidence_items": []},
+    "depth":      {"score": 0.6,  "evidence": ["deepens label Blue Note (3 held)"],
+                   "evidence_items": [{"dimension": "label", "entity": "Blue Note", "kind": "thread", "count": 3}]},
+    "redundancy": {"score": 0.0,  "evidence": [], "evidence_items": []}
   },
   "confidence": "exact",
   "policy_id": "cratefit_v0",
@@ -44,7 +47,7 @@ will eventually replace the guesses with learned weights.
 | Field | Meaning |
 | --- | --- |
 | `fit` | `affinity + novelty + bridge + depth − redundancy`, clipped to `[0, 1]`. Unweighted |
-| `components` | The five dimensions, each `{score, evidence}`. Always all five |
+| `components` | The five dimensions, each `{score, evidence, evidence_items}`. Always all five |
 | `confidence` | How the candidate was **identified**, not how good the fit is. See below |
 | `policy_id` / `fit_version` | The decision procedure that produced the score. The same string |
 | `impression_id` | The showing this response was, to report an outcome against. `null` when the release has no native id |
@@ -83,6 +86,42 @@ strongest wins outright:
 Redundancy is the one component subtracted from the fit, which is why its evidence names
 the held version: a collector told their fit is low deserves to be told which record of
 theirs said so.
+
+## Evidence, structured
+
+Each component's `evidence` is a short list of sentences, and `evidence_items` is the same
+facts one entry per sentence, at the same position — a client that wants to key on the
+claim rather than parse the sentence reads exactly what the sentence says, because the
+sentence is rendered from the entry rather than composed beside it. Both lists are capped
+by the same limit (three), so a component's evidence is never deeper on one side than the
+other.
+
+An entry always carries:
+
+| Field | Meaning |
+| --- | --- |
+| `dimension` | The facet the claim is about: `artist`, `label`, `genre`, `style`, `release`, or a component-specific one like `bridge` |
+| `entity` | The name or id of the thing the claim is about |
+| `kind` | The shape of the claim — see below |
+
+and, when the claim has one:
+
+| Field | Meaning |
+| --- | --- |
+| `count` | The collector's held count for the facet (affinity's and depth's evidence) |
+| `release_id` | The matched release id (redundancy's evidence, when a specific held release is named) |
+| `detail` | A little extra text a few claim kinds need to finish their sentence — a shared media family, the artist name a title match was found under |
+
+`kind` names the assertion, not the dimension: `shared` (affinity — the candidate and the
+collection share this facet), `unheld` (novelty — the candidate carries this facet and the
+collection does not), `thread` (depth — this facet is a thread the candidate deepens),
+`bridge` and `heuristic` (bridge's two evidence lines: the regions joined, and the caveat
+that the regions are a v0 genre heuristic), and `duplicate` / `duplicate_title`
+(redundancy's four cases — the last, with no master link between the two releases, is its
+own kind because its sentence names an artist rather than a shared media family).
+
+An evidence item never claims more than its own sentence does: `evidence` and
+`evidence_items` are two readings of one fact, not two facts that happen to agree.
 
 ## What is a v0 heuristic, and why bridge is the loudest one
 

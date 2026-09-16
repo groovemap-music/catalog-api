@@ -135,6 +135,8 @@ def test_full_profile(test_client: TestClient, auth_headers: dict[str, str]) -> 
     for component in body["components"].values():
         assert 0.0 <= component["score"] <= 1.0
         assert isinstance(component["evidence"], list)
+        assert isinstance(component["evidence_items"], list)
+        assert len(component["evidence_items"]) == len(component["evidence"])
     assert 0.0 <= body["fit"] <= 1.0
     assert body["confidence"] == "exact"
     assert body["policy_id"] == "cratefit_v0"
@@ -155,6 +157,8 @@ def test_profile_evidence_cites_the_callers_own_collection(test_client: TestClie
 
     assert "shares label Blue Note with 3 releases you hold" in body["components"]["affinity"]["evidence"]
     assert body["components"]["depth"]["evidence"] == ["deepens label Blue Note (3 held)"]
+    assert body["components"]["depth"]["evidence_items"] == [{"dimension": "label", "entity": "Blue Note", "kind": "thread", "count": 3}]
+    assert {"dimension": "label", "entity": "Blue Note", "kind": "shared", "count": 3} in body["components"]["affinity"]["evidence_items"]
 
 
 def test_unknown_release_is_a_404(test_client: TestClient, auth_headers: dict[str, str]) -> None:
@@ -213,6 +217,7 @@ def test_cached_body_never_carries_an_impression_id(test_client: TestClient, aut
     written = [json.loads(call.args[1]) for call in mock_redis.set.await_args_list if str(call.args[0]).endswith("fit:release:555")]
     assert written and written[0]["impression_id"] is None
     assert written[0]["fit"] == response.json()["fit"]
+    assert written[0]["components"]["depth"]["evidence_items"] == response.json()["components"]["depth"]["evidence_items"]
 
 
 def test_cache_hit_still_stamps_a_fresh_impression(test_client: TestClient, auth_headers: dict[str, str]) -> None:

@@ -95,9 +95,82 @@ def _article(noun: str) -> str:
     return "an" if noun[0] in "aeiou" else "a"
 
 
-def _component(score: float, evidence: list[str]) -> dict[str, Any]:
-    """Shape one component: a score clipped to ``[0, 1]`` and the facts behind it."""
-    return {"score": round(min(1.0, max(0.0, score)), _PRECISION), "evidence": evidence[:_EVIDENCE_LIMIT]}
+def _entry(
+    dimension: str,
+    entity: str,
+    kind: str,
+    *,
+    count: int | None = None,
+    release_id: str | None = None,
+    detail: str | None = None,
+) -> dict[str, Any]:
+    """One structured evidence fact: what a component asserts, before it is worded.
+
+    ``dimension`` names the facet the claim is about (``artist``, ``label``, ``genre``,
+    ``style``, ``release``, ...), ``entity`` the name or id of the thing the claim is
+    about, and ``kind`` the shape of the claim itself (``shared``, ``unheld``, ``thread``,
+    ``duplicate``, ``bridge``, or a component-specific kind such as ``duplicate_title`` or
+    ``heuristic``). ``count`` and ``release_id`` hold the held count or the matched release
+    id where the claim has one; ``detail`` is the small amount of extra freeform text a few
+    claim kinds need to complete their sentence (a shared media family, a matched artist
+    name) and is never the only fact a sentence states.
+    """
+    entry: dict[str, Any] = {"dimension": dimension, "entity": entity, "kind": kind}
+    if count is not None:
+        entry["count"] = count
+    if release_id is not None:
+        entry["release_id"] = release_id
+    if detail is not None:
+        entry["detail"] = detail
+    return entry
+
+
+def _render_entry(entry: dict[str, Any]) -> str:
+    """The one place an evidence sentence is written, so a sentence and its entry cannot drift.
+
+    Every ``evidence`` string a component returns is this function applied to the entry at
+    the same position in ``evidence_items`` — never a string composed separately from the
+    same facts — which is what makes the two lists a single source of truth read two ways.
+    """
+    kind = entry["kind"]
+    dimension = entry.get("dimension", "")
+    entity = entry.get("entity", "")
+    count = entry.get("count")
+    detail = entry.get("detail")
+
+    if kind == "shared":
+        return f"shares {dimension} {entity} with {count} release{'' if count == 1 else 's'} you hold"
+    if kind == "unheld":
+        return f"{entity} is {_article(dimension)} {dimension} your collection has never held"
+    if kind == "thread":
+        return f"deepens {dimension} {entity} ({count} held)"
+    if kind == "bridge":
+        return f"bridges {entity}, which share no artist or label in your collection"
+    if kind == "heuristic":
+        return "region boundaries are the v0 genre heuristic, not a computed community"
+    if kind == "duplicate":
+        if detail is None:
+            return "you already hold this exact release"
+        return f"you hold {entity}, the same record on {detail}"
+    if kind == "duplicate_title":
+        return f"you hold {entity} by {detail}, which no master links to this pressing"
+    raise ValueError(f"unrenderable evidence kind: {kind!r}")
+
+
+def _component(score: float, entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Shape one component: a score clipped to ``[0, 1]``, and evidence built from entries.
+
+    ``evidence`` and ``evidence_items`` are two views of the same facts, capped by the
+    same :data:`FIT_CONSTANTS` evidence limit: every entry is rendered into its sentence by
+    :func:`_render_entry`, so the prose a collector reads and the structured claim a
+    consumer can key on can never say two different things.
+    """
+    capped = entries[:_EVIDENCE_LIMIT]
+    return {
+        "score": round(min(1.0, max(0.0, score)), _PRECISION),
+        "evidence": [_render_entry(entry) for entry in capped],
+        "evidence_items": capped,
+    }
 
 
 def _candidate_facets(context: dict[str, Any]) -> dict[str, list[tuple[str, str]]]:
@@ -162,8 +235,8 @@ def score_affinity(collection: dict[str, Any], context: dict[str, Any]) -> dict[
     # Loudest first, then alphabetically, so the same collection always cites the same
     # facts in the same order.
     shared.sort(key=lambda entry: (-entry[0], entry[1], entry[2]))
-    evidence = [f"shares {noun} {name} with {count} release{'' if count == 1 else 's'} you hold" for count, noun, name in shared if count]
-    return _component(score, evidence)
+    entries = [_entry(noun, name, "shared", count=count) for count, noun, name in shared if count]
+    return _component(score, entries)
 
 
 def score_novelty(collection: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -188,7 +261,7 @@ def score_novelty(collection: dict[str, Any], context: dict[str, Any]) -> dict[s
 
     score = len(new) / total if total else 0.0
     new.sort()
-    return _component(score, [f"{name} is {_article(noun)} {noun} your collection has never held" for noun, name in new])
+    return _component(score, [_entry(noun, name, "unheld") for noun, name in new])
 
 
 def score_depth(collection: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -215,7 +288,7 @@ def score_depth(collection: dict[str, Any], context: dict[str, Any]) -> dict[str
             deepened.append((held, _DIMENSION_NOUN[dimension], name))
 
     deepened.sort(key=lambda entry: (-entry[0], entry[1], entry[2]))
-    return _component(score, [f"deepens {noun} {name} ({count} held)" for count, noun, name in deepened])
+    return _component(score, [_entry(noun, name, "thread", count=count) for count, noun, name in deepened])
 
 
 def score_bridge(collection: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -262,12 +335,12 @@ def score_bridge(collection: dict[str, Any], context: dict[str, Any]) -> dict[st
         picked_neighbourhoods.append(neighbourhood)
 
     score = min(float(FIT_CONSTANTS["bridge_score_cap"]), float(max(0, len(picked) - 1)))
-    evidence: list[str] = []
+    entries: list[dict[str, Any]] = []
     if score > 0:
         named = ", ".join(picked[:-1]) + f" and {picked[-1]}"
-        evidence.append(f"bridges {named}, which share no artist or label in your collection")
-        evidence.append("region boundaries are the v0 genre heuristic, not a computed community")
-    return _component(score, evidence)
+        entries.append(_entry("genre", named, "bridge", count=len(picked)))
+        entries.append(_entry("bridge", "v0 heuristic", "heuristic"))
+    return _component(score, entries)
 
 
 def _sibling_media(sibling: dict[str, Any]) -> set[str]:
@@ -296,7 +369,8 @@ def score_redundancy(collection: dict[str, Any], context: dict[str, Any]) -> dic
     candidate_id = str(context.get("id") or "")
 
     if candidate_id and candidate_id in held_releases:
-        return _component(float(FIT_CONSTANTS["redundancy_held_release"]), ["you already hold this exact release"])
+        entry = _entry("release", candidate_id, "duplicate", release_id=candidate_id)
+        return _component(float(FIT_CONSTANTS["redundancy_held_release"]), [entry])
 
     candidate_families = {str(value) for value in context.get("media_families") or [] if value}
     held_siblings = [sibling for sibling in context.get("siblings") or [] if str(sibling.get("id") or "") in held_releases]
@@ -305,18 +379,16 @@ def score_redundancy(collection: dict[str, Any], context: dict[str, Any]) -> dic
     if same_family:
         sibling = min(same_family, key=lambda entry: str(entry.get("id")))
         shared = ", ".join(sorted(_sibling_media(sibling) & candidate_families))
-        return _component(
-            float(FIT_CONSTANTS["redundancy_same_master_same_family"]),
-            [f"you hold {sibling.get('title') or sibling.get('id')}, the same record on {shared}"],
-        )
+        sibling_id = str(sibling.get("id"))
+        entry = _entry("release", str(sibling.get("title") or sibling.get("id")), "duplicate", release_id=sibling_id, detail=shared)
+        return _component(float(FIT_CONSTANTS["redundancy_same_master_same_family"]), [entry])
 
     if held_siblings:
         sibling = min(held_siblings, key=lambda entry: str(entry.get("id")))
         families = ", ".join(sorted(_sibling_media(sibling))) or "another format"
-        return _component(
-            float(FIT_CONSTANTS["redundancy_same_master_other_family"]),
-            [f"you hold {sibling.get('title') or sibling.get('id')}, the same record on {families}"],
-        )
+        sibling_id = str(sibling.get("id"))
+        entry = _entry("release", str(sibling.get("title") or sibling.get("id")), "duplicate", release_id=sibling_id, detail=families)
+        return _component(float(FIT_CONSTANTS["redundancy_same_master_other_family"]), [entry])
 
     held_titles: dict[str, Any] = collection.get("held_titles") or {}
     title = str(context.get("title") or "")
@@ -324,10 +396,8 @@ def score_redundancy(collection: dict[str, Any], context: dict[str, Any]) -> dic
         for identifier, name in _candidate_facets(context)["artist"]:
             held_title = held_titles.get(held_title_key(identifier, title))
             if held_title:
-                return _component(
-                    float(FIT_CONSTANTS["redundancy_same_artist_and_title"]),
-                    [f"you hold {held_title} by {name}, which no master links to this pressing"],
-                )
+                entry = _entry("release", str(held_title), "duplicate_title", detail=name)
+                return _component(float(FIT_CONSTANTS["redundancy_same_artist_and_title"]), [entry])
 
     return _component(0.0, [])
 
