@@ -18,6 +18,7 @@ from typing import Any
 from api.fit import (
     FIT_CONSTANTS,
     FIT_VERSION,
+    _render_entry,
     compute_fit,
     identity_confidence,
     score_affinity,
@@ -231,7 +232,7 @@ def test_depth_evidence_names_the_thread_and_the_holding() -> None:
 
 def test_depth_of_an_empty_collection_is_zero() -> None:
     """There is no thread to deepen."""
-    assert score_depth(empty_collection(), _context()) == {"score": 0.0, "evidence": []}
+    assert score_depth(empty_collection(), _context()) == {"score": 0.0, "evidence": [], "evidence_items": []}
 
 
 def test_depth_takes_the_maximum_thread_not_the_sum() -> None:
@@ -387,7 +388,7 @@ def test_redundancy_matches_a_held_title_case_insensitively() -> None:
 
 def test_redundancy_of_an_unheld_record_is_zero() -> None:
     """Nothing held, nothing duplicated."""
-    assert score_redundancy(empty_collection(), _context()) == {"score": 0.0, "evidence": []}
+    assert score_redundancy(empty_collection(), _context()) == {"score": 0.0, "evidence": [], "evidence_items": []}
 
 
 def test_redundancy_ignores_a_sibling_the_collector_does_not_hold() -> None:
@@ -535,3 +536,97 @@ def test_evidence_never_exceeds_the_stated_limit() -> None:
     component = score_affinity(collection, candidate)
 
     assert len(component["evidence"]) == int(FIT_CONSTANTS["evidence_limit"])
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# evidence_items — the structured claim beside each sentence
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_evidence_items_never_exceeds_the_stated_limit_either() -> None:
+    """The cap a collector's sentence list respects is not looser for the structured one."""
+    collection = fold_collection(
+        [_row(str(index), f"LP {index}", artists=[f"a-{index}"], labels=["l-blue-note"], genres=["Jazz"], styles=["Hard Bop"]) for index in range(6)]
+    )
+    candidate = _context(
+        artists=[("a-0", "One"), ("a-1", "Two"), ("a-2", "Three"), ("a-3", "Four")],
+        labels=[("l-blue-note", "Blue Note")],
+        genres=["Jazz"],
+        styles=["Hard Bop"],
+    )
+
+    component = score_affinity(collection, candidate)
+
+    assert len(component["evidence_items"]) == int(FIT_CONSTANTS["evidence_limit"])
+    assert len(component["evidence_items"]) == len(component["evidence"])
+
+
+def test_affinity_evidence_items_name_the_dimension_entity_and_count() -> None:
+    """A consumer that wants the claim rather than the sentence reads the same fact."""
+    component = score_affinity(_jazz_collection(), _context())
+
+    assert {"dimension": "genre", "entity": "Jazz", "kind": "shared", "count": 3} in component["evidence_items"]
+    assert {"dimension": "label", "entity": "Blue Note", "kind": "shared", "count": 3} in component["evidence_items"]
+
+
+def test_bridge_evidence_items_name_the_regions_and_flag_the_heuristic() -> None:
+    """The bridged regions and the caveat that they are a v0 heuristic, both structured."""
+    component = score_bridge(_two_region_collection(), _context(genres=["Jazz", "Electronic"], styles=[]))
+
+    assert component["evidence_items"][0] == {"dimension": "genre", "entity": "Electronic and Jazz", "kind": "bridge", "count": 2}
+    assert component["evidence_items"][1] == {"dimension": "bridge", "entity": "v0 heuristic", "kind": "heuristic"}
+
+
+def test_redundancy_exact_duplicate_evidence_item_carries_the_matched_release_id() -> None:
+    """The held version a low fit is scored on is nameable, not just readable in prose."""
+    component = score_redundancy(_jazz_collection(), _context(release_id="1"))
+
+    assert component["evidence_items"] == [{"dimension": "release", "entity": "1", "kind": "duplicate", "release_id": "1"}]
+
+
+def test_redundancy_same_family_evidence_item_carries_the_shared_family_as_detail() -> None:
+    """The same-master, same-family case names the sibling and the family it shares."""
+    candidate = _context(release_id="999", siblings=[{"id": "1", "title": "Moanin'", "media_families": ["grooved"]}])
+
+    component = score_redundancy(_jazz_collection(), candidate)
+
+    assert component["evidence_items"] == [{"dimension": "release", "entity": "Moanin'", "kind": "duplicate", "release_id": "1", "detail": "grooved"}]
+
+
+def test_redundancy_same_title_evidence_item_uses_its_own_kind() -> None:
+    """The weakest redundancy case — no master link — is its own claim kind, not `duplicate`."""
+    collection = fold_collection([_row("1", "Blue Train", artists=["a-coltrane"], labels=["l-blue-note"], genres=["Jazz"])])
+    candidate = _context(release_id="999", master_id=None, siblings=[])
+
+    component = score_redundancy(collection, candidate)
+
+    assert component["evidence_items"] == [{"dimension": "release", "entity": "Blue Train", "kind": "duplicate_title", "detail": "John Coltrane"}]
+
+
+def test_every_evidence_sentence_is_rendered_from_its_own_entry() -> None:
+    """The sentence and the structured claim cannot disagree because one produces the other.
+
+    Exercised across every component and every branch this bead touches: a shared facet,
+    an unheld one, a deepened thread, a bridge between two regions plus its heuristic
+    caveat, and each of redundancy's four cases — so a hand-typed sentence that drifted
+    from its entry would fail here rather than surviving because no test built the
+    scenario that exercises it.
+    """
+    profiles = [
+        compute_fit(_jazz_collection(), _context(release_id="1")),
+        compute_fit(_jazz_collection(), _context(release_id="999", siblings=[{"id": "1", "title": "Moanin'", "media_families": ["grooved"]}])),
+        compute_fit(_jazz_collection(), _context(release_id="999", siblings=[{"id": "1", "title": "Moanin'", "media_families": ["digital"]}])),
+        compute_fit(
+            fold_collection([_row("1", "Blue Train", artists=["a-coltrane"], labels=["l-blue-note"], genres=["Jazz"])]),
+            _context(release_id="999", master_id=None, siblings=[]),
+        ),
+        compute_fit(_two_region_collection(), _context(genres=["Jazz", "Electronic"], styles=[])),
+        compute_fit(_jazz_collection(), _context()),
+        compute_fit(empty_collection(), _context()),
+    ]
+
+    for profile in profiles:
+        for component in profile["components"].values():
+            assert len(component["evidence_items"]) == len(component["evidence"])
+            for sentence, item in zip(component["evidence"], component["evidence_items"], strict=True):
+                assert _render_entry(item) == sentence
