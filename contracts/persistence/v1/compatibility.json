@@ -17,6 +17,60 @@
     "tested_commit": "6e84fe9acfd9551bd3bba2f2e78fef0ec1ef38ef"
   },
   "contract": "groovemap.persistence",
+  "graph_schema": {
+    "availability": "unconditional",
+    "documentation": "docs/architecture.md#graph-schema",
+    "functions": [
+      "graph.credit_role_category",
+      "graph.medium_label"
+    ],
+    "introduced_in_contract_version": 1,
+    "kind": "additive",
+    "note": "Read-only views over tables declared elsewhere in this contract. Nothing is materialized and no base table changes, so a consumer promotes to a commit carrying them without a migration.",
+    "schema": "graph",
+    "vertex_views": 16,
+    "edge_views": 36,
+    "views": 52,
+    "appended_key_columns": {
+      "availability": "unconditional",
+      "columns": [
+        "graph.artist.artist_key",
+        "graph.label.label_key",
+        "graph.master.master_key",
+        "graph.release.release_key"
+      ],
+      "kind": "additive",
+      "note": "Appended after the published columns of the four Discogs vertex views on every engine, including PostgreSQL 18 with the property graph switch off. Structural only: each restates its view's <entity>_id as text because PostgreSQL 19 beta 3 rejects a character varying vertex key. Not declared as a property graph property; <entity>_id keeps its published type.",
+      "type": "text"
+    },
+    "property_graph": {
+      "absent_on": "PostgreSQL 18, and PostgreSQL 19 with the switch off",
+      "availability": "conditional",
+      "conditions": [
+        "server_version_num >= 190000",
+        "the SCHEMA_PROPERTY_GRAPH environment switch is enabled"
+      ],
+      "consumer_rule": "consumers must not assume it exists; probe pg_class for a relation named catalog in schema graph, of relkind g, and fall back to the views, which are always present",
+      "documentation": "docs/architecture.md#property-graph",
+      "edge_tables": 36,
+      "kind": "additive",
+      "name": "graph.catalog",
+      "note": "A SQL/PGQ declaration over the graph schema's views, applied after the rest of the PostgreSQL schema. A closed gate is logged and is not a failure. There is no IF NOT EXISTS for a property graph and this initializer never drops one, so an existing graph.catalog is left as it is and a changed declaration does not roll out on its own.",
+      "vertex_tables": 16
+    },
+    "view_evolution": {
+      "allowed": "appending a column to the end of an existing view",
+      "engine_enforcement": "CREATE OR REPLACE VIEW fails the statement outright rather than replacing the view",
+      "forbidden": [
+        "dropping a column",
+        "renaming a view or a view column",
+        "reordering columns",
+        "retyping a column"
+      ],
+      "migration": "expand, migrate consumers, then contract, with a coordinated DROP ... CASCADE",
+      "rule": "append-only"
+    }
+  },
   "owners": [
     "database-schema"
   ],
