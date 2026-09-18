@@ -58,6 +58,11 @@ flowchart LR
   same vendored vocabulary the writer minted it from. See
   [Catalogue identifiers, credits, and country](catalog-identifiers.md).
 
+- Follow ADR 0012 (Neo4j → PostgreSQL 19 property graph migration): introduce `GRAPH_BACKEND`
+  and a per-query-family backend selector as the seam later phases plug into. Phase 0 adds the
+  seam only — every family still resolves to its Neo4j implementation for both `neo4j` and
+  `postgres`, so behavior is unchanged. See [Configuration](configuration.md#connections-and-pools).
+
 Historical references to the combined `catalog-ingestion` repository describe the pre-split
 lineage retained by ADR 0005. They are migration records, not the name of a current producer or
 an active ownership boundary.

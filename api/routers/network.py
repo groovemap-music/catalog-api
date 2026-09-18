@@ -12,6 +12,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from neo4j.exceptions import ClientError as Neo4jClientError
 
+from api.graph_backend import get_backend
 from api.limiter import limiter
 from api.queries import network_queries
 from api.telemetry import CACHE_NETWORK_CENTRALITY, CACHE_NETWORK_CLUSTER, cache_get
@@ -23,16 +24,20 @@ router = APIRouter(prefix="/api/network", tags=["network"])
 
 _neo4j: Any = None
 _redis: Any = None
+# Resolved via the graph-backend selector; defaults to the Neo4j implementation so an
+# unconfigured router (e.g. in tests) behaves exactly as it did before the seam existed.
+_collaborators_backend: Any = network_queries
 
 # Cache TTL for centrality and cluster results (1 hour — moderately expensive)
 _NETWORK_CACHE_TTL = 3600
 
 
-def configure(neo4j: Any, redis: Any = None) -> None:
+def configure(neo4j: Any, redis: Any = None, graph_backend: str = "neo4j") -> None:
     """Configure the network router with database connections."""
-    global _neo4j, _redis
+    global _neo4j, _redis, _collaborators_backend
     _neo4j = neo4j
     _redis = redis
+    _collaborators_backend = get_backend("collaborators", graph_backend)
 
 
 @router.get("/artist/{artist_id}/collaborators")
@@ -54,17 +59,17 @@ async def artist_collaborators(
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     try:
-        identity = await network_queries.get_artist_identity(_neo4j, artist_id)
+        identity = await _collaborators_backend.get_artist_identity(_neo4j, artist_id)
         if not identity:
             return JSONResponse(content={"error": f"Artist '{artist_id}' not found"}, status_code=404)
 
-        collaborators = await network_queries.get_multi_hop_collaborators(
+        collaborators = await _collaborators_backend.get_multi_hop_collaborators(
             _neo4j,
             artist_id,
             depth=depth,
             limit=limit,
         )
-        total = await network_queries.count_multi_hop_collaborators(
+        total = await _collaborators_backend.count_multi_hop_collaborators(
             _neo4j,
             artist_id,
             depth=depth,
