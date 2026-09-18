@@ -638,3 +638,84 @@ class TestConfigure:
         finally:
             mod._neo4j = original_neo4j
             mod._redis = original_redis
+
+
+class TestCollaboratorsBackendSelection:
+    """`configure(graph_backend=...)` — which module runs, and which handle it gets.
+
+    The seam that picks the module landed without the connection: the router only ever held
+    a Neo4j driver, so a PostgreSQL implementation had nothing to run against. These cover
+    the handle, which is the other half of the switch.
+    """
+
+    @staticmethod
+    def _saved_state() -> tuple[object, ...]:
+        import api.routers.network as mod
+
+        return (mod._neo4j, mod._redis, mod._pg_pool, mod._graph_backend, mod._collaborators_backend)
+
+    def test_neo4j_backend_passes_the_driver(self) -> None:
+        import api.routers.network as mod
+        from api.queries import network_queries
+
+        saved = self._saved_state()
+        try:
+            driver = AsyncMock()
+            mod.configure(driver, None, "neo4j", pg_pool=AsyncMock())
+            assert mod._collaborators_backend is network_queries
+            assert mod._collaborators_handle() is driver
+        finally:
+            (mod._neo4j, mod._redis, mod._pg_pool, mod._graph_backend, mod._collaborators_backend) = saved
+
+    def test_postgres_backend_passes_the_pool(self) -> None:
+        import api.routers.network as mod
+        from api.queries import network_pg_queries
+
+        saved = self._saved_state()
+        try:
+            pool = AsyncMock()
+            mod.configure(AsyncMock(), None, "postgres", pg_pool=pool)
+            assert mod._collaborators_backend is network_pg_queries
+            assert mod._collaborators_handle() is pool
+        finally:
+            (mod._neo4j, mod._redis, mod._pg_pool, mod._graph_backend, mod._collaborators_backend) = saved
+
+    def test_postgres_backend_serves_the_endpoint_from_the_pool(self, test_client: TestClient) -> None:
+        """End to end through the router: the PostgreSQL module is called, with the pool."""
+        import api.routers.network as mod
+
+        identity = {"artist_id": "123", "artist_name": "Miles Davis"}
+        collaborators = [{"artist_id": "456", "artist_name": "John Coltrane", "distance": 1, "collaboration_count": 5}]
+        saved = self._saved_state()
+        pool = AsyncMock()
+        try:
+            mod.configure(AsyncMock(), None, "postgres", pg_pool=pool)
+            with (
+                patch("api.queries.network_pg_queries.get_artist_identity", new_callable=AsyncMock, return_value=identity) as identity_call,
+                patch(
+                    "api.queries.network_pg_queries.get_multi_hop_collaborators",
+                    new_callable=AsyncMock,
+                    return_value=collaborators,
+                ) as collaborators_call,
+                patch("api.queries.network_pg_queries.count_multi_hop_collaborators", new_callable=AsyncMock, return_value=1) as count_call,
+            ):
+                response = test_client.get("/api/network/artist/123/collaborators?depth=2&limit=50")
+        finally:
+            (mod._neo4j, mod._redis, mod._pg_pool, mod._graph_backend, mod._collaborators_backend) = saved
+
+        assert response.status_code == 200
+        assert response.json()["collaborators"] == collaborators
+        identity_call.assert_awaited_once_with(pool, "123")
+        collaborators_call.assert_awaited_once_with(pool, "123", depth=2, limit=50)
+        count_call.assert_awaited_once_with(pool, "123", depth=2)
+
+    def test_postgres_backend_without_a_pool_is_not_ready(self, test_client: TestClient) -> None:
+        import api.routers.network as mod
+
+        saved = self._saved_state()
+        try:
+            mod.configure(AsyncMock(), None, "postgres", pg_pool=None)
+            response = test_client.get("/api/network/artist/123/collaborators")
+        finally:
+            (mod._neo4j, mod._redis, mod._pg_pool, mod._graph_backend, mod._collaborators_backend) = saved
+        assert response.status_code == 503
