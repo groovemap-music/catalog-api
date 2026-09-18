@@ -39,6 +39,7 @@ class ApiConfig:
     neo4j_password: str = field(repr=False)
     postgres_pool_min_size: int = 2
     postgres_pool_max_size: int = 8
+    graph_backend: str = "neo4j"
     redis_host: str = "redis://redis:6379/0"
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 30
@@ -91,6 +92,9 @@ class ApiConfig:
         jwt_algorithm = getenv("JWT_ALGORITHM", "HS256")
         if jwt_algorithm != "HS256":
             raise ValueError(f"Unsupported JWT algorithm: {jwt_algorithm}. Only HS256 is supported.")
+        graph_backend = getenv("GRAPH_BACKEND", "neo4j")
+        if graph_backend not in ("neo4j", "postgres"):
+            raise ValueError(f"Unsupported graph backend: {graph_backend}. Must be 'neo4j' or 'postgres'.")
         cors_origins_raw = getenv("CORS_ORIGINS")
         cors_origins = [origin.strip() for origin in cors_origins_raw.split(",") if origin.strip()] if cors_origins_raw else None
         pool_min, pool_max = resolve_postgres_pool_sizes(default_min=2, default_max=8)
@@ -105,6 +109,7 @@ class ApiConfig:
             neo4j_password=cast("str", neo4j_password),
             postgres_pool_min_size=pool_min,
             postgres_pool_max_size=pool_max,
+            graph_backend=graph_backend,
             redis_host=_build_redis_url(),
             jwt_algorithm=jwt_algorithm,
             jwt_expire_minutes=_env_int("JWT_EXPIRE_MINUTES", 30),

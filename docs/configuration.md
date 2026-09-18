@@ -45,11 +45,20 @@ password in the environment. Do not set both forms to conflicting values.
 | `POSTGRES_POOL_MAX_SIZE` | `8` | Maximum API pool size |
 | `NEO4J_TLS_ENABLED` | `false` | Enable Bolt TLS for a host without a TLS URI scheme |
 | `NEO4J_TLS_VERIFY` | `true` | Verify the Bolt certificate when TLS is enabled |
+| `GRAPH_BACKEND` | `neo4j` | Backend that answers graph query families (`neo4j` or `postgres`); rejected at startup if set to anything else |
 | `REDIS_HOST` | `redis://redis:6379/0` | Redis host or URL |
 | `REDIS_PASSWORD` | unset | Optional Redis password; `REDIS_PASSWORD_FILE` is supported |
 
 Use `neo4j+s://...` in `NEO4J_HOST` for a managed Neo4j endpoint that already expresses its
 TLS policy. Deployment-specific certificate and network guidance belongs in `deployment`.
+
+`GRAPH_BACKEND` is Phase 0 of ADR 0012 (Neo4j → PostgreSQL 19 property graph migration, see
+[architecture-decisions.md](architecture-decisions.md)): a selector resolves each graph query
+family to the module implementing it for the configured backend. As of this phase every
+family still resolves to its Neo4j implementation for both values, so leaving the variable
+unset — or setting it explicitly to `neo4j` — changes nothing. Setting `postgres` is a no-op
+today and will start selecting PostgreSQL implementations only as later phases register
+them per family.
 
 ## Authentication and public URLs
 
