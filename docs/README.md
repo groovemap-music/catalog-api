@@ -26,6 +26,7 @@ flowchart TD
 - [Performance](performance-guide.md)
 - [Coverage policy](coverage-policy.md)
 - [Query performance optimizations](query-performance-optimizations.md)
+- [The GRAPH_TABLE migration template](graph-table-migration-template.md)
 - [Offline evaluation harness](evaluation.md)
 - [Transactional email decision](transactional-email-provider-decision.md)
 - [Architecture decisions](architecture-decisions.md)
