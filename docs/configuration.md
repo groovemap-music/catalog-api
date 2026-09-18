@@ -52,13 +52,25 @@ password in the environment. Do not set both forms to conflicting values.
 Use `neo4j+s://...` in `NEO4J_HOST` for a managed Neo4j endpoint that already expresses its
 TLS policy. Deployment-specific certificate and network guidance belongs in `deployment`.
 
-`GRAPH_BACKEND` is Phase 0 of ADR 0012 (Neo4j → PostgreSQL 19 property graph migration, see
+`GRAPH_BACKEND` implements ADR 0012 (Neo4j → PostgreSQL 19 property graph migration, see
 [architecture-decisions.md](architecture-decisions.md)): a selector resolves each graph query
-family to the module implementing it for the configured backend. As of this phase every
-family still resolves to its Neo4j implementation for both values, so leaving the variable
-unset — or setting it explicitly to `neo4j` — changes nothing. Setting `postgres` is a no-op
-today and will start selecting PostgreSQL implementations only as later phases register
-them per family.
+family to the module implementing it for the configured backend. Leaving the variable unset —
+or setting it explicitly to `neo4j` — keeps every family on Neo4j.
+
+Setting `postgres` currently moves one family: **collaborators**, which backs
+`GET /api/network/artist/{id}/collaborators`. It is answered by SQL/PGQ `GRAPH_TABLE` queries
+over the `graph.catalog` property graph, using the API's existing PostgreSQL pool. Every other
+family still resolves to Neo4j regardless of this setting. See
+[The GRAPH_TABLE migration template](graph-table-migration-template.md).
+
+`graph.catalog` is not present on every server: the `groovemap-database-schema` initializer
+declares it only on PostgreSQL 19 or later and only with its own `SCHEMA_PROPERTY_GRAPH` switch
+enabled. With `GRAPH_BACKEND=postgres` the API therefore checks both at startup — that
+`server_version_num` is at least `190000`, and that `graph.catalog` exists — and refuses to
+start with a message naming which condition failed. That turns a misconfiguration into one
+clear line at boot rather than a missing-relation error on the first request that reaches the
+endpoint. Note that the required PostgreSQL tier for this service is 18, where the property
+graph is deliberately absent; `postgres` is usable only against the advisory 19 tier.
 
 ## Authentication and public URLs
 
