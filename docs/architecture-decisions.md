@@ -58,6 +58,16 @@ flowchart LR
   same vendored vocabulary the writer minted it from. See
   [Catalogue identifiers, credits, and country](catalog-identifiers.md).
 
+- Follow ADR 0012 (Neo4j → PostgreSQL 19 property graph migration): introduce `GRAPH_BACKEND`
+  and a per-query-family backend selector as the seam later phases plug into, then migrate the
+  graph reads one family at a time. The collaborators family is the first one migrated: with
+  `GRAPH_BACKEND=postgres` it is answered by SQL/PGQ `GRAPH_TABLE` queries over the
+  `graph.catalog` property graph instead of Cypher, and row-level parity with the Neo4j
+  implementation is proved against a PostgreSQL 19 container. Its query is the worked example
+  the remaining families are migrated from — see
+  [The GRAPH_TABLE migration template](graph-table-migration-template.md) and
+  [Configuration](configuration.md#connections-and-pools).
+
 Historical references to the combined `catalog-ingestion` repository describe the pre-split
 lineage retained by ADR 0005. They are migration records, not the name of a current producer or
 an active ownership boundary.
