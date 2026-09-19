@@ -26,6 +26,8 @@ from typing import Any, Protocol, cast
 import psycopg
 from common.db_resilience import DatabaseUnavailableError
 from neo4j.exceptions import ClientError as Neo4jClientError
+from neo4j.exceptions import ServiceUnavailable as Neo4jServiceUnavailable
+from neo4j.exceptions import SessionExpired as Neo4jSessionExpired
 
 from api.queries import network_pg_queries, network_queries
 
@@ -95,48 +97,89 @@ def get_collaborators_backend(backend: str) -> CollaboratorsBackend:
 
 
 # ── Backend-neutral error mapping ─────────────────────────────────────────────
-# A query family's router must not care which backend raised a failure. A statement
-# timeout looks completely different depending on which engine hit it: Neo4j surfaces it
-# as a `ClientError` whose message contains "TransactionTimedOut" (or, more rarely,
-# "TransactionTimedOutClientConfiguration"); PostgreSQL surfaces the equivalent as
-# `psycopg.errors.QueryCanceled` (SQLSTATE 57014, raised when the session's
-# `statement_timeout` fires and the server cancels the in-flight query) — or, one layer
-# out, as the connection pool's own `DatabaseUnavailableError` family when *acquiring* a
-# connection is what ran out of patience: `ConnectionEstablishmentError` after the pool
-# has exhausted its checkout retries, `CircuitOpenError` once the breaker has already
-# tripped on repeated failures. That is the pool's shape of "gave up waiting" — it is
-# raised in place of a bare `asyncio.TimeoutError`, which `AsyncPostgreSQLPool` catches
-# and retries internally rather than letting escape (see
-# `common.postgres_resilient.AsyncPostgreSQLPool._pooled_connection`).
+# A query family's router must not care which backend raised a failure, and it must not
+# conflate two different failure *kinds* that happen to come from the same backend. A
+# query timeout ("this specific request took too long") and backend unavailability ("the
+# database cannot be reached at all right now") are different situations with different
+# retry advice, so they get two predicates, not one:
 #
-# `GRAPH_BACKEND_ERROR_TYPES` is the tuple a router's `except` clause catches;
-# `is_graph_query_timeout` is the predicate it tests the caught exception against. A
-# family that adds a third backend registers that backend's own exception type in the
-# tuple once, here, rather than teaching every router about it.
-GRAPH_BACKEND_ERROR_TYPES: tuple[type[BaseException], ...] = (Neo4jClientError, psycopg.Error, DatabaseUnavailableError)
+# `is_graph_query_timeout` — a statement/transaction-level timeout:
+#   - Neo4j: a `ClientError` whose message contains "TransactionTimedOut" (or, more
+#     rarely, "TransactionTimedOutClientConfiguration").
+#   - PostgreSQL: `psycopg.errors.QueryCanceled` (SQLSTATE 57014), raised when the
+#     session's `statement_timeout` fires and the server cancels the in-flight query.
+#
+# `is_graph_backend_unavailable` — the backend itself could not be reached or gave up
+# before a query ever ran:
+#   - Neo4j: `ServiceUnavailable` (no reachable server) or `SessionExpired` (the routing
+#     table sent the driver to a server that is no longer serving this session) — both
+#     `DriverError`, not `ClientError`, so they were never covered by the old
+#     Neo4j-only `except ClientError` handlers and fell through to a bare 500; this gives
+#     them the same 503 a not-configured backend already returns, instead of inventing a
+#     third code.
+#   - PostgreSQL: the connection pool's own `DatabaseUnavailableError` family —
+#     `ConnectionEstablishmentError` after checkout has exhausted its retries,
+#     `CircuitOpenError` once the breaker has tripped on repeated failures. This is the
+#     pool's shape of "gave up waiting," raised in place of a bare `asyncio.TimeoutError`,
+#     which `AsyncPostgreSQLPool` catches and retries internally rather than letting it
+#     escape (see `common.postgres_resilient.AsyncPostgreSQLPool._pooled_connection`).
+#     It reads like a timeout but it is not a *query* timeout — nothing about the request
+#     itself was slow — so a router must not fold it into the 504/"try reducing depth or
+#     limit" message; it belongs with 503, alongside every other "not ready" case.
+#
+# `GRAPH_BACKEND_ERROR_TYPES` is the tuple a router's `except` clause catches; the two
+# predicates above are what it tests the caught exception against, in order (timeout,
+# then unavailable) — a family that adds a third backend registers that backend's
+# exception types in the tuple once, here, rather than teaching every router about them.
+GRAPH_BACKEND_ERROR_TYPES: tuple[type[BaseException], ...] = (
+    Neo4jClientError,
+    Neo4jServiceUnavailable,
+    Neo4jSessionExpired,
+    psycopg.Error,
+    DatabaseUnavailableError,
+)
 
-# The two PostgreSQL shapes `is_graph_query_timeout` treats as a timeout: cancellation of
-# an in-flight statement, and the pool giving up on acquiring a connection at all.
-_POSTGRES_TIMEOUT_ERRORS: tuple[type[BaseException], ...] = (psycopg.errors.QueryCanceled, DatabaseUnavailableError)
+# The Neo4j and PostgreSQL shapes of "the backend could not be reached," tested by
+# `is_graph_backend_unavailable`. Deliberately disjoint from `psycopg.errors.QueryCanceled`
+# and the Neo4j `ClientError` timeout codes, which are query-level, not backend-level.
+_BACKEND_UNAVAILABLE_ERRORS: tuple[type[BaseException], ...] = (
+    Neo4jServiceUnavailable,
+    Neo4jSessionExpired,
+    DatabaseUnavailableError,
+)
 
 
 def is_graph_query_timeout(exc: BaseException) -> bool:
-    """True when *exc* is a backend's way of saying a query ran out of time.
+    """True when *exc* is a backend's way of saying a specific query ran out of time.
 
     Covers Neo4j's `TransactionTimedOut` / `TransactionTimedOutClientConfiguration`
     client errors (matched on message — the same substring check the pre-existing Neo4j
     handlers used, kept as-is so this is a refactor of that behavior, not a change to it)
-    and PostgreSQL's statement-level cancellation (`QueryCanceled`) and connection-pool
-    timeout/exhaustion (`DatabaseUnavailableError` and its subclasses).
+    and PostgreSQL's statement-level cancellation (`QueryCanceled`).
 
-    A caller normally reacts to `True` by returning the family's 504. `False` — including
-    every non-timeout member of `GRAPH_BACKEND_ERROR_TYPES` — means re-raise, so a genuine
-    backend bug still surfaces as a 500 on both backends alike, exactly as it did before
-    the PostgreSQL backend existed.
+    Deliberately excludes backend-unavailability — see `is_graph_backend_unavailable` —
+    even though both eventually read as "the request didn't finish": only a genuine
+    statement/transaction timeout belongs in the 504 this predicate drives a caller to
+    return; a caller normally reacts to `False` by checking `is_graph_backend_unavailable`
+    next, and re-raises only when neither predicate matches, so a real backend bug still
+    surfaces as a 500 on both backends alike, exactly as it did before the PostgreSQL
+    backend existed.
     """
     if isinstance(exc, Neo4jClientError):
         return "TransactionTimedOut" in str(exc)
-    return isinstance(exc, _POSTGRES_TIMEOUT_ERRORS)
+    return isinstance(exc, psycopg.errors.QueryCanceled)
+
+
+def is_graph_backend_unavailable(exc: BaseException) -> bool:
+    """True when *exc* is a backend's way of saying it could not be reached at all.
+
+    Covers Neo4j's `ServiceUnavailable` / `SessionExpired` driver errors and PostgreSQL's
+    connection-pool `DatabaseUnavailableError` family (`ConnectionEstablishmentError`,
+    `CircuitOpenError`). A caller normally reacts to `True` with the same 503 a
+    not-configured backend already returns — never the query-timeout 504, since no query
+    ran: `is_graph_query_timeout` is `False` for every case here.
+    """
+    return isinstance(exc, _BACKEND_UNAVAILABLE_ERRORS)
 
 
 # ── Startup readiness for the PostgreSQL backend ─────────────────────────────

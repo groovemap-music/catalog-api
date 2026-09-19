@@ -16,6 +16,7 @@ from api.graph_backend import (
     GRAPH_BACKEND_ERROR_TYPES,
     CollaboratorsBackend,
     get_collaborators_backend,
+    is_graph_backend_unavailable,
     is_graph_query_timeout,
 )
 from api.limiter import limiter
@@ -98,14 +99,21 @@ async def artist_collaborators(
         )
     except GRAPH_BACKEND_ERROR_TYPES as exc:
         # Backend-neutral: `GRAPH_BACKEND_ERROR_TYPES` covers both the Neo4j driver's and
-        # the PostgreSQL pool's exception hierarchies, and `is_graph_query_timeout` is what
-        # tells a statement/connection timeout — on either backend — apart from a genuine
-        # backend bug, which still re-raises to the same 500 both backends always produced.
+        # the PostgreSQL pool's exception hierarchies. `is_graph_query_timeout` and
+        # `is_graph_backend_unavailable` tell the two failure kinds apart — a timed-out
+        # query versus a backend that could not be reached at all — from a genuine backend
+        # bug, which still re-raises to the same 500 both backends always produced.
         if is_graph_query_timeout(exc):
             logger.warning("⏱️ Network collaborators query timed out", artist_id=artist_id, depth=depth)
             return JSONResponse(
                 content={"error": "Network collaborators query timed out — try reducing depth or limit"},
                 status_code=504,
+            )
+        if is_graph_backend_unavailable(exc):
+            logger.warning("🔌 Network collaborators graph backend unavailable", artist_id=artist_id, depth=depth)
+            return JSONResponse(
+                content={"error": "Graph backend unavailable — try again later"},
+                status_code=503,
             )
         raise
 
