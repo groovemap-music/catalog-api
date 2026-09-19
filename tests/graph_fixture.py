@@ -27,6 +27,15 @@ way to reach it as a bridge.
 Anchor "8" is tie-free too: artist 9 at distance 1 over two shared releases, artist 10 at
 distance 1 over one, artist 11 at distance 2 over one bridge.
 
+**Release years** (`RELEASE_YEARS`) exist for the one-hop `collaborator_queries` family
+(`gm-catalog-api-91a.3`), which Cypher-filters on `r.year > 0` and groups its result by
+year. Every release above gets a distinct year so `RELEASE_YEARS` needs no component of its
+own: under anchor "1" the one-hop family orders by `release_count` exactly as the two-hop
+family orders by `collaboration_count` at distance 1, so it inherits the same tie-free
+vantage point; under anchor "8" the three-credit release is what makes the one-hop family's
+own walk-semantics guard (`peer.artist_id <> anchor.artist_id`) observable too — without it,
+a walk from "8" over release 201 can turn around and report "8" as its own collaborator.
+
 **The full-text component** (ids 301+) belongs to the autocomplete family and shares no
 row with the other two. It traverses nothing: the five relations it is read from are
 `graph.artist`, `graph.label`, `graph.genre`, `graph.style`, and `graph.person`, and only
@@ -111,6 +120,28 @@ RELEASES: dict[str, tuple[str, ...]] = {
     "203": ("9", "11"),
 }
 
+# release id -> the year it was released. A separate mapping rather than a field on
+# `RELEASES` so the two-hop family's `len(RELEASES[...])` / membership checks
+# (`tests/test_graph_parity.py`) keep reading a plain tuple of credited artist ids. Every
+# release gets its own year; nothing in either family's ordering depends on which.
+RELEASE_YEARS: dict[str, int] = {
+    "101": 2001,
+    "102": 2002,
+    "103": 2003,
+    "104": 2004,
+    "105": 2005,
+    "106": 2006,
+    "107": 2007,
+    "108": 2008,
+    "109": 2009,
+    "110": 2010,
+    "111": 2011,
+    "112": 2012,
+    THREE_CREDIT_RELEASE_ID: 2013,
+    "202": 2014,
+    "203": 2015,
+}
+
 # ── The full-text component ─────────────────────────────────────────────────
 # Read by the autocomplete family. Ids start at 301 so no row here can collide with the
 # two traversal components above.
@@ -189,6 +220,7 @@ SET a.name = artist.name
 WITH count(*) AS _seeded
 UNWIND $releases AS release
 MERGE (r:Release {id: release.id})
+SET r.year = release.year
 WITH r, release
 UNWIND release.artists AS artist_id
 MATCH (a:Artist {id: artist_id})
@@ -263,7 +295,7 @@ async def seed_neo4j(driver: AsyncResilientNeo4jDriver) -> None:
         driver,
         _SEED_NEO4J,
         artists=[{"id": artist_id, "name": name} for artist_id, name in ARTISTS.items()],
-        releases=[{"id": release_id, "artists": list(credits)} for release_id, credits in RELEASES.items()],
+        releases=[{"id": release_id, "artists": list(credits), "year": RELEASE_YEARS[release_id]} for release_id, credits in RELEASES.items()],
     )
     await consume(
         driver,
@@ -293,7 +325,11 @@ async def seed_postgres(pool: AsyncPostgreSQLPool) -> None:
         for artist_id, name in ARTISTS.items():
             await cursor.execute(_SEED_ARTIST, (artist_id, "parity-fixture", json.dumps({"name": name})))
         for release_id, credits in RELEASES.items():
-            document = {"title": f"Release {release_id}", "artists": [{"id": int(each)} for each in credits]}
+            document = {
+                "title": f"Release {release_id}",
+                "year": RELEASE_YEARS[release_id],
+                "artists": [{"id": int(each)} for each in credits],
+            }
             await cursor.execute(_SEED_RELEASE, (release_id, "parity-fixture", json.dumps(document)))
         for artist_id, name in AUTOCOMPLETE_ARTISTS.items():
             await cursor.execute(_SEED_ARTIST, (artist_id, "parity-fixture", json.dumps({"name": name})))
