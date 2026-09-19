@@ -35,6 +35,25 @@ family orders by `collaboration_count` at distance 1, so it inherits the same ti
 vantage point; under anchor "8" the three-credit release is what makes the one-hop family's
 own walk-semantics guard (`peer.artist_id <> anchor.artist_id`) observable too — without it,
 a walk from "8" over release 201 can turn around and report "8" as its own collaborator.
+
+**The full-text component** (ids 301+) belongs to the autocomplete family and shares no
+row with the other two. It traverses nothing: the five relations it is read from are
+`graph.artist`, `graph.label`, `graph.genre`, `graph.style`, and `graph.person`, and only
+the first two are reachable from a release at all. Its releases therefore credit no artist
+and name no label — they exist solely to carry the `genres`, `styles`, and `extraartists`
+blocks the three name-keyed vertex tables are projected from, so nothing it adds can reach
+an anchor of the other two components.
+
+Its names are chosen for three jobs. Each registered query matches its relation under
+*both* engines' rules — every term a prefix of a word in the name — so the row sets agree
+and only the ranking differs. Each matches more than one name where the family's limit and
+ordering are worth exercising. And three of them carry characters a query string has no
+business carrying. Two (`AC/DC`, `Charles "Chuck" Berry`) are Lucene syntax, which is what
+the escaping this family retires existed for, and are searched for by the hazard tests
+rather than by a parity call because the Lucene side does not return the same row.
+`Sinéad O'Connor` is the third and is different: an apostrophe survives Lucene's tokenizer
+intact, so both engines answer and it is a parity call — it is there for the character that
+would have broken a hand-built SQL string rather than a query parser.
 """
 
 from __future__ import annotations
@@ -48,6 +67,7 @@ from typing import Any
 
 import pytest
 from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver, parse_postgres_host_port
+from groovemap_schema.neo4j import create_neo4j_schema
 from groovemap_schema.postgres import (
     PROPERTY_GRAPH_MINIMUM_SERVER_VERSION,
     create_postgres_schema,
@@ -122,9 +142,75 @@ RELEASE_YEARS: dict[str, int] = {
     "203": 2015,
 }
 
-_TRUNCATE_ENTITIES = "TRUNCATE artists, releases CASCADE"
+# ── The full-text component ─────────────────────────────────────────────────
+# Read by the autocomplete family. Ids start at 301 so no row here can collide with the
+# two traversal components above.
+
+# Query "radio" reaches both; query "acdc" reaches neither, and query "AC/DC" is what the
+# Lucene escaping mishandled.
+AUTOCOMPLETE_ARTISTS: dict[str, str] = {
+    "301": "Radiohead",
+    "302": "Radio Birdman",
+    "303": "AC/DC",
+}
+
+# Query "warp" reaches the first two; "Warped Vinyl" is there so the prefix is a prefix of
+# a *word* rather than of the whole name, which is the rule both engines apply.
+AUTOCOMPLETE_LABELS: dict[str, str] = {
+    "401": "Warp Records",
+    "402": "Warped Vinyl",
+    "403": "Mute",
+}
+
+# release id -> the tag blocks and credits it carries. `graph.genre`, `graph.style`, and
+# `graph.person` are projections of exactly these three document keys, so this is the whole
+# input for three of the family's five relations. No `artists` and no `labels` key: an edge
+# out of these releases would join the full-text component to nothing and is not wanted.
+AUTOCOMPLETE_RELEASES: dict[str, dict[str, Any]] = {
+    "901": {
+        "genres": ["Rock"],
+        "styles": ["Ambient"],
+        "extraartists": [
+            {"name": 'Charles "Chuck" Berry', "role": "Guitar"},
+            {"name": "Bob Ludwig", "role": "Mastered By"},
+        ],
+    },
+    "902": {
+        "genres": ["Electronic"],
+        "styles": ["Ambient House", "Techno"],
+        "extraartists": [
+            {"name": "Sinéad O'Connor", "role": "Vocals"},
+            {"name": "Bob Power", "role": "Mixed By"},
+        ],
+    },
+}
+
+# The names the two vertex tables above are projected to, restated so a test can name one
+# without re-deriving it from the documents.
+AUTOCOMPLETE_GENRES: tuple[str, ...] = ("Electronic", "Rock")
+AUTOCOMPLETE_STYLES: tuple[str, ...] = ("Ambient", "Ambient House", "Techno")
+AUTOCOMPLETE_PEOPLE: tuple[str, ...] = (
+    "Bob Ludwig",
+    "Bob Power",
+    'Charles "Chuck" Berry',
+    "Sinéad O'Connor",
+)
+
+
+_TRUNCATE_ENTITIES = "TRUNCATE artists, labels, releases CASCADE"
+
+# What turns the seeded documents into graph rows. From the phase 2 schema revision the
+# `graph` relations a loader owns — every edge, and the `genre`, `style`, and `person`
+# vertices — are tables rather than views over `public.releases`, so seeding a document no
+# longer projects an edge on its own. `graph.bootstrap_fill()` is the producer's own
+# one-off fill: it truncates each of those relations and refills it from the same phase 0
+# body the view used to publish, in one transaction, and returns a row count per relation.
+# It is exactly what the contract says it is for — populating an environment before a
+# loader has run — which is what a fixture is.
+_BOOTSTRAP_FILL = "SELECT relation, row_count FROM graph.bootstrap_fill()"
 
 _SEED_ARTIST = "INSERT INTO artists (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
+_SEED_LABEL = "INSERT INTO labels (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
 _SEED_RELEASE = "INSERT INTO releases (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
 
 _SEED_NEO4J = """
@@ -140,6 +226,31 @@ UNWIND release.artists AS artist_id
 MATCH (a:Artist {id: artist_id})
 MERGE (r)-[:BY]->(a)
 """
+
+# The full-text component's Neo4j half. `graphinator` writes these five node kinds from the
+# same document keys `graph.bootstrap_fill` projects the PostgreSQL tables from, so the two
+# sides are seeded from one set of constants and diverge only where the engines do.
+_SEED_NEO4J_FULLTEXT = """
+UNWIND $artists AS artist
+MERGE (a:Artist {id: artist.id}) SET a.name = artist.name
+WITH count(*) AS _artists
+UNWIND $labels AS label
+MERGE (l:Label {id: label.id}) SET l.name = label.name
+WITH count(*) AS _labels
+UNWIND $genres AS genre
+MERGE (:Genre {name: genre})
+WITH count(*) AS _genres
+UNWIND $styles AS style
+MERGE (:Style {name: style})
+WITH count(*) AS _styles
+UNWIND $people AS person
+MERGE (:Person {name: person})
+"""
+
+# Lucene indexes are populated in the background, so a search issued the moment the seed
+# commits can read an index that is still building and answer with fewer rows than the
+# graph holds. Every full-text call in the suite is downstream of this.
+_AWAIT_NEO4J_INDEXES = "CALL db.awaitIndexes()"
 
 _SERVER_VERSION = "SELECT current_setting('server_version_num')::int"
 
@@ -168,7 +279,17 @@ async def consume(driver: AsyncResilientNeo4jDriver, cypher: str, **params: Any)
 
 
 async def seed_neo4j(driver: AsyncResilientNeo4jDriver) -> None:
-    """Project the fixture into Neo4j as the graph enrichers would."""
+    """Project the fixture into Neo4j as the graph enrichers would.
+
+    The producer's own constraints and indexes are applied first, for the same reason
+    `seed_postgres` applies the producer's DDL rather than a hand-rolled subset: the five
+    `*_name_fulltext` indexes the autocomplete family reads are declared in
+    `groovemap_schema.neo4j`, and a hand-written `CREATE FULLTEXT INDEX` here would be a
+    second spelling of them that can drift. `db.awaitIndexes()` then makes the seed
+    readable rather than merely committed.
+    """
+    failures = await create_neo4j_schema(driver)
+    assert failures == 0, f"{failures} Neo4j schema statements failed against the integration container"
     await consume(driver, "MATCH (n) DETACH DELETE n")
     await consume(
         driver,
@@ -176,13 +297,28 @@ async def seed_neo4j(driver: AsyncResilientNeo4jDriver) -> None:
         artists=[{"id": artist_id, "name": name} for artist_id, name in ARTISTS.items()],
         releases=[{"id": release_id, "artists": list(credits), "year": RELEASE_YEARS[release_id]} for release_id, credits in RELEASES.items()],
     )
+    await consume(
+        driver,
+        _SEED_NEO4J_FULLTEXT,
+        artists=[{"id": artist_id, "name": name} for artist_id, name in AUTOCOMPLETE_ARTISTS.items()],
+        labels=[{"id": label_id, "name": name} for label_id, name in AUTOCOMPLETE_LABELS.items()],
+        genres=list(AUTOCOMPLETE_GENRES),
+        styles=list(AUTOCOMPLETE_STYLES),
+        people=list(AUTOCOMPLETE_PEOPLE),
+    )
+    await consume(driver, _AWAIT_NEO4J_INDEXES)
 
 
 async def seed_postgres(pool: AsyncPostgreSQLPool) -> None:
-    """Write the fixture into `artists` and `releases` as Discogs documents.
+    """Write the fixture as Discogs documents, then project it into the graph relations.
 
-    Nothing else is written: `graph.catalog` and the views underneath it are declarations
-    over these two tables, so the documents are the whole projection.
+    The documents are still the whole input — nothing is written to a `graph` relation by
+    hand. They are not the whole projection any more, though: the loader-owned relations
+    are tables from the phase 2 schema revision onward, so `graph.bootstrap_fill()` runs
+    afterwards to derive them from the documents just written. It truncates first, so a
+    re-seed converges rather than accumulating, and it covers the traversal component's
+    `graph.by_artist` and the full-text component's `graph.genre`, `graph.style`, and
+    `graph.person` in the same pass.
     """
     async with pool.connection() as conn, conn.cursor() as cursor:
         await cursor.execute(_TRUNCATE_ENTITIES)
@@ -195,18 +331,30 @@ async def seed_postgres(pool: AsyncPostgreSQLPool) -> None:
                 "artists": [{"id": int(each)} for each in credits],
             }
             await cursor.execute(_SEED_RELEASE, (release_id, "parity-fixture", json.dumps(document)))
+        for artist_id, name in AUTOCOMPLETE_ARTISTS.items():
+            await cursor.execute(_SEED_ARTIST, (artist_id, "parity-fixture", json.dumps({"name": name})))
+        for label_id, name in AUTOCOMPLETE_LABELS.items():
+            await cursor.execute(_SEED_LABEL, (label_id, "parity-fixture", json.dumps({"name": name})))
+        for release_id, tags in AUTOCOMPLETE_RELEASES.items():
+            document = {"title": f"Release {release_id}", **tags}
+            await cursor.execute(_SEED_RELEASE, (release_id, "parity-fixture", json.dumps(document)))
+        await cursor.execute(_BOOTSTRAP_FILL)
+        await cursor.fetchall()
 
 
 async def open_postgres_pool() -> AsyncPostgreSQLPool:
     """Open a pool on the integration container with the producer's own schema applied.
 
-    The two gates are asserted rather than skipped past. A caller reaches this only once
-    the property graph has been *requested*, and a container that then cannot serve it is
-    a failure, not a no-op: the whole point of the PostgreSQL 19 tier is that the graph is
-    there.
-    """
-    assert property_graph_enabled(), "SCHEMA_PROPERTY_GRAPH must be enabled; use `just test-integration-pg19`"
+    Both property-graph gates are asserted rather than skipped past *when the switch asks
+    for the graph*: a container that has been told to declare `graph.catalog` and then
+    cannot is a failure, not a no-op, because the whole point of the PostgreSQL 19 tier is
+    that the graph is there.
 
+    With the switch off there is nothing to gate. A family registered
+    `requires_property_graph=False` is ordinary SQL over the `graph` relations — which are
+    unconditional, on every tier — so it runs here on PostgreSQL 18 too, and asserting a
+    graph it never reads would be the fixture failing a run the family is fine on.
+    """
     host, port = parse_postgres_host_port(required_env("POSTGRES_HOST"))
     pool = AsyncPostgreSQLPool(
         connection_params={
@@ -223,14 +371,15 @@ async def open_postgres_pool() -> AsyncPostgreSQLPool:
     )
     await pool.initialize()
 
-    async with pool.connection() as conn, conn.cursor() as cursor:
-        await cursor.execute(_SERVER_VERSION)
-        row = await cursor.fetchone()
-        server_version_num = int(row[0]) if row else 0
-    assert server_version_num >= PROPERTY_GRAPH_MINIMUM_SERVER_VERSION, (
-        f"this suite needs server_version_num >= {PROPERTY_GRAPH_MINIMUM_SERVER_VERSION}; "
-        f"the container reports {server_version_num}. Check POSTGRES_INTEGRATION_IMAGE."
-    )
+    if property_graph_enabled():
+        async with pool.connection() as conn, conn.cursor() as cursor:
+            await cursor.execute(_SERVER_VERSION)
+            row = await cursor.fetchone()
+            server_version_num = int(row[0]) if row else 0
+        assert server_version_num >= PROPERTY_GRAPH_MINIMUM_SERVER_VERSION, (
+            f"this suite needs server_version_num >= {PROPERTY_GRAPH_MINIMUM_SERVER_VERSION}; "
+            f"the container reports {server_version_num}. Check POSTGRES_INTEGRATION_IMAGE."
+        )
 
     failures = await create_postgres_schema(pool)
     assert failures == 0, f"{failures} schema statements failed against the integration container"

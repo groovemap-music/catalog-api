@@ -23,7 +23,14 @@ from __future__ import annotations
 from types import ModuleType
 from typing import Any, Protocol, cast
 
-from api.queries import collaborator_pg_queries, collaborator_queries, network_pg_queries, network_queries
+from api.queries import (
+    autocomplete_pg_queries,
+    autocomplete_queries,
+    collaborator_pg_queries,
+    collaborator_queries,
+    network_pg_queries,
+    network_queries,
+)
 
 
 class CollaboratorsBackend(Protocol):
@@ -47,11 +54,39 @@ class CollaboratorsBackend(Protocol):
     async def count_multi_hop_collaborators(self, handle: Any, artist_id: str, /, depth: int = 2) -> int: ...
 
 
+# ── The "autocomplete" family ────────────────────────────────────────────────
+class AutocompleteBackend(Protocol):
+    """The five name searches the "autocomplete" family is made of.
+
+    The one family that answers without traversing: the Cypher side calls Neo4j's Lucene
+    full-text indexes and the PostgreSQL side reads the `graph` vertex relations through
+    their trigram indexes, so neither spelling needs `graph.catalog` and both run on every
+    server tier.
+
+    As in `CollaboratorsBackend`, the handle is the backend's own — a Neo4j driver or a
+    PostgreSQL pool — and is positional-only so each module can name it for what it takes.
+    `query` is positional-only for the same reason the routers pass it that way; `limit` is
+    named because it is the one argument a caller varies.
+    """
+
+    async def autocomplete_artist(self, handle: Any, query: str, /, limit: int = 10) -> list[dict[str, Any]]: ...
+
+    async def autocomplete_label(self, handle: Any, query: str, /, limit: int = 10) -> list[dict[str, Any]]: ...
+
+    async def autocomplete_genre(self, handle: Any, query: str, /, limit: int = 10) -> list[dict[str, Any]]: ...
+
+    async def autocomplete_style(self, handle: Any, query: str, /, limit: int = 10) -> list[dict[str, Any]]: ...
+
+    async def autocomplete_person(self, handle: Any, query: str, /, limit: int = 10) -> list[dict[str, Any]]: ...
+
+
 # The signature-parity assertions. They exist only to be type-checked: each name binds a
 # module to the protocol, and mypy verifies the module's functions against it. Keeping them
 # here rather than in either query module means neither backend imports the other.
 _NEO4J_COLLABORATORS: CollaboratorsBackend = network_queries
 _POSTGRES_COLLABORATORS: CollaboratorsBackend = network_pg_queries
+_NEO4J_AUTOCOMPLETE: AutocompleteBackend = autocomplete_queries
+_POSTGRES_AUTOCOMPLETE: AutocompleteBackend = autocomplete_pg_queries
 
 
 # ── one_hop_collaborators family (gm-catalog-api-91a.3) ──────────────────────────────────
@@ -85,6 +120,10 @@ _FAMILY_BACKENDS: dict[str, dict[str, ModuleType]] = {
     "one_hop_collaborators": {
         "neo4j": collaborator_queries,
         "postgres": collaborator_pg_queries,
+    },
+    "autocomplete": {
+        "neo4j": autocomplete_queries,
+        "postgres": autocomplete_pg_queries,
     },
 }
 
@@ -123,6 +162,15 @@ def get_one_hop_collaborators_backend(backend: str) -> OneHopCollaboratorsBacken
     `OneHopCollaboratorsBackend` above, which is where mypy checks it.
     """
     return cast("OneHopCollaboratorsBackend", get_backend("one_hop_collaborators", backend))
+
+
+def get_autocomplete_backend(backend: str) -> AutocompleteBackend:
+    """Resolve the "autocomplete" family for *backend*, typed rather than as a module.
+
+    Sound for the same reason `get_collaborators_backend` is: both registered modules are
+    bound to `AutocompleteBackend` above, which is where mypy checks them.
+    """
+    return cast("AutocompleteBackend", get_backend("autocomplete", backend))
 
 
 # ── Startup readiness for the PostgreSQL backend ─────────────────────────────
