@@ -23,7 +23,7 @@ from __future__ import annotations
 from types import ModuleType
 from typing import Any, Protocol, cast
 
-from api.queries import network_pg_queries, network_queries
+from api.queries import collaborator_pg_queries, collaborator_queries, network_pg_queries, network_queries
 
 
 class CollaboratorsBackend(Protocol):
@@ -54,11 +54,37 @@ _NEO4J_COLLABORATORS: CollaboratorsBackend = network_queries
 _POSTGRES_COLLABORATORS: CollaboratorsBackend = network_pg_queries
 
 
+# ── one_hop_collaborators family (gm-catalog-api-91a.3) ──────────────────────────────────
+# The pilot's one-hop sibling: `/api/collaborators/{id}`, the NLQ `get_collaborators` tool,
+# and the MCP `get_collaborators` tool (which reaches the same endpoint over HTTP, per
+# `api/contracts/mcp-server/v1/routes.json`) all call `collaborator_queries.get_collaborators`
+# and its count, not the "collaborators" family above. `get_artist_identity` is deliberately
+# not part of this protocol — it is grouped with the other plain vertex lookups instead.
+class OneHopCollaboratorsBackend(Protocol):
+    """The two query functions the "one_hop_collaborators" family is made of.
+
+    See `CollaboratorsBackend` above for why the handle is positional-only and typed `Any`.
+    """
+
+    async def get_collaborators(self, handle: Any, artist_id: str, /, limit: int = 20) -> list[dict[str, Any]]: ...
+
+    async def count_collaborators(self, handle: Any, artist_id: str, /) -> int: ...
+
+
+_NEO4J_ONE_HOP_COLLABORATORS: OneHopCollaboratorsBackend = collaborator_queries
+_POSTGRES_ONE_HOP_COLLABORATORS: OneHopCollaboratorsBackend = collaborator_pg_queries
+# ── end one_hop_collaborators family ──────────────────────────────────────────────────────
+
+
 # family name -> backend name -> module implementing that family's query functions.
 _FAMILY_BACKENDS: dict[str, dict[str, ModuleType]] = {
     "collaborators": {
         "neo4j": network_queries,
         "postgres": network_pg_queries,
+    },
+    "one_hop_collaborators": {
+        "neo4j": collaborator_queries,
+        "postgres": collaborator_pg_queries,
     },
 }
 
@@ -88,6 +114,15 @@ def get_collaborators_backend(backend: str) -> CollaboratorsBackend:
     three call sites are type-checked instead of an untyped `ModuleType`.
     """
     return cast("CollaboratorsBackend", get_backend("collaborators", backend))
+
+
+def get_one_hop_collaborators_backend(backend: str) -> OneHopCollaboratorsBackend:
+    """Resolve the "one_hop_collaborators" family for *backend*, typed rather than as a module.
+
+    The cast is sound because every module registered under that family is bound to
+    `OneHopCollaboratorsBackend` above, which is where mypy checks it.
+    """
+    return cast("OneHopCollaboratorsBackend", get_backend("one_hop_collaborators", backend))
 
 
 # ── Startup readiness for the PostgreSQL backend ─────────────────────────────
