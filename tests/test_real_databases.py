@@ -32,6 +32,7 @@ from api.graph_backend import (
     CollaboratorIdentityBackend,
     CollaboratorsBackend,
     GapMetadataBackend,
+    OneHopCollaboratorsBackend,
     get_backend,
     registered_families,
 )
@@ -469,6 +470,28 @@ COLLABORATORS_CALLS: tuple[ParityCall, ...] = (
 register_parity_family("collaborators", COLLABORATORS_CALLS)
 
 
+# ── one_hop_collaborators family (gm-catalog-api-91a.3) ──────────────────────────────────
+# The pilot's one-hop sibling: `collaborator_queries.get_collaborators` and its count, which
+# `/api/collaborators/{id}`, the NLQ `get_collaborators` tool, and the MCP `get_collaborators`
+# tool all actually call. Both anchors are the same tie-free vantage points the pilot family
+# above uses: "1" orders unambiguously by `release_count`, and "8" is where the three-credit
+# release makes this family's own `peer <> anchor` walk-semantics guard observable — without
+# it, a walk from "8" can turn around on that release and report "8" as its own collaborator.
+
+_ONE_HOP_ANCHORS = (graph_fixture.ANCHOR_ARTIST_ID, graph_fixture.PROBE_ANCHOR_ARTIST_ID)
+
+ONE_HOP_COLLABORATORS_CALLS: tuple[ParityCall, ...] = (
+    *(ParityCall("get_collaborators", (anchor,), {"limit": 20}) for anchor in _ONE_HOP_ANCHORS),
+    ParityCall("get_collaborators", (graph_fixture.ANCHOR_ARTIST_ID,), {"limit": 2}),
+    ParityCall("get_collaborators", ("does-not-exist",), {"limit": 20}),
+    *(ParityCall("count_collaborators", (anchor,)) for anchor in _ONE_HOP_ANCHORS),
+    ParityCall("count_collaborators", ("does-not-exist",)),
+)
+
+register_parity_family("one_hop_collaborators", ONE_HOP_COLLABORATORS_CALLS)
+# ── end one_hop_collaborators family ──────────────────────────────────────────────────────
+
+
 # ── Coverage spike family 1: vertex lookups and store statistics (gm-catalog-api-91a.2) ──
 # Four families, none needing `graph.catalog`: every PostgreSQL statement below is a plain
 # SELECT over a phase 0 view, so each registers `requires_property_graph=False` and runs on
@@ -506,6 +529,7 @@ register_parity_family("catalog_overview", CATALOG_OVERVIEW_CALLS, requires_prop
 # leave one of its functions unproven.
 FAMILY_PROTOCOLS: dict[str, type] = {
     "collaborators": CollaboratorsBackend,
+    "one_hop_collaborators": OneHopCollaboratorsBackend,
     "collaborator_identity": CollaboratorIdentityBackend,
     "gap_metadata": GapMetadataBackend,
     "catalog_overview": CatalogOverviewBackend,

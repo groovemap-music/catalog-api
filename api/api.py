@@ -315,7 +315,7 @@ def _configure_routers(
         from api.nlq.tools import NLQToolRunner  # noqa: PLC0415
 
         anthropic_client = AsyncAnthropic(api_key=nlq_config.api_key)
-        tool_runner = NLQToolRunner(neo4j_driver=neo4j, pg_pool=pool, redis=redis)
+        tool_runner = NLQToolRunner(neo4j_driver=neo4j, pg_pool=pool, redis=redis, graph_backend=config.graph_backend)
         nlq_engine = NLQEngine(config=nlq_config, client=anthropic_client, tool_runner=tool_runner)
         logger.info("🧠 NLQ engine initialized", model=nlq_config.model)
 

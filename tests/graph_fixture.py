@@ -27,6 +27,15 @@ way to reach it as a bridge.
 Anchor "8" is tie-free too: artist 9 at distance 1 over two shared releases, artist 10 at
 distance 1 over one, artist 11 at distance 2 over one bridge.
 
+**Release years** (`RELEASE_YEARS`) exist for the one-hop `collaborator_queries` family
+(`gm-catalog-api-91a.3`), which Cypher-filters on `r.year > 0` and groups its result by
+year. Every release above gets a distinct year so `RELEASE_YEARS` needs no component of its
+own: under anchor "1" the one-hop family orders by `release_count` exactly as the two-hop
+family orders by `collaboration_count` at distance 1, so it inherits the same tie-free
+vantage point; under anchor "8" the three-credit release is what makes the one-hop family's
+own walk-semantics guard (`peer.artist_id <> anchor.artist_id`) observable too — without it,
+a walk from "8" over release 201 can turn around and report "8" as its own collaborator.
+
 **The full-text component** (ids 301+) belongs to the autocomplete family and shares no
 row with the other two. It traverses nothing: the five relations it is read from are
 `graph.artist`, `graph.label`, `graph.genre`, `graph.style`, and `graph.person`, and only
@@ -118,7 +127,11 @@ RELEASES: dict[str, tuple[str, ...]] = {
 # something other than zero for those two labels. The years are otherwise arbitrary — chosen
 # only so the extremes are unambiguous (release "101" is the sole minimum, "203" the sole
 # maximum) — and every release gets one, so no release is excluded by the `year > 0` guard
-# both engines apply.
+# both engines apply, and none is excluded by `one_hop_collaborators`' `year ~ '^[0-9]{4}$'`
+# guard either. A separate mapping rather than a field on `RELEASES` is also what the
+# `one_hop_collaborators` family (`gm-catalog-api-91a.3`) needs it for: the two-hop family's
+# `len(RELEASES[...])` / membership checks (`tests/test_graph_parity.py`) keep reading a
+# plain tuple of credited artist ids either way.
 #
 # The genre and style are deliberately not left at zero. A totally absent label is a
 # pathological case neither engine treats the same way once you look past the trivial "both
@@ -380,8 +393,8 @@ async def seed_postgres(pool: AsyncPostgreSQLPool) -> None:
         for release_id, credits in RELEASES.items():
             document = {
                 "title": f"Release {release_id}",
-                "artists": [{"id": int(each)} for each in credits],
                 "year": RELEASE_YEARS[release_id],
+                "artists": [{"id": int(each)} for each in credits],
             }
             if release_id == _TAGGED_RELEASE_ID:
                 document["genres"] = [GENRE_NAME]
