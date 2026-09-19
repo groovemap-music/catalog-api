@@ -93,6 +93,16 @@ RELEASES: dict[str, tuple[str, ...]] = {
 
 _TRUNCATE_ENTITIES = "TRUNCATE artists, releases CASCADE"
 
+# What turns the seeded documents into graph rows. From the phase 2 schema revision the
+# `graph` relations a loader owns — every edge, and the `genre`, `style`, and `person`
+# vertices — are tables rather than views over `public.releases`, so seeding a document no
+# longer projects an edge on its own. `graph.bootstrap_fill()` is the producer's own
+# one-off fill: it truncates each of those relations and refills it from the same phase 0
+# body the view used to publish, in one transaction, and returns a row count per relation.
+# It is exactly what the contract says it is for — populating an environment before a
+# loader has run — which is what a fixture is.
+_BOOTSTRAP_FILL = "SELECT relation, row_count FROM graph.bootstrap_fill()"
+
 _SEED_ARTIST = "INSERT INTO artists (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
 _SEED_RELEASE = "INSERT INTO releases (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
 
@@ -147,10 +157,15 @@ async def seed_neo4j(driver: AsyncResilientNeo4jDriver) -> None:
 
 
 async def seed_postgres(pool: AsyncPostgreSQLPool) -> None:
-    """Write the fixture into `artists` and `releases` as Discogs documents.
+    """Write the fixture as Discogs documents, then project it into the graph relations.
 
-    Nothing else is written: `graph.catalog` and the views underneath it are declarations
-    over these two tables, so the documents are the whole projection.
+    The documents are still the whole input — nothing is written to a `graph` relation by
+    hand. They are not the whole projection any more, though: the loader-owned relations
+    are tables from the phase 2 schema revision onward, so `graph.bootstrap_fill()` runs
+    afterwards to derive them from the documents just written. It truncates first, so a
+    re-seed converges rather than accumulating, and it covers the traversal component's
+    `graph.by_artist` and the full-text component's `graph.genre`, `graph.style`, and
+    `graph.person` in the same pass.
     """
     async with pool.connection() as conn, conn.cursor() as cursor:
         await cursor.execute(_TRUNCATE_ENTITIES)
@@ -159,6 +174,8 @@ async def seed_postgres(pool: AsyncPostgreSQLPool) -> None:
         for release_id, credits in RELEASES.items():
             document = {"title": f"Release {release_id}", "artists": [{"id": int(each)} for each in credits]}
             await cursor.execute(_SEED_RELEASE, (release_id, "parity-fixture", json.dumps(document)))
+        await cursor.execute(_BOOTSTRAP_FILL)
+        await cursor.fetchall()
 
 
 async def open_postgres_pool() -> AsyncPostgreSQLPool:
