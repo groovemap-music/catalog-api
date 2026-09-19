@@ -520,6 +520,11 @@ AUTOCOMPLETE_CALLS: tuple[ParityCall, ...] = (
     ParityCall("autocomplete_style", ("tech",), {"limit": 10}),
     ParityCall("autocomplete_person", ("bob",), {"limit": 10}),
     ParityCall("autocomplete_person", ("chuck",), {"limit": 10}),
+    # An apostrophe turns out not to be a Lucene hazard — its tokenizer keeps `O'Connor`
+    # as one token, so `o'conn*` matches and both engines return the same row. It is a
+    # parity call rather than a hazard case for exactly that reason, and it is worth one
+    # because the apostrophe is the character a hand-built SQL string would have broken on.
+    ParityCall("autocomplete_person", ("O'Conn",), {"limit": 10}),
 )
 
 register_parity_family("autocomplete", AUTOCOMPLETE_CALLS, requires_property_graph=False)
@@ -570,6 +575,40 @@ async def test_graph_query_family_agrees_on_both_backends(
     postgres_result = await _invoke(get_backend(family, "postgres"), call, parity_backends.postgres)
 
     assert_parity(family, call, neo4j_result=neo4j_result, postgres_result=postgres_result)
+
+
+# ── The inputs the Lucene escaping was there for ─────────────────────────────
+# These are not parity calls, and the reason is the bead: Lucene does not answer them the
+# way the trigram path does, so there is nothing to be at parity with. The claim the
+# family rests on is the pair below — PostgreSQL returns the row, and Neo4j does not
+# return the same set — and it is asserted rather than described.
+#
+# `_escape_lucene_query` exists because the query string reaches a parser. `AC/DC` is the
+# name the one unescaped call site returned a 500 on; a name with a quote in it is the
+# same hazard from the credits side, where nicknames are routinely quoted.
+
+_LUCENE_HAZARD_INPUTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("autocomplete_artist", "AC/DC", ("AC/DC",)),
+    ("autocomplete_person", 'Chuck"', ('Charles "Chuck" Berry',)),
+)
+
+
+@pytest.mark.parametrize(("function", "query", "expected"), _LUCENE_HAZARD_INPUTS)
+async def test_trigram_autocomplete_answers_the_inputs_lucene_mishandled(
+    parity_backends: graph_fixture.ParityBackends,
+    function: str,
+    query: str,
+    expected: tuple[str, ...],
+) -> None:
+    """PostgreSQL returns the name; Neo4j, reading the same fixture, does not agree."""
+    call = ParityCall(function, (query,), {"limit": 10})
+    postgres_result = await _invoke(get_backend("autocomplete", "postgres"), call, parity_backends.postgres)
+    neo4j_result = await _invoke(get_backend("autocomplete", "neo4j"), call, parity_backends.neo4j)
+
+    assert tuple(row["name"] for row in postgres_result) == expected
+    assert {row["name"] for row in neo4j_result} != set(expected), (
+        f"Neo4j agreed on {call}, so this input is no longer a Lucene hazard and belongs in AUTOCOMPLETE_CALLS rather than here."
+    )
 
 
 @pytest.mark.parametrize("family", sorted(PARITY_FAMILIES))

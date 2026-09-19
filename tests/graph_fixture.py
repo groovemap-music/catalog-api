@@ -38,10 +38,13 @@ an anchor of the other two components.
 Its names are chosen for three jobs. Each registered query matches its relation under
 *both* engines' rules — every term a prefix of a word in the name — so the row sets agree
 and only the ranking differs. Each matches more than one name where the family's limit and
-ordering are worth exercising. And three of them (`AC/DC`, `Charles "Chuck" Berry`,
-`Sinéad O'Connor`) carry the characters Lucene reads as syntax, which is what the escaping
-this family retires existed for; those are read by the PostgreSQL-only tests rather than by
-a parity call, because the Lucene side does not answer them at all.
+ordering are worth exercising. And three of them carry characters a query string has no
+business carrying. Two (`AC/DC`, `Charles "Chuck" Berry`) are Lucene syntax, which is what
+the escaping this family retires existed for, and are searched for by the hazard tests
+rather than by a parity call because the Lucene side does not return the same row.
+`Sinéad O'Connor` is the third and is different: an apostrophe survives Lucene's tokenizer
+intact, so both engines answer and it is a parity call — it is there for the character that
+would have broken a hand-built SQL string rather than a query parser.
 """
 
 from __future__ import annotations
