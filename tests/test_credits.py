@@ -182,7 +182,7 @@ class TestPersonConnectionsEndpoint:
 class TestCreditsAutocompleteEndpoint:
     """Tests for GET /api/credits/autocomplete."""
 
-    @patch("api.routers.credits.autocomplete_person")
+    @patch("api.queries.autocomplete_queries.autocomplete_person")
     def test_autocomplete_success(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = [
             {"name": "Bob Ludwig", "score": 5.2},
@@ -193,6 +193,28 @@ class TestCreditsAutocompleteEndpoint:
         data = response.json()
         assert len(data["results"]) == 2
         assert data["results"][0]["name"] == "Bob Ludwig"
+
+    def test_autocomplete_resolves_the_postgres_backend_when_configured(self, test_client: TestClient) -> None:
+        """GRAPH_BACKEND=postgres sends the person search to the trigram module."""
+        import api.routers.credits as credits_module
+
+        pool = object()
+        mock_func = AsyncMock(return_value=[{"name": "Bob Ludwig", "score": 0.4}])
+        driver, redis, backend, original_pool = (
+            credits_module._neo4j_driver,
+            credits_module._redis,
+            credits_module._graph_backend,
+            credits_module._pg_pool,
+        )
+        try:
+            credits_module.configure(driver, redis, "postgres", pg_pool=pool)
+            with patch("api.queries.autocomplete_pg_queries.autocomplete_person", mock_func):
+                response = test_client.get("/api/credits/autocomplete?q=bob&limit=4")
+        finally:
+            credits_module.configure(driver, redis, backend, pg_pool=original_pool)
+
+        assert response.status_code == 200
+        mock_func.assert_awaited_once_with(pool, "bob", 4)
 
     def test_autocomplete_query_too_short(self, test_client: TestClient) -> None:
         response = test_client.get("/api/credits/autocomplete?q=B")

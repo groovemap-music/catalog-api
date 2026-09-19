@@ -26,6 +26,8 @@ from typing import Any, Protocol, cast
 from api.queries import (
     admin_pg_queries,
     admin_queries,
+    autocomplete_pg_queries,
+    autocomplete_queries,
     collaborator_pg_queries,
     collaborator_queries,
     gap_pg_queries,
@@ -58,11 +60,39 @@ class CollaboratorsBackend(Protocol):
     async def count_multi_hop_collaborators(self, handle: Any, artist_id: str, /, depth: int = 2) -> int: ...
 
 
+# ── The "autocomplete" family ────────────────────────────────────────────────
+class AutocompleteBackend(Protocol):
+    """The five name searches the "autocomplete" family is made of.
+
+    The one family that answers without traversing: the Cypher side calls Neo4j's Lucene
+    full-text indexes and the PostgreSQL side reads the `graph` vertex relations through
+    their trigram indexes, so neither spelling needs `graph.catalog` and both run on every
+    server tier.
+
+    As in `CollaboratorsBackend`, the handle is the backend's own — a Neo4j driver or a
+    PostgreSQL pool — and is positional-only so each module can name it for what it takes.
+    `query` is positional-only for the same reason the routers pass it that way; `limit` is
+    named because it is the one argument a caller varies.
+    """
+
+    async def autocomplete_artist(self, handle: Any, query: str, /, limit: int = 10) -> list[dict[str, Any]]: ...
+
+    async def autocomplete_label(self, handle: Any, query: str, /, limit: int = 10) -> list[dict[str, Any]]: ...
+
+    async def autocomplete_genre(self, handle: Any, query: str, /, limit: int = 10) -> list[dict[str, Any]]: ...
+
+    async def autocomplete_style(self, handle: Any, query: str, /, limit: int = 10) -> list[dict[str, Any]]: ...
+
+    async def autocomplete_person(self, handle: Any, query: str, /, limit: int = 10) -> list[dict[str, Any]]: ...
+
+
 # The signature-parity assertions. They exist only to be type-checked: each name binds a
 # module to the protocol, and mypy verifies the module's functions against it. Keeping them
 # here rather than in either query module means neither backend imports the other.
 _NEO4J_COLLABORATORS: CollaboratorsBackend = network_queries
 _POSTGRES_COLLABORATORS: CollaboratorsBackend = network_pg_queries
+_NEO4J_AUTOCOMPLETE: AutocompleteBackend = autocomplete_queries
+_POSTGRES_AUTOCOMPLETE: AutocompleteBackend = autocomplete_pg_queries
 
 
 # ── Coverage spike family 1: vertex lookups and store statistics (gm-catalog-api-91a.2) ──
@@ -130,6 +160,10 @@ _FAMILY_BACKENDS: dict[str, dict[str, ModuleType]] = {
         "neo4j": network_queries,
         "postgres": network_pg_queries,
     },
+    "autocomplete": {
+        "neo4j": autocomplete_queries,
+        "postgres": autocomplete_pg_queries,
+    },
     "collaborator_identity": {
         "neo4j": collaborator_queries,
         "postgres": collaborator_pg_queries,
@@ -147,6 +181,18 @@ _FAMILY_BACKENDS: dict[str, dict[str, ModuleType]] = {
         "postgres": admin_pg_queries,
     },
 }
+
+
+def registered_families() -> frozenset[str]:
+    """Return every family name registered in `_FAMILY_BACKENDS`.
+
+    What `tests/test_real_databases.py`'s coverage guard reads to check that a *family*, not
+    just a function within one, was not silently left off the parity harness: registering a
+    family and forgetting to also register it with the harness is otherwise invisible, the
+    same gap `test_every_function_of_a_registered_family_is_covered_by_a_parity_call`'s own
+    docstring warns a forgotten function is — one level up.
+    """
+    return frozenset(_FAMILY_BACKENDS)
 
 
 def get_backend(family: str, backend: str) -> ModuleType:
@@ -174,6 +220,15 @@ def get_collaborators_backend(backend: str) -> CollaboratorsBackend:
     three call sites are type-checked instead of an untyped `ModuleType`.
     """
     return cast("CollaboratorsBackend", get_backend("collaborators", backend))
+
+
+def get_autocomplete_backend(backend: str) -> AutocompleteBackend:
+    """Resolve the "autocomplete" family for *backend*, typed rather than as a module.
+
+    Sound for the same reason `get_collaborators_backend` is: both registered modules are
+    bound to `AutocompleteBackend` above, which is where mypy checks them.
+    """
+    return cast("AutocompleteBackend", get_backend("autocomplete", backend))
 
 
 def get_collaborator_identity_backend(backend: str) -> CollaboratorIdentityBackend:

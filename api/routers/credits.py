@@ -8,6 +8,7 @@ from common.credit_roles import ALL_CATEGORIES
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
+from api.graph_backend import AutocompleteBackend, get_autocomplete_backend
 from api.limiter import limiter
 from api.models import (
     ConnectionEntry,
@@ -25,8 +26,8 @@ from api.models import (
     SharedCreditsResponse,
     TimelineEntry,
 )
+from api.queries import autocomplete_queries
 from api.queries.credits_queries import (
-    autocomplete_person,
     get_person_connections,
     get_person_credits,
     get_person_profile,
@@ -45,15 +46,31 @@ router = APIRouter()
 
 _neo4j_driver: Any = None
 _redis: Any = None
+# The PostgreSQL pool, held alongside the Neo4j driver because the person search is the one
+# route here that either engine can serve. Every other credits route walks CREDITED_ON and
+# reads `_neo4j_driver` directly.
+_pg_pool: Any = None
+_graph_backend: str = "neo4j"
+# Resolved through the graph-backend selector; defaults to the Neo4j implementation so an
+# unconfigured router behaves exactly as it did before the seam existed.
+_autocomplete_backend: AutocompleteBackend = autocomplete_queries
 
 # Redis cache TTL for credits (24 hours — data changes only on import)
 _CREDITS_CACHE_TTL = 86400
 
 
-def configure(neo4j: Any, redis: Any = None) -> None:
-    global _neo4j_driver, _redis
+def configure(neo4j: Any, redis: Any = None, graph_backend: str = "neo4j", pg_pool: Any = None) -> None:
+    global _neo4j_driver, _redis, _pg_pool, _graph_backend, _autocomplete_backend
     _neo4j_driver = neo4j
     _redis = redis
+    _pg_pool = pg_pool
+    _graph_backend = graph_backend
+    _autocomplete_backend = get_autocomplete_backend(graph_backend)
+
+
+def _autocomplete_handle() -> Any:
+    """Return the connection handle the resolved autocomplete backend expects."""
+    return _pg_pool if _graph_backend == "postgres" else _neo4j_driver
 
 
 # ── Person sub-routes MUST be declared before the catch-all {name} route ──
@@ -275,9 +292,10 @@ async def credits_autocomplete(
     limit: int = Query(10, ge=1, le=50),
 ) -> JSONResponse:
     """Search credits by person name."""
-    if not _neo4j_driver:
+    handle = _autocomplete_handle()
+    if not handle:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
-    records = await autocomplete_person(_neo4j_driver, q, limit)
+    records = await _autocomplete_backend.autocomplete_person(handle, q, limit)
     results = [PersonAutocompleteEntry(name=r["name"], score=r["score"]) for r in records]
     return JSONResponse(content={"results": [r.model_dump() for r in results]})

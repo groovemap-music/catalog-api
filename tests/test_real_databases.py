@@ -27,11 +27,13 @@ from neo4j.exceptions import Neo4jError
 from psycopg.rows import dict_row
 
 from api.graph_backend import (
+    AutocompleteBackend,
     CatalogOverviewBackend,
     CollaboratorIdentityBackend,
     CollaboratorsBackend,
     GapMetadataBackend,
     get_backend,
+    registered_families,
 )
 from api.queries.credits_queries import get_person_connections
 from api.queries.helpers import run_count, run_query, run_single
@@ -95,7 +97,7 @@ async def postgres_pool() -> AsyncIterator[AsyncPostgreSQLPool]:
 
     The schema comes from ``groovemap_schema.postgres.create_postgres_schema``, pinned as
     a dev dependency on database-schema revision
-    ``a0782de298599353242d86f56184d5f15c564f8b`` — the same producer revision
+    ``ea36cfa66672cb1e3f565165fea56d01b9b19c95`` — the same producer revision
     ``contracts/persistence/v1/source.json`` records this repository as tested against.
     Applying the producer's own DDL is what keeps the fixture from drifting behind the
     tables the syncer, identity, and projection paths read; a hand-rolled subset is what
@@ -374,8 +376,11 @@ class ExpectedDifference:
 # fails on an entry whose difference did not materialise, so a tolerance cannot outlive
 # the behaviour it was granted for.
 #
-# It is empty, and the collaborators family is why it should stay that way — the pilot
-# reaches column-for-column agreement with no tolerance at all. An entry looks like:
+# The collaborators pilot is the bar: column-for-column agreement, with no entry at all.
+# The autocomplete family is the other case a migration runs into, and it registers its
+# entries beside itself below rather than here — Lucene's relevance score has no
+# PostgreSQL spelling, so that column, and the row order it drives, is the one thing
+# tolerated. An entry looks like:
 #
 #     ("label_dna", "get_label_profile"): ExpectedDifference(
 #         reason="Neo4j returns float scores; the SQL sums numeric and rounds at 6 places",
@@ -507,6 +512,77 @@ FAMILY_PROTOCOLS: dict[str, type] = {
 }
 
 
+# ── The autocomplete family ──────────────────────────────────────────────────
+# The six full-text functions the Cypher coverage spike found, moved to trigram search on
+# `graph.genre`, `graph.style`, `graph.person` and the two vertex views. Nothing here
+# traverses, so the family registers `requires_property_graph=False` and its calls run on
+# the required PostgreSQL 18 tier as well as on 19.
+#
+# Every call matches under both engines' rules — each term is a prefix of a word in the
+# name — so the two backends return the same rows. What they cannot return is the same
+# `score`: Neo4j's is Lucene relevance, computed from index term statistics that do not
+# exist in PostgreSQL, and this backend publishes trigram similarity in the same column.
+# The declared difference below is exactly that, and no more than that.
+
+
+def _rank_free(rows: Any) -> Any:
+    """Return *rows* with the score's value dropped and the row order normalised by name.
+
+    Two tolerances, and they are the same tolerance: the score cannot be reproduced, so
+    neither can an ordering driven by it. Everything else is still compared — the rows,
+    the `id` and `name` values, the columns and their order.
+
+    The score is replaced by the *name of its type* rather than by a constant, so the
+    column keeps earning its place: a backend that started returning `Decimal` where the
+    other returns `float` still fails here, which is the divergence a rounding tolerance
+    would have hidden.
+    """
+    return sorted(
+        ({**row, "score": type(row["score"]).__name__} for row in rows),
+        key=lambda row: str(row["name"]),
+    )
+
+
+_LUCENE_SCORE_DIFFERENCE = ExpectedDifference(
+    reason=(
+        "Neo4j ranks by Lucene relevance; PostgreSQL has no such number and returns "
+        "pg_trgm similarity in the same column, ordered by it and then by name"
+    ),
+    normalize=_rank_free,
+)
+
+AUTOCOMPLETE_CALLS: tuple[ParityCall, ...] = (
+    # Two names matched by one prefix, so the order the score drives is exercised rather
+    # than assumed away.
+    ParityCall("autocomplete_artist", ("radio",), {"limit": 10}),
+    # One name, so `limit` is provably applied to a result the limit cannot reorder.
+    ParityCall("autocomplete_artist", ("birdman",), {"limit": 1}),
+    ParityCall("autocomplete_label", ("warp",), {"limit": 10}),
+    ParityCall("autocomplete_label", ("mut",), {"limit": 10}),
+    ParityCall("autocomplete_genre", ("roc",), {"limit": 10}),
+    ParityCall("autocomplete_genre", ("elec",), {"limit": 10}),
+    ParityCall("autocomplete_style", ("ambi",), {"limit": 10}),
+    ParityCall("autocomplete_style", ("tech",), {"limit": 10}),
+    ParityCall("autocomplete_person", ("bob",), {"limit": 10}),
+    ParityCall("autocomplete_person", ("chuck",), {"limit": 10}),
+    # An apostrophe turns out not to be a Lucene hazard — its tokenizer keeps `O'Connor`
+    # as one token, so `o'conn*` matches and both engines return the same row. It is a
+    # parity call rather than a hazard case for exactly that reason, and it is worth one
+    # because the apostrophe is the character a hand-built SQL string would have broken on.
+    ParityCall("autocomplete_person", ("O'Conn",), {"limit": 10}),
+)
+
+register_parity_family("autocomplete", AUTOCOMPLETE_CALLS, requires_property_graph=False)
+FAMILY_PROTOCOLS["autocomplete"] = AutocompleteBackend
+
+# Keyed per function rather than per family, because that is the registry's key. Every
+# registered call above returns at least one row: the harness fails a declared difference
+# that did not materialise, and two empty results agree. A query that matches nothing is
+# worth covering and is covered in `tests/test_autocomplete_pg_queries.py`, on one engine,
+# where agreeing is not a failure.
+EXPECTED_DIFFERENCES.update({("autocomplete", function): _LUCENE_SCORE_DIFFERENCE for function in PARITY_FAMILIES["autocomplete"].functions})
+
+
 # `graph.catalog` exists only on a PostgreSQL 19 server whose initializer ran with the
 # switch on, which is what `just test-integration-pg19` arranges. Off that tier the
 # property-graph families are skipped at collection, so the default suite never starts a
@@ -515,6 +591,13 @@ _NEEDS_PROPERTY_GRAPH = pytest.mark.skipif(
     not property_graph_enabled(),
     reason="needs graph.catalog on PostgreSQL 19; run `just test-integration-pg19`",
 )
+
+
+@pytest_asyncio.fixture
+async def parity_backends() -> AsyncIterator[graph_fixture.ParityBackends]:
+    """Both engines, holding the same fixture."""
+    async with graph_fixture.seeded_backends() as backends:
+        yield backends
 
 
 def _parity_params() -> list[Any]:
@@ -527,20 +610,58 @@ def _parity_params() -> list[Any]:
 
 
 @pytest.mark.parametrize(("family", "call"), _parity_params())
-async def test_graph_query_family_agrees_on_both_backends(family: str, call: ParityCall) -> None:
+async def test_graph_query_family_agrees_on_both_backends(
+    parity_backends: graph_fixture.ParityBackends,
+    family: str,
+    call: ParityCall,
+) -> None:
     """Same rows, same order, same types, from the same fixture, for one registered call.
 
-    Each family carries its own `requires_property_graph` flag, so the fixture is opened
-    per call rather than through a shared fixture function: a family whose PostgreSQL side
-    is ordinary SQL over the phase 0 views (coverage spike family 1) needs no property
-    graph and must not assert for one, while a `GRAPH_TABLE` family still does.
+    Whether the fixture's PostgreSQL pool asserts for `graph.catalog` is decided inside
+    `graph_fixture.open_postgres_pool` itself, from `SCHEMA_PROPERTY_GRAPH` — a property of
+    the tier this one shared fixture is seeded on, not of any one family's call — so a
+    family whose PostgreSQL side is ordinary SQL over the phase 0 views (coverage spike
+    family 1) needs no property graph and is never asked to assert for one, while a
+    `GRAPH_TABLE` family still is.
     """
-    require_property_graph = PARITY_FAMILIES[family].requires_property_graph
-    async with graph_fixture.seeded_backends(require_property_graph=require_property_graph) as backends:
-        neo4j_result = await _invoke(get_backend(family, "neo4j"), call, backends.neo4j)
-        postgres_result = await _invoke(get_backend(family, "postgres"), call, backends.postgres)
+    neo4j_result = await _invoke(get_backend(family, "neo4j"), call, parity_backends.neo4j)
+    postgres_result = await _invoke(get_backend(family, "postgres"), call, parity_backends.postgres)
 
     assert_parity(family, call, neo4j_result=neo4j_result, postgres_result=postgres_result)
+
+
+# ── The inputs the Lucene escaping was there for ─────────────────────────────
+# These are not parity calls, and the reason is the bead: Lucene does not answer them the
+# way the trigram path does, so there is nothing to be at parity with. The claim the
+# family rests on is the pair below — PostgreSQL returns the row, and Neo4j does not
+# return the same set — and it is asserted rather than described.
+#
+# `_escape_lucene_query` exists because the query string reaches a parser. `AC/DC` is the
+# name the one unescaped call site returned a 500 on; a name with a quote in it is the
+# same hazard from the credits side, where nicknames are routinely quoted.
+
+_LUCENE_HAZARD_INPUTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("autocomplete_artist", "AC/DC", ("AC/DC",)),
+    ("autocomplete_person", 'Chuck"', ('Charles "Chuck" Berry',)),
+)
+
+
+@pytest.mark.parametrize(("function", "query", "expected"), _LUCENE_HAZARD_INPUTS)
+async def test_trigram_autocomplete_answers_the_inputs_lucene_mishandled(
+    parity_backends: graph_fixture.ParityBackends,
+    function: str,
+    query: str,
+    expected: tuple[str, ...],
+) -> None:
+    """PostgreSQL returns the name; Neo4j, reading the same fixture, does not agree."""
+    call = ParityCall(function, (query,), {"limit": 10})
+    postgres_result = await _invoke(get_backend("autocomplete", "postgres"), call, parity_backends.postgres)
+    neo4j_result = await _invoke(get_backend("autocomplete", "neo4j"), call, parity_backends.neo4j)
+
+    assert tuple(row["name"] for row in postgres_result) == expected
+    assert {row["name"] for row in neo4j_result} != set(expected), (
+        f"Neo4j agreed on {call}, so this input is no longer a Lucene hazard and belongs in AUTOCOMPLETE_CALLS rather than here."
+    )
 
 
 @pytest.mark.parametrize("family", sorted(PARITY_FAMILIES))
@@ -555,3 +676,34 @@ async def test_every_function_of_a_registered_family_is_covered_by_a_parity_call
     covered = PARITY_FAMILIES[family].functions
 
     assert covered == expected, f"{family}: {sorted(expected - covered)} have no registered parity call"
+
+
+# Families in `api/graph_backend.py` that are deliberately not registered with the parity
+# harness at all — a level above the guard just above, which only catches a forgotten
+# *function* within an already-registered family. Each entry needs a reason here, the same
+# way `EXPECTED_DIFFERENCES` needs one per declared divergence.
+PARITY_EXEMPT_FAMILIES: frozenset[str] = frozenset(
+    {
+        # api/queries/admin_pg_queries.py: JMX store sizes and the full MusicBrainz
+        # relationship vocabulary have no PostgreSQL equivalent at this phase, so a Neo4j-
+        # versus-PostgreSQL row comparison would either be vacuous (store_sizes) or need
+        # fixture surface this family's phase 0 scope does not otherwise need (every
+        # MusicBrainz relationship type). Proven instead by tests/test_admin_pg_queries.py.
+        "admin_storage",
+    }
+)
+
+
+async def test_every_registered_family_is_either_proven_by_parity_or_explicitly_exempt() -> None:
+    """A family is silently unproven if it is registered in graph_backend.py but nowhere else.
+
+    `test_every_function_of_a_registered_family_is_covered_by_a_parity_call` only reads
+    `PARITY_FAMILIES`, so a family present in `_FAMILY_BACKENDS` but never passed to
+    `register_parity_family` — the mistake `admin_storage` almost was — is invisible to it:
+    the suite goes green having never run the family at all, not merely one of its functions.
+    """
+    unaccounted = registered_families() - frozenset(PARITY_FAMILIES) - PARITY_EXEMPT_FAMILIES
+    assert not unaccounted, (
+        f"{sorted(unaccounted)} are registered in api/graph_backend.py but neither proven by "
+        f"the parity harness nor listed in PARITY_EXEMPT_FAMILIES with a reason"
+    )

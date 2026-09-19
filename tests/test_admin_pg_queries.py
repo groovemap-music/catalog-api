@@ -4,15 +4,17 @@
 `api/queries/admin_pg_queries.py`'s module docstring for why: JMX store sizes and the full
 MusicBrainz relationship vocabulary have no PostgreSQL equivalent at this phase, so a row
 comparison against the Neo4j side would either be vacuous or require fixture surface this
-family's phase 0 scope does not otherwise need. This module is what stands in for that:
-the SQL shape, and that the response is shaped the way `admin_queries.get_neo4j_storage`
-shapes it, so the admin panel does not need to branch on `GRAPH_BACKEND`.
+family's phase 0 scope does not otherwise need. This module is what stands in for that: the
+SQL shape, and that the response validates against `api.models.Neo4jStorage` — the same four
+`store_sizes` keys the Neo4j backend returns, `nodes`/`relationships`/`strings` populated with
+`None` rather than a formatted size, which is why those three fields are typed `str | None`.
 """
 
 from __future__ import annotations
 
 import pytest
 
+from api.models import Neo4jStorage
 from api.queries import admin_pg_queries as pg
 from tests.fake_postgres import FakePool
 
@@ -84,6 +86,20 @@ class TestGetNeo4jStorage:
         ]
         assert result["relationships"] == [{"type": "BY", "count": 12}, {"type": "ON", "count": 0}]
         assert result["store_sizes"] == {"total": "1 MB", "nodes": None, "relationships": None, "strings": None}
+
+    async def test_response_validates_against_the_declared_neo4j_storage_contract(self) -> None:
+        # api/models.py:StoreSizes types nodes/relationships/strings as str | None precisely
+        # so this backend's None-filled payload is a valid Neo4jStorage rather than a
+        # response that only stays green because /api/admin/storage skips model validation.
+        pool = FakePool(
+            [
+                [("Artist", 11), ("Genre", 0), ("Label", 1), ("Master", 1), ("Release", 15), ("Style", 0)],
+                [("BY", 12), ("ON", 0)],
+                [(1_048_576,)],
+            ]
+        )
+        result = await pg.get_neo4j_storage(pool)
+        Neo4jStorage.model_validate(result)
 
     async def test_runs_three_statements_in_the_documented_order(self) -> None:
         pool = FakePool([[], [], [(0,)]])

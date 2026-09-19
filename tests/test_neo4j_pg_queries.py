@@ -26,8 +26,12 @@ class TestYearRangeStatementShape:
     async def test_selects_from_the_phase_0_release_view(self) -> None:
         assert "FROM graph.release" in pg.YEAR_RANGE_SQL
 
-    async def test_guards_the_empty_string_year_before_casting_to_int(self) -> None:
-        assert "NULLIF(year, '')::int" in pg.YEAR_RANGE_SQL
+    async def test_guards_non_numeric_year_before_casting_to_int(self) -> None:
+        # The regex runs in the subquery's own WHERE, before NULLIF(...)::int is reached at
+        # all — a row that fails it is excluded rather than raising invalid input syntax for
+        # type integer and failing the whole catalog-wide query.
+        assert "WHERE btrim(year) ~ '^[0-9]{4}$'" in pg.YEAR_RANGE_SQL
+        assert "NULLIF(btrim(year), '')::int" in pg.YEAR_RANGE_SQL
 
     async def test_keeps_the_same_zero_sentinel_guard_as_the_cypher(self) -> None:
         assert "year_value > 0" in pg.YEAR_RANGE_SQL

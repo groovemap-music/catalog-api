@@ -233,6 +233,109 @@ exists to pin the masking as a fact instead of leaving it to be rediscovered. Ex
 shape of problem in the next family: a guard that a later clause makes redundant is still worth
 writing, but it has to be tested where it acts.
 
+## The family that is not a traversal: trigram autocomplete
+
+The second family migrated is **autocomplete**, and it is worth reading beside the pilot
+because almost none of the above applies to it. The Cypher coverage spike
+(`gm-database-schema-9c8.2`) found six functions that do not traverse at all — the four
+autocompletes in `api/queries/neo4j_queries.py`, the person search in
+`api/queries/credits_queries.py`, and the `_autocomplete` engine they share — and classifies
+them **SQL-only (no graph)**. They call Neo4j's Lucene full-text indexes. `GRAPH_TABLE` has
+nothing to say about them, so the PostgreSQL side is
+[`api/queries/autocomplete_pg_queries.py`](../api/queries/autocomplete_pg_queries.py): five
+plain statements, one per relation, each reading one relation and ranking it.
+
+Three consequences worth carrying to the next non-traversal family:
+
+- **It registers `requires_property_graph=False`.** The `graph` relations are
+  unconditional; only `graph.catalog` is conditional. So the family's parity calls run on
+  the required PostgreSQL 18 tier as well as on 19, and `just test-integration` covers it.
+- **The Neo4j side needed a module of its own.** The family spans two Cypher modules and the
+  seam resolves a family to exactly one, so
+  [`api/queries/autocomplete_queries.py`](../api/queries/autocomplete_queries.py) gathers
+  them. It delegates by attribute at call time rather than re-exporting, because a
+  `from ... import` binds a second name that a patch of the original never reaches — and
+  patchability through the selector is a property the seam promises.
+- **Three of its five relations had to stop being views.** `graph.genre`, `graph.style`, and
+  `graph.person` are name-keyed tables carrying `GIN (name gin_trgm_ops)` from the phase 2
+  schema revision, because a view cannot hold an index. `graph.artist` and `graph.label` are
+  still views: the same predicate runs and the server scans.
+
+### What Lucene was doing, and what replaces it
+
+`_escape_lucene_query` exists because the query string reaches a **parser**. A bare `/`,
+`~`, `:` or `(` in a name is Lucene syntax, and the one call site that forgot to escape
+returned an unhandled 500 on names like `AC/DC`. Nothing on the PostgreSQL side has a
+parser: the string is bound as a value three times over — a `LIKE` pattern, a
+regular-expression pattern, and the right operand of `similarity()` — and a value cannot
+become syntax. That is the bug class the move retires.
+
+Lucene's matching rule, via `_build_autocomplete_query`, is one wildcard term per whitespace
+term, ANDed: `post roc` becomes `post* AND roc*`. The analyzer has already split each name
+into tokens, so it means **every query term is a prefix of some word in the name**. Two
+predicates reproduce it:
+
+```sql
+WHERE candidate.name ILIKE %(contains)s
+  AND candidate.name ~* ALL (%(prefixes)s::text[])
+```
+
+The second is the rule. Each array element is `\m` — the start-of-word constraint — followed
+by the escaped term, ANDed exactly as Lucene ANDs the wildcards. Punctuation is a word
+boundary to both engines, which is why `dc` still finds `AC/DC`.
+
+The first is a **superset** of the second, and is there only so the trigram index can drive
+the scan: a term that begins a word in the name is certainly a substring of it, so the
+filter cannot drop a row. `ALL (...)` over an array is not an indexable operator; a plain
+`ILIKE` is. The pattern is built from the longest term, which carries the most trigrams.
+
+### The ordering rule, and why it is declared rather than matched
+
+Lucene returns a relevance `score` and the Cypher orders by it. **It cannot be reproduced.**
+It is a function of the index's term statistics and of how the wildcard query was rewritten,
+and neither exists in PostgreSQL. So this backend publishes a different number in the same
+column and orders by it:
+
+```sql
+ORDER BY similarity(name, <query>) DESC, name ASC
+```
+
+`similarity()` is the trigram overlap of the whole query against the whole name — a number
+in `[0, 1]`, not a relevance score. `name ASC` is a tiebreaker the Cypher does not have,
+which makes this side's order total where Lucene's is arbitrary among equal scores.
+
+That is the family's declared difference, and it is the reason `EXPECTED_DIFFERENCES` is no
+longer empty:
+
+```python
+ExpectedDifference(
+    reason="Neo4j ranks by Lucene relevance; PostgreSQL has no such number and returns "
+    "pg_trgm similarity in the same column, ordered by it and then by name",
+    normalize=_rank_free,
+)
+```
+
+`_rank_free` sorts both results by name and replaces the score with **the name of its
+type**. That tolerates exactly two things — the score's value and the order it drives — and
+nothing else: the rows, the `id` and `name` values, the column set and the column order are
+all still compared, and a backend returning `Decimal` where the other returns `float` still
+fails. A tolerance that replaced the score with a constant would have hidden that.
+
+Two rules follow for a family with a declared difference, and both bite:
+
+1. **Every registered call must actually diverge.** The harness fails a declaration whose
+   difference did not materialise, and two empty results agree — so a query that matches
+   nothing cannot be a parity call. Cover it on one engine instead.
+2. **Row sets must still agree.** A declared difference normalises; it does not excuse a
+   missing row. Inputs where Lucene returns something else entirely — `AC/DC`, a quoted
+   nickname — are therefore not parity calls either. They are asserted directly, in
+   `test_trigram_autocomplete_answers_the_inputs_lucene_mishandled`, which fails if Neo4j
+   ever starts agreeing.
+
+An apostrophe turned out **not** to be in that set: Lucene's tokenizer keeps `O'Connor` as
+one token, so both engines answer and `Sinéad O'Connor` is a parity call. It is worth one
+anyway, for the character a hand-built SQL string would have broken on.
+
 ## Migrating the next family
 
 1. Register the family with the parity harness in `tests/test_real_databases.py` — one

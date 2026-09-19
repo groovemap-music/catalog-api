@@ -117,9 +117,14 @@ def _format_bytes(value: int) -> str:
 async def get_neo4j_storage(pool: Any) -> dict[str, Any]:
     """Return the graph's label and edge counts, in the shape the admin panel renders.
 
-    Same top-level shape as :func:`api.queries.admin_queries.get_neo4j_storage` —
-    ``status``, ``nodes``, ``relationships``, ``store_sizes`` — so the panel does not need to
-    branch on `GRAPH_BACKEND`. See the module docstring for what deliberately differs.
+    Same top-level shape as :func:`api.queries.admin_queries.get_neo4j_storage` — ``status``,
+    ``nodes``, ``relationships``, ``store_sizes`` — with the same four ``store_sizes`` keys
+    always present, so the panel does not need to branch on `GRAPH_BACKEND` to know what
+    fields exist. What it renders still differs: ``store_sizes["nodes"]``,
+    ``["relationships"]``, and ``["strings"]`` come back `None` here (see
+    :class:`api.models.StoreSizes`, whose fields are `str | None` for exactly this reason)
+    rather than a formatted size, because a view-and-table-backed graph has no per-kind store
+    to report. See the module docstring for what else deliberately differs.
     """
     async with pool.connection() as conn, conn.cursor() as cursor_cm:
         cursor = cast("Any", cursor_cm)

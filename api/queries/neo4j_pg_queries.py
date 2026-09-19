@@ -16,21 +16,31 @@ from typing import Any, cast
 from common.query_debug import execute_sql
 
 
-# `graph.release.year` is `releases.data ->> 'year'`, a text column — the Discogs document
-# carries the year as a JSON value, never as SQL's own integer type. `NULLIF(..., '')`
-# mirrors the Cypher's `r.year > 0` guard against the empty-string sentinel a document with
-# no year produces; `year_value > 0` then keeps parity with the same guard against the
-# `0` sentinel a malformed document could carry. The outer `WHERE matched > 0` is what makes
-# an empty result set behave like the Cypher's: `CALL { ... LIMIT 1 }` returns zero rows
-# when nothing matches, so `run_single` returns `None` — a plain `min()`/`max()` over zero
-# rows would otherwise still return one row of `NULL`s instead of no row at all.
+# `graph.release.year` is `releases.data ->> 'year'`, a text column read straight off the
+# Discogs document — unlike Neo4j's `r.year`, which `graphinator` writes as an integer
+# property (or omits, for a document with no parseable year), nothing upstream of this view
+# guarantees the text is numeric. Casting it unconditionally is what the first version of
+# this query did, and it broke on the first non-numeric or whitespace-only value: PostgreSQL
+# raises `invalid input syntax for type integer` mid-aggregate, which fails the whole
+# catalog-wide query rather than excluding the one bad row the way Cypher's `r.year > 0`
+# silently does by comparing a non-numeric value to `null`. The fix is the same guard
+# `database-schema`'s `genre_stats`/`style_stats` counters already use for the identical
+# cast (`postgres.py`'s `_COUNTER_BOOTSTRAP["genre_stats"]`): filter with
+# `btrim(year) ~ '^[0-9]{4}$'` *before* the cast, in the `WHERE` of the subquery the cast
+# runs in, so a row that fails the regex is excluded rather than reaching `::int` at all.
+# `year_value > 0` then keeps parity with the Cypher's own guard against the `0` sentinel a
+# malformed document could still carry. The outer `WHERE matched > 0` is what makes an empty
+# result set behave like the Cypher's: `CALL { ... LIMIT 1 }` returns zero rows when nothing
+# matches, so `run_single` returns `None` — a plain `min()`/`max()` over zero rows would
+# otherwise still return one row of `NULL`s instead of no row at all.
 YEAR_RANGE_SQL = """
 SELECT min_year, max_year
 FROM (
     SELECT min(year_value) AS min_year, max(year_value) AS max_year, count(*) AS matched
     FROM (
-        SELECT NULLIF(year, '')::int AS year_value
+        SELECT NULLIF(btrim(year), '')::int AS year_value
         FROM graph.release
+        WHERE btrim(year) ~ '^[0-9]{4}$'
     ) AS parsed
     WHERE year_value > 0
 ) AS bounds
