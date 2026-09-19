@@ -26,7 +26,7 @@ from groovemap_schema.postgres import create_postgres_schema, property_graph_ena
 from neo4j.exceptions import Neo4jError
 from psycopg.rows import dict_row
 
-from api.graph_backend import CollaboratorsBackend, get_backend
+from api.graph_backend import CollaboratorsBackend, OneHopCollaboratorsBackend, get_backend
 from api.queries.credits_queries import get_person_connections
 from api.queries.helpers import run_count, run_query, run_single
 from api.syncer import DISCOGS_API_BASE, sync_collection
@@ -458,10 +458,35 @@ COLLABORATORS_CALLS: tuple[ParityCall, ...] = (
 register_parity_family("collaborators", COLLABORATORS_CALLS)
 
 
+# ── one_hop_collaborators family (gm-catalog-api-91a.3) ──────────────────────────────────
+# The pilot's one-hop sibling: `collaborator_queries.get_collaborators` and its count, which
+# `/api/collaborators/{id}`, the NLQ `get_collaborators` tool, and the MCP `get_collaborators`
+# tool all actually call. Both anchors are the same tie-free vantage points the pilot family
+# above uses: "1" orders unambiguously by `release_count`, and "8" is where the three-credit
+# release makes this family's own `peer <> anchor` walk-semantics guard observable — without
+# it, a walk from "8" can turn around on that release and report "8" as its own collaborator.
+
+_ONE_HOP_ANCHORS = (graph_fixture.ANCHOR_ARTIST_ID, graph_fixture.PROBE_ANCHOR_ARTIST_ID)
+
+ONE_HOP_COLLABORATORS_CALLS: tuple[ParityCall, ...] = (
+    *(ParityCall("get_collaborators", (anchor,), {"limit": 20}) for anchor in _ONE_HOP_ANCHORS),
+    ParityCall("get_collaborators", (graph_fixture.ANCHOR_ARTIST_ID,), {"limit": 2}),
+    ParityCall("get_collaborators", ("does-not-exist",), {"limit": 20}),
+    *(ParityCall("count_collaborators", (anchor,)) for anchor in _ONE_HOP_ANCHORS),
+    ParityCall("count_collaborators", ("does-not-exist",)),
+)
+
+register_parity_family("one_hop_collaborators", ONE_HOP_COLLABORATORS_CALLS)
+# ── end one_hop_collaborators family ──────────────────────────────────────────────────────
+
+
 # The protocol each family's two backends are bound to in `api/graph_backend.py`. It is
 # what the coverage test below reads to check that registering a family did not quietly
 # leave one of its functions unproven.
-FAMILY_PROTOCOLS: dict[str, type] = {"collaborators": CollaboratorsBackend}
+FAMILY_PROTOCOLS: dict[str, type] = {
+    "collaborators": CollaboratorsBackend,
+    "one_hop_collaborators": OneHopCollaboratorsBackend,
+}
 
 
 # `graph.catalog` exists only on a PostgreSQL 19 server whose initializer ran with the
