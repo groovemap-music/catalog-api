@@ -31,6 +31,13 @@ flowchart TD
   against them. Run it locally before submitting a change to the collection sync or to the
   native identity read paths; it is the only gate that proves those statements against the
   real tables rather than a mock.
+- `just test-integration-pg19` runs that same suite, plus `tests/test_graph_parity.py`, against
+  a digest-pinned PostgreSQL 19 beta image with the schema initializer's
+  `SCHEMA_PROPERTY_GRAPH` switch on. It is the tier the Neo4j-versus-PostgreSQL parity harness
+  needs: `graph.catalog` exists nowhere else, so on the required tier the harness's
+  property-graph families skip themselves. Run it before submitting a change to a migrated
+  query family. PostgreSQL 19 is an advisory tier, so this is opt-in and is not part of
+  `just check`; see [the migration template](graph-table-migration-template.md).
 - `just secret-scan` is the narrow gitleaks capability used by both local and shared CI gates.
 - `just check` runs formatting, linting, type checks, the complete test suite, secret scans,
   wheel construction, installed-wheel smoke tests, dependency-license policy, and version checks.

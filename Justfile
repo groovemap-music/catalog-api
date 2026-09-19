@@ -38,7 +38,8 @@ test:
 test-integration:
     bash scripts/test-integration.sh
 
-# Opt-in: row-level parity between the Neo4j and SQL/PGQ collaborators backends.
+# Opt-in: the integration suite on the PostgreSQL 19 tier, where the parity harness's
+# property-graph families run instead of skipping, plus the SQL/PGQ predicate suite.
 #
 # Not part of `check`. SQL/PGQ and `graph.catalog` need PostgreSQL 19, which is an advisory
 # tier — the required tier is 18, where the property graph is deliberately absent — so this
@@ -48,7 +49,7 @@ test-integration:
 test-integration-pg19:
     POSTGRES_INTEGRATION_IMAGE="postgres:19beta3-alpine@sha256:b1692e50613a21e61c424859f943b9e193ae73e5a8c68abd5382dfb235bf15fc" \
     SCHEMA_PROPERTY_GRAPH=enabled \
-    INTEGRATION_TEST_TARGET=tests/test_graph_parity.py \
+    INTEGRATION_TEST_TARGET="tests/test_real_databases.py tests/test_graph_parity.py" \
     bash scripts/test-integration.sh
 
 coverage: test
