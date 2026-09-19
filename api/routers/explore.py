@@ -12,11 +12,11 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from neo4j.exceptions import ClientError as Neo4jClientError
 
+from api.graph_backend import AutocompleteBackend, get_autocomplete_backend
 from api.limiter import limiter
 from api.models import PathNode, PathResponse
-from api.queries import collaborator_queries, genre_tree_queries
+from api.queries import autocomplete_queries, collaborator_queries, genre_tree_queries
 from api.queries.neo4j_queries import (
-    AUTOCOMPLETE_DISPATCH,
     COUNT_DISPATCH,
     DETAILS_DISPATCH,
     EXPAND_DISPATCH,
@@ -45,6 +45,21 @@ router = APIRouter()
 _neo4j_driver: Any = None
 _redis: Any = None
 _pg_pool: Any = None
+_graph_backend: str = "neo4j"
+# Resolved through the graph-backend selector, exactly as the network router resolves the
+# collaborators family. It defaults to the Neo4j implementation so an unconfigured router —
+# in a test, say — behaves as it did before the seam existed.
+_autocomplete_backend: AutocompleteBackend = autocomplete_queries
+
+# entity type -> the family function serving it. The values are names rather than functions
+# because the function has to be read off whichever module the selector resolved, at call
+# time; binding a function here would freeze one backend into the dispatch table.
+_AUTOCOMPLETE_FUNCTIONS: dict[str, str] = {
+    "artist": "autocomplete_artist",
+    "genre": "autocomplete_genre",
+    "label": "autocomplete_label",
+    "style": "autocomplete_style",
+}
 
 # Redis cache TTL for trends (genre/style/label) and explore (artist/label)
 # 24 hours — data changes only on import
@@ -52,11 +67,22 @@ _TRENDS_CACHE_TTL = 86400
 _EXPLORE_CACHE_TTL = 86400
 
 
-def configure(neo4j: Any, jwt_secret: str | None, redis: Any = None, pg_pool: Any = None) -> None:  # noqa: ARG001
-    global _neo4j_driver, _redis, _pg_pool
+def configure(neo4j: Any, jwt_secret: str | None, redis: Any = None, pg_pool: Any = None, graph_backend: str = "neo4j") -> None:  # noqa: ARG001
+    global _neo4j_driver, _redis, _pg_pool, _graph_backend, _autocomplete_backend
     _neo4j_driver = neo4j
     _redis = redis
     _pg_pool = pg_pool
+    _graph_backend = graph_backend
+    _autocomplete_backend = get_autocomplete_backend(graph_backend)
+
+
+def _autocomplete_handle() -> Any:
+    """Return the connection handle the resolved autocomplete backend expects.
+
+    Read at call time rather than frozen in `configure`, so the handle tracks the
+    module-level connection the rest of this router uses.
+    """
+    return _pg_pool if _graph_backend == "postgres" else _neo4j_driver
 
 
 _autocomplete_cache: OrderedDict[tuple[str, str, int], list[dict[str, Any]]] = OrderedDict()
@@ -112,10 +138,11 @@ async def autocomplete(
     type: str = Query("artist"),
     limit: int = Query(10, ge=1, le=50),
 ) -> JSONResponse:
-    if not _neo4j_driver:
+    handle = _autocomplete_handle()
+    if not handle:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     entity_type = type.lower()
-    if entity_type not in AUTOCOMPLETE_DISPATCH:
+    if entity_type not in _AUTOCOMPLETE_FUNCTIONS:
         return JSONResponse(content={"error": f"Invalid type: {type}. Must be artist, genre, label, or style"}, status_code=400)
     global _autocomplete_lock
     if _autocomplete_lock is None:
@@ -125,8 +152,8 @@ async def autocomplete(
         if cache_key in _autocomplete_cache:
             _autocomplete_cache.move_to_end(cache_key)
             return JSONResponse(content={"results": _autocomplete_cache[cache_key]})
-    query_func = AUTOCOMPLETE_DISPATCH[entity_type]
-    results = await query_func(_neo4j_driver, q, limit)
+    query_func = getattr(_autocomplete_backend, _AUTOCOMPLETE_FUNCTIONS[entity_type])
+    results = await query_func(handle, q, limit)
     async with _autocomplete_lock:
         if len(_autocomplete_cache) >= _AUTOCOMPLETE_CACHE_MAX:
             evict_count = _AUTOCOMPLETE_CACHE_MAX // 4
