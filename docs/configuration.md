@@ -57,11 +57,20 @@ TLS policy. Deployment-specific certificate and network guidance belongs in `dep
 family to the module implementing it for the configured backend. Leaving the variable unset —
 or setting it explicitly to `neo4j` — keeps every family on Neo4j.
 
-Setting `postgres` currently moves one family: **collaborators**, which backs
-`GET /api/network/artist/{id}/collaborators`. It is answered by SQL/PGQ `GRAPH_TABLE` queries
-over the `graph.catalog` property graph, using the API's existing PostgreSQL pool. Every other
-family still resolves to Neo4j regardless of this setting. See
-[The GRAPH_TABLE migration template](graph-table-migration-template.md).
+Setting `postgres` currently moves two families, using the API's existing PostgreSQL pool:
+
+- **collaborators**, backing `GET /api/network/artist/{id}/collaborators`, answered by SQL/PGQ
+  `GRAPH_TABLE` queries over the `graph.catalog` property graph.
+- **autocomplete**, backing `GET /api/autocomplete` and `GET /api/credits/autocomplete`,
+  answered by `pg_trgm` searches over the `graph` vertex relations. Nothing in it traverses,
+  so it needs no property graph and runs on any supported server — but it does need the
+  `pg_trgm` extension, which the schema initializer creates. Its results are **ranked
+  differently** from the Neo4j ones; see
+  [The GRAPH_TABLE migration template](graph-table-migration-template.md#the-family-that-is-not-a-traversal-trigram-autocomplete).
+
+Every other family still resolves to Neo4j regardless of this setting. The natural-language
+query tool surface keeps its own Cypher autocomplete and is not affected by this variable.
+See [The GRAPH_TABLE migration template](graph-table-migration-template.md).
 
 `graph.catalog` is not present on every server: the `groovemap-database-schema` initializer
 declares it only on PostgreSQL 19 or later and only with its own `SCHEMA_PROPERTY_GRAPH` switch

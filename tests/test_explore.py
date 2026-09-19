@@ -7,7 +7,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from api.queries import collaborator_queries, genre_tree_queries
+from api.queries import autocomplete_pg_queries, collaborator_queries, genre_tree_queries
 
 
 class TestAutocompleteEndpoint:
@@ -16,7 +16,9 @@ class TestAutocompleteEndpoint:
     def test_autocomplete_artist_success(self, test_client: TestClient) -> None:
         sample = [{"id": "1", "name": "Radiohead", "score": 1.0}]
         mock_func = AsyncMock(return_value=sample)
-        with patch.dict("api.routers.explore.AUTOCOMPLETE_DISPATCH", {"artist": mock_func}):
+        # The route reads the function off whichever module the graph-backend selector
+        # resolved, so the patch goes on that module rather than on a dispatch table.
+        with patch("api.queries.autocomplete_queries.autocomplete_artist", mock_func):
             response = test_client.get("/api/autocomplete?q=radio&type=artist&limit=10")
         assert response.status_code == 200
         data = response.json()
@@ -38,12 +40,35 @@ class TestAutocompleteEndpoint:
         sample: dict[str, Any],
     ) -> None:
         mock_func = AsyncMock(return_value=[sample])
-        with patch.dict("api.routers.explore.AUTOCOMPLETE_DISPATCH", {entity_type: mock_func}):
+        with patch(f"api.queries.autocomplete_queries.autocomplete_{entity_type}", mock_func):
             response = test_client.get(f"/api/autocomplete?q={query}&type={entity_type}&limit=7")
 
         assert response.status_code == 200
         assert response.json() == {"results": [sample]}
         mock_func.assert_awaited_once_with(ANY, query, 7)
+
+    def test_autocomplete_resolves_the_postgres_backend_when_configured(self, test_client: TestClient) -> None:
+        """GRAPH_BACKEND=postgres sends the search to the trigram module, with the pool."""
+        import api.routers.explore as explore_module
+
+        pool = object()
+        mock_func = AsyncMock(return_value=[{"id": "1", "name": "Radiohead", "score": 0.5}])
+        driver, redis, original_pool, backend = (
+            explore_module._neo4j_driver,
+            explore_module._redis,
+            explore_module._pg_pool,
+            explore_module._graph_backend,
+        )
+        try:
+            explore_module.configure(driver, None, redis, pg_pool=pool, graph_backend="postgres")
+            assert explore_module._autocomplete_backend is autocomplete_pg_queries
+            with patch("api.queries.autocomplete_pg_queries.autocomplete_artist", mock_func):
+                response = test_client.get("/api/autocomplete?q=trigramwired&type=artist&limit=6")
+        finally:
+            explore_module.configure(driver, None, redis, pg_pool=original_pool, graph_backend=backend)
+
+        assert response.status_code == 200
+        mock_func.assert_awaited_once_with(pool, "trigramwired", 6)
 
     def test_autocomplete_minimum_length_validation(self, test_client: TestClient) -> None:
         response = test_client.get("/api/autocomplete?q=ab")
@@ -716,7 +741,7 @@ class TestAutocompleteCache:
 
             # Adding one more should trigger eviction (removes _MAX//4 = 1 item)
             mock_func = AsyncMock(return_value=[{"id": "new", "name": "New", "score": 1.0}])
-            with patch.dict("api.routers.explore.AUTOCOMPLETE_DISPATCH", {"artist": mock_func}):
+            with patch("api.queries.autocomplete_queries.autocomplete_artist", mock_func):
                 response = test_client.get("/api/autocomplete?q=new&type=artist&limit=10")
             assert response.status_code == 200
             # Cache should have shrunk and then grown by one
