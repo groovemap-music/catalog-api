@@ -169,8 +169,9 @@ Three things follow from registering first:
   `Protocol` from `api/graph_backend.py` and fails if a function the router can reach has no
   call. Forgetting one is otherwise silent — the suite goes green having never run it.
 - A family that needs `graph.catalog` keeps the default `requires_property_graph=True`, and its
-  calls skip themselves off the PostgreSQL 19 tier. A family whose PostgreSQL side is ordinary
-  SQL over the `graph` views passes `requires_property_graph=False` and runs on every tier.
+  calls then run only on the PostgreSQL 19 tier and skip elsewhere. A family whose PostgreSQL
+  side is ordinary SQL over the `graph` views passes `requires_property_graph=False` and runs on
+  every tier.
 
 ### Declaring an expected difference
 
@@ -216,6 +217,10 @@ no-revisit predicate is holding back. Query shape — that values are bound, tha
 `GRAPH_TABLE` over `graph.catalog`, that the anti-join is a `NOT EXISTS` over a second one — is
 covered without a server in
 [`tests/test_network_pg_queries.py`](../tests/test_network_pg_queries.py).
+
+The harness's own decisions — what counts as a divergence, what a declared difference buys — are
+covered in [`tests/test_parity_harness.py`](../tests/test_parity_harness.py), which needs no
+engine and runs in `just test`. Change `assert_parity` and that is the suite to run.
 
 ### What the harness cannot see
 
