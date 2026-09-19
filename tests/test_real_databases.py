@@ -393,10 +393,6 @@ def _type_shape(result: Any) -> Any:
     return type(result).__name__
 
 
-def _render(result: Any) -> str:
-    return repr(result)
-
-
 def assert_parity(family: str, call: ParityCall, *, neo4j_result: Any, postgres_result: Any) -> None:
     """Fail unless the two backends agreed, or agreed as far as a declared difference allows."""
     declared = EXPECTED_DIFFERENCES.get((family, call.function))
@@ -406,10 +402,10 @@ def assert_parity(family: str, call: ParityCall, *, neo4j_result: Any, postgres_
         if not agrees:
             pytest.fail(
                 f"{family}.{call} diverged between the two backends.\n"
-                f"  neo4j:      {_render(neo4j_result)}\n"
-                f"  postgres:   {_render(postgres_result)}\n"
-                f"  neo4j types:    {_render(_type_shape(neo4j_result))}\n"
-                f"  postgres types: {_render(_type_shape(postgres_result))}\n"
+                f"  neo4j:          {neo4j_result!r}\n"
+                f"  postgres:       {postgres_result!r}\n"
+                f"  neo4j types:    {_type_shape(neo4j_result)!r}\n"
+                f"  postgres types: {_type_shape(postgres_result)!r}\n"
                 f"If this difference is intended, declare it in EXPECTED_DIFFERENCES under "
                 f"the key ({family!r}, {call.function!r}); the harness tolerates nothing it "
                 f"has not been told about."
@@ -427,8 +423,8 @@ def assert_parity(family: str, call: ParityCall, *, neo4j_result: Any, postgres_
     if normalized_postgres != normalized_neo4j or _type_shape(normalized_postgres) != _type_shape(normalized_neo4j):
         pytest.fail(
             f"{family}.{call} diverged by more than the declared difference ({declared.reason}).\n"
-            f"  neo4j:    {_render(normalized_neo4j)}\n"
-            f"  postgres: {_render(normalized_postgres)}"
+            f"  neo4j:    {normalized_neo4j!r}\n"
+            f"  postgres: {normalized_postgres!r}"
         )
 
 
