@@ -10,13 +10,18 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
+import psycopg
 import pytest
+from common.db_resilience import CircuitOpenError, ConnectionEstablishmentError, DatabaseUnavailableError
+from neo4j.exceptions import ClientError as Neo4jClientError
 
 from api.config import ApiConfig
 from api.graph_backend import (
+    GRAPH_BACKEND_ERROR_TYPES,
     GraphBackendUnavailableError,
     get_backend,
     get_collaborators_backend,
+    is_graph_query_timeout,
     verify_postgres_graph_backend,
 )
 from api.queries import network_pg_queries, network_queries
@@ -122,3 +127,63 @@ class TestVerifyPostgresGraphBackend:
         pool = FakePool([[]])
         with pytest.raises(GraphBackendUnavailableError, match="server_version_num 0"):
             await verify_postgres_graph_backend(pool)
+
+
+class TestIsGraphQueryTimeout:
+    """`is_graph_query_timeout` — the backend-neutral timeout predicate.
+
+    A router catches `GRAPH_BACKEND_ERROR_TYPES`, then asks this predicate whether the
+    caught exception is a timeout (→ 504) or a genuine backend bug (→ re-raise, 500). Every
+    case here is a member of `GRAPH_BACKEND_ERROR_TYPES`; the ones that return `False` are
+    exactly the ones a router must still re-raise.
+    """
+
+    def test_neo4j_transaction_timed_out_is_a_timeout(self) -> None:
+        assert is_graph_query_timeout(Neo4jClientError("TransactionTimedOut")) is True
+
+    def test_neo4j_transaction_timed_out_client_configuration_is_a_timeout(self) -> None:
+        # Substring match, so the client-configuration variant of the same code counts too.
+        assert is_graph_query_timeout(Neo4jClientError("TransactionTimedOutClientConfiguration")) is True
+
+    def test_neo4j_other_client_error_is_not_a_timeout(self) -> None:
+        assert is_graph_query_timeout(Neo4jClientError("SomeOtherError")) is False
+
+    def test_postgres_query_canceled_is_a_timeout(self) -> None:
+        # SQLSTATE 57014 — the server cancelled the statement because it hit
+        # `statement_timeout`. This is psycopg's exact exception shape for that.
+        assert is_graph_query_timeout(psycopg.errors.QueryCanceled("canceling statement due to statement timeout")) is True
+
+    def test_postgres_connection_establishment_error_is_a_timeout(self) -> None:
+        # The pool's own "gave up waiting for a connection" shape, raised after it
+        # exhausts its checkout retries — the pool-level analogue of a statement timeout.
+        assert is_graph_query_timeout(ConnectionEstablishmentError("Failed to get PostgreSQL connection after 5 attempts")) is True
+
+    def test_postgres_circuit_open_error_is_a_timeout(self) -> None:
+        # Also a `DatabaseUnavailableError` subclass — the breaker has already tripped, so
+        # every checkout fails immediately rather than waiting, but the caller-visible
+        # effect (this request could not get a connection in time) is the same.
+        assert is_graph_query_timeout(CircuitOpenError("AsyncPostgreSQL: Circuit breaker is OPEN")) is True
+
+    def test_postgres_bare_database_unavailable_error_is_a_timeout(self) -> None:
+        assert is_graph_query_timeout(DatabaseUnavailableError("database unavailable")) is True
+
+    def test_postgres_non_timeout_operational_error_is_not_a_timeout(self) -> None:
+        # A real backend problem (e.g. the connection was dropped mid-query) — must
+        # re-raise to a 500, not be swallowed into the same 504 as an actual timeout.
+        assert is_graph_query_timeout(psycopg.OperationalError("server closed the connection unexpectedly")) is False
+
+    def test_postgres_programming_error_is_not_a_timeout(self) -> None:
+        assert is_graph_query_timeout(psycopg.errors.UndefinedTable("relation does not exist")) is False
+
+    def test_every_timeout_case_is_also_a_caught_backend_error_type(self) -> None:
+        # `GRAPH_BACKEND_ERROR_TYPES` is what a router's `except` clause names; if a case
+        # above were not a member, the router would never call `is_graph_query_timeout` on
+        # it in the first place and it would escape uncaught instead of becoming a 500.
+        timeouts: list[BaseException] = [
+            Neo4jClientError("TransactionTimedOut"),
+            psycopg.errors.QueryCanceled("canceling statement due to statement timeout"),
+            ConnectionEstablishmentError("Failed to get PostgreSQL connection after 5 attempts"),
+            CircuitOpenError("AsyncPostgreSQL: Circuit breaker is OPEN"),
+        ]
+        for exc in timeouts:
+            assert isinstance(exc, GRAPH_BACKEND_ERROR_TYPES)

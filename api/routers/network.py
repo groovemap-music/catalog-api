@@ -12,7 +12,12 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from neo4j.exceptions import ClientError as Neo4jClientError
 
-from api.graph_backend import CollaboratorsBackend, get_collaborators_backend
+from api.graph_backend import (
+    GRAPH_BACKEND_ERROR_TYPES,
+    CollaboratorsBackend,
+    get_collaborators_backend,
+    is_graph_query_timeout,
+)
 from api.limiter import limiter
 from api.queries import network_queries
 from api.telemetry import CACHE_NETWORK_CENTRALITY, CACHE_NETWORK_CLUSTER, cache_get
@@ -91,8 +96,12 @@ async def artist_collaborators(
             artist_id,
             depth=depth,
         )
-    except Neo4jClientError as exc:
-        if "TransactionTimedOut" in str(exc):
+    except GRAPH_BACKEND_ERROR_TYPES as exc:
+        # Backend-neutral: `GRAPH_BACKEND_ERROR_TYPES` covers both the Neo4j driver's and
+        # the PostgreSQL pool's exception hierarchies, and `is_graph_query_timeout` is what
+        # tells a statement/connection timeout — on either backend — apart from a genuine
+        # backend bug, which still re-raises to the same 500 both backends always produced.
+        if is_graph_query_timeout(exc):
             logger.warning("⏱️ Network collaborators query timed out", artist_id=artist_id, depth=depth)
             return JSONResponse(
                 content={"error": "Network collaborators query timed out — try reducing depth or limit"},
