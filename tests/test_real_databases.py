@@ -26,7 +26,7 @@ from groovemap_schema.postgres import create_postgres_schema, property_graph_ena
 from neo4j.exceptions import Neo4jError
 from psycopg.rows import dict_row
 
-from api.graph_backend import CollaboratorsBackend, get_backend
+from api.graph_backend import AutocompleteBackend, CollaboratorsBackend, get_backend
 from api.queries.credits_queries import get_person_connections
 from api.queries.helpers import run_count, run_query, run_single
 from api.syncer import DISCOGS_API_BASE, sync_collection
@@ -368,8 +368,11 @@ class ExpectedDifference:
 # fails on an entry whose difference did not materialise, so a tolerance cannot outlive
 # the behaviour it was granted for.
 #
-# It is empty, and the collaborators family is why it should stay that way — the pilot
-# reaches column-for-column agreement with no tolerance at all. An entry looks like:
+# The collaborators pilot is the bar: column-for-column agreement, with no entry at all.
+# The autocomplete family is the other case a migration runs into, and it registers its
+# entries beside itself below rather than here — Lucene's relevance score has no
+# PostgreSQL spelling, so that column, and the row order it drives, is the one thing
+# tolerated. An entry looks like:
 #
 #     ("label_dna", "get_label_profile"): ExpectedDifference(
 #         reason="Neo4j returns float scores; the SQL sums numeric and rounds at 6 places",
@@ -462,6 +465,72 @@ register_parity_family("collaborators", COLLABORATORS_CALLS)
 # what the coverage test below reads to check that registering a family did not quietly
 # leave one of its functions unproven.
 FAMILY_PROTOCOLS: dict[str, type] = {"collaborators": CollaboratorsBackend}
+
+
+# ── The autocomplete family ──────────────────────────────────────────────────
+# The six full-text functions the Cypher coverage spike found, moved to trigram search on
+# `graph.genre`, `graph.style`, `graph.person` and the two vertex views. Nothing here
+# traverses, so the family registers `requires_property_graph=False` and its calls run on
+# the required PostgreSQL 18 tier as well as on 19.
+#
+# Every call matches under both engines' rules — each term is a prefix of a word in the
+# name — so the two backends return the same rows. What they cannot return is the same
+# `score`: Neo4j's is Lucene relevance, computed from index term statistics that do not
+# exist in PostgreSQL, and this backend publishes trigram similarity in the same column.
+# The declared difference below is exactly that, and no more than that.
+
+
+def _rank_free(rows: Any) -> Any:
+    """Return *rows* with the score's value dropped and the row order normalised by name.
+
+    Two tolerances, and they are the same tolerance: the score cannot be reproduced, so
+    neither can an ordering driven by it. Everything else is still compared — the rows,
+    the `id` and `name` values, the columns and their order.
+
+    The score is replaced by the *name of its type* rather than by a constant, so the
+    column keeps earning its place: a backend that started returning `Decimal` where the
+    other returns `float` still fails here, which is the divergence a rounding tolerance
+    would have hidden.
+    """
+    return sorted(
+        ({**row, "score": type(row["score"]).__name__} for row in rows),
+        key=lambda row: str(row["name"]),
+    )
+
+
+_LUCENE_SCORE_DIFFERENCE = ExpectedDifference(
+    reason=(
+        "Neo4j ranks by Lucene relevance; PostgreSQL has no such number and returns "
+        "pg_trgm similarity in the same column, ordered by it and then by name"
+    ),
+    normalize=_rank_free,
+)
+
+AUTOCOMPLETE_CALLS: tuple[ParityCall, ...] = (
+    # Two names matched by one prefix, so the order the score drives is exercised rather
+    # than assumed away.
+    ParityCall("autocomplete_artist", ("radio",), {"limit": 10}),
+    # One name, so `limit` is provably applied to a result the limit cannot reorder.
+    ParityCall("autocomplete_artist", ("birdman",), {"limit": 1}),
+    ParityCall("autocomplete_label", ("warp",), {"limit": 10}),
+    ParityCall("autocomplete_label", ("mut",), {"limit": 10}),
+    ParityCall("autocomplete_genre", ("roc",), {"limit": 10}),
+    ParityCall("autocomplete_genre", ("elec",), {"limit": 10}),
+    ParityCall("autocomplete_style", ("ambi",), {"limit": 10}),
+    ParityCall("autocomplete_style", ("tech",), {"limit": 10}),
+    ParityCall("autocomplete_person", ("bob",), {"limit": 10}),
+    ParityCall("autocomplete_person", ("chuck",), {"limit": 10}),
+)
+
+register_parity_family("autocomplete", AUTOCOMPLETE_CALLS, requires_property_graph=False)
+FAMILY_PROTOCOLS["autocomplete"] = AutocompleteBackend
+
+# Keyed per function rather than per family, because that is the registry's key. Every
+# registered call above returns at least one row: the harness fails a declared difference
+# that did not materialise, and two empty results agree. A query that matches nothing is
+# worth covering and is covered in `tests/test_autocomplete_pg_queries.py`, on one engine,
+# where agreeing is not a failure.
+EXPECTED_DIFFERENCES.update({("autocomplete", function): _LUCENE_SCORE_DIFFERENCE for function in PARITY_FAMILIES["autocomplete"].functions})
 
 
 # `graph.catalog` exists only on a PostgreSQL 19 server whose initializer ran with the
