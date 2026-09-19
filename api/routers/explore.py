@@ -12,6 +12,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from neo4j.exceptions import ClientError as Neo4jClientError
 
+from api.graph_backend import OneHopCollaboratorsBackend, get_one_hop_collaborators_backend
 from api.limiter import limiter
 from api.models import PathNode, PathResponse
 from api.queries import collaborator_queries, genre_tree_queries
@@ -45,6 +46,15 @@ router = APIRouter()
 _neo4j_driver: Any = None
 _redis: Any = None
 _pg_pool: Any = None
+# ── one_hop_collaborators family (gm-catalog-api-91a.3) ──────────────────────────────────
+# Resolved via the graph-backend selector; defaults to the Neo4j implementation so an
+# unconfigured router (e.g. in tests) behaves exactly as it did before the seam existed. Only
+# `get_collaborators`/`count_collaborators` route through this — the identity check just
+# below stays on `_neo4j_driver` directly, since `get_artist_identity` belongs to a separate
+# vertex-lookups family migrated on its own.
+_graph_backend: str = "neo4j"
+_one_hop_collaborators_backend: OneHopCollaboratorsBackend = collaborator_queries
+# ── end one_hop_collaborators family ──────────────────────────────────────────────────────
 
 # Redis cache TTL for trends (genre/style/label) and explore (artist/label)
 # 24 hours — data changes only on import
@@ -52,11 +62,29 @@ _TRENDS_CACHE_TTL = 86400
 _EXPLORE_CACHE_TTL = 86400
 
 
-def configure(neo4j: Any, jwt_secret: str | None, redis: Any = None, pg_pool: Any = None) -> None:  # noqa: ARG001
-    global _neo4j_driver, _redis, _pg_pool
+def configure(
+    neo4j: Any,
+    jwt_secret: str | None,  # noqa: ARG001
+    redis: Any = None,
+    pg_pool: Any = None,
+    graph_backend: str = "neo4j",
+) -> None:
+    global _neo4j_driver, _redis, _pg_pool, _graph_backend, _one_hop_collaborators_backend
     _neo4j_driver = neo4j
     _redis = redis
     _pg_pool = pg_pool
+    _graph_backend = graph_backend
+    _one_hop_collaborators_backend = get_one_hop_collaborators_backend(graph_backend)
+
+
+def _one_hop_collaborators_handle() -> Any:
+    """Return the connection handle the resolved one-hop collaborators backend expects.
+
+    Read at call time rather than frozen in `configure`, so the handle always tracks the
+    module-level connection the rest of this router uses. Mirrors
+    `api.routers.network._collaborators_handle`.
+    """
+    return _pg_pool if _graph_backend == "postgres" else _neo4j_driver
 
 
 _autocomplete_cache: OrderedDict[tuple[str, str, int], list[dict[str, Any]]] = OrderedDict()
@@ -236,14 +264,18 @@ async def get_collaborators(
     if not _neo4j_driver:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
+    collaborators_handle = _one_hop_collaborators_handle()
+    if not collaborators_handle:
+        return JSONResponse(content={"error": "Service not ready"}, status_code=503)
+
     try:
         identity = await collaborator_queries.get_artist_identity(_neo4j_driver, artist_id)
         if not identity:
             return JSONResponse(content={"error": f"Artist '{artist_id}' not found"}, status_code=404)
 
         collaborators, total = await asyncio.gather(
-            collaborator_queries.get_collaborators(_neo4j_driver, artist_id, limit=limit),
-            collaborator_queries.count_collaborators(_neo4j_driver, artist_id),
+            _one_hop_collaborators_backend.get_collaborators(collaborators_handle, artist_id, limit=limit),
+            _one_hop_collaborators_backend.count_collaborators(collaborators_handle, artist_id),
         )
     except Neo4jClientError as exc:
         if "TransactionTimedOut" in str(exc):
