@@ -91,10 +91,58 @@ RELEASES: dict[str, tuple[str, ...]] = {
     "203": ("9", "11"),
 }
 
-_TRUNCATE_ENTITIES = "TRUNCATE artists, releases CASCADE"
+# ── Coverage spike family 1 fixture data (gm-catalog-api-91a.2) ─────────────────────────
+# Vertex lookups and store statistics need entities the pilot's collaborators fixture never
+# seeded: a label and a master to look up by id, a year on every release so `get_year_range`
+# has a real min and max to agree on, and a genre and a style so `get_graph_stats` counts
+# something other than zero for those two labels. The years are otherwise arbitrary — chosen
+# only so the extremes are unambiguous (release "101" is the sole minimum, "203" the sole
+# maximum) — and every release gets one, so no release is excluded by the `year > 0` guard
+# both engines apply.
+#
+# The genre and style are deliberately not left at zero. A totally absent label is a
+# pathological case neither engine treats the same way once you look past the trivial "both
+# report 0": this Neo4j build's `CALL { ... UNION ALL ... }` drops the branch's row entirely
+# rather than reporting `count(g) = 0` when no node has ever carried the `Genre` label in the
+# database, while the SQL side's `count(*)` over an empty `graph.genre` view still returns a
+# row of `0` — a real divergence, but one that cannot happen against production data, where
+# `graphinator` has always created at least one node of every label before either endpoint is
+# ever called. Giving both engines one real genre and one real style keeps the fixture inside
+# the case the two backends actually have to agree on.
+LABEL_ID = "301"
+LABEL_NAME = "Fixture Label"
+MASTER_ID = "401"
+MASTER_NAME = "Fixture Master"
+GENRE_NAME = "Fixture Genre"
+STYLE_NAME = "Fixture Style"
+# The one release whose document carries the genre/style tags above, so `graph.genre` and
+# `graph.style` (DISTINCT over every release's and master's tags) each get exactly one row.
+_TAGGED_RELEASE_ID = "101"
+
+RELEASE_YEARS: dict[str, int] = {
+    "101": 1959,
+    "102": 1962,
+    "103": 1965,
+    "104": 1968,
+    "105": 1971,
+    "106": 1974,
+    "107": 1977,
+    "108": 1980,
+    "109": 1983,
+    "110": 1986,
+    "111": 1989,
+    "112": 1992,
+    THREE_CREDIT_RELEASE_ID: 1995,
+    "202": 1998,
+    "203": 2001,
+}
+
+_TRUNCATE_ENTITIES = "TRUNCATE artists, releases, labels, masters CASCADE"
 
 _SEED_ARTIST = "INSERT INTO artists (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
 _SEED_RELEASE = "INSERT INTO releases (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
+_SEED_LABEL = "INSERT INTO labels (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
+_SEED_MASTER = "INSERT INTO masters (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
 
 _SEED_NEO4J = """
 UNWIND $artists AS artist
@@ -103,10 +151,18 @@ SET a.name = artist.name
 WITH count(*) AS _seeded
 UNWIND $releases AS release
 MERGE (r:Release {id: release.id})
+SET r.year = release.year
 WITH r, release
 UNWIND release.artists AS artist_id
 MATCH (a:Artist {id: artist_id})
 MERGE (r)-[:BY]->(a)
+WITH count(*) AS _credited
+MERGE (l:Label {id: $label_id})
+SET l.name = $label_name
+MERGE (m:Master {id: $master_id})
+SET m.title = $master_name
+MERGE (g:Genre {name: $genre_name})
+MERGE (s:Style {name: $style_name})
 """
 
 _SERVER_VERSION = "SELECT current_setting('server_version_num')::int"
@@ -142,34 +198,58 @@ async def seed_neo4j(driver: AsyncResilientNeo4jDriver) -> None:
         driver,
         _SEED_NEO4J,
         artists=[{"id": artist_id, "name": name} for artist_id, name in ARTISTS.items()],
-        releases=[{"id": release_id, "artists": list(credits)} for release_id, credits in RELEASES.items()],
+        releases=[{"id": release_id, "artists": list(credits), "year": RELEASE_YEARS[release_id]} for release_id, credits in RELEASES.items()],
+        label_id=LABEL_ID,
+        label_name=LABEL_NAME,
+        master_id=MASTER_ID,
+        master_name=MASTER_NAME,
+        genre_name=GENRE_NAME,
+        style_name=STYLE_NAME,
     )
 
 
 async def seed_postgres(pool: AsyncPostgreSQLPool) -> None:
-    """Write the fixture into `artists` and `releases` as Discogs documents.
+    """Write the fixture into `artists`, `releases`, `labels`, and `masters` as Discogs documents.
 
     Nothing else is written: `graph.catalog` and the views underneath it are declarations
-    over these two tables, so the documents are the whole projection.
+    over these tables, so the documents are the whole projection.
     """
     async with pool.connection() as conn, conn.cursor() as cursor:
         await cursor.execute(_TRUNCATE_ENTITIES)
         for artist_id, name in ARTISTS.items():
             await cursor.execute(_SEED_ARTIST, (artist_id, "parity-fixture", json.dumps({"name": name})))
         for release_id, credits in RELEASES.items():
-            document = {"title": f"Release {release_id}", "artists": [{"id": int(each)} for each in credits]}
+            document = {
+                "title": f"Release {release_id}",
+                "artists": [{"id": int(each)} for each in credits],
+                "year": RELEASE_YEARS[release_id],
+            }
+            if release_id == _TAGGED_RELEASE_ID:
+                document["genres"] = [GENRE_NAME]
+                document["styles"] = [STYLE_NAME]
             await cursor.execute(_SEED_RELEASE, (release_id, "parity-fixture", json.dumps(document)))
+        await cursor.execute(_SEED_LABEL, (LABEL_ID, "parity-fixture", json.dumps({"name": LABEL_NAME})))
+        await cursor.execute(_SEED_MASTER, (MASTER_ID, "parity-fixture", json.dumps({"title": MASTER_NAME})))
 
 
-async def open_postgres_pool() -> AsyncPostgreSQLPool:
+async def open_postgres_pool(*, require_property_graph: bool = True) -> AsyncPostgreSQLPool:
     """Open a pool on the integration container with the producer's own schema applied.
 
-    The two gates are asserted rather than skipped past. A caller reaches this only once
-    the property graph has been *requested*, and a container that then cannot serve it is
-    a failure, not a no-op: the whole point of the PostgreSQL 19 tier is that the graph is
-    there.
+    Args:
+        require_property_graph: When True (the default), assert the connected server can
+            serve `graph.catalog` — PostgreSQL 19 with `SCHEMA_PROPERTY_GRAPH` enabled —
+            before seeding it, which is what every family whose PostgreSQL side is a
+            `GRAPH_TABLE` traversal needs. The two gates are asserted rather than skipped
+            past: a caller that asked for the property graph and got a container that
+            cannot serve it has hit a failure, not a no-op — the whole point of the
+            PostgreSQL 19 tier is that the graph is there. A family whose PostgreSQL side is
+            ordinary SQL over the phase 0 views (coverage spike family 1, for one — see
+            `gm-catalog-api-91a.2`) passes False and runs on every integration tier instead:
+            `create_postgres_schema` builds every `graph` schema *view* regardless of the
+            switch, and none of those views needs a property graph to answer a plain SELECT.
     """
-    assert property_graph_enabled(), "SCHEMA_PROPERTY_GRAPH must be enabled; use `just test-integration-pg19`"
+    if require_property_graph:
+        assert property_graph_enabled(), "SCHEMA_PROPERTY_GRAPH must be enabled; use `just test-integration-pg19`"
 
     host, port = parse_postgres_host_port(required_env("POSTGRES_HOST"))
     pool = AsyncPostgreSQLPool(
@@ -187,14 +267,15 @@ async def open_postgres_pool() -> AsyncPostgreSQLPool:
     )
     await pool.initialize()
 
-    async with pool.connection() as conn, conn.cursor() as cursor:
-        await cursor.execute(_SERVER_VERSION)
-        row = await cursor.fetchone()
-        server_version_num = int(row[0]) if row else 0
-    assert server_version_num >= PROPERTY_GRAPH_MINIMUM_SERVER_VERSION, (
-        f"this suite needs server_version_num >= {PROPERTY_GRAPH_MINIMUM_SERVER_VERSION}; "
-        f"the container reports {server_version_num}. Check POSTGRES_INTEGRATION_IMAGE."
-    )
+    if require_property_graph:
+        async with pool.connection() as conn, conn.cursor() as cursor:
+            await cursor.execute(_SERVER_VERSION)
+            row = await cursor.fetchone()
+            server_version_num = int(row[0]) if row else 0
+        assert server_version_num >= PROPERTY_GRAPH_MINIMUM_SERVER_VERSION, (
+            f"this suite needs server_version_num >= {PROPERTY_GRAPH_MINIMUM_SERVER_VERSION}; "
+            f"the container reports {server_version_num}. Check POSTGRES_INTEGRATION_IMAGE."
+        )
 
     failures = await create_postgres_schema(pool)
     assert failures == 0, f"{failures} schema statements failed against the integration container"
@@ -202,14 +283,18 @@ async def open_postgres_pool() -> AsyncPostgreSQLPool:
 
 
 @asynccontextmanager
-async def seeded_backends() -> AsyncIterator[ParityBackends]:
-    """Yield both engines holding the fixture, and close them afterwards."""
+async def seeded_backends(*, require_property_graph: bool = True) -> AsyncIterator[ParityBackends]:
+    """Yield both engines holding the fixture, and close them afterwards.
+
+    Args:
+        require_property_graph: Forwarded to :func:`open_postgres_pool`.
+    """
     driver = AsyncResilientNeo4jDriver(
         uri=required_env("NEO4J_HOST"),
         auth=(required_env("NEO4J_USERNAME"), required_env("NEO4J_PASSWORD")),
         max_retries=1,
     )
-    pool = await open_postgres_pool()
+    pool = await open_postgres_pool(require_property_graph=require_property_graph)
     try:
         await seed_neo4j(driver)
         await seed_postgres(pool)

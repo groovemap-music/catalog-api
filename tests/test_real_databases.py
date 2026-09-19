@@ -26,7 +26,13 @@ from groovemap_schema.postgres import create_postgres_schema, property_graph_ena
 from neo4j.exceptions import Neo4jError
 from psycopg.rows import dict_row
 
-from api.graph_backend import CollaboratorsBackend, get_backend
+from api.graph_backend import (
+    CatalogOverviewBackend,
+    CollaboratorIdentityBackend,
+    CollaboratorsBackend,
+    GapMetadataBackend,
+    get_backend,
+)
 from api.queries.credits_queries import get_person_connections
 from api.queries.helpers import run_count, run_query, run_single
 from api.syncer import DISCOGS_API_BASE, sync_collection
@@ -458,10 +464,47 @@ COLLABORATORS_CALLS: tuple[ParityCall, ...] = (
 register_parity_family("collaborators", COLLABORATORS_CALLS)
 
 
+# ── Coverage spike family 1: vertex lookups and store statistics (gm-catalog-api-91a.2) ──
+# Four families, none needing `graph.catalog`: every PostgreSQL statement below is a plain
+# SELECT over a phase 0 view, so each registers `requires_property_graph=False` and runs on
+# every integration tier rather than only PostgreSQL 19. `admin_storage`
+# (`api/queries/admin_pg_queries.py`) is deliberately not registered here — see that
+# module's docstring for why a Neo4j-versus-PostgreSQL row comparison does not fit an admin
+# metadata snapshot; it is proven by `tests/test_admin_pg_queries.py` instead.
+
+COLLABORATOR_IDENTITY_CALLS: tuple[ParityCall, ...] = (
+    ParityCall("get_artist_identity", (graph_fixture.ANCHOR_ARTIST_ID,)),
+    ParityCall("get_artist_identity", (graph_fixture.PROBE_ANCHOR_ARTIST_ID,)),
+    ParityCall("get_artist_identity", ("does-not-exist",)),
+)
+register_parity_family("collaborator_identity", COLLABORATOR_IDENTITY_CALLS, requires_property_graph=False)
+
+GAP_METADATA_CALLS: tuple[ParityCall, ...] = (
+    ParityCall("get_label_metadata", (graph_fixture.LABEL_ID,)),
+    ParityCall("get_label_metadata", ("does-not-exist",)),
+    ParityCall("get_artist_metadata", (graph_fixture.ANCHOR_ARTIST_ID,)),
+    ParityCall("get_artist_metadata", ("does-not-exist",)),
+    ParityCall("get_master_metadata", (graph_fixture.MASTER_ID,)),
+    ParityCall("get_master_metadata", ("does-not-exist",)),
+)
+register_parity_family("gap_metadata", GAP_METADATA_CALLS, requires_property_graph=False)
+
+CATALOG_OVERVIEW_CALLS: tuple[ParityCall, ...] = (
+    ParityCall("get_year_range"),
+    ParityCall("get_graph_stats"),
+)
+register_parity_family("catalog_overview", CATALOG_OVERVIEW_CALLS, requires_property_graph=False)
+
+
 # The protocol each family's two backends are bound to in `api/graph_backend.py`. It is
 # what the coverage test below reads to check that registering a family did not quietly
 # leave one of its functions unproven.
-FAMILY_PROTOCOLS: dict[str, type] = {"collaborators": CollaboratorsBackend}
+FAMILY_PROTOCOLS: dict[str, type] = {
+    "collaborators": CollaboratorsBackend,
+    "collaborator_identity": CollaboratorIdentityBackend,
+    "gap_metadata": GapMetadataBackend,
+    "catalog_overview": CatalogOverviewBackend,
+}
 
 
 # `graph.catalog` exists only on a PostgreSQL 19 server whose initializer ran with the
@@ -483,22 +526,19 @@ def _parity_params() -> list[Any]:
     return params
 
 
-@pytest_asyncio.fixture
-async def parity_backends() -> AsyncIterator[graph_fixture.ParityBackends]:
-    """Both engines, holding the same fixture."""
-    async with graph_fixture.seeded_backends() as backends:
-        yield backends
-
-
 @pytest.mark.parametrize(("family", "call"), _parity_params())
-async def test_graph_query_family_agrees_on_both_backends(
-    parity_backends: graph_fixture.ParityBackends,
-    family: str,
-    call: ParityCall,
-) -> None:
-    """Same rows, same order, same types, from the same fixture, for one registered call."""
-    neo4j_result = await _invoke(get_backend(family, "neo4j"), call, parity_backends.neo4j)
-    postgres_result = await _invoke(get_backend(family, "postgres"), call, parity_backends.postgres)
+async def test_graph_query_family_agrees_on_both_backends(family: str, call: ParityCall) -> None:
+    """Same rows, same order, same types, from the same fixture, for one registered call.
+
+    Each family carries its own `requires_property_graph` flag, so the fixture is opened
+    per call rather than through a shared fixture function: a family whose PostgreSQL side
+    is ordinary SQL over the phase 0 views (coverage spike family 1) needs no property
+    graph and must not assert for one, while a `GRAPH_TABLE` family still does.
+    """
+    require_property_graph = PARITY_FAMILIES[family].requires_property_graph
+    async with graph_fixture.seeded_backends(require_property_graph=require_property_graph) as backends:
+        neo4j_result = await _invoke(get_backend(family, "neo4j"), call, backends.neo4j)
+        postgres_result = await _invoke(get_backend(family, "postgres"), call, backends.postgres)
 
     assert_parity(family, call, neo4j_result=neo4j_result, postgres_result=postgres_result)
 
