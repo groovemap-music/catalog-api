@@ -23,7 +23,18 @@ from __future__ import annotations
 from types import ModuleType
 from typing import Any, Protocol, cast
 
-from api.queries import network_pg_queries, network_queries
+from api.queries import (
+    admin_pg_queries,
+    admin_queries,
+    collaborator_pg_queries,
+    collaborator_queries,
+    gap_pg_queries,
+    gap_queries,
+    neo4j_pg_queries,
+    neo4j_queries,
+    network_pg_queries,
+    network_queries,
+)
 
 
 class CollaboratorsBackend(Protocol):
@@ -54,11 +65,86 @@ _NEO4J_COLLABORATORS: CollaboratorsBackend = network_queries
 _POSTGRES_COLLABORATORS: CollaboratorsBackend = network_pg_queries
 
 
+# ── Coverage spike family 1: vertex lookups and store statistics (gm-catalog-api-91a.2) ──
+# Nine functions across four modules, none of which traverses an edge: single-vertex
+# lookups, a min/max over `Release.year`, and node/edge counts. Each below is its own
+# family — one Protocol, one pair of backend modules — because the functions live in
+# different Cypher modules with different call signatures; grouping them here is what the
+# coverage spike calls "family 1" even though `graph_backend.py` sees four families. None
+# needs `graph.catalog`: every PostgreSQL statement is a plain SELECT over a phase 0 view,
+# so all four are registered `requires_property_graph=False` in the parity harness and run
+# on every integration tier.
+
+
+class CollaboratorIdentityBackend(Protocol):
+    """The single-vertex lookup behind the Explore endpoint's collaborators panel."""
+
+    async def get_artist_identity(self, handle: Any, artist_id: str, /) -> dict[str, Any] | None: ...
+
+
+class GapMetadataBackend(Protocol):
+    """The three single-vertex lookups behind "Complete My Collection"'s gap endpoints."""
+
+    async def get_label_metadata(self, handle: Any, label_id: str, /) -> dict[str, Any] | None: ...
+
+    async def get_artist_metadata(self, handle: Any, artist_id: str, /) -> dict[str, Any] | None: ...
+
+    async def get_master_metadata(self, handle: Any, master_id: str, /) -> dict[str, Any] | None: ...
+
+
+class CatalogOverviewBackend(Protocol):
+    """The catalog-wide year range and the six-label node-count summary."""
+
+    async def get_year_range(self, handle: Any, /) -> dict[str, int] | None: ...
+
+    async def get_graph_stats(self, handle: Any, /) -> dict[str, int]: ...
+
+
+class AdminStorageBackend(Protocol):
+    """The admin storage panel's graph-shape summary.
+
+    `get_neo4j_storage` keeps its name across both backends even though the PostgreSQL side
+    reads no Neo4j store — see `api/queries/admin_pg_queries.py` for why, and for why this
+    one function is proven by unit tests rather than the live parity harness.
+    """
+
+    async def get_neo4j_storage(self, handle: Any, /) -> dict[str, Any]: ...
+
+
+_NEO4J_COLLABORATOR_IDENTITY: CollaboratorIdentityBackend = collaborator_queries
+_POSTGRES_COLLABORATOR_IDENTITY: CollaboratorIdentityBackend = collaborator_pg_queries
+
+_NEO4J_GAP_METADATA: GapMetadataBackend = gap_queries
+_POSTGRES_GAP_METADATA: GapMetadataBackend = gap_pg_queries
+
+_NEO4J_CATALOG_OVERVIEW: CatalogOverviewBackend = neo4j_queries
+_POSTGRES_CATALOG_OVERVIEW: CatalogOverviewBackend = neo4j_pg_queries
+
+_NEO4J_ADMIN_STORAGE: AdminStorageBackend = admin_queries
+_POSTGRES_ADMIN_STORAGE: AdminStorageBackend = admin_pg_queries
+
+
 # family name -> backend name -> module implementing that family's query functions.
 _FAMILY_BACKENDS: dict[str, dict[str, ModuleType]] = {
     "collaborators": {
         "neo4j": network_queries,
         "postgres": network_pg_queries,
+    },
+    "collaborator_identity": {
+        "neo4j": collaborator_queries,
+        "postgres": collaborator_pg_queries,
+    },
+    "gap_metadata": {
+        "neo4j": gap_queries,
+        "postgres": gap_pg_queries,
+    },
+    "catalog_overview": {
+        "neo4j": neo4j_queries,
+        "postgres": neo4j_pg_queries,
+    },
+    "admin_storage": {
+        "neo4j": admin_queries,
+        "postgres": admin_pg_queries,
     },
 }
 
@@ -88,6 +174,26 @@ def get_collaborators_backend(backend: str) -> CollaboratorsBackend:
     three call sites are type-checked instead of an untyped `ModuleType`.
     """
     return cast("CollaboratorsBackend", get_backend("collaborators", backend))
+
+
+def get_collaborator_identity_backend(backend: str) -> CollaboratorIdentityBackend:
+    """Resolve the "collaborator_identity" family for *backend*, typed rather than as a module."""
+    return cast("CollaboratorIdentityBackend", get_backend("collaborator_identity", backend))
+
+
+def get_gap_metadata_backend(backend: str) -> GapMetadataBackend:
+    """Resolve the "gap_metadata" family for *backend*, typed rather than as a module."""
+    return cast("GapMetadataBackend", get_backend("gap_metadata", backend))
+
+
+def get_catalog_overview_backend(backend: str) -> CatalogOverviewBackend:
+    """Resolve the "catalog_overview" family for *backend*, typed rather than as a module."""
+    return cast("CatalogOverviewBackend", get_backend("catalog_overview", backend))
+
+
+def get_admin_storage_backend(backend: str) -> AdminStorageBackend:
+    """Resolve the "admin_storage" family for *backend*, typed rather than as a module."""
+    return cast("AdminStorageBackend", get_backend("admin_storage", backend))
 
 
 # ── Startup readiness for the PostgreSQL backend ─────────────────────────────
