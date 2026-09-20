@@ -36,6 +36,8 @@ from api.queries import (
     autocomplete_queries,
     collaborator_pg_queries,
     collaborator_queries,
+    credits_pg_queries,
+    credits_queries,
     gap_pg_queries,
     gap_queries,
     neo4j_pg_queries,
@@ -182,6 +184,46 @@ _NEO4J_ADMIN_STORAGE: AdminStorageBackend = admin_queries
 _POSTGRES_ADMIN_STORAGE: AdminStorageBackend = admin_pg_queries
 
 
+# ── Coverage spike family 4: credits and provenance (gm-catalog-api-dl8.1) ───────────────
+# The whole of `api/queries/credits_queries.py` over one edge type (`graph.credited_on`),
+# one vertex label (`graph.person`), and the identity edge beside it (`graph.same_as`).
+#
+# Eight functions, not the nine the coverage spike counts in that module: the ninth,
+# `autocomplete_person`, is the module's full-text search, which the spike classifies
+# SQL-only and lists under *its* family 2 as well. It was migrated there — it is a member
+# of `AutocompleteBackend` above, resolved through the "autocomplete" family, and answered
+# by `api/queries/autocomplete_pg_queries.py` — and a function the seam resolves through
+# two families would be a function with two backends for one call. So the credits family
+# takes the eight traversals and leaves the search where it already works.
+class CreditsBackend(Protocol):
+    """The eight traversal queries the "credits" family is made of.
+
+    See `CollaboratorsBackend` for why the handle is positional-only and typed `Any`.
+    `depth` and `limit` are named because `api/routers/credits.py` varies them per request.
+    """
+
+    async def get_person_credits(self, handle: Any, name: str, /) -> list[dict[str, Any]]: ...
+
+    async def get_person_timeline(self, handle: Any, name: str, /) -> list[dict[str, Any]]: ...
+
+    async def get_release_credits(self, handle: Any, release_id: str, /) -> list[dict[str, Any]]: ...
+
+    async def get_role_leaderboard(self, handle: Any, category: str, /, limit: int = 20) -> list[dict[str, Any]]: ...
+
+    async def get_shared_credits(self, handle: Any, person1: str, person2: str, /) -> list[dict[str, Any]]: ...
+
+    async def get_person_connections(self, handle: Any, name: str, /, depth: int = 2, limit: int = 50) -> list[dict[str, Any]]: ...
+
+    async def get_person_profile(self, handle: Any, name: str, /) -> dict[str, Any] | None: ...
+
+    async def get_person_role_breakdown(self, handle: Any, name: str, /) -> list[dict[str, Any]]: ...
+
+
+_NEO4J_CREDITS: CreditsBackend = credits_queries
+_POSTGRES_CREDITS: CreditsBackend = credits_pg_queries
+# ── end credits family ───────────────────────────────────────────────────────────────────
+
+
 # family name -> backend name -> module implementing that family's query functions.
 _FAMILY_BACKENDS: dict[str, dict[str, ModuleType]] = {
     "collaborators": {
@@ -212,6 +254,12 @@ _FAMILY_BACKENDS: dict[str, dict[str, ModuleType]] = {
         "neo4j": admin_queries,
         "postgres": admin_pg_queries,
     },
+    # ── credits family (gm-catalog-api-dl8.1) ────────────────────────────────
+    "credits": {
+        "neo4j": credits_queries,
+        "postgres": credits_pg_queries,
+    },
+    # ── end credits family ───────────────────────────────────────────────────
 }
 
 
@@ -290,6 +338,19 @@ def get_catalog_overview_backend(backend: str) -> CatalogOverviewBackend:
 def get_admin_storage_backend(backend: str) -> AdminStorageBackend:
     """Resolve the "admin_storage" family for *backend*, typed rather than as a module."""
     return cast("AdminStorageBackend", get_backend("admin_storage", backend))
+
+
+# ── credits family (gm-catalog-api-dl8.1) ────────────────────────────────────
+def get_credits_backend(backend: str) -> CreditsBackend:
+    """Resolve the "credits" family for *backend*, typed rather than as a module.
+
+    Sound for the same reason `get_collaborators_backend` is: both registered modules are
+    bound to `CreditsBackend` above, which is where mypy checks them.
+    """
+    return cast("CreditsBackend", get_backend("credits", backend))
+
+
+# ── end credits family ───────────────────────────────────────────────────────
 
 
 # ── Backend-neutral error mapping ─────────────────────────────────────────────
