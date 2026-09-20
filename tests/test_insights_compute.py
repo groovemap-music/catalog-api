@@ -247,7 +247,7 @@ class TestRarityScoresEndpoint:
         """Returns 200 with rarity score results."""
         mock_results = [{"release_id": "1", "rarity_score": 85.0, "tier": "ultra-rare"}]
         with patch(
-            "api.routers.insights_compute.fetch_all_rarity_signals",
+            "api.queries.rarity_queries.fetch_all_rarity_signals",
             new=AsyncMock(return_value=mock_results),
         ):
             response = test_client.get("/api/internal/insights/rarity-scores")
@@ -273,7 +273,7 @@ class TestRarityScoresEndpoint:
 
         err = TransientError("MemoryPoolOutOfMemoryError")
         with patch(
-            "api.routers.insights_compute.fetch_all_rarity_signals",
+            "api.queries.rarity_queries.fetch_all_rarity_signals",
             new=AsyncMock(side_effect=err),
         ):
             response = test_client.get("/api/internal/insights/rarity-scores")
@@ -288,7 +288,7 @@ class TestRarityScoresEndpoint:
         """
         err = _neo4j_error("Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration", "transaction timed out")
         with patch(
-            "api.routers.insights_compute.fetch_all_rarity_signals",
+            "api.queries.rarity_queries.fetch_all_rarity_signals",
             new=AsyncMock(side_effect=err),
         ):
             response = test_client.get("/api/internal/insights/rarity-scores")
@@ -301,7 +301,7 @@ class TestRarityScoresEndpoint:
         err = _neo4j_error("Neo.ClientError.Transaction.TransactionTimedOut", "transaction timed out")
         group = ExceptionGroup("unhandled errors in a TaskGroup", [err])
         with patch(
-            "api.routers.insights_compute.fetch_all_rarity_signals",
+            "api.queries.rarity_queries.fetch_all_rarity_signals",
             new=AsyncMock(side_effect=group),
         ):
             response = test_client.get("/api/internal/insights/rarity-scores")
@@ -314,7 +314,7 @@ class TestRarityScoresEndpoint:
         err = _neo4j_error("Neo.ClientError.Statement.SyntaxError", "invalid syntax")
         assert isinstance(err, ClientError)  # same class, non-retryable code
         with patch(
-            "api.routers.insights_compute.fetch_all_rarity_signals",
+            "api.queries.rarity_queries.fetch_all_rarity_signals",
             new=AsyncMock(side_effect=err),
         ):
             # The fixture's TestClient uses raise_server_exceptions=False, so an

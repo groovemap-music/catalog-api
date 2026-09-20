@@ -206,7 +206,7 @@ class TestHiddenGems:
 class TestArtistRarity:
     def test_success(self, test_client: TestClient) -> None:
         with patch(
-            "api.routers.rarity.get_rarity_by_artist",
+            "api.queries.rarity_queries.get_rarity_by_artist",
             new=AsyncMock(return_value=([_MOCK_LIST_ITEM], 5)),
         ):
             response = test_client.get("/api/rarity/artist/123")
@@ -216,7 +216,7 @@ class TestArtistRarity:
 
     def test_not_found(self, test_client: TestClient) -> None:
         with patch(
-            "api.routers.rarity.get_rarity_by_artist",
+            "api.queries.rarity_queries.get_rarity_by_artist",
             new=AsyncMock(return_value=None),
         ):
             response = test_client.get("/api/rarity/artist/nonexistent")
@@ -237,7 +237,7 @@ class TestArtistRarity:
 class TestLabelRarity:
     def test_success(self, test_client: TestClient) -> None:
         with patch(
-            "api.routers.rarity.get_rarity_by_label",
+            "api.queries.rarity_queries.get_rarity_by_label",
             new=AsyncMock(return_value=([_MOCK_LIST_ITEM], 10)),
         ):
             response = test_client.get("/api/rarity/label/456")
@@ -247,7 +247,7 @@ class TestLabelRarity:
 
     def test_not_found(self, test_client: TestClient) -> None:
         with patch(
-            "api.routers.rarity.get_rarity_by_label",
+            "api.queries.rarity_queries.get_rarity_by_label",
             new=AsyncMock(return_value=None),
         ):
             response = test_client.get("/api/rarity/label/nonexistent")
