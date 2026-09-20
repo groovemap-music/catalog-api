@@ -86,6 +86,41 @@ class TestCollaboratorsEndpoint:
             response = test_client.get("/api/network/artist/123/collaborators")
         assert response.status_code == 500
 
+    def test_neo4j_service_unavailable_returns_503(self, test_client: TestClient) -> None:
+        """`ServiceUnavailable` (no reachable Neo4j server) is backend unavailability, not
+        a query timeout: 503, matching the PostgreSQL side's pool-exhaustion mapping —
+        see `TestCollaboratorsPostgresErrorMapping.test_connection_establishment_error_returns_503`."""
+        from neo4j.exceptions import ServiceUnavailable
+
+        identity = {"artist_id": "123", "artist_name": "Test"}
+        with (
+            patch("api.queries.network_queries.get_artist_identity", new_callable=AsyncMock, return_value=identity),
+            patch(
+                "api.queries.network_queries.get_multi_hop_collaborators",
+                new_callable=AsyncMock,
+                side_effect=ServiceUnavailable("Failed to establish connection"),
+            ),
+        ):
+            response = test_client.get("/api/network/artist/123/collaborators")
+        assert response.status_code == 503
+        assert "reducing depth" not in response.json()["error"]
+
+    def test_neo4j_session_expired_returns_503(self, test_client: TestClient) -> None:
+        """`SessionExpired` is the same unavailability shape as `ServiceUnavailable`."""
+        from neo4j.exceptions import SessionExpired
+
+        identity = {"artist_id": "123", "artist_name": "Test"}
+        with (
+            patch("api.queries.network_queries.get_artist_identity", new_callable=AsyncMock, return_value=identity),
+            patch(
+                "api.queries.network_queries.get_multi_hop_collaborators",
+                new_callable=AsyncMock,
+                side_effect=SessionExpired("Session expired"),
+            ),
+        ):
+            response = test_client.get("/api/network/artist/123/collaborators")
+        assert response.status_code == 503
+
     def test_limit_validation(self, test_client: TestClient) -> None:
         """Rejects limit > 200."""
         response = test_client.get("/api/network/artist/123/collaborators?limit=500")
@@ -719,3 +754,116 @@ class TestCollaboratorsBackendSelection:
         finally:
             (mod._neo4j, mod._redis, mod._pg_pool, mod._graph_backend, mod._collaborators_backend) = saved
         assert response.status_code == 503
+
+
+class TestCollaboratorsPostgresErrorMapping:
+    """Backend-neutral error mapping (gm-catalog-api-91a.5) — the PostgreSQL side.
+
+    `TestCollaboratorsEndpoint.test_timeout` / `test_non_timeout_neo4j_error_reraises`
+    cover the same contract on the Neo4j side: a statement timeout becomes 504 and
+    anything else re-raises to 500. These prove `api.graph_backend.is_graph_query_timeout`
+    gives PostgreSQL the identical shape through this router, end to end.
+    """
+
+    @staticmethod
+    def _saved_state() -> tuple[object, ...]:
+        import api.routers.network as mod
+
+        return (mod._neo4j, mod._redis, mod._pg_pool, mod._graph_backend, mod._collaborators_backend)
+
+    def test_query_canceled_returns_504(self, test_client: TestClient) -> None:
+        """A PostgreSQL statement timeout (`QueryCanceled`, SQLSTATE 57014) maps to the
+        same 504 the Neo4j `TransactionTimedOut` path produces."""
+        import psycopg
+
+        import api.routers.network as mod
+
+        identity = {"artist_id": "123", "artist_name": "Test"}
+        saved = self._saved_state()
+        try:
+            mod.configure(AsyncMock(), None, "postgres", pg_pool=AsyncMock())
+            with (
+                patch("api.queries.network_pg_queries.get_artist_identity", new_callable=AsyncMock, return_value=identity),
+                patch(
+                    "api.queries.network_pg_queries.get_multi_hop_collaborators",
+                    new_callable=AsyncMock,
+                    side_effect=psycopg.errors.QueryCanceled("canceling statement due to statement timeout"),
+                ),
+            ):
+                response = test_client.get("/api/network/artist/123/collaborators")
+        finally:
+            (mod._neo4j, mod._redis, mod._pg_pool, mod._graph_backend, mod._collaborators_backend) = saved
+        assert response.status_code == 504
+
+    def test_connection_establishment_error_returns_503(self, test_client: TestClient) -> None:
+        """The pool's own "could not get a connection at all" shape — checkout retries
+        exhausted — is backend unavailability, not a query timeout: 503, not 504, and not
+        the "try reducing depth or limit" message (no query ever ran)."""
+        from common.db_resilience import ConnectionEstablishmentError
+
+        import api.routers.network as mod
+
+        identity = {"artist_id": "123", "artist_name": "Test"}
+        saved = self._saved_state()
+        try:
+            mod.configure(AsyncMock(), None, "postgres", pg_pool=AsyncMock())
+            with (
+                patch("api.queries.network_pg_queries.get_artist_identity", new_callable=AsyncMock, return_value=identity),
+                patch(
+                    "api.queries.network_pg_queries.get_multi_hop_collaborators",
+                    new_callable=AsyncMock,
+                    side_effect=ConnectionEstablishmentError("Failed to get PostgreSQL connection after 5 attempts"),
+                ),
+            ):
+                response = test_client.get("/api/network/artist/123/collaborators")
+        finally:
+            (mod._neo4j, mod._redis, mod._pg_pool, mod._graph_backend, mod._collaborators_backend) = saved
+        assert response.status_code == 503
+        assert "reducing depth" not in response.json()["error"]
+
+    def test_circuit_open_error_returns_503(self, test_client: TestClient) -> None:
+        """The pool's breaker having already tripped is the same unavailability as above."""
+        from common.db_resilience import CircuitOpenError
+
+        import api.routers.network as mod
+
+        identity = {"artist_id": "123", "artist_name": "Test"}
+        saved = self._saved_state()
+        try:
+            mod.configure(AsyncMock(), None, "postgres", pg_pool=AsyncMock())
+            with (
+                patch("api.queries.network_pg_queries.get_artist_identity", new_callable=AsyncMock, return_value=identity),
+                patch(
+                    "api.queries.network_pg_queries.get_multi_hop_collaborators",
+                    new_callable=AsyncMock,
+                    side_effect=CircuitOpenError("AsyncPostgreSQL: Circuit breaker is OPEN"),
+                ),
+            ):
+                response = test_client.get("/api/network/artist/123/collaborators")
+        finally:
+            (mod._neo4j, mod._redis, mod._pg_pool, mod._graph_backend, mod._collaborators_backend) = saved
+        assert response.status_code == 503
+
+    def test_non_timeout_postgres_error_reraises(self, test_client: TestClient) -> None:
+        """A non-timeout psycopg error re-raises to 500 — parity with the Neo4j path's
+        `test_non_timeout_neo4j_error_reraises`."""
+        import psycopg
+
+        import api.routers.network as mod
+
+        identity = {"artist_id": "123", "artist_name": "Test"}
+        saved = self._saved_state()
+        try:
+            mod.configure(AsyncMock(), None, "postgres", pg_pool=AsyncMock())
+            with (
+                patch("api.queries.network_pg_queries.get_artist_identity", new_callable=AsyncMock, return_value=identity),
+                patch(
+                    "api.queries.network_pg_queries.get_multi_hop_collaborators",
+                    new_callable=AsyncMock,
+                    side_effect=psycopg.OperationalError("server closed the connection unexpectedly"),
+                ),
+            ):
+                response = test_client.get("/api/network/artist/123/collaborators")
+        finally:
+            (mod._neo4j, mod._redis, mod._pg_pool, mod._graph_backend, mod._collaborators_backend) = saved
+        assert response.status_code == 500
