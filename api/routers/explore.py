@@ -14,8 +14,10 @@ from neo4j.exceptions import ClientError as Neo4jClientError
 
 from api.graph_backend import (
     AutocompleteBackend,
+    CollaboratorIdentityBackend,
     OneHopCollaboratorsBackend,
     get_autocomplete_backend,
+    get_collaborator_identity_backend,
     get_one_hop_collaborators_backend,
 )
 from api.limiter import limiter
@@ -55,11 +57,20 @@ _pg_pool: Any = None
 _graph_backend: str = "neo4j"
 
 # ── one_hop_collaborators family (gm-catalog-api-91a.3) ──────────────────────────────────
-# Only `get_collaborators`/`count_collaborators` route through this — the identity check
-# just below stays on `_neo4j_driver` directly, since `get_artist_identity` belongs to a
-# separate vertex-lookups family migrated on its own.
+# `get_collaborators`/`count_collaborators` route through this. The identity check the same
+# endpoint makes routes through the separate `collaborator_identity` family just below —
+# `get_artist_identity` was migrated on its own bead (`gm-catalog-api-91a.2`), which is why
+# it is a second seam rather than a third method on this one.
 _one_hop_collaborators_backend: OneHopCollaboratorsBackend = collaborator_queries
 # ── end one_hop_collaborators family ──────────────────────────────────────────────────────
+
+# ── collaborator_identity family (gm-catalog-api-91a.2) ──────────────────────────────────
+# `/api/collaborators/{id}`'s existence check, routed through the seam so the endpoint is no
+# longer mixed-engine under `GRAPH_BACKEND=postgres`: the collaborators themselves already
+# come from `_one_hop_collaborators_backend` above, and the identity lookup that gates them
+# now comes from the same configured backend rather than always from `_neo4j_driver`.
+_collaborator_identity_backend: CollaboratorIdentityBackend = collaborator_queries
+# ── end collaborator_identity family ──────────────────────────────────────────────────────
 
 # Resolved through the graph-backend selector, exactly as the network router resolves the
 # collaborators family.
@@ -88,12 +99,13 @@ def configure(
     pg_pool: Any = None,
     graph_backend: str = "neo4j",
 ) -> None:
-    global _neo4j_driver, _redis, _pg_pool, _graph_backend, _one_hop_collaborators_backend, _autocomplete_backend
+    global _neo4j_driver, _redis, _pg_pool, _graph_backend, _one_hop_collaborators_backend, _collaborator_identity_backend, _autocomplete_backend
     _neo4j_driver = neo4j
     _redis = redis
     _pg_pool = pg_pool
     _graph_backend = graph_backend
     _one_hop_collaborators_backend = get_one_hop_collaborators_backend(graph_backend)
+    _collaborator_identity_backend = get_collaborator_identity_backend(graph_backend)
     _autocomplete_backend = get_autocomplete_backend(graph_backend)
 
 
@@ -103,6 +115,15 @@ def _one_hop_collaborators_handle() -> Any:
     Read at call time rather than frozen in `configure`, so the handle always tracks the
     module-level connection the rest of this router uses. Mirrors
     `api.routers.network._collaborators_handle`.
+    """
+    return _pg_pool if _graph_backend == "postgres" else _neo4j_driver
+
+
+def _collaborator_identity_handle() -> Any:
+    """Return the connection handle the resolved collaborator-identity backend expects.
+
+    Same rule as `_one_hop_collaborators_handle`: read at call time rather than frozen in
+    `configure`, so the handle always tracks the module-level connection this router uses.
     """
     return _pg_pool if _graph_backend == "postgres" else _neo4j_driver
 
@@ -295,11 +316,12 @@ async def get_collaborators(
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     collaborators_handle = _one_hop_collaborators_handle()
-    if not collaborators_handle:
+    identity_handle = _collaborator_identity_handle()
+    if not collaborators_handle or not identity_handle:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     try:
-        identity = await collaborator_queries.get_artist_identity(_neo4j_driver, artist_id)
+        identity = await _collaborator_identity_backend.get_artist_identity(identity_handle, artist_id)
         if not identity:
             return JSONResponse(content={"error": f"Artist '{artist_id}' not found"}, status_code=404)
 

@@ -1078,6 +1078,41 @@ class TestCollaboratorsEndpoint:
             response = test_client.get("/api/collaborators/a1")
         assert response.status_code == 500
 
+    def test_collaborators_resolves_the_postgres_backend_for_identity_and_collaborators(self, test_client: TestClient) -> None:
+        """GRAPH_BACKEND=postgres sends both the identity check and the collaborators
+        themselves to the postgres modules, with the pool — the endpoint is no longer
+        mixed-engine once `collaborator_identity` is configured alongside
+        `one_hop_collaborators`.
+        """
+        import api.routers.explore as explore_module
+        from api.queries import collaborator_pg_queries
+
+        identity = {"artist_id": "a1", "artist_name": "Miles Davis"}
+        collabs = [{"artist_id": "a2", "artist_name": "John Coltrane", "release_count": 5}]
+        pool = object()
+        driver, redis, original_pool, backend = (
+            explore_module._neo4j_driver,
+            explore_module._redis,
+            explore_module._pg_pool,
+            explore_module._graph_backend,
+        )
+        try:
+            explore_module.configure(driver, None, redis, pg_pool=pool, graph_backend="postgres")
+            assert explore_module._collaborator_identity_backend is collaborator_pg_queries
+            with (
+                patch("api.queries.collaborator_pg_queries.get_artist_identity", AsyncMock(return_value=identity)) as identity_fn,
+                patch("api.queries.collaborator_pg_queries.get_collaborators", AsyncMock(return_value=collabs)) as collaborators_fn,
+                patch("api.queries.collaborator_pg_queries.count_collaborators", AsyncMock(return_value=1)),
+            ):
+                response = test_client.get("/api/collaborators/a1?limit=20")
+        finally:
+            explore_module.configure(driver, None, redis, pg_pool=original_pool, graph_backend=backend)
+
+        assert response.status_code == 200
+        assert response.json()["collaborators"] == collabs
+        identity_fn.assert_awaited_once_with(pool, "a1")
+        collaborators_fn.assert_awaited_once_with(pool, "a1", limit=20)
+
 
 class TestGenreTreeEndpoint:
     """Tests for GET /api/genre-tree."""

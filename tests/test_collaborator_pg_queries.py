@@ -1,12 +1,20 @@
-"""Query-shape coverage for the SQL/PGQ one-hop collaborators backend.
+"""Query-shape coverage for the Collaborators endpoint's PostgreSQL backends.
 
-These run without a server, so they assert what the module *sends*: that the traversal is
-pattern matching over `graph.catalog` with the labels the schema producer declares, that the
-walk-semantics guard Neo4j gets for free from relationship isomorphism is written out, and
-that the year filter mirrors the Cypher's `r.year > 0` over a JSONB-backed text column.
+Two families share `api/queries/collaborator_pg_queries.py`, and this module follows suit:
 
-Row-level agreement with the Cypher is not something a fake pool can show. That is
-`tests/test_real_databases.py`'s `one_hop_collaborators` family, which runs both engines.
+- `TestArtistIdentityStatementShape`/`TestGetArtistIdentity` cover `get_artist_identity`
+  (the `collaborator_identity` family, `gm-catalog-api-91a.2`) — a plain `SELECT`, not a
+  `GRAPH_TABLE` pattern, per the coverage spike's single-vertex-lookup rule.
+- `TestOneHopStatementShape`/`TestGetCollaborators`/`TestCountCollaborators` cover
+  `get_collaborators`/`count_collaborators` (the `one_hop_collaborators` family,
+  `gm-catalog-api-91a.3`) — that the traversal is pattern matching over `graph.catalog`
+  with the labels the schema producer declares, that the walk-semantics guard Neo4j gets
+  for free from relationship isomorphism is written out, and that the year filter mirrors
+  the Cypher's `r.year > 0` over a JSONB-backed text column.
+
+Row-level agreement with the Cypher is not something a fake pool can show for either family.
+That is `tests/test_real_databases.py`'s `collaborator_identity` and `one_hop_collaborators`
+families, which run both engines.
 """
 
 from __future__ import annotations
@@ -21,24 +29,55 @@ from tests.fake_postgres import FakePool
 
 pytestmark = pytest.mark.asyncio
 
-ALL_STATEMENTS = (
+ALL_ONE_HOP_STATEMENTS = (
     pg.ONE_HOP_COLLABORATORS_SQL,
     pg.COUNT_ONE_HOP_COLLABORATORS_SQL,
 )
 
 
-class TestStatementShape:
-    """What the module-level SQL constants are made of."""
+class TestArtistIdentityStatementShape:
+    async def test_selects_from_the_phase_0_artist_view(self) -> None:
+        assert "FROM graph.artist" in pg.ARTIST_IDENTITY_SQL
 
-    @pytest.mark.parametrize("sql", ALL_STATEMENTS)
+    async def test_is_a_plain_select_not_a_graph_table_pattern(self) -> None:
+        # Coverage spike rule: a single-vertex lookup is SQL-only, not GRAPH_TABLE — a
+        # one-element pattern buys nothing over a plain select.
+        assert "GRAPH_TABLE" not in pg.ARTIST_IDENTITY_SQL
+
+    async def test_the_artist_id_is_bound_not_interpolated(self) -> None:
+        assert "artist_id = %(artist_id)s" in pg.ARTIST_IDENTITY_SQL
+
+    async def test_no_statement_carries_a_quoted_literal(self) -> None:
+        assert "'" not in pg.ARTIST_IDENTITY_SQL
+
+
+class TestGetArtistIdentity:
+    async def test_returns_the_cypher_column_names(self) -> None:
+        pool = FakePool([[("123", "Miles Davis")]])
+        assert await pg.get_artist_identity(pool, "123") == {"artist_id": "123", "artist_name": "Miles Davis"}
+
+    async def test_binds_the_artist_id(self) -> None:
+        pool = FakePool([[("123", "Miles Davis")]])
+        await pg.get_artist_identity(pool, "123")
+        assert pool.sql == pg.ARTIST_IDENTITY_SQL
+        assert pool.params == {"artist_id": "123"}
+
+    async def test_returns_none_for_an_unknown_artist(self) -> None:
+        assert await pg.get_artist_identity(FakePool([[]]), "missing") is None
+
+
+class TestOneHopStatementShape:
+    """What the one-hop collaborators module-level SQL constants are made of."""
+
+    @pytest.mark.parametrize("sql", ALL_ONE_HOP_STATEMENTS)
     async def test_every_traversal_is_a_graph_table_over_the_declared_graph(self, sql: str) -> None:
         assert "GRAPH_TABLE (graph.catalog" in sql
 
-    @pytest.mark.parametrize("sql", ALL_STATEMENTS)
+    @pytest.mark.parametrize("sql", ALL_ONE_HOP_STATEMENTS)
     async def test_the_anchor_artist_is_bound_not_interpolated(self, sql: str) -> None:
         assert "anchor.artist_id = %(artist_id)s" in sql
 
-    @pytest.mark.parametrize("sql", ALL_STATEMENTS)
+    @pytest.mark.parametrize("sql", ALL_ONE_HOP_STATEMENTS)
     async def test_every_quoted_literal_is_structural_not_a_baked_in_value(self, sql: str) -> None:
         # Unlike the pilot family, this one carries quoted literals: the year-shape regex
         # guard and the two JSON key names `json_build_object` writes — both structural,
@@ -52,20 +91,20 @@ class TestStatementShape:
         quoted = set(re.findall(r"'[^']*'", pg.ONE_HOP_COLLABORATORS_SQL))
         assert quoted == {"'^[0-9]{4}$'", "'year'", "'count'"}
 
-    @pytest.mark.parametrize("sql", ALL_STATEMENTS)
+    @pytest.mark.parametrize("sql", ALL_ONE_HOP_STATEMENTS)
     async def test_the_hop_uses_the_by_artist_label_in_both_directions(self, sql: str) -> None:
         # Release -> artist is the edge's declared direction, so reaching a collaborator
         # means traversing it backwards and then forwards.
         assert "<-[IS by_artist]-(credit IS release)-[IS by_artist]->(peer IS artist)" in sql
 
-    @pytest.mark.parametrize("sql", ALL_STATEMENTS)
+    @pytest.mark.parametrize("sql", ALL_ONE_HOP_STATEMENTS)
     async def test_the_walk_semantics_guard_excludes_the_anchor_as_its_own_peer(self, sql: str) -> None:
         # SQL/PGQ has no relationship isomorphism: without this, a release shared with
         # nobody else would let the same edge bind to both legs of the pattern and report
         # the anchor as its own collaborator.
         assert "peer.artist_id <> anchor.artist_id" in sql
 
-    @pytest.mark.parametrize("sql", ALL_STATEMENTS)
+    @pytest.mark.parametrize("sql", ALL_ONE_HOP_STATEMENTS)
     async def test_the_year_filter_guards_the_cast_before_it_runs(self, sql: str) -> None:
         # Mirrors the defensive order `api.queries.search_queries._run_decade_facets` uses
         # on the same JSONB-backed `year` column: a regex check before the numeric cast.
