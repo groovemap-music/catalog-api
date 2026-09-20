@@ -33,11 +33,14 @@ from api.graph_backend import (
     CollaboratorsBackend,
     GapMetadataBackend,
     OneHopCollaboratorsBackend,
+    RarityBackend,
     get_backend,
+    rarity_handles,
     registered_families,
 )
 from api.queries.credits_queries import get_person_connections
 from api.queries.helpers import run_count, run_query, run_single
+from api.queries.rarity_pipeline import RarityHandles
 from api.syncer import DISCOGS_API_BASE, sync_collection
 from tests import graph_fixture
 
@@ -329,6 +332,23 @@ class ParityCall:
         return f"{self.function}({', '.join(rendered)})"
 
 
+# ── rarity family (gm-catalog-api-wpku.1): a family may name its own handle ──
+# Every family above this is called with the backend's own connection — the Neo4j driver or
+# the PostgreSQL pool — and that is still the default. The rarity family cannot be: its batch
+# reads `insights.community_counts` and its two lookups read `insights.release_rarity`, and
+# those are PostgreSQL tables on *both* backends, because ADR 0012 migrates the graph reads
+# and not the results table. So its Neo4j backend needs two connections where its PostgreSQL
+# backend needs one, and both take them as a single `RarityHandles` so the two implementations
+# can be bound to one `Protocol`. A family that needs that says so here rather than the
+# harness growing a special case for it.
+def _backend_handle(backend: str, backends: graph_fixture.ParityBackends) -> Any:
+    """Return the connection *backend* is called with: its own, which is the usual case."""
+    return backends.neo4j if backend == "neo4j" else backends.postgres
+
+
+# ── end rarity family handle hook ────────────────────────────────────────────
+
+
 @dataclass(frozen=True)
 class ParityFamily:
     """A query family and the calls the harness proves parity on."""
@@ -336,6 +356,7 @@ class ParityFamily:
     name: str
     calls: tuple[ParityCall, ...]
     requires_property_graph: bool = True
+    handle: Callable[[str, graph_fixture.ParityBackends], Any] = _backend_handle
 
     @property
     def functions(self) -> frozenset[str]:
@@ -347,14 +368,21 @@ class ParityFamily:
 PARITY_FAMILIES: dict[str, ParityFamily] = {}
 
 
-def register_parity_family(name: str, calls: Sequence[ParityCall], *, requires_property_graph: bool = True) -> None:
+def register_parity_family(
+    name: str,
+    calls: Sequence[ParityCall],
+    *,
+    requires_property_graph: bool = True,
+    handle: Callable[[str, graph_fixture.ParityBackends], Any] = _backend_handle,
+) -> None:
     """Register *name* — a family in `api/graph_backend.py` — with the calls to compare.
 
     The backends themselves are not passed: the harness resolves them through the same
     selector the router uses, so a family cannot be proven at parity against a module the
-    router would not actually call.
+    router would not actually call. *handle* is what each backend is called with and defaults
+    to that backend's own connection; see `_backend_handle`.
     """
-    PARITY_FAMILIES[name] = ParityFamily(name=name, calls=tuple(calls), requires_property_graph=requires_property_graph)
+    PARITY_FAMILIES[name] = ParityFamily(name=name, calls=tuple(calls), requires_property_graph=requires_property_graph, handle=handle)
 
 
 @dataclass(frozen=True)
@@ -607,6 +635,95 @@ FAMILY_PROTOCOLS["autocomplete"] = AutocompleteBackend
 EXPECTED_DIFFERENCES.update({("autocomplete", function): _LUCENE_SCORE_DIFFERENCE for function in PARITY_FAMILIES["autocomplete"].functions})
 
 
+# ── The rarity family (gm-catalog-api-wpku.1) ────────────────────────────────
+# The rarity signal batch, and the two lookups that key a stored rarity page off a graph
+# vertex. Six functions, and every one of them is registered: the three page-level reads are
+# family members rather than private helpers of the batch precisely so the harness can prove
+# them, because each is a separate graph question carrying its own chunking-contract
+# obligation and a batch that agrees overall can still be built from a page read that does not.
+#
+# Every statement traverses `graph.catalog`, so the family keeps the default
+# `requires_property_graph=True` and its calls run only on the PostgreSQL 19 tier.
+
+
+def _rarity_handle(backend: str, backends: graph_fixture.ParityBackends) -> RarityHandles:
+    """Return the graph-and-insights handle the rarity family's *backend* is called with.
+
+    The same function `api/graph_backend.py` gives a router, applied to the fixture's two
+    engines: the graph half is whichever store answers the traversals, the insights half is
+    always the PostgreSQL pool. On the PostgreSQL backend both are the same pool, which is why
+    its two lookups are one statement rather than four round trips.
+    """
+    return rarity_handles(backend, backends.neo4j, backends.postgres)
+
+
+# The page reads. "" is the open-ended start cursor, so the first call is the walk's first
+# page; "7" lands between the traversal components' ids and the rarity component's, which is a
+# real keyset boundary rather than an endpoint; "zzz" is past every id and must come back
+# empty on both engines, which is what terminates the walk.
+_RARITY_PAGE_CALLS: tuple[ParityCall, ...] = (
+    ParityCall("fetch_release_id_page", ("", 5)),
+    ParityCall("fetch_release_id_page", ("7", 100)),
+    ParityCall("fetch_release_id_page", ("zzz", 10)),
+)
+
+# One page carrying every shape the eight core signal queries have to answer for: a release
+# with tags but no media (101), the rarity component's fully-equipped release with a label, a
+# master with siblings, a medium, and the collection and wantlist rows that are the live half
+# of its degree (731), the unique pressing of a master (734), the standalone two-credit
+# release (735), and a release with credits and no year at all (901).
+_RARITY_SIGNAL_PAGE = ["101", "731", "734", "735", "901"]
+
+_RARITY_SIGNAL_CALLS: tuple[ParityCall, ...] = (
+    ParityCall("fetch_page_signals", (_RARITY_SIGNAL_PAGE,)),
+    ParityCall("fetch_page_signals", ([graph_fixture.RARITY_COLLECTED_RELEASE_ID],)),
+    # A page of ids that are not in the store. Both engines must answer with a row set per
+    # fact and no rows in any of them, not with a missing fact.
+    ParityCall("fetch_page_signals", (["does-not-exist"],)),
+)
+
+# The batch itself, twice: once on the production page size, where the whole fixture is one
+# page, and once on a page size small enough to force six pages. The second is what proves the
+# keyset walk agrees, not just the arithmetic on top of it — a cursor that advanced differently
+# on the two engines would score the same releases in a different order, or twice.
+_RARITY_BATCH_CALLS: tuple[ParityCall, ...] = (
+    ParityCall("fetch_all_rarity_signals"),
+    ParityCall("fetch_all_rarity_signals", (), {"page_size": 4}),
+    ParityCall("count_releases"),
+)
+
+# The two lookups. Three answers have to stay distinguishable and each is registered: no such
+# vertex (None), a vertex that exists with nothing scored against it — `ANCHOR_ARTIST_ID` and
+# `LABEL_ID` are from the earlier components, which the batch has never written rows for —
+# and a vertex with a page. The paging calls run against the rarity artist and label, whose
+# stored rows carry distinct scores so `rarity_score DESC, release_id` is a total order.
+_RARITY_LOOKUP_CALLS: tuple[ParityCall, ...] = (
+    ParityCall("get_rarity_by_artist", ("701",)),
+    ParityCall("get_rarity_by_artist", ("702",)),
+    ParityCall("get_rarity_by_artist", (graph_fixture.ANCHOR_ARTIST_ID,)),
+    ParityCall("get_rarity_by_artist", ("does-not-exist",)),
+    ParityCall("get_rarity_by_artist", ("701", 1, 2)),
+    ParityCall("get_rarity_by_artist", ("701", 2, 2)),
+    ParityCall("get_rarity_by_artist", ("701", 9, 2)),
+    ParityCall("get_rarity_by_label", (graph_fixture.RARITY_LABEL_ID,)),
+    ParityCall("get_rarity_by_label", (graph_fixture.LABEL_ID,)),
+    ParityCall("get_rarity_by_label", ("does-not-exist",)),
+    ParityCall("get_rarity_by_label", (graph_fixture.RARITY_LABEL_ID, 1, 3)),
+    ParityCall("get_rarity_by_label", (graph_fixture.RARITY_LABEL_ID, 2, 3)),
+)
+
+RARITY_CALLS: tuple[ParityCall, ...] = (
+    *_RARITY_PAGE_CALLS,
+    *_RARITY_SIGNAL_CALLS,
+    *_RARITY_BATCH_CALLS,
+    *_RARITY_LOOKUP_CALLS,
+)
+
+register_parity_family("rarity", RARITY_CALLS, handle=_rarity_handle)
+FAMILY_PROTOCOLS["rarity"] = RarityBackend
+# ── end rarity family ────────────────────────────────────────────────────────
+
+
 # `graph.catalog` exists only on a PostgreSQL 19 server whose initializer ran with the
 # switch on, which is what `just test-integration-pg19` arranges. Off that tier the
 # property-graph families are skipped at collection, so the default suite never starts a
@@ -648,8 +765,9 @@ async def test_graph_query_family_agrees_on_both_backends(
     family 1) needs no property graph and is never asked to assert for one, while a
     `GRAPH_TABLE` family still is.
     """
-    neo4j_result = await _invoke(get_backend(family, "neo4j"), call, parity_backends.neo4j)
-    postgres_result = await _invoke(get_backend(family, "postgres"), call, parity_backends.postgres)
+    handle = PARITY_FAMILIES[family].handle
+    neo4j_result = await _invoke(get_backend(family, "neo4j"), call, handle("neo4j", parity_backends))
+    postgres_result = await _invoke(get_backend(family, "postgres"), call, handle("postgres", parity_backends))
 
     assert_parity(family, call, neo4j_result=neo4j_result, postgres_result=postgres_result)
 
