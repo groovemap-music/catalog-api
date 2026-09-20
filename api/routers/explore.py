@@ -13,10 +13,13 @@ from fastapi.responses import JSONResponse
 from neo4j.exceptions import ClientError as Neo4jClientError
 
 from api.graph_backend import (
+    GRAPH_BACKEND_ERROR_TYPES,
     AutocompleteBackend,
     OneHopCollaboratorsBackend,
     get_autocomplete_backend,
     get_one_hop_collaborators_backend,
+    is_graph_backend_unavailable,
+    is_graph_query_timeout,
 )
 from api.limiter import limiter
 from api.models import PathNode, PathResponse
@@ -307,12 +310,23 @@ async def get_collaborators(
             _one_hop_collaborators_backend.get_collaborators(collaborators_handle, artist_id, limit=limit),
             _one_hop_collaborators_backend.count_collaborators(collaborators_handle, artist_id),
         )
-    except Neo4jClientError as exc:
-        if "TransactionTimedOut" in str(exc):
+    except GRAPH_BACKEND_ERROR_TYPES as exc:
+        # Backend-neutral (gm-catalog-api-91a.5): `GRAPH_BACKEND_ERROR_TYPES` covers both
+        # the Neo4j driver's and the PostgreSQL pool's exception hierarchies, and the two
+        # predicates tell a timed-out query apart from a backend that could not be reached
+        # at all, from a genuine backend bug, which still re-raises to the same 500 both
+        # backends always produced. Mirrors api.routers.network.artist_collaborators.
+        if is_graph_query_timeout(exc):
             logger.warning("⏱️ Collaborators query timed out", artist_id=artist_id)
             return JSONResponse(
                 content={"error": "Collaborators query timed out — try again later"},
                 status_code=504,
+            )
+        if is_graph_backend_unavailable(exc):
+            logger.warning("🔌 Collaborators graph backend unavailable", artist_id=artist_id)
+            return JSONResponse(
+                content={"error": "Graph backend unavailable — try again later"},
+                status_code=503,
             )
         raise
 
