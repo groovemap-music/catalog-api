@@ -275,11 +275,11 @@ def _configure_routers(
     _syncer.configure(_activity.record_event)
     _activity_router.configure(pool, redis, neo4j, config)
     _sync_router.configure(pool, neo4j, config, _running_syncs, redis)
-    _explore_router.configure(neo4j, jwt_secret_for_neo4j, redis, pg_pool=pool)
+    _explore_router.configure(neo4j, jwt_secret_for_neo4j, redis, pg_pool=pool, graph_backend=config.graph_backend)
     _user_router.configure(neo4j, jwt_secret_for_neo4j)
     _taste_router.configure(neo4j, jwt_secret_for_neo4j)
     _collection_router.configure(neo4j, pool, jwt_secret_for_neo4j)
-    _credits_router.configure(neo4j, redis)
+    _credits_router.configure(neo4j, redis, config.graph_backend, pg_pool=pool)
     _label_dna_router.configure(neo4j, redis)
     _recommend_router.configure(neo4j, jwt_secret_for_neo4j, redis)
     _fit_router.configure(neo4j, pool, redis)
@@ -315,7 +315,7 @@ def _configure_routers(
         from api.nlq.tools import NLQToolRunner  # noqa: PLC0415
 
         anthropic_client = AsyncAnthropic(api_key=nlq_config.api_key)
-        tool_runner = NLQToolRunner(neo4j_driver=neo4j, pg_pool=pool, redis=redis)
+        tool_runner = NLQToolRunner(neo4j_driver=neo4j, pg_pool=pool, redis=redis, graph_backend=config.graph_backend)
         nlq_engine = NLQEngine(config=nlq_config, client=anthropic_client, tool_runner=tool_runner)
         logger.info("🧠 NLQ engine initialized", model=nlq_config.model)
 

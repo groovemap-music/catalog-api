@@ -8,7 +8,7 @@ depend on.
 from __future__ import annotations
 
 import os
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import psycopg
 import pytest
@@ -21,13 +21,14 @@ from api.config import ApiConfig
 from api.graph_backend import (
     GRAPH_BACKEND_ERROR_TYPES,
     GraphBackendUnavailableError,
+    get_autocomplete_backend,
     get_backend,
     get_collaborators_backend,
     is_graph_backend_unavailable,
     is_graph_query_timeout,
     verify_postgres_graph_backend,
 )
-from api.queries import network_pg_queries, network_queries
+from api.queries import autocomplete_pg_queries, autocomplete_queries, network_pg_queries, network_queries
 from tests.fake_postgres import FakePool
 
 
@@ -77,6 +78,23 @@ class TestGetBackend:
         # the module itself so `unittest.mock.patch` on a module attribute still lands.
         assert get_collaborators_backend("neo4j") is network_queries
         assert get_collaborators_backend("postgres") is network_pg_queries
+
+    def test_autocomplete_family_resolves_to_both_implementations(self) -> None:
+        assert get_backend("autocomplete", "neo4j") is autocomplete_queries
+        assert get_backend("autocomplete", "postgres") is autocomplete_pg_queries
+        assert get_autocomplete_backend("neo4j") is autocomplete_queries
+        assert get_autocomplete_backend("postgres") is autocomplete_pg_queries
+
+    @pytest.mark.asyncio
+    async def test_the_neo4j_autocomplete_module_delegates_rather_than_re_exporting(self) -> None:
+        # The family spans two Cypher modules and the seam resolves a family to one, so
+        # the Neo4j side is an aggregator. It has to delegate by attribute at call time:
+        # a `from ... import` would bind a second name that a patch of the original never
+        # reaches, and patchability through the selector is what the seam promises.
+        with patch("api.queries.neo4j_queries.autocomplete_artist", new_callable=AsyncMock) as patched:
+            patched.return_value = [{"id": "1", "name": "Radiohead", "score": 1.0}]
+            assert await get_autocomplete_backend("neo4j").autocomplete_artist(object(), "radio", limit=3) == patched.return_value
+        patched.assert_awaited_once()
 
     def test_unknown_family_raises(self) -> None:
         with pytest.raises(KeyError, match="Unknown graph query family"):

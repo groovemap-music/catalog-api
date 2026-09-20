@@ -478,10 +478,13 @@ class NLQToolRunner:
     recorder list supplied by the caller.
     """
 
-    def __init__(self, neo4j_driver: Any, pg_pool: Any, redis: Any) -> None:
+    def __init__(self, neo4j_driver: Any, pg_pool: Any, redis: Any, graph_backend: str = "neo4j") -> None:
         self._driver = neo4j_driver
         self._pool = pg_pool
         self._redis = redis
+        # Which engine the `get_collaborators` tool's one_hop_collaborators family
+        # (gm-catalog-api-91a.3) resolves to; every other handler is Neo4j-only today.
+        self._graph_backend = graph_backend
 
     async def execute(
         self,
@@ -717,13 +720,16 @@ class NLQToolRunner:
     async def _handle_get_collaborators(self, params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:
         import common.agent_tools as agent_tools  # noqa: PLC0415
 
-        from api.queries import collaborator_queries  # noqa: PLC0415
+        from api.graph_backend import get_one_hop_collaborators_backend  # noqa: PLC0415
+
+        backend = get_one_hop_collaborators_backend(self._graph_backend)
+        handle = self._pool if self._graph_backend == "postgres" else self._driver
 
         return await agent_tools.get_collaborators(
-            driver=self._driver,
+            driver=handle,
             artist_id=params.get("artist_id", ""),
             limit=params.get("limit", 20),
-            collaborators_fn=collaborator_queries.get_collaborators,
+            collaborators_fn=backend.get_collaborators,
         )
 
     async def _handle_get_similar_artists(self, params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:
