@@ -274,10 +274,10 @@ _CORE_QUERIES: dict[str, str] = {
 # ── The four graph reads the rarity family's Neo4j backend contributes ───────
 
 
-async def fetch_release_id_page(driver: Any, cursor: str, limit: int) -> list[str]:
+async def fetch_release_id_page(handles: RarityHandles, cursor: str, limit: int) -> list[str]:
     """Return the next page of release ids strictly after ``cursor``, in ascending order."""
     rows = await run_query(
-        driver,
+        handles.graph,
         _RELEASE_ID_PAGE_QUERY,
         database="neo4j",
         timeout=RARITY_QUERY_TIMEOUT_SECONDS,
@@ -287,7 +287,7 @@ async def fetch_release_id_page(driver: Any, cursor: str, limit: int) -> list[st
     return [row["release_id"] for row in rows]
 
 
-async def fetch_page_signals(driver: Any, ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+async def fetch_page_signals(handles: RarityHandles, ids: list[str]) -> dict[str, list[dict[str, Any]]]:
     """Run the core and family-extension signal queries for one page of release ids.
 
     Run sequentially, not via asyncio.gather: running them concurrently sums
@@ -303,7 +303,7 @@ async def fetch_page_signals(driver: Any, ids: list[str]) -> dict[str, list[dict
 
     async def _run(cypher: str) -> list[dict[str, Any]]:
         return await run_query(
-            driver,
+            handles.graph,
             cypher,
             database="neo4j",
             timeout=RARITY_QUERY_TIMEOUT_SECONDS,
@@ -316,13 +316,13 @@ async def fetch_page_signals(driver: Any, ids: list[str]) -> dict[str, list[dict
     return signals
 
 
-async def count_releases(driver: Any) -> int | None:
+async def count_releases(handles: RarityHandles) -> int | None:
     """Return how many releases the graph holds, for the walk's coverage check.
 
     Served from Neo4j's label count store (O(1), not a scan), so the check costs nothing.
     """
     rows = await run_query(
-        driver,
+        handles.graph,
         _RELEASE_COUNT_QUERY,
         database="neo4j",
         timeout=RARITY_QUERY_TIMEOUT_SECONDS,

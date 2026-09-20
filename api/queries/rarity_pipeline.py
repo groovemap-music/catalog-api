@@ -96,10 +96,13 @@ class RarityHandles:
     insights: Any = None
 
 
-# One backend read, as the pipeline calls it.
-PageReader = Callable[[Any, str, int], Awaitable[list[str]]]
-SignalReader = Callable[[Any, list[str]], Awaitable[dict[str, list[dict[str, Any]]]]]
-CountReader = Callable[[Any], Awaitable[int | None]]
+# One backend read, as the pipeline calls it. Each takes the family's whole handle rather
+# than its graph half, because these are `RarityBackend` functions and the graph-backend seam
+# calls every function of a family the same way. A read that only needs the graph simply
+# reaches for `handles.graph` itself.
+PageReader = Callable[["RarityHandles", str, int], Awaitable[list[str]]]
+SignalReader = Callable[["RarityHandles", list[str]], Awaitable[dict[str, list[dict[str, Any]]]]]
+CountReader = Callable[["RarityHandles"], Awaitable[int | None]]
 
 
 def rows_by_release_id(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -199,13 +202,13 @@ async def score_all_rarity_signals(
     cursor = ""
     pages = 0
     while True:
-        ids = await page(handles.graph, cursor, page_size)
+        ids = await page(handles, cursor, page_size)
         if not ids:
             break
         cursor = ids[-1]
         pages += 1
 
-        page_rows = await signals(handles.graph, ids)
+        page_rows = await signals(handles, ids)
 
         release_map = _index_by_release(page_rows["release"])
         media_map = _index_by_release(page_rows["media"])
@@ -313,13 +316,13 @@ async def score_all_rarity_signals(
         )
         entry["hidden_gem_score"] = round(rarity_score * quality_multiplier, 1)
 
-    await warn_on_incomplete_coverage(handles.graph, count, scored=len(results))
+    await warn_on_incomplete_coverage(handles, count, scored=len(results))
 
     logger.info("✅ Rarity scores computed", total=len(results), pages=pages)
     return results
 
 
-async def warn_on_incomplete_coverage(graph: Any, count: CountReader, scored: int) -> None:
+async def warn_on_incomplete_coverage(handles: RarityHandles, count: CountReader, scored: int) -> None:
     """Log a warning when the paginated walk scored fewer releases than exist.
 
     The keyset walk compares ``release id > cursor`` against a string cursor; if the store
@@ -330,7 +333,7 @@ async def warn_on_incomplete_coverage(graph: Any, count: CountReader, scored: in
     batch that has already been computed.
     """
     try:
-        total = await count(graph)
+        total = await count(handles)
     except Exception:
         logger.debug("⚠️ Release count check skipped", exc_info=True)
         return

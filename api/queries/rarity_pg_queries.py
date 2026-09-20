@@ -359,42 +359,52 @@ _LOOKUP_ROW_COLUMNS: tuple[str, ...] = (
 )
 
 
+# The chunking contract's per-query budget, applied the way PostgreSQL takes it.
+#
+# `SET statement_timeout = %s` is not an option: `SET` is a utility statement and the server
+# rejects a bind parameter in it outright ("syntax error at or near $1"). `set_config` is the
+# function form of the same thing and is an ordinary expression, so the value stays bound
+# rather than being formatted into a statement — which is rule 3 of the migration template and
+# not something to waive because the value happens to be a module constant today.
+_SET_STATEMENT_TIMEOUT_SQL = "SELECT set_config('statement_timeout', %(timeout_ms)s, false)"
+_RESET_STATEMENT_TIMEOUT_SQL = "RESET statement_timeout"
+
+
 @asynccontextmanager
 async def _page_cursor(pool: Any) -> AsyncIterator[Any]:
     """Yield a cursor whose statements carry the chunking contract's server-side budget.
 
     The Cypher side passes `timeout=RARITY_QUERY_TIMEOUT_SECONDS` on every signal query so a
     pathological page fails fast rather than burning the 600s transaction budget. This is the
-    same budget, applied the way PostgreSQL takes it. The pool hands out autocommit
-    connections, so `SET LOCAL` would be a no-op and the setting has to be reset explicitly
-    before the connection goes back — a leaked `statement_timeout` would apply to every
-    unrelated query the next borrower runs.
+    same budget. The pool hands out autocommit connections, so `SET LOCAL` would be a no-op
+    and the setting has to be reset explicitly before the connection goes back — a leaked
+    `statement_timeout` would apply to every unrelated query the next borrower runs.
     """
-    timeout_ms = int(RARITY_QUERY_TIMEOUT_SECONDS * 1000)
+    timeout_ms = str(int(RARITY_QUERY_TIMEOUT_SECONDS * 1000))
     async with pool.connection() as conn, conn.cursor() as cursor_cm:
         cursor = cast("Any", cursor_cm)
-        await cursor.execute("SET statement_timeout = %s", (timeout_ms,))
+        await execute_sql(cursor, _SET_STATEMENT_TIMEOUT_SQL, {"timeout_ms": timeout_ms})
         try:
             yield cursor
         finally:
-            await cursor.execute("RESET statement_timeout")
+            await cursor.execute(_RESET_STATEMENT_TIMEOUT_SQL)
 
 
 # ── The four graph reads the rarity family's PostgreSQL backend contributes ──
 
 
-async def fetch_release_id_page(pool: Any, cursor: str, limit: int) -> list[str]:
+async def fetch_release_id_page(handles: RarityHandles, cursor: str, limit: int) -> list[str]:
     """Return the next page of release ids strictly after ``cursor``, in ascending order.
 
     Mirrors :func:`api.queries.rarity_queries.fetch_release_id_page` column for column.
     """
-    async with _page_cursor(pool) as db:
+    async with _page_cursor(handles.graph) as db:
         await execute_sql(db, RELEASE_ID_PAGE_SQL, {"cursor": cursor, "limit": limit})
         rows = await db.fetchall()
     return [row[0] for row in rows]
 
 
-async def fetch_page_signals(pool: Any, ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+async def fetch_page_signals(handles: RarityHandles, ids: list[str]) -> dict[str, list[dict[str, Any]]]:
     """Run the core and family-extension signal statements for one page of release ids.
 
     Run sequentially, on one connection, for the same reason the Cypher side does: this is a
@@ -405,7 +415,7 @@ async def fetch_page_signals(pool: Any, ids: list[str]) -> dict[str, list[dict[s
     defeat the chunking contract.
     """
     signals: dict[str, list[dict[str, Any]]] = {}
-    async with _page_cursor(pool) as db:
+    async with _page_cursor(handles.graph) as db:
         for fact, sql in (*_CORE_SQL.items(), *family_sql_queries().items()):
             await execute_sql(db, sql, {"ids": ids})
             rows = await db.fetchall()
@@ -414,9 +424,9 @@ async def fetch_page_signals(pool: Any, ids: list[str]) -> dict[str, list[dict[s
     return signals
 
 
-async def count_releases(pool: Any) -> int | None:
+async def count_releases(handles: RarityHandles) -> int | None:
     """Return how many releases the catalog holds, for the walk's coverage check."""
-    async with _page_cursor(pool) as db:
+    async with _page_cursor(handles.graph) as db:
         await execute_sql(db, RELEASE_COUNT_SQL)
         row = await db.fetchone()
     return int(row[0]) if row else None

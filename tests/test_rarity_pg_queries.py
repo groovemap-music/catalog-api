@@ -82,7 +82,7 @@ class TestChunkingContract:
     @pytest.mark.asyncio
     async def test_the_walk_asks_for_one_page_at_a_time(self) -> None:
         pool = FakePool([[], [("101",), ("102",)], []])
-        ids = await pg.fetch_release_id_page(pool, "", RARITY_PAGE_SIZE)
+        ids = await pg.fetch_release_id_page(RarityHandles(graph=pool, insights=pool), "", RARITY_PAGE_SIZE)
 
         assert ids == ["101", "102"]
         page_call = next(call for call in pool.calls if "graph.release" in call.sql)
@@ -94,10 +94,10 @@ class TestChunkingContract:
         it. It is reset rather than left on the connection, which the pool hands out with
         autocommit on and reuses for unrelated work."""
         pool = FakePool(_signal_results())
-        await pg.fetch_page_signals(pool, PAGE)
+        await pg.fetch_page_signals(RarityHandles(graph=pool, insights=pool), PAGE)
 
-        assert pool.calls[0].sql == "SET statement_timeout = %s"
-        assert pool.calls[0].params == (int(RARITY_QUERY_TIMEOUT_SECONDS * 1000),)
+        assert pool.calls[0].sql == pg._SET_STATEMENT_TIMEOUT_SQL
+        assert pool.calls[0].params == {"timeout_ms": str(int(RARITY_QUERY_TIMEOUT_SECONDS * 1000))}
         assert pool.calls[-1].sql == "RESET statement_timeout"
 
 
@@ -113,7 +113,7 @@ class TestKeysetWalk:
     @pytest.mark.asyncio
     async def test_the_release_count_is_one_aggregate(self) -> None:
         pool = FakePool([[], [(22,)], []])
-        assert await pg.count_releases(pool) == 22
+        assert await pg.count_releases(RarityHandles(graph=pool, insights=pool)) == 22
         assert "count(*)::bigint" in pg.RELEASE_COUNT_SQL
 
 
@@ -219,7 +219,7 @@ class TestPageSignals:
             results.append([("731", *[None] * (width - 1)), ("101", *[None] * (width - 1))])
         results.append([])
 
-        signals = await pg.fetch_page_signals(FakePool(results), PAGE)
+        signals = await pg.fetch_page_signals(RarityHandles(graph=FakePool(results), insights=None), PAGE)
 
         assert set(signals) == set(SIGNAL_STATEMENTS)
         for fact, rows in signals.items():
@@ -229,7 +229,7 @@ class TestPageSignals:
     @pytest.mark.asyncio
     async def test_the_page_is_bound_once_per_statement(self) -> None:
         pool = FakePool(_signal_results())
-        await pg.fetch_page_signals(pool, PAGE)
+        await pg.fetch_page_signals(RarityHandles(graph=pool, insights=pool), PAGE)
 
         signal_calls = [call for call in pool.calls if "statement_timeout" not in call.sql]
         assert len(signal_calls) == len(SIGNAL_STATEMENTS)
