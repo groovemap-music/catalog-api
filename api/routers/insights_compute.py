@@ -19,6 +19,7 @@ from psycopg.rows import dict_row
 
 from api.auth import decrypt_oauth_token, get_oauth_encryption_key
 from api.config import DEFAULT_DISCOGS_USER_AGENT
+from api.graph_backend import get_rarity_backend, rarity_handles
 from api.limiter import limiter
 from api.queries.insights_neo4j_queries import (
     query_artist_centrality,
@@ -27,7 +28,6 @@ from api.queries.insights_neo4j_queries import (
     query_monthly_anniversaries,
 )
 from api.queries.insights_pg_queries import query_data_completeness
-from api.queries.rarity_queries import fetch_all_rarity_signals
 from api.syncer import DISCOGS_API_BASE, MAX_RATE_LIMIT_RETRIES, SYNC_DELAY_SECONDS, _auth_header
 from api.telemetry import CACHE_INSIGHTS_COMPLETENESS, cache_get
 
@@ -228,11 +228,13 @@ def _find_retryable_neo4j_error(exc: BaseException) -> Neo4jError | None:
 @router.get("/rarity-scores")
 @limiter.limit("5/minute")
 async def rarity_scores(request: Request) -> JSONResponse:  # noqa: ARG001
-    """Return computed rarity scores for all releases from Neo4j."""
+    """Return computed rarity scores for every release, from the configured graph backend."""
     if not _neo4j:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
+    backend_name = getattr(_config, "graph_backend", "neo4j") if _config is not None else "neo4j"
+    backend = get_rarity_backend(backend_name)
     try:
-        results = await fetch_all_rarity_signals(_neo4j, _pool)
+        results = await backend.fetch_all_rarity_signals(rarity_handles(backend_name, _neo4j, _pool))
     except (TransientError, ClientError, BaseExceptionGroup) as exc:
         # TransientError: e.g. MemoryPoolOutOfMemoryError under DB pressure.
         # ClientError: a transaction timeout (see TRANSACTION_TIMEOUT_CODES).

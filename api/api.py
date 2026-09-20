@@ -289,7 +289,7 @@ def _configure_routers(
     _admin_router.configure(pool, redis, config, neo4j_driver=neo4j)
     _musicbrainz_router.configure(pool, neo4j)
     _network_router.configure(neo4j, redis, config.graph_backend, pg_pool=pool)
-    _rarity_router.configure(neo4j, pool, redis)
+    _rarity_router.configure(neo4j, pool, redis, graph_backend=config.graph_backend)
     _auth_router.configure(
         pool,
         redis,
