@@ -636,12 +636,20 @@ class RelationshipCount(BaseModel):
 
 
 class StoreSizes(BaseModel):
-    """Neo4j store size breakdown."""
+    """Storage size breakdown for the graph backend's admin panel.
+
+    All four fields are formatted strings (e.g. "1.2 GB"), not raw byte counts. `nodes`,
+    `relationships`, and `strings` are the JMX per-store breakdown Neo4j's backend reports;
+    the PostgreSQL backend (`api/queries/admin_pg_queries.py`) has no equivalent split —
+    `graph.artist`, `graph.by_artist`, and the rest are views and tables over the same four
+    base tables, so there is no per-kind size to report — and returns `None` for each of the
+    three, leaving only `total` populated.
+    """
 
     total: str
-    nodes: str
-    relationships: str
-    strings: str
+    nodes: str | None
+    relationships: str | None
+    strings: str | None
 
 
 class Neo4jStorage(BaseModel):
