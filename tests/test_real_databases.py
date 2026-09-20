@@ -679,10 +679,7 @@ CREDITS_CALLS: tuple[ParityCall, ...] = (
     # depth 3 is accepted by the endpoint and must behave as depth 2, exactly as the Cypher
     # does. Every anchor reaches at most one second hop per bridge, because the Cypher
     # collects them into a list it never orders.
-    *(
-        ParityCall("get_person_connections", (_CREDITS_PERSON,), {"depth": depth, "limit": 50})
-        for depth in (1, 2, 3)
-    ),
+    *(ParityCall("get_person_connections", (_CREDITS_PERSON,), {"depth": depth, "limit": 50}) for depth in (1, 2, 3)),
     *(ParityCall("get_person_connections", (_CREDITS_PERSON,), {"depth": depth, "limit": 1}) for depth in (1, 2)),
     # "Ida Okonkwo" is the bridge with no second hop at all, which is the empty-list branch
     # of the Cypher's `CASE WHEN hop2 IS NOT NULL`.

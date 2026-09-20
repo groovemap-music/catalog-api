@@ -435,7 +435,8 @@ async def _rows(pool: Any, sql: str, params: dict[str, Any]) -> list[tuple[Any, 
     async with pool.connection() as conn, conn.cursor() as cursor_cm:
         cursor = cast("Any", cursor_cm)
         await execute_sql(cursor, sql, params)
-        return await cursor.fetchall()
+        rows = await cursor.fetchall()
+    return cast("list[tuple[Any, ...]]", rows)
 
 
 async def get_person_credits(pool: Any, name: str) -> list[dict[str, Any]]:

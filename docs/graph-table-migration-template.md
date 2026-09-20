@@ -346,7 +346,7 @@ first family to hit three things the two before it did not.
 
 ### A property that changed its name
 
-`graphinator` writes `CREDITED_ON.category`. The relational edge publishes the same value
+`discogs-graph-enricher` writes `CREDITED_ON.category`. The relational edge publishes the same value
 as **`role_category`**, a column generated over `graph.credit_role_category(role)` — a
 function the schema producer renders from `common.credit_roles.ROLE_CATEGORIES`, the same
 taxonomy `categorize_role` scans, so the two stores compute one answer from one vocabulary

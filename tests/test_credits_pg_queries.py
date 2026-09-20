@@ -287,9 +287,7 @@ class TestGetPersonConnections:
     async def test_depth_two_adds_the_second_hops_column(self) -> None:
         hops: list[dict[str, Any]] = [{"name": "Ida Okonkwo", "via": "Marlon Hale", "shared": 1}]
         pool = FakePool([[("Marlon Hale", 3, hops)]])
-        assert await pg.get_person_connections(pool, "Tessa Vance", depth=2) == [
-            {"name": "Marlon Hale", "shared_count": 3, "second_hops": hops}
-        ]
+        assert await pg.get_person_connections(pool, "Tessa Vance", depth=2) == [{"name": "Marlon Hale", "shared_count": 3, "second_hops": hops}]
         assert pool.sql == pg.PERSON_CONNECTIONS_TWO_HOP_SQL
 
     async def test_depth_three_selects_the_same_statement_as_depth_two(self) -> None:

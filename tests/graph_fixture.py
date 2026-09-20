@@ -415,20 +415,13 @@ def credit_edges() -> list[dict[str, Any]]:
 
 def same_as_edges() -> list[dict[str, str]]:
     """Return every `SAME_AS` edge the seeded credits imply, deduplicated as the graph is."""
-    seen = {
-        (credit["name"], str(credit["id"]))
-        for release in CREDITS_RELEASES.values()
-        for credit in release["extraartists"]
-        if credit.get("id")
-    }
+    seen = {(credit["name"], str(credit["id"])) for release in CREDITS_RELEASES.values() for credit in release["extraartists"] if credit.get("id")}
     return [{"name": name, "artist_id": artist_id} for name, artist_id in sorted(seen)]
 
 
 def _endpoint_pairs(key: str, column: str) -> list[dict[str, str]]:
     """Return the (release, endpoint) pairs one document key implies, flattened for UNWIND."""
-    return [
-        {"release_id": release_id, column: endpoint_id} for release_id, release in CREDITS_RELEASES.items() for endpoint_id in release[key]
-    ]
+    return [{"release_id": release_id, column: endpoint_id} for release_id, release in CREDITS_RELEASES.items() for endpoint_id in release[key]]
 
 
 # Reconciled from the two branches' TRUNCATEs: family 1 needs `masters` truncated too, on
