@@ -1,4 +1,12 @@
-"""Unit tests for Credits & Provenance router endpoints."""
+"""Unit tests for Credits & Provenance router endpoints.
+
+Every query function is patched on `api.queries.credits_queries` rather than on the router,
+because the router reaches all eight of them through the graph-backend seam
+(`gm-catalog-api-dl8.1`) instead of importing them. The seam resolves a family to the
+target *module*, not to copies of its functions, so patching the module's attribute is
+still what the router sees — that patchability is a property the seam promises, and these
+tests are where it is relied on.
+"""
 
 import json
 from unittest.mock import AsyncMock, patch
@@ -12,7 +20,7 @@ from fastapi.testclient import TestClient
 class TestPersonCreditsEndpoint:
     """Tests for GET /api/credits/person/{name}."""
 
-    @patch("api.routers.credits.get_person_credits")
+    @patch("api.queries.credits_queries.get_person_credits")
     def test_person_credits_success(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = [
             {
@@ -33,7 +41,7 @@ class TestPersonCreditsEndpoint:
         assert len(data["credits"]) == 1
         assert data["credits"][0]["role"] == "Mastered By"
 
-    @patch("api.routers.credits.get_person_credits")
+    @patch("api.queries.credits_queries.get_person_credits")
     def test_person_credits_not_found(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = []
         response = test_client.get("/api/credits/person/Nobody")
@@ -54,7 +62,7 @@ class TestPersonCreditsEndpoint:
 class TestPersonTimelineEndpoint:
     """Tests for GET /api/credits/person/{name}/timeline."""
 
-    @patch("api.routers.credits.get_person_timeline")
+    @patch("api.queries.credits_queries.get_person_timeline")
     def test_timeline_success(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = [
             {"year": 1990, "category": "mastering", "count": 5},
@@ -66,7 +74,7 @@ class TestPersonTimelineEndpoint:
         assert data["name"] == "Bob Ludwig"
         assert len(data["timeline"]) == 2
 
-    @patch("api.routers.credits.get_person_timeline")
+    @patch("api.queries.credits_queries.get_person_timeline")
     def test_timeline_not_found(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = []
         response = test_client.get("/api/credits/person/Nobody/timeline")
@@ -76,7 +84,7 @@ class TestPersonTimelineEndpoint:
 class TestReleaseCreditsEndpoint:
     """Tests for GET /api/credits/release/{release_id}."""
 
-    @patch("api.routers.credits.get_release_credits")
+    @patch("api.queries.credits_queries.get_release_credits")
     def test_release_credits_success(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = [
             {
@@ -100,7 +108,7 @@ class TestReleaseCreditsEndpoint:
         assert data["release_id"] == "123"
         assert len(data["credits"]) == 2
 
-    @patch("api.routers.credits.get_release_credits")
+    @patch("api.queries.credits_queries.get_release_credits")
     def test_release_credits_not_found(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = []
         response = test_client.get("/api/credits/release/99999")
@@ -110,7 +118,7 @@ class TestReleaseCreditsEndpoint:
 class TestRoleLeaderboardEndpoint:
     """Tests for GET /api/credits/role/{role}/top."""
 
-    @patch("api.routers.credits.get_role_leaderboard")
+    @patch("api.queries.credits_queries.get_role_leaderboard")
     def test_leaderboard_success(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = [
             {"name": "Bob Ludwig", "credit_count": 500},
@@ -127,7 +135,7 @@ class TestRoleLeaderboardEndpoint:
         assert response.status_code == 400
         assert "Invalid role category" in response.json()["error"]
 
-    @patch("api.routers.credits.get_role_leaderboard")
+    @patch("api.queries.credits_queries.get_role_leaderboard")
     def test_leaderboard_with_limit(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = [{"name": "Test", "credit_count": 10}]
         response = test_client.get("/api/credits/role/production/top?limit=5")
@@ -137,7 +145,7 @@ class TestRoleLeaderboardEndpoint:
 class TestSharedCreditsEndpoint:
     """Tests for GET /api/credits/shared."""
 
-    @patch("api.routers.credits.get_shared_credits")
+    @patch("api.queries.credits_queries.get_shared_credits")
     def test_shared_credits_success(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = [
             {
@@ -156,7 +164,7 @@ class TestSharedCreditsEndpoint:
         assert data["person2"] == "Alan Moulder"
         assert len(data["shared_releases"]) == 1
 
-    @patch("api.routers.credits.get_shared_credits")
+    @patch("api.queries.credits_queries.get_shared_credits")
     def test_shared_credits_empty(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = []
         response = test_client.get("/api/credits/shared?person1=A&person2=B")
@@ -167,7 +175,7 @@ class TestSharedCreditsEndpoint:
 class TestPersonConnectionsEndpoint:
     """Tests for GET /api/credits/connections/{name}."""
 
-    @patch("api.routers.credits.get_person_connections")
+    @patch("api.queries.credits_queries.get_person_connections")
     def test_connections_success(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = [
             {"name": "Connected Person", "shared_count": 10},
@@ -226,8 +234,8 @@ class TestPersonProfileEndpoint:
 
     def test_profile_success(self, test_client: TestClient) -> None:
         with (
-            patch("api.routers.credits.get_person_profile") as mock_profile,
-            patch("api.routers.credits.get_person_role_breakdown") as mock_breakdown,
+            patch("api.queries.credits_queries.get_person_profile") as mock_profile,
+            patch("api.queries.credits_queries.get_person_role_breakdown") as mock_breakdown,
         ):
             mock_profile.return_value = {
                 "name": "Bob Ludwig",
@@ -246,7 +254,7 @@ class TestPersonProfileEndpoint:
             assert data["total_credits"] == 500
             assert len(data["role_breakdown"]) == 1
 
-    @patch("api.routers.credits.get_person_profile")
+    @patch("api.queries.credits_queries.get_person_profile")
     def test_profile_not_found(self, mock_profile: AsyncMock, test_client: TestClient) -> None:
         mock_profile.return_value = None
         response = test_client.get("/api/credits/person/Nobody/profile")
@@ -291,7 +299,7 @@ class TestCreditsServiceNotReady:
 class TestCreditsRedisCaching:
     """Tests for Redis cache hit/miss paths."""
 
-    @patch("api.routers.credits.get_person_credits")
+    @patch("api.queries.credits_queries.get_person_credits")
     def test_person_credits_cache_hit(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         """Test that cached data is returned without querying Neo4j."""
         import api.routers.credits as credits_router
@@ -315,7 +323,7 @@ class TestCreditsRedisCaching:
         finally:
             credits_router._redis = original_redis
 
-    @patch("api.routers.credits.get_person_credits")
+    @patch("api.queries.credits_queries.get_person_credits")
     def test_person_credits_cache_miss_sets_cache(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         """Test that cache miss queries Neo4j and stores result."""
         import api.routers.credits as credits_router
@@ -335,7 +343,7 @@ class TestCreditsRedisCaching:
         finally:
             credits_router._redis = original_redis
 
-    @patch("api.routers.credits.get_person_credits")
+    @patch("api.queries.credits_queries.get_person_credits")
     def test_person_credits_cache_get_error(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         """Test that Redis get error falls through to Neo4j query."""
         import api.routers.credits as credits_router
@@ -355,7 +363,7 @@ class TestCreditsRedisCaching:
         finally:
             credits_router._redis = original_redis
 
-    @patch("api.routers.credits.get_role_leaderboard")
+    @patch("api.queries.credits_queries.get_role_leaderboard")
     def test_leaderboard_cache_hit(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         """Test leaderboard returns cached data."""
         import api.routers.credits as credits_router
@@ -373,7 +381,7 @@ class TestCreditsRedisCaching:
         finally:
             credits_router._redis = original_redis
 
-    @patch("api.routers.credits.get_role_leaderboard")
+    @patch("api.queries.credits_queries.get_role_leaderboard")
     def test_leaderboard_cache_error(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         """Test leaderboard falls through on Redis error."""
         import api.routers.credits as credits_router
