@@ -92,16 +92,20 @@ def _autocomplete_handle() -> Any:
 def _backend_failure(exc: BaseException, what: str, **context: Any) -> JSONResponse:
     """Map a backend failure to a response, or re-raise it.
 
+    `context` is merged into the log event under its own key rather than splatted, so a
+    caller naming a field the same thing this function logs cannot turn a handled failure
+    into a `TypeError` and a 500.
+
     Backend-neutral, the way `api/routers/network.py` is: a query that ran out of time is
     a 504 whichever engine timed it out, a backend that could not be reached at all is the
     same 503 a not-configured backend returns, and anything else is a genuine bug that
     still reaches the 500 both backends always produced.
     """
     if is_graph_query_timeout(exc):
-        logger.warning("⏱️ Credits query timed out", query=what, **context)
+        logger.warning("⏱️ Credits query timed out", credits_query=what, context=context)
         return JSONResponse(content={"error": f"{what} query timed out — try again with a narrower request"}, status_code=504)
     if is_graph_backend_unavailable(exc):
-        logger.warning("🔌 Credits graph backend unavailable", query=what, **context)
+        logger.warning("🔌 Credits graph backend unavailable", credits_query=what, context=context)
         return JSONResponse(content={"error": "Graph backend unavailable — try again later"}, status_code=503)
     raise exc
 
@@ -360,6 +364,6 @@ async def credits_autocomplete(
     try:
         records = await _autocomplete_backend.autocomplete_person(handle, q, limit)
     except GRAPH_BACKEND_ERROR_TYPES as exc:
-        return _backend_failure(exc, "Person autocomplete", query=q)
+        return _backend_failure(exc, "Person autocomplete", search=q)
     results = [PersonAutocompleteEntry(name=r["name"], score=r["score"]) for r in records]
     return JSONResponse(content={"results": [r.model_dump() for r in results]})

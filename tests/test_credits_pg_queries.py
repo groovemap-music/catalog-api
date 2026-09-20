@@ -303,6 +303,15 @@ class TestGetPersonConnections:
         await pg.get_person_connections(pool, "Tessa Vance", depth=depth)
         assert pool.sql == pg.PERSON_CONNECTIONS_SQL
 
+    @pytest.mark.parametrize("depth", [4, 9])
+    async def test_a_depth_above_three_is_clamped_down(self, depth: int) -> None:
+        # The endpoint already bounds `depth` to [1, 3], so this clamp only ever sees a
+        # direct caller. The Cypher clamps it too, and a backend that did not would be the
+        # one place the two disagree without a request ever showing it.
+        pool = FakePool([[]])
+        await pg.get_person_connections(pool, "Tessa Vance", depth=depth)
+        assert pool.sql == pg.PERSON_CONNECTIONS_TWO_HOP_SQL
+
     async def test_it_keeps_the_cypher_defaults(self) -> None:
         pool = FakePool([[]])
         await pg.get_person_connections(pool, "Tessa Vance")

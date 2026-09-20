@@ -11,6 +11,7 @@ tests are where it is relied on.
 import json
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -397,3 +398,136 @@ class TestCreditsRedisCaching:
             assert response.status_code == 200
         finally:
             credits_router._redis = original_redis
+
+
+class TestCreditsBackendErrorMapping:
+    """The backend-neutral error mapping, on every endpoint this router serves.
+
+    `gm-catalog-api-dl8.1` routed the eight traversals through the graph-backend seam, and
+    the seam is what makes a failure's *kind* readable without knowing which engine raised
+    it: `api.graph_backend.is_graph_query_timeout` for a statement that ran out of time,
+    `is_graph_backend_unavailable` for a backend that could not be reached at all, and
+    neither for a genuine bug, which still reaches the 500 both backends always produced.
+
+    Every endpoint is covered rather than one of them, because each has its own `except`
+    and a handler that forgot one would be invisible here otherwise.
+    """
+
+    # (patched function, request) — one per `except GRAPH_BACKEND_ERROR_TYPES` clause.
+    ENDPOINTS: tuple[tuple[str, str], ...] = (
+        ("get_person_timeline", "/api/credits/person/Tessa%20Vance/timeline"),
+        ("get_person_profile", "/api/credits/person/Tessa%20Vance/profile"),
+        ("get_person_credits", "/api/credits/person/Tessa%20Vance"),
+        ("get_release_credits", "/api/credits/release/701"),
+        ("get_role_leaderboard", "/api/credits/role/mastering/top"),
+        ("get_shared_credits", "/api/credits/shared?person1=Tessa%20Vance&person2=Marlon%20Hale"),
+        ("get_person_connections", "/api/credits/connections/Tessa%20Vance"),
+    )
+    ENDPOINT_IDS: tuple[str, ...] = tuple(function for function, _ in ENDPOINTS)
+
+    @pytest.mark.parametrize(("function", "url"), ENDPOINTS, ids=ENDPOINT_IDS)
+    def test_a_neo4j_transaction_timeout_is_504(self, function: str, url: str, test_client: TestClient) -> None:
+        from neo4j.exceptions import ClientError as Neo4jClientError
+
+        with patch(f"api.queries.credits_queries.{function}", new_callable=AsyncMock, side_effect=Neo4jClientError("TransactionTimedOut")):
+            response = test_client.get(url)
+        assert response.status_code == 504
+
+    @pytest.mark.parametrize(("function", "url"), ENDPOINTS, ids=ENDPOINT_IDS)
+    def test_an_unreachable_backend_is_503(self, function: str, url: str, test_client: TestClient) -> None:
+        """Not 504: no query ran, so "try again with a narrower request" would be advice
+        about something that never happened."""
+        from neo4j.exceptions import ServiceUnavailable
+
+        with patch(f"api.queries.credits_queries.{function}", new_callable=AsyncMock, side_effect=ServiceUnavailable("no reachable server")):
+            response = test_client.get(url)
+        assert response.status_code == 503
+        assert "narrower" not in response.json()["error"]
+
+    def test_the_person_search_maps_its_failures_the_same_way(self, test_client: TestClient) -> None:
+        """The autocomplete endpoint reaches a backend too, through its own family."""
+        from neo4j.exceptions import ClientError as Neo4jClientError
+
+        with patch(
+            "api.queries.autocomplete_queries.autocomplete_person",
+            new_callable=AsyncMock,
+            side_effect=Neo4jClientError("TransactionTimedOut"),
+        ):
+            response = test_client.get("/api/credits/autocomplete?q=bob")
+        assert response.status_code == 504
+
+    def test_any_other_backend_error_still_reaches_the_500_it_always_did(self, test_client: TestClient) -> None:
+        from neo4j.exceptions import ClientError as Neo4jClientError
+
+        with patch("api.queries.credits_queries.get_person_credits", new_callable=AsyncMock, side_effect=Neo4jClientError("SomeOtherError")):
+            response = test_client.get("/api/credits/person/Tessa%20Vance")
+        assert response.status_code == 500
+
+    def test_a_postgres_statement_timeout_is_the_same_504(self, test_client: TestClient) -> None:
+        """The whole point of the mapping: the same contract from the other engine."""
+        import psycopg
+
+        import api.routers.credits as credits_module
+
+        saved = (credits_module._neo4j_driver, credits_module._redis, credits_module._graph_backend, credits_module._pg_pool)
+        try:
+            credits_module.configure(saved[0], saved[1], "postgres", pg_pool=AsyncMock())
+            with patch(
+                "api.queries.credits_pg_queries.get_person_credits",
+                new_callable=AsyncMock,
+                side_effect=psycopg.errors.QueryCanceled("canceling statement due to statement timeout"),
+            ):
+                response = test_client.get("/api/credits/person/Tessa%20Vance")
+        finally:
+            credits_module.configure(saved[0], saved[1], saved[2], pg_pool=saved[3])
+        assert response.status_code == 504
+
+    def test_the_postgres_pool_giving_up_is_503_not_504(self, test_client: TestClient) -> None:
+        from common.db_resilience import ConnectionEstablishmentError
+
+        import api.routers.credits as credits_module
+
+        saved = (credits_module._neo4j_driver, credits_module._redis, credits_module._graph_backend, credits_module._pg_pool)
+        try:
+            credits_module.configure(saved[0], saved[1], "postgres", pg_pool=AsyncMock())
+            with patch(
+                "api.queries.credits_pg_queries.get_person_connections",
+                new_callable=AsyncMock,
+                side_effect=ConnectionEstablishmentError("Failed to get PostgreSQL connection after 5 attempts"),
+            ):
+                response = test_client.get("/api/credits/connections/Tessa%20Vance")
+        finally:
+            credits_module.configure(saved[0], saved[1], saved[2], pg_pool=saved[3])
+        assert response.status_code == 503
+
+
+class TestCreditsBackendResolution:
+    """`GRAPH_BACKEND=postgres` sends the eight traversals to the SQL/PGQ module."""
+
+    def test_the_seam_resolves_the_postgres_credits_module(self, test_client: TestClient) -> None:
+        import api.routers.credits as credits_module
+
+        rows = [{"category": "mastering", "count": 4}]
+        saved = (credits_module._neo4j_driver, credits_module._redis, credits_module._graph_backend, credits_module._pg_pool)
+        try:
+            credits_module.configure(saved[0], saved[1], "postgres", pg_pool=AsyncMock())
+            profile = {
+                "name": "Tessa Vance",
+                "total_credits": 4,
+                "categories": ["mastering"],
+                "first_year": 1963,
+                "last_year": 1972,
+                "artist_id": "801",
+                "artist_name": "Vance Machine",
+            }
+            with (
+                patch("api.queries.credits_pg_queries.get_person_role_breakdown", new_callable=AsyncMock, return_value=rows) as postgres_call,
+                patch("api.queries.credits_pg_queries.get_person_profile", new_callable=AsyncMock, return_value=profile),
+            ):
+                response = test_client.get("/api/credits/person/Tessa%20Vance/profile")
+        finally:
+            credits_module.configure(saved[0], saved[1], saved[2], pg_pool=saved[3])
+
+        assert response.status_code == 200
+        assert response.json()["role_breakdown"] == [{"category": "mastering", "count": 4}]
+        postgres_call.assert_awaited_once()
