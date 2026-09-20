@@ -120,26 +120,57 @@ RELEASES: dict[str, tuple[str, ...]] = {
     "203": ("9", "11"),
 }
 
-# release id -> the year it was released. A separate mapping rather than a field on
-# `RELEASES` so the two-hop family's `len(RELEASES[...])` / membership checks
-# (`tests/test_graph_parity.py`) keep reading a plain tuple of credited artist ids. Every
-# release gets its own year; nothing in either family's ordering depends on which.
+# ── Coverage spike family 1 fixture data (gm-catalog-api-91a.2) ─────────────────────────
+# Vertex lookups and store statistics need entities the pilot's collaborators fixture never
+# seeded: a label and a master to look up by id, a year on every release so `get_year_range`
+# has a real min and max to agree on, and a genre and a style so `get_graph_stats` counts
+# something other than zero for those two labels. The years are otherwise arbitrary — chosen
+# only so the extremes are unambiguous (release "101" is the sole minimum, "203" the sole
+# maximum) — and every release gets one, so no release is excluded by the `year > 0` guard
+# both engines apply, and none is excluded by `one_hop_collaborators`' `year ~ '^[0-9]{4}$'`
+# guard either. A separate mapping rather than a field on `RELEASES` is also what the
+# `one_hop_collaborators` family (`gm-catalog-api-91a.3`) needs it for: the two-hop family's
+# `len(RELEASES[...])` / membership checks (`tests/test_graph_parity.py`) keep reading a
+# plain tuple of credited artist ids either way.
+#
+# The genre and style are deliberately not left at zero. A totally absent label is a
+# pathological case neither engine treats the same way once you look past the trivial "both
+# report 0": this Neo4j build's `CALL { ... UNION ALL ... }` drops the branch's row entirely
+# rather than reporting `count(g) = 0` when no node has ever carried the `Genre` label in the
+# database, while the SQL side's `count(*)` over an empty `graph.genre` view still returns a
+# row of `0` — a real divergence, but one that cannot happen against production data, where
+# `graphinator` has always created at least one node of every label before either endpoint is
+# ever called. Giving both engines one real genre and one real style keeps the fixture inside
+# the case the two backends actually have to agree on.
+#
+# Ids are chosen clear of the full-text component's 301-303 (artists) and 401-403 (labels)
+# below.
+LABEL_ID = "501"
+LABEL_NAME = "Fixture Label"
+MASTER_ID = "601"
+MASTER_NAME = "Fixture Master"
+GENRE_NAME = "Fixture Genre"
+STYLE_NAME = "Fixture Style"
+# The one release whose document carries the genre/style tags above, so `graph.genre` and
+# `graph.style` (DISTINCT over every release's and master's tags) each get exactly one row.
+_TAGGED_RELEASE_ID = "101"
+
 RELEASE_YEARS: dict[str, int] = {
-    "101": 2001,
-    "102": 2002,
-    "103": 2003,
-    "104": 2004,
-    "105": 2005,
-    "106": 2006,
-    "107": 2007,
-    "108": 2008,
-    "109": 2009,
-    "110": 2010,
-    "111": 2011,
-    "112": 2012,
-    THREE_CREDIT_RELEASE_ID: 2013,
-    "202": 2014,
-    "203": 2015,
+    "101": 1959,
+    "102": 1962,
+    "103": 1965,
+    "104": 1968,
+    "105": 1971,
+    "106": 1974,
+    "107": 1977,
+    "108": 1980,
+    "109": 1983,
+    "110": 1986,
+    "111": 1989,
+    "112": 1992,
+    THREE_CREDIT_RELEASE_ID: 1995,
+    "202": 1998,
+    "203": 2001,
 }
 
 # ── The full-text component ─────────────────────────────────────────────────
@@ -197,7 +228,9 @@ AUTOCOMPLETE_PEOPLE: tuple[str, ...] = (
 )
 
 
-_TRUNCATE_ENTITIES = "TRUNCATE artists, labels, releases CASCADE"
+# Reconciled from the two branches' TRUNCATEs: family 1 needs `masters` truncated too, on
+# top of the autocomplete family's `artists, labels, releases`.
+_TRUNCATE_ENTITIES = "TRUNCATE artists, labels, releases, masters CASCADE"
 
 # What turns the seeded documents into graph rows. From the phase 2 schema revision the
 # `graph` relations a loader owns — every edge, and the `genre`, `style`, and `person`
@@ -206,12 +239,15 @@ _TRUNCATE_ENTITIES = "TRUNCATE artists, labels, releases CASCADE"
 # one-off fill: it truncates each of those relations and refills it from the same phase 0
 # body the view used to publish, in one transaction, and returns a row count per relation.
 # It is exactly what the contract says it is for — populating an environment before a
-# loader has run — which is what a fixture is.
+# loader has run — which is what a fixture is. Family 1's genre/style counts, seeded above
+# as a tag on release "101", depend on this the same way the full-text component's do: both
+# `graph.genre` and `graph.style` are among the relations it fills.
 _BOOTSTRAP_FILL = "SELECT relation, row_count FROM graph.bootstrap_fill()"
 
 _SEED_ARTIST = "INSERT INTO artists (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
 _SEED_LABEL = "INSERT INTO labels (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
 _SEED_RELEASE = "INSERT INTO releases (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
+_SEED_MASTER = "INSERT INTO masters (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
 
 _SEED_NEO4J = """
 UNWIND $artists AS artist
@@ -225,11 +261,29 @@ WITH r, release
 UNWIND release.artists AS artist_id
 MATCH (a:Artist {id: artist_id})
 MERGE (r)-[:BY]->(a)
+WITH count(*) AS _credited
+MERGE (l:Label {id: $label_id})
+SET l.name = $label_name
+MERGE (m:Master {id: $master_id})
+SET m.title = $master_name
+MERGE (g:Genre {name: $genre_name})
+MERGE (s:Style {name: $style_name})
 """
 
 # The full-text component's Neo4j half. `graphinator` writes these five node kinds from the
 # same document keys `graph.bootstrap_fill` projects the PostgreSQL tables from, so the two
 # sides are seeded from one set of constants and diverge only where the engines do.
+#
+# The bare `:Release` nodes are the one addition that is not one of the five: the PostgreSQL
+# side's `releases` table is the single base table every family's `graph.release` view or
+# fill reads from, so `AUTOCOMPLETE_RELEASES`' two rows are visible to `catalog_overview`'s
+# `get_graph_stats` there whether the autocomplete family "needs" them counted or not — the
+# document exists, so the row does. Neo4j has no such single shared table, so without a
+# matching `:Release {id: ...}` here its `MATCH (r:Release)` would legitimately answer two
+# fewer than PostgreSQL's `count(*) FROM graph.release`, not because the two engines
+# disagree but because only one of them was told about these two releases. No `BY`/`ON` edge
+# is added — that disconnection is what the full-text component still needs — and no `year`
+# is set, matching the PostgreSQL document, which carries none either.
 _SEED_NEO4J_FULLTEXT = """
 UNWIND $artists AS artist
 MERGE (a:Artist {id: artist.id}) SET a.name = artist.name
@@ -245,6 +299,9 @@ MERGE (:Style {name: style})
 WITH count(*) AS _styles
 UNWIND $people AS person
 MERGE (:Person {name: person})
+WITH count(*) AS _people
+UNWIND $releases AS release
+MERGE (:Release {id: release})
 """
 
 # Lucene indexes are populated in the background, so a search issued the moment the seed
@@ -296,6 +353,12 @@ async def seed_neo4j(driver: AsyncResilientNeo4jDriver) -> None:
         _SEED_NEO4J,
         artists=[{"id": artist_id, "name": name} for artist_id, name in ARTISTS.items()],
         releases=[{"id": release_id, "artists": list(credits), "year": RELEASE_YEARS[release_id]} for release_id, credits in RELEASES.items()],
+        label_id=LABEL_ID,
+        label_name=LABEL_NAME,
+        master_id=MASTER_ID,
+        master_name=MASTER_NAME,
+        genre_name=GENRE_NAME,
+        style_name=STYLE_NAME,
     )
     await consume(
         driver,
@@ -305,6 +368,7 @@ async def seed_neo4j(driver: AsyncResilientNeo4jDriver) -> None:
         genres=list(AUTOCOMPLETE_GENRES),
         styles=list(AUTOCOMPLETE_STYLES),
         people=list(AUTOCOMPLETE_PEOPLE),
+        releases=list(AUTOCOMPLETE_RELEASES),
     )
     await consume(driver, _AWAIT_NEO4J_INDEXES)
 
@@ -318,7 +382,9 @@ async def seed_postgres(pool: AsyncPostgreSQLPool) -> None:
     afterwards to derive them from the documents just written. It truncates first, so a
     re-seed converges rather than accumulating, and it covers the traversal component's
     `graph.by_artist` and the full-text component's `graph.genre`, `graph.style`, and
-    `graph.person` in the same pass.
+    `graph.person` in the same pass — which is also where family 1's genre and style come
+    from now: `graph.master` stays a plain view, so `masters` needs no fill of its own, but
+    `graph.genre`/`graph.style` are only populated once `graph.bootstrap_fill()` has run.
     """
     async with pool.connection() as conn, conn.cursor() as cursor:
         await cursor.execute(_TRUNCATE_ENTITIES)
@@ -330,7 +396,12 @@ async def seed_postgres(pool: AsyncPostgreSQLPool) -> None:
                 "year": RELEASE_YEARS[release_id],
                 "artists": [{"id": int(each)} for each in credits],
             }
+            if release_id == _TAGGED_RELEASE_ID:
+                document["genres"] = [GENRE_NAME]
+                document["styles"] = [STYLE_NAME]
             await cursor.execute(_SEED_RELEASE, (release_id, "parity-fixture", json.dumps(document)))
+        await cursor.execute(_SEED_LABEL, (LABEL_ID, "parity-fixture", json.dumps({"name": LABEL_NAME})))
+        await cursor.execute(_SEED_MASTER, (MASTER_ID, "parity-fixture", json.dumps({"title": MASTER_NAME})))
         for artist_id, name in AUTOCOMPLETE_ARTISTS.items():
             await cursor.execute(_SEED_ARTIST, (artist_id, "parity-fixture", json.dumps({"name": name})))
         for label_id, name in AUTOCOMPLETE_LABELS.items():
@@ -351,9 +422,13 @@ async def open_postgres_pool() -> AsyncPostgreSQLPool:
     that the graph is there.
 
     With the switch off there is nothing to gate. A family registered
-    `requires_property_graph=False` is ordinary SQL over the `graph` relations — which are
-    unconditional, on every tier — so it runs here on PostgreSQL 18 too, and asserting a
-    graph it never reads would be the fixture failing a run the family is fine on.
+    `requires_property_graph=False` — coverage spike family 1 (`gm-catalog-api-91a.2`) and
+    autocomplete both are — is ordinary SQL over the `graph` relations, which are
+    unconditional on every tier, so it runs here on PostgreSQL 18 too, and asserting a graph
+    it never reads would be the fixture failing a run the family is fine on. Which gate
+    applies is read from `SCHEMA_PROPERTY_GRAPH` itself rather than passed in by the caller:
+    one pool is shared by every family a given test run seeds, and the switch is a property
+    of the *tier*, not of any one family's call.
     """
     host, port = parse_postgres_host_port(required_env("POSTGRES_HOST"))
     pool = AsyncPostgreSQLPool(

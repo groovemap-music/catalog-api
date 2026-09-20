@@ -1,17 +1,21 @@
-"""SQL/PGQ queries for the one-hop Collaborators endpoint — the PostgreSQL backend.
+"""SQL/PGQ queries for the Collaborators endpoint — the PostgreSQL backend.
 
-This is the one-hop sibling of the pilot's ``network_pg_queries`` (ADR 0012): the same
-``by_artist`` edge over ``graph.catalog``, walked once instead of chained to two hops, and
-grouped by shared-release year the way :mod:`api.queries.collaborator_queries` groups it in
-Cypher. See :mod:`api.queries.network_pg_queries` for the four rules this follows (pattern
-matching replaces Cypher, not SQL; one constant per query; every value is a parameter;
-parity is column-for-column) and `docs/graph-table-migration-template.md` for the worked
-example.
+Two families share this module because they share the Cypher module they replace
+(:mod:`api.queries.collaborator_queries`), even though each is migrated by its own bead and
+registered under its own name in `api/graph_backend.py`:
 
-This module covers ``get_collaborators`` and ``count_collaborators`` only.
-``collaborator_queries.get_artist_identity`` is not part of this family: the coverage spike
-groups every plain vertex lookup — including this one — into a separate identity/statistics
-family migrated by its own bead, so it is not duplicated or registered here.
+- **`collaborator_identity`** (`get_artist_identity`): a single-vertex lookup — coverage
+  spike family 1, "vertex lookups and store statistics" (`gm-catalog-api-91a.2`). Per that
+  spike's rule ("A single-vertex lookup is SQL-only"), this is a plain ``SELECT`` over
+  ``graph.artist`` rather than a ``GRAPH_TABLE`` pattern — a pattern match buys nothing over
+  a plain select for a single vertex and costs a planner detour.
+- **`one_hop_collaborators`** (`get_collaborators`, `count_collaborators`): the one-hop
+  sibling of the pilot's ``network_pg_queries`` (ADR 0012, `gm-catalog-api-91a.3`) — the
+  same ``by_artist`` edge over ``graph.catalog``, walked once instead of chained to two
+  hops, and grouped by shared-release year the way the Cypher groups it. See
+  :mod:`api.queries.network_pg_queries` for the four rules this follows (pattern matching
+  replaces Cypher, not SQL; one constant per query; every value is a parameter; parity is
+  column-for-column) and `docs/graph-table-migration-template.md` for the worked example.
 
 Mapping the Cypher onto the graph
 ----------------------------------
@@ -47,6 +51,13 @@ from common.query_debug import execute_sql
 
 logger = structlog.get_logger(__name__)
 
+
+# `graph.artist` is keyed on `artists.data_id`, so there is never a second row to match.
+ARTIST_IDENTITY_SQL = """
+SELECT artist_id, name
+FROM graph.artist
+WHERE artist_id = %(artist_id)s
+"""
 
 # One row per (collaborator, shared release), with the release's year alongside so the
 # grouping query below can reproduce the Cypher's per-year breakdown. `peer.artist_id <>
@@ -110,6 +121,21 @@ SELECT count(DISTINCT collaborator_id)::bigint AS total
 FROM ({_ONE_HOP_COLLABORATORS_HOP.rstrip()}
 ) AS hop
 """  # noqa: S608 — as above: the composition is of module constants only
+
+
+async def get_artist_identity(pool: Any, artist_id: str) -> dict[str, Any] | None:
+    """Return the artist's id and name, or ``None`` when no such artist exists.
+
+    Mirrors :func:`api.queries.collaborator_queries.get_artist_identity` column for column.
+    """
+    async with pool.connection() as conn, conn.cursor() as cursor_cm:
+        cursor = cast("Any", cursor_cm)
+        await execute_sql(cursor, ARTIST_IDENTITY_SQL, {"artist_id": artist_id})
+        row = await cursor.fetchone()
+
+    if row is None:
+        return None
+    return {"artist_id": row[0], "artist_name": row[1]}
 
 
 async def get_collaborators(pool: Any, artist_id: str, limit: int = 20) -> list[dict[str, Any]]:
