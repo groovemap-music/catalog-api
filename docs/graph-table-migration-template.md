@@ -336,6 +336,108 @@ An apostrophe turned out **not** to be in that set: Lucene's tokenizer keeps `O'
 one token, so both engines answer and `Sinéad O'Connor` is a parity call. It is worth one
 anyway, for the character a hand-built SQL string would have broken on.
 
+## The family with a rename, and an order Cypher does not have: credits
+
+The third family migrated is **credits** — coverage spike family 4, the whole of
+[`api/queries/credits_queries.py`](../api/queries/credits_queries.py) bar its full-text
+search, answered by
+[`api/queries/credits_pg_queries.py`](../api/queries/credits_pg_queries.py). It is the
+first family to hit three things the two before it did not.
+
+### A property that changed its name
+
+`graphinator` writes `CREDITED_ON.category`. The relational edge publishes the same value
+as **`role_category`**, a column generated over `graph.credit_role_category(role)` — a
+function the schema producer renders from `common.credit_roles.ROLE_CATEGORIES`, the same
+taxonomy `categorize_role` scans, so the two stores compute one answer from one vocabulary
+rather than agreeing by coincidence.
+
+Six statements read it. The spike singles the rename out because **a missed one is a
+silent null, not an error**: `c.category` on an edge that has no such property is `NULL` in
+Cypher and a planner error in SQL only if you are lucky. So it is written down at each of
+the six, and `tests/test_credits_pg_queries.py` checks the list rather than grepping for
+it. The API column keeps the Cypher's name — every statement projects
+`role_category AS category` — because this is a backend swap underneath an unchanged
+response schema.
+
+Expect one of these per family from here on. The spike's "the property each function
+reads" table is where to look before writing any SQL.
+
+### A pattern that meets itself
+
+The pilot's walk-semantics problem was a *path* doubling back. This family's is smaller and
+easier to miss: `get_shared_credits` matches
+
+```
+(p1:Person)-[c1:CREDITED_ON]->(r:Release)<-[c2:CREDITED_ON]-(p2:Person)
+```
+
+and the endpoint accepts the same name for both people. Neo4j's relationship isomorphism
+keeps `c1` and `c2` from binding the same relationship, so it answers with nothing.
+SQL/PGQ lets them, so it answers with every release that person is credited on. The guard
+is edge inequality written out in the columns the edge key is made of:
+
+```sql
+WHERE NOT (credit_one.person_name = credit_two.person_name AND credit_one.role = credit_two.role)
+```
+
+**Two edge variables pointing at one vertex is the shape to check.** Every other pattern in
+this family is closed by a name predicate the Cypher already carries for its own reasons —
+`connected.name <> $name`, `hop2.name <> hop1.name` — and each of those predicates happens
+to imply the edge inequality too. That is worth verifying rather than assuming, which is
+what `tests/test_graph_parity.py` does.
+
+Unlike the pilot's four predicates, nothing masks this one: the harness's self-pair parity
+call fails outright without it. The masking problem has not gone away, though — it just
+moved to the caps below.
+
+### Three results Cypher builds from `collect`, which has no order
+
+`get_person_credits` returns `collect(DISTINCT a.name)[..3]`, `get_person_profile` returns
+`collect(DISTINCT c.category)`, and `get_person_connections` returns a `[..10]` list of
+maps. **`collect` has no defined order in Cypher.** So a row containing one of those lists
+with more than one element cannot be a parity call: the harness compares row values, and
+two arbitrary orders are not a divergence either backend is answerable for.
+
+The rule the family follows, and the next one should:
+
+1. **The PostgreSQL side orders anyway** — by name, or by the sort `array_agg(DISTINCT ...)`
+   already performs. A backend should be deterministic even where its sibling is not.
+2. **The fixture keeps every parity call's lists to one element or none**, which is why the
+   credits component gives most of its releases a single artist and a single label.
+3. **The cap is proven separately, by length.** One release credits four artists and names
+   two labels, and `test_both_engines_cap_the_collected_lists_at_the_same_length` asks both
+   engines how many names survived — not which. The person credited on that release is
+   deliberately not asked for their credits by the harness.
+
+That third point is this family's version of "what the harness cannot see". A parity suite
+that only compared rows would go green with the `[..3]` slice deleted.
+
+### Ordering is a fixture design problem
+
+More generally: the credits family has eight functions with seven different `ORDER BY`
+clauses and no tiebreakers, and the fixture's whole shape is the answer to "from which
+vantage point is each of them total?". `tests/graph_fixture.py` names every person and
+release the harness deliberately does *not* ask about, and why — a tie on `(year, title)`,
+a category two people are level on, a `collect` with two elements. **Write that list down
+while designing the fixture, not after the first red run.**
+
+Two smaller ordering notes that will recur:
+
+- `ORDER BY r.year DESC` puts nulls first on both engines and `ASC` puts them last, so the
+  defaults already agree; nothing needs `NULLS FIRST` spelled out.
+- `ORDER BY p.name` is Unicode-codepoint ordering in Neo4j and **database-collation**
+  ordering in PostgreSQL. They agree on ASCII and need not agree on anything else, so an
+  ordered parity call should be anchored on names where they do.
+
+### What did not need doing
+
+`autocomplete_person` is the ninth function of `credits_queries.py` and the spike counts it
+in both family 2 and family 4. It was migrated with family 2 and stays there: the seam
+resolves a family to exactly one module, so a function reachable through two families would
+be a function with two backends for one call. A family that overlaps an already-migrated one
+should take the remainder and say so in its `Protocol`, which is what `CreditsBackend` does.
+
 ## Migrating the next family
 
 1. Register the family with the parity harness in `tests/test_real_databases.py` — one
