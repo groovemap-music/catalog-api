@@ -31,6 +31,7 @@ from api.graph_backend import (
     CatalogOverviewBackend,
     CollaboratorIdentityBackend,
     CollaboratorsBackend,
+    CreditsBackend,
     GapMetadataBackend,
     OneHopCollaboratorsBackend,
     get_backend,
@@ -605,6 +606,110 @@ FAMILY_PROTOCOLS["autocomplete"] = AutocompleteBackend
 # worth covering and is covered in `tests/test_autocomplete_pg_queries.py`, on one engine,
 # where agreeing is not a failure.
 EXPECTED_DIFFERENCES.update({("autocomplete", function): _LUCENE_SCORE_DIFFERENCE for function in PARITY_FAMILIES["autocomplete"].functions})
+
+
+# ── The credits family (gm-catalog-api-dl8.1) ────────────────────────────────
+# Coverage spike family 4, minus its full-text search: eight traversals over
+# `graph.credited_on`, `graph.same_as` and `graph.person`, every one of them
+# `GRAPH_TABLE + SQL`, so the family keeps the default `requires_property_graph=True` and
+# runs only on the PostgreSQL 19 tier. `autocomplete_person` is the ninth function of
+# `api/queries/credits_queries.py` and is registered above, under `autocomplete`; see
+# `CreditsBackend` in `api/graph_backend.py` for why it is not registered twice.
+#
+# Every call below is made from a vantage point where the function's own `ORDER BY` is
+# total over the fixture, and the people and releases it is *not* made from are as much a
+# part of the design — `tests/graph_fixture.py` names each one and why. Four cases recur:
+#
+# - A person credited twice on one release ties `get_person_credits` on (year, title) and
+#   `get_shared_credits` on year, so "Rex Quill" and "Wren Halloway" are asked neither.
+# - A person in two categories leaves `get_person_profile`'s `collect(DISTINCT c.category)`
+#   with an order Cypher does not define, so "Rex Quill" is not asked for a profile — he is
+#   asked for the role breakdown instead, where his two categories have different counts.
+# - A category two people are tied on has no defined leaderboard order, which rules out
+#   `engineering` and `session` and leaves `mastering` as the one call with three rows.
+# - `OVERFLOWING_RELEASE_ID` is the only release either `collect(...)` cap bites on, and
+#   which names survive an undefined order is undefined too, so its credited person is
+#   asked for a release breakdown but never for their credits.
+
+_CREDITS_PERSON = graph_fixture.SAME_AS_PERSON
+_CREDITS_BRIDGE = "Marlon Hale"
+_CREDITS_LEAF = "Ida Okonkwo"
+_CREDITS_DUAL_ROLE_PERSON = "Rex Quill"
+_CREDITS_REPEAT_PERSON = "Wren Halloway"
+_CREDITS_DESIGNER = "Nadia Brightwater"
+_CREDITS_OVERFLOW_PERSON = "Owen Fairweather"
+_CREDITS_UNKNOWN = "does-not-exist"
+
+CREDITS_CALLS: tuple[ParityCall, ...] = (
+    # One row per (release, role), with the release's artists and labels collected beside
+    # it. Each anchor holds exactly one role per release and each release it reaches names
+    # at most one artist and one label, so both the row order and the two lists are total.
+    *(ParityCall("get_person_credits", (person,)) for person in (_CREDITS_PERSON, _CREDITS_BRIDGE, _CREDITS_LEAF, _CREDITS_DESIGNER)),
+    ParityCall("get_person_credits", (_CREDITS_UNKNOWN,)),
+    # "Marlon Hale" is the year with two credits in one category: one row, count two.
+    *(
+        ParityCall("get_person_timeline", (person,))
+        for person in (_CREDITS_PERSON, _CREDITS_BRIDGE, _CREDITS_LEAF, _CREDITS_DESIGNER, _CREDITS_OVERFLOW_PERSON)
+    ),
+    ParityCall("get_person_timeline", (_CREDITS_UNKNOWN,)),
+    # The dual-role release is the whole point of this one: the same person twice under two
+    # roles in two categories, beside a person whose `SAME_AS` artist fills the outer join
+    # the other two leave null.
+    ParityCall("get_release_credits", (graph_fixture.DUAL_ROLE_RELEASE_ID,)),
+    ParityCall("get_release_credits", (graph_fixture.SESSION_RELEASE_ID,)),
+    ParityCall("get_release_credits", (graph_fixture.OVERFLOWING_RELEASE_ID,)),
+    ParityCall("get_release_credits", (_CREDITS_UNKNOWN,)),
+    # `mastering` is the one category with three people on distinct release counts — and
+    # the one that proves `count(DISTINCT r)`: its leader holds four credits on four
+    # releases, the runner-up three credits on two.
+    ParityCall("get_role_leaderboard", ("mastering",), {"limit": 20}),
+    *(ParityCall("get_role_leaderboard", ("mastering",), {"limit": limit}) for limit in (1, 2)),
+    *(ParityCall("get_role_leaderboard", (category,), {"limit": 20}) for category in ("production", "design", "management", "other")),
+    # Both directions of the same pair, so the two credit edges are provably not
+    # interchangeable, and a self-pair, which is where SQL/PGQ's walk semantics would let
+    # one `credited_on` edge bind to both halves of the pattern and report four shared
+    # releases Neo4j's relationship isomorphism forbids.
+    ParityCall("get_shared_credits", (_CREDITS_PERSON, _CREDITS_BRIDGE)),
+    ParityCall("get_shared_credits", (_CREDITS_BRIDGE, _CREDITS_PERSON)),
+    ParityCall("get_shared_credits", (_CREDITS_BRIDGE, _CREDITS_LEAF)),
+    ParityCall("get_shared_credits", (_CREDITS_PERSON, _CREDITS_PERSON)),
+    ParityCall("get_shared_credits", (_CREDITS_PERSON, _CREDITS_DESIGNER)),
+    ParityCall("get_shared_credits", (_CREDITS_UNKNOWN, _CREDITS_BRIDGE)),
+    # Depth 1 and depth 2 are two different statements returning two different column sets;
+    # depth 3 is accepted by the endpoint and must behave as depth 2, exactly as the Cypher
+    # does. Every anchor reaches at most one second hop per bridge, because the Cypher
+    # collects them into a list it never orders.
+    *(
+        ParityCall("get_person_connections", (_CREDITS_PERSON,), {"depth": depth, "limit": 50})
+        for depth in (1, 2, 3)
+    ),
+    *(ParityCall("get_person_connections", (_CREDITS_PERSON,), {"depth": depth, "limit": 1}) for depth in (1, 2)),
+    # "Ida Okonkwo" is the bridge with no second hop at all, which is the empty-list branch
+    # of the Cypher's `CASE WHEN hop2 IS NOT NULL`.
+    ParityCall("get_person_connections", (_CREDITS_BRIDGE,), {"depth": 2, "limit": 50}),
+    *(ParityCall("get_person_connections", (_CREDITS_LEAF,), {"depth": depth, "limit": 50}) for depth in (1, 2)),
+    ParityCall("get_person_connections", (_CREDITS_DESIGNER,), {"depth": 2, "limit": 50}),
+    *(ParityCall("get_person_connections", (_CREDITS_OVERFLOW_PERSON,), {"depth": depth, "limit": 50}) for depth in (1, 2)),
+    *(ParityCall("get_person_connections", (_CREDITS_UNKNOWN,), {"depth": depth, "limit": 50}) for depth in (1, 2)),
+    # "Wren Halloway" holds three credits across two releases, which is the only thing that
+    # separates the profile's `count(c)` from the leaderboard's `count(DISTINCT r)`.
+    *(
+        ParityCall("get_person_profile", (person,))
+        for person in (_CREDITS_PERSON, _CREDITS_BRIDGE, _CREDITS_REPEAT_PERSON, _CREDITS_LEAF, _CREDITS_OVERFLOW_PERSON)
+    ),
+    ParityCall("get_person_profile", (_CREDITS_UNKNOWN,)),
+    # "Rex Quill" is the two-category breakdown, and his counts differ, so the order the
+    # Cypher asks for is the only order either engine may answer in.
+    *(
+        ParityCall("get_person_role_breakdown", (person,))
+        for person in (_CREDITS_DUAL_ROLE_PERSON, _CREDITS_PERSON, _CREDITS_BRIDGE, _CREDITS_REPEAT_PERSON)
+    ),
+    ParityCall("get_person_role_breakdown", (_CREDITS_UNKNOWN,)),
+)
+
+register_parity_family("credits", CREDITS_CALLS)
+FAMILY_PROTOCOLS["credits"] = CreditsBackend
+# ── end credits family ───────────────────────────────────────────────────────
 
 
 # `graph.catalog` exists only on a PostgreSQL 19 server whose initializer ran with the
