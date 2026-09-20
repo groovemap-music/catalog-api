@@ -1102,10 +1102,14 @@ class TestCollaboratorsPostgresErrorMapping:
     """Backend-neutral error mapping (gm-catalog-api-91a.5) for the one_hop_collaborators
     family — the PostgreSQL side of `TestCollaboratorsEndpoint`'s Neo4j coverage above.
 
-    `get_artist_identity` is not part of the `one_hop_collaborators` family (see the
-    comment on `OneHopCollaboratorsBackend` in api/graph_backend.py) and always resolves
-    through the Neo4j driver, so these patch the identity lookup to succeed and raise from
-    the backend-routed `get_collaborators`/`count_collaborators` calls instead.
+    Since gm-catalog-api-91a.2, `get_artist_identity` is its own backend-routed family
+    (`collaborator_identity`) rather than a fixed call through the Neo4j driver, so under
+    `GRAPH_BACKEND=postgres` it resolves to `collaborator_pg_queries.get_artist_identity`
+    just like `get_collaborators`/`count_collaborators` do — both calls run inside the one
+    try block the mapping wraps, on both backends. Most cases here patch the identity
+    lookup to succeed and raise from `get_collaborators` instead, since that call is
+    simpler to isolate; `test_identity_*` below prove the identity call itself is covered
+    too, not merely reachable through the same except clause by construction.
     """
 
     @staticmethod
@@ -1118,6 +1122,7 @@ class TestCollaboratorsPostgresErrorMapping:
             explore_module._pg_pool,
             explore_module._graph_backend,
             explore_module._one_hop_collaborators_backend,
+            explore_module._collaborator_identity_backend,
         )
 
     def _configure_postgres(self, pool: object) -> tuple[object, ...]:
@@ -1126,6 +1131,7 @@ class TestCollaboratorsPostgresErrorMapping:
         saved = self._saved_state()
         explore_module.configure(saved[0], None, saved[1], pg_pool=pool, graph_backend="postgres")
         assert explore_module._one_hop_collaborators_backend is collaborator_pg_queries
+        assert explore_module._collaborator_identity_backend is collaborator_pg_queries
         return saved
 
     @staticmethod
@@ -1138,6 +1144,7 @@ class TestCollaboratorsPostgresErrorMapping:
             explore_module._pg_pool,
             explore_module._graph_backend,
             explore_module._one_hop_collaborators_backend,
+            explore_module._collaborator_identity_backend,
         ) = saved
 
     def test_query_canceled_returns_504(self, test_client: TestClient) -> None:
@@ -1147,7 +1154,7 @@ class TestCollaboratorsPostgresErrorMapping:
         saved = self._configure_postgres(object())
         try:
             with (
-                patch("api.routers.explore.collaborator_queries.get_artist_identity", AsyncMock(return_value=identity)),
+                patch("api.queries.collaborator_pg_queries.get_artist_identity", AsyncMock(return_value=identity)),
                 patch(
                     "api.queries.collaborator_pg_queries.get_collaborators",
                     AsyncMock(side_effect=psycopg.errors.QueryCanceled("canceling statement due to statement timeout")),
@@ -1166,7 +1173,7 @@ class TestCollaboratorsPostgresErrorMapping:
         saved = self._configure_postgres(object())
         try:
             with (
-                patch("api.routers.explore.collaborator_queries.get_artist_identity", AsyncMock(return_value=identity)),
+                patch("api.queries.collaborator_pg_queries.get_artist_identity", AsyncMock(return_value=identity)),
                 patch(
                     "api.queries.collaborator_pg_queries.get_collaborators",
                     AsyncMock(side_effect=ConnectionEstablishmentError("Failed to get PostgreSQL connection after 5 attempts")),
@@ -1185,12 +1192,43 @@ class TestCollaboratorsPostgresErrorMapping:
         saved = self._configure_postgres(object())
         try:
             with (
-                patch("api.routers.explore.collaborator_queries.get_artist_identity", AsyncMock(return_value=identity)),
+                patch("api.queries.collaborator_pg_queries.get_artist_identity", AsyncMock(return_value=identity)),
                 patch(
                     "api.queries.collaborator_pg_queries.get_collaborators",
                     AsyncMock(side_effect=CircuitOpenError("AsyncPostgreSQL: Circuit breaker is OPEN")),
                 ),
                 patch("api.queries.collaborator_pg_queries.count_collaborators", AsyncMock(return_value=0)),
+            ):
+                response = test_client.get("/api/collaborators/a1")
+        finally:
+            self._restore(saved)
+        assert response.status_code == 503
+
+    def test_identity_query_canceled_returns_504(self, test_client: TestClient) -> None:
+        """The identity lookup itself is now backend-routed (gm-catalog-api-91a.2) and
+        runs inside the same try block — a timeout there must map exactly like one from
+        `get_collaborators` does above."""
+        import psycopg
+
+        saved = self._configure_postgres(object())
+        try:
+            with patch(
+                "api.queries.collaborator_pg_queries.get_artist_identity",
+                AsyncMock(side_effect=psycopg.errors.QueryCanceled("canceling statement due to statement timeout")),
+            ):
+                response = test_client.get("/api/collaborators/a1")
+        finally:
+            self._restore(saved)
+        assert response.status_code == 504
+
+    def test_identity_connection_establishment_error_returns_503(self, test_client: TestClient) -> None:
+        from common.db_resilience import ConnectionEstablishmentError
+
+        saved = self._configure_postgres(object())
+        try:
+            with patch(
+                "api.queries.collaborator_pg_queries.get_artist_identity",
+                AsyncMock(side_effect=ConnectionEstablishmentError("Failed to get PostgreSQL connection after 5 attempts")),
             ):
                 response = test_client.get("/api/collaborators/a1")
         finally:
@@ -1204,7 +1242,7 @@ class TestCollaboratorsPostgresErrorMapping:
         saved = self._configure_postgres(object())
         try:
             with (
-                patch("api.routers.explore.collaborator_queries.get_artist_identity", AsyncMock(return_value=identity)),
+                patch("api.queries.collaborator_pg_queries.get_artist_identity", AsyncMock(return_value=identity)),
                 patch(
                     "api.queries.collaborator_pg_queries.get_collaborators",
                     AsyncMock(side_effect=psycopg.OperationalError("server closed the connection unexpectedly")),
