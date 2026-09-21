@@ -15,17 +15,23 @@ from neo4j.exceptions import ClientError as Neo4jClientError
 from api.graph_backend import (
     GRAPH_BACKEND_ERROR_TYPES,
     AutocompleteBackend,
+    CatalogOverviewBackend,
     CollaboratorIdentityBackend,
+    ExploreBackend,
+    GenreTreeBackend,
     OneHopCollaboratorsBackend,
     get_autocomplete_backend,
+    get_catalog_overview_backend,
     get_collaborator_identity_backend,
+    get_explore_backend,
+    get_genre_tree_backend,
     get_one_hop_collaborators_backend,
     is_graph_backend_unavailable,
     is_graph_query_timeout,
 )
 from api.limiter import limiter
 from api.models import PathNode, PathResponse
-from api.queries import autocomplete_queries, collaborator_queries, genre_tree_queries
+from api.queries import autocomplete_queries, collaborator_queries, genre_tree_queries, neo4j_queries
 from api.queries.neo4j_queries import (
     COUNT_DISPATCH,
     DETAILS_DISPATCH,
@@ -78,6 +84,9 @@ _collaborator_identity_backend: CollaboratorIdentityBackend = collaborator_queri
 # Resolved through the graph-backend selector, exactly as the network router resolves the
 # collaborators family.
 _autocomplete_backend: AutocompleteBackend = autocomplete_queries
+_explore_backend: ExploreBackend = neo4j_queries
+_catalog_overview_backend: CatalogOverviewBackend = neo4j_queries
+_genre_tree_backend: GenreTreeBackend = genre_tree_queries
 
 # entity type -> the family function serving it. The values are names rather than functions
 # because the function has to be read off whichever module the selector resolved, at call
@@ -103,6 +112,7 @@ def configure(
     graph_backend: str = "neo4j",
 ) -> None:
     global _neo4j_driver, _redis, _pg_pool, _graph_backend, _one_hop_collaborators_backend, _collaborator_identity_backend, _autocomplete_backend
+    global _explore_backend, _catalog_overview_backend, _genre_tree_backend, _genre_tree_cache
     _neo4j_driver = neo4j
     _redis = redis
     _pg_pool = pg_pool
@@ -110,6 +120,19 @@ def configure(
     _one_hop_collaborators_backend = get_one_hop_collaborators_backend(graph_backend)
     _collaborator_identity_backend = get_collaborator_identity_backend(graph_backend)
     _autocomplete_backend = get_autocomplete_backend(graph_backend)
+    _explore_backend = get_explore_backend(graph_backend)
+    _catalog_overview_backend = get_catalog_overview_backend(graph_backend)
+    _genre_tree_backend = get_genre_tree_backend(graph_backend)
+    _genre_tree_cache = None
+
+
+def _explore_handle() -> Any:
+    return _pg_pool if _graph_backend == "postgres" else _neo4j_driver
+
+
+def _family_function(prefix: str, entity_type: str, category: str | None = None) -> Any:
+    name = f"{prefix}_{entity_type}" if category is None else f"{prefix}_{entity_type}_{category}"
+    return getattr(_explore_backend, name)
 
 
 def _one_hop_collaborators_handle() -> Any:
@@ -223,7 +246,8 @@ async def explore(
     name: str = Query(...),
     type: str = Query("artist"),
 ) -> JSONResponse:
-    if not _neo4j_driver:
+    handle = _explore_handle()
+    if not handle:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     entity_type = type.lower()
     if entity_type not in EXPLORE_DISPATCH:
@@ -239,8 +263,8 @@ async def explore(
         except Exception:
             logger.debug("⚠️ Explore cache get failed", key=cache_key)
 
-    query_func = EXPLORE_DISPATCH[entity_type]
-    result = await query_func(_neo4j_driver, name)
+    query_func = _family_function("explore", entity_type) if _graph_backend == "postgres" else EXPLORE_DISPATCH[entity_type]
+    result = await query_func(handle, name)
     if not result:
         return JSONResponse(content={"error": f"{type.capitalize()} '{name}' not found"}, status_code=404)
     categories = _build_categories(entity_type, result)
@@ -265,7 +289,8 @@ async def expand(
     offset: int = Query(0, ge=0),
     before_year: int | None = Query(default=None, ge=1900, le=2030),
 ) -> JSONResponse:
-    if not _neo4j_driver:
+    handle = _explore_handle()
+    if not handle:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     entity_type = type.lower()
     category_lower = category.lower()
@@ -275,20 +300,23 @@ async def expand(
     if category_lower not in type_categories:
         valid = ", ".join(type_categories.keys())
         return JSONResponse(content={"error": f"Invalid category '{category}' for type '{type}'. Valid: {valid}"}, status_code=400)
-    query_func = type_categories[category_lower]
-    count_func = COUNT_DISPATCH[entity_type][category_lower]
+    query_func = _family_function("expand", entity_type, category_lower) if _graph_backend == "postgres" else type_categories[category_lower]
+    count_func = (
+        _family_function("count", entity_type, category_lower) if _graph_backend == "postgres" else COUNT_DISPATCH[entity_type][category_lower]
+    )
     results, total = await asyncio.gather(
-        query_func(_neo4j_driver, node_id, limit, offset, before_year=before_year),
-        count_func(_neo4j_driver, node_id, before_year=before_year),
+        query_func(handle, node_id, limit, offset, before_year=before_year),
+        count_func(handle, node_id, before_year=before_year),
     )
     return JSONResponse(content={"children": results, "total": total, "offset": offset, "limit": limit, "has_more": offset + len(results) < total})
 
 
 @router.get("/api/explore/year-range")
 async def year_range() -> JSONResponse:
-    if not _neo4j_driver:
+    handle = _explore_handle()
+    if not handle:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
-    result = await get_year_range(_neo4j_driver)
+    result = await (_catalog_overview_backend.get_year_range(handle) if _graph_backend == "postgres" else get_year_range(handle))
     if result is None:
         return JSONResponse(content={"min_year": None, "max_year": None})
     # Clamp to valid bounds so the frontend slider stays within the
@@ -302,9 +330,12 @@ async def year_range() -> JSONResponse:
 async def genre_emergence(
     before_year: int = Query(..., ge=1900, le=2030),
 ) -> JSONResponse:
-    if not _neo4j_driver:
+    handle = _explore_handle()
+    if not handle:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
-    result = await get_genre_emergence(_neo4j_driver, before_year)
+    result = await (
+        _explore_backend.get_genre_emergence(handle, before_year) if _graph_backend == "postgres" else get_genre_emergence(handle, before_year)
+    )
     return JSONResponse(content=result)
 
 
@@ -315,7 +346,7 @@ async def get_collaborators(
     artist_id: str,
     limit: int = Query(20, ge=1, le=100),
 ) -> JSONResponse:
-    if not _neo4j_driver:
+    if not _one_hop_collaborators_handle():
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     collaborators_handle = _one_hop_collaborators_handle()
@@ -370,7 +401,8 @@ async def genre_tree(
     """Return the full genre/style hierarchy derived from release co-occurrence."""
     global _genre_tree_cache, _genre_tree_cache_time, _genre_tree_lock
 
-    if not _neo4j_driver:
+    handle = _explore_handle()
+    if not handle:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     now = time.monotonic()
@@ -387,14 +419,16 @@ async def genre_tree(
             return JSONResponse(content=_genre_tree_cache)
 
         try:
-            genres = await genre_tree_queries.get_genre_tree(_neo4j_driver)
-        except Neo4jClientError as exc:
-            if "TransactionTimedOut" in str(exc):
+            genres = await _genre_tree_backend.get_genre_tree(handle)
+        except GRAPH_BACKEND_ERROR_TYPES as exc:
+            if is_graph_query_timeout(exc):
                 logger.warning("⏱️ Genre tree query timed out")
                 return JSONResponse(
                     content={"error": "Genre tree query timed out — try again later"},
                     status_code=504,
                 )
+            if is_graph_backend_unavailable(exc):
+                return JSONResponse(content={"error": "Graph backend unavailable — try again later"}, status_code=503)
             raise
 
         _genre_tree_cache = {"genres": genres}
@@ -441,13 +475,14 @@ async def get_node_details(
     node_id: str,
     type: str = Query("artist"),
 ) -> JSONResponse:
-    if not _neo4j_driver:
+    handle = _explore_handle()
+    if not handle:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     entity_type = type.lower()
     if entity_type not in DETAILS_DISPATCH:
         return JSONResponse(content={"error": f"Invalid type: {type}"}, status_code=400)
-    query_func = DETAILS_DISPATCH[entity_type]
-    result = await query_func(_neo4j_driver, node_id)
+    query_func = _family_function("get", entity_type, "details") if _graph_backend == "postgres" else DETAILS_DISPATCH[entity_type]
+    result = await query_func(handle, node_id)
     if not result:
         return JSONResponse(content={"error": f"{type.capitalize()} '{node_id}' not found"}, status_code=404)
     if entity_type == "release":
@@ -465,7 +500,8 @@ async def get_trends(
     name: str = Query(...),
     type: str = Query("artist"),
 ) -> JSONResponse:
-    if not _neo4j_driver:
+    handle = _explore_handle()
+    if not handle:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     entity_type = type.lower()
     if entity_type not in TRENDS_DISPATCH:
@@ -481,8 +517,8 @@ async def get_trends(
         except Exception:
             logger.debug("⚠️ Trends cache get failed", key=cache_key)
 
-    query_func = TRENDS_DISPATCH[entity_type]
-    results = await query_func(_neo4j_driver, name)
+    query_func = _family_function("trends", entity_type) if _graph_backend == "postgres" else TRENDS_DISPATCH[entity_type]
+    results = await query_func(handle, name)
     response = {"name": name, "type": entity_type, "data": results}
 
     if _redis and entity_type in ("genre", "style", "label"):
@@ -595,7 +631,8 @@ async def find_path(
 @router.get("/api/graph/stats")
 async def graph_stats() -> JSONResponse:
     """Return aggregate node counts for each entity type in the knowledge graph."""
-    if not _neo4j_driver:
+    handle = _explore_handle()
+    if not handle:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
-    counts = await get_graph_stats(_neo4j_driver)
+    counts = await (_catalog_overview_backend.get_graph_stats(handle) if _graph_backend == "postgres" else get_graph_stats(handle))
     return JSONResponse(content={"total_entities": sum(counts.values()), "counts": counts})

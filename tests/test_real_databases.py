@@ -33,9 +33,11 @@ from api.graph_backend import (
     CollaboratorIdentityBackend,
     CollaboratorsBackend,
     CreditsBackend,
+    ExploreBackend,
     FitBackend,
     GapAnalysisBackend,
     GapMetadataBackend,
+    GenreTreeBackend,
     LabelDnaBackend,
     OneHopCollaboratorsBackend,
     RecommendationsBackend,
@@ -484,6 +486,10 @@ COLLABORATORS_CALLS: tuple[ParityCall, ...] = (
     *(ParityCall("get_multi_hop_collaborators", (anchor,), {"depth": depth, "limit": 50}) for anchor in _COLLABORATOR_ANCHORS for depth in (1, 2, 3)),
     *(ParityCall("get_multi_hop_collaborators", (graph_fixture.ANCHOR_ARTIST_ID,), {"depth": 2, "limit": limit}) for limit in (1, 4)),
     *(ParityCall("count_multi_hop_collaborators", (anchor,), {"depth": depth}) for anchor in _COLLABORATOR_ANCHORS for depth in (1, 2, 3)),
+    *(
+        ParityCall("get_artist_centrality", (anchor,))
+        for anchor in (*_COLLABORATOR_ANCHORS, graph_fixture.ALIAS_ARTIST_ID, graph_fixture.PRIMARY_ARTIST_ID, "does-not-exist")
+    ),
 )
 
 register_parity_family("collaborators", COLLABORATORS_CALLS)
@@ -543,6 +549,58 @@ CATALOG_OVERVIEW_CALLS: tuple[ParityCall, ...] = (
 register_parity_family("catalog_overview", CATALOG_OVERVIEW_CALLS, requires_property_graph=False)
 
 
+_EXPLORE_ANCHORS = {
+    "artist": (graph_fixture.LABEL_DNA_ARTISTS["1301"], "1301"),
+    "genre": ("Electronic", "Electronic"),
+    "label": (graph_fixture.LABEL_DNA_LABELS[graph_fixture.LABEL_DNA_TARGET_ID], graph_fixture.LABEL_DNA_TARGET_ID),
+    "style": ("Label DNA Shared Style", "Label DNA Shared Style"),
+}
+_EXPLORE_CHILDREN = {
+    "artist": ("releases", "labels", "aliases"),
+    "genre": ("releases", "artists", "labels", "styles"),
+    "label": ("releases", "artists", "genres"),
+    "style": ("releases", "artists", "labels", "genres"),
+}
+EXPLORE_CALLS: tuple[ParityCall, ...] = (
+    *(ParityCall(f"explore_{center}", (anchor[0],)) for center, anchor in _EXPLORE_ANCHORS.items()),
+    ParityCall("explore_artist", (graph_fixture.LABEL_DNA_ARTISTS[graph_fixture.PRIMARY_ARTIST_ID],)),
+    *(
+        ParityCall(f"expand_{center}_{child}", (_EXPLORE_ANCHORS[center][0],), {"limit": 50, "offset": 0})
+        for center, children in _EXPLORE_CHILDREN.items()
+        for child in children
+    ),
+    *(ParityCall(f"count_{center}_{child}", (_EXPLORE_ANCHORS[center][0],)) for center, children in _EXPLORE_CHILDREN.items() for child in children),
+    ParityCall("expand_artist_aliases", (graph_fixture.LABEL_DNA_ARTISTS[graph_fixture.PRIMARY_ARTIST_ID],), {"limit": 50, "offset": 0}),
+    ParityCall("count_artist_aliases", (graph_fixture.LABEL_DNA_ARTISTS[graph_fixture.PRIMARY_ARTIST_ID],)),
+    *(ParityCall(f"get_{center}_details", (anchor[1],)) for center, anchor in _EXPLORE_ANCHORS.items()),
+    ParityCall("get_release_details", ("1201",)),
+    *(ParityCall(f"trends_{center}", (anchor[0],)) for center, anchor in _EXPLORE_ANCHORS.items()),
+    ParityCall("get_genre_emergence", (2025,)),
+)
+register_parity_family("explore", EXPLORE_CALLS)
+register_parity_family("genre_tree", (ParityCall("get_genre_tree"),))
+
+
+@pytest.mark.parametrize("backend", ["neo4j", "postgres"])
+async def test_alias_fixture_proves_outgoing_alias_to_primary_direction(parity_backends: graph_fixture.ParityBackends, backend: str) -> None:
+    handle = parity_backends.postgres if backend == "postgres" else parity_backends.neo4j
+    explore = get_backend("explore", backend)
+    network = get_backend("collaborators", backend)
+    alias_name = graph_fixture.LABEL_DNA_ARTISTS[graph_fixture.ALIAS_ARTIST_ID]
+    primary_name = graph_fixture.LABEL_DNA_ARTISTS[graph_fixture.PRIMARY_ARTIST_ID]
+
+    assert (await explore.explore_artist(handle, alias_name))["alias_count"] == 1
+    assert (await explore.explore_artist(handle, primary_name))["alias_count"] == 0
+    assert await explore.count_artist_aliases(handle, alias_name) == 1
+    assert await explore.count_artist_aliases(handle, primary_name) == 0
+    assert await explore.expand_artist_aliases(handle, alias_name) == [
+        {"id": graph_fixture.PRIMARY_ARTIST_ID, "name": primary_name, "type": "artist"}
+    ]
+    assert await explore.expand_artist_aliases(handle, primary_name) == []
+    assert (await network.get_artist_centrality(handle, graph_fixture.ALIAS_ARTIST_ID))["alias_count"] == 1
+    assert (await network.get_artist_centrality(handle, graph_fixture.PRIMARY_ARTIST_ID))["alias_count"] == 0
+
+
 # The protocol each family's two backends are bound to in `api/graph_backend.py`. It is
 # what the coverage test below reads to check that registering a family did not quietly
 # leave one of its functions unproven.
@@ -552,6 +610,8 @@ FAMILY_PROTOCOLS: dict[str, type] = {
     "collaborator_identity": CollaboratorIdentityBackend,
     "gap_metadata": GapMetadataBackend,
     "catalog_overview": CatalogOverviewBackend,
+    "explore": ExploreBackend,
+    "genre_tree": GenreTreeBackend,
     "label_dna": LabelDnaBackend,
     "user_collection": UserCollectionBackend,
     "taste": TasteBackend,

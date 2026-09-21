@@ -411,6 +411,11 @@ LABEL_DNA_ARTISTS: dict[str, str] = {
     "1303": "Recommendation Test Artist",
 }
 
+# Graphinator emits ALIAS_OF from alias to primary. The primary artist document
+# lists its aliases, while the Neo4j edge below follows alias -> primary.
+ALIAS_ARTIST_ID = "1301"
+PRIMARY_ARTIST_ID = "1302"
+
 
 def _label_dna_release(
     *,
@@ -654,7 +659,7 @@ SET a.name = artist.name
 WITH count(*) AS _seeded
 UNWIND $releases AS release
 MERGE (r:Release {id: release.id})
-SET r.year = release.year
+SET r.year = release.year, r.title = 'Release ' + release.id
 WITH r, release
 UNWIND release.artists AS artist_id
 MATCH (a:Artist {id: artist_id})
@@ -667,6 +672,41 @@ SET m.title = $master_name
 MERGE (g:Genre {name: $genre_name})
 MERGE (s:Style {name: $style_name})
 """
+
+_SEED_NEO4J_EXPLORE_TAGS = """
+UNWIND $rows AS row
+MATCH (r:Release {id: row.id})
+FOREACH (genre IN row.genres |
+    MERGE (g:Genre {name: genre}) MERGE (r)-[:IS]->(g))
+FOREACH (style IN row.styles |
+    MERGE (s:Style {name: style}) MERGE (r)-[:IS]->(s))
+"""
+
+_SEED_NEO4J_EXPLORE_COUNTERS = (
+    """MATCH (g:Genre)
+       OPTIONAL MATCH (g)<-[:IS]-(r:Release)
+       WITH g, min(CASE WHEN r.year > 0 THEN r.year END) AS first_year
+       SET g.first_year = first_year,
+           g.release_count = COUNT { MATCH (release:Release)-[:IS]->(g) RETURN DISTINCT release },
+           g.artist_count = COUNT { MATCH (release:Release)-[:IS]->(g), (release)-[:BY]->(artist:Artist) RETURN DISTINCT artist },
+           g.label_count = COUNT { MATCH (release:Release)-[:IS]->(g), (release)-[:ON]->(label:Label) RETURN DISTINCT label },
+           g.style_count = COUNT { MATCH (release:Release)-[:IS]->(g), (release)-[:IS]->(style:Style) RETURN DISTINCT style }
+    """,
+    """MATCH (s:Style)
+       OPTIONAL MATCH (s)<-[:IS]-(r:Release)
+       WITH s, min(CASE WHEN r.year > 0 THEN r.year END) AS first_year
+       SET s.first_year = first_year,
+           s.release_count = COUNT { MATCH (release:Release)-[:IS]->(s) RETURN DISTINCT release },
+           s.artist_count = COUNT { MATCH (release:Release)-[:IS]->(s), (release)-[:BY]->(artist:Artist) RETURN DISTINCT artist },
+           s.label_count = COUNT { MATCH (release:Release)-[:IS]->(s), (release)-[:ON]->(label:Label) RETURN DISTINCT label },
+           s.genre_count = COUNT { MATCH (release:Release)-[:IS]->(s), (release)-[:IS]->(genre:Genre) RETURN DISTINCT genre }
+    """,
+    """MATCH (l:Label)
+       SET l.release_count = COUNT { MATCH (release:Release)-[:ON]->(l) RETURN DISTINCT release },
+           l.artist_count = COUNT { MATCH (release:Release)-[:ON]->(l), (release)-[:BY]->(artist:Artist) RETURN DISTINCT artist },
+           l.genre_count = COUNT { MATCH (release:Release)-[:ON]->(l), (release)-[:IS]->(genre:Genre) RETURN DISTINCT genre }
+    """,
+)
 
 # The full-text component's Neo4j half. `graphinator` writes these five node kinds from the
 # same document keys `graph.bootstrap_fill` projects the PostgreSQL tables from, so the two
@@ -699,7 +739,7 @@ UNWIND $people AS person
 MERGE (:Person {name: person})
 WITH count(*) AS _people
 UNWIND $releases AS release
-MERGE (:Release {id: release})
+MERGE (r:Release {id: release}) SET r.title = 'Release ' + release
 """
 
 # ── The credits component's Neo4j half (gm-catalog-api-dl8.1) ────────────────
@@ -937,12 +977,28 @@ async def seed_neo4j(driver: AsyncResilientNeo4jDriver) -> None:
     await consume(driver, _SEED_NEO4J_BY, edges=label_dna_edges("artists", "artist_id"))
     await consume(
         driver,
+        "MATCH (alias:Artist {id: $alias_id}), (primary:Artist {id: $primary_id}) MERGE (alias)-[:ALIAS_OF]->(primary)",
+        alias_id=ALIAS_ARTIST_ID,
+        primary_id=PRIMARY_ARTIST_ID,
+    )
+    await consume(
+        driver,
         _SEED_NEO4J_ON,
         edges=[{"release_id": release_id, "label_id": release["label"]} for release_id, release in LABEL_DNA_RELEASES.items()],
     )
     await consume(driver, _SEED_NEO4J_LABEL_DNA_GENRE, edges=label_dna_edges("genres", "name"))
     await consume(driver, _SEED_NEO4J_LABEL_DNA_STYLE, edges=label_dna_edges("styles", "name"))
     await consume(driver, _SEED_NEO4J_LABEL_DNA_MEDIA, edges=label_dna_media_edges())
+    await consume(
+        driver,
+        _SEED_NEO4J_EXPLORE_TAGS,
+        rows=[
+            {"id": _TAGGED_RELEASE_ID, "genres": [GENRE_NAME], "styles": [STYLE_NAME]},
+            *({"id": release_id, "genres": release["genres"], "styles": release["styles"]} for release_id, release in AUTOCOMPLETE_RELEASES.items()),
+        ],
+    )
+    for cypher in _SEED_NEO4J_EXPLORE_COUNTERS:
+        await consume(driver, cypher)
     await consume(driver, "MERGE (master:Master {id: $master_id}) SET master.title = 'Collection Master'", master_id=COLLECTION_MASTER_ID)
     await consume(
         driver,
@@ -1007,7 +1063,10 @@ async def seed_postgres(pool: AsyncPostgreSQLPool) -> None:
         # ── end credits component ────────────────────────────────────────────
         # ── label-DNA component (gm-catalog-api-dl8.2) ──────────────────────
         for artist_id, name in LABEL_DNA_ARTISTS.items():
-            await cursor.execute(_SEED_ARTIST, (artist_id, "parity-fixture", json.dumps({"name": name})))
+            document = {"name": name}
+            if artist_id == PRIMARY_ARTIST_ID:
+                document["aliases"] = [{"id": int(ALIAS_ARTIST_ID)}]
+            await cursor.execute(_SEED_ARTIST, (artist_id, "parity-fixture", json.dumps(document)))
         for label_id, name in LABEL_DNA_LABELS.items():
             await cursor.execute(_SEED_LABEL, (label_id, "parity-fixture", json.dumps({"name": name})))
         for release_id, release in LABEL_DNA_RELEASES.items():
