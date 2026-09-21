@@ -233,6 +233,26 @@ class TestArtistRarity:
         finally:
             rarity_router._pg_pool = original_pool
 
+    def test_postgres_backend_does_not_require_neo4j(self, test_client: TestClient) -> None:
+        import api.routers.rarity as rarity_router
+
+        original_backend = rarity_router._graph_backend
+        original_driver = rarity_router._neo4j_driver
+        backend = AsyncMock()
+        backend.get_rarity_by_artist.return_value = ([_MOCK_LIST_ITEM], 1)
+        original_impl = rarity_router._rarity_backend
+        rarity_router._graph_backend = "postgres"
+        rarity_router._neo4j_driver = None
+        rarity_router._rarity_backend = backend
+        try:
+            response = test_client.get("/api/rarity/artist/123")
+            assert response.status_code == 200
+            backend.get_rarity_by_artist.assert_awaited_once()
+        finally:
+            rarity_router._graph_backend = original_backend
+            rarity_router._neo4j_driver = original_driver
+            rarity_router._rarity_backend = original_impl
+
 
 class TestLabelRarity:
     def test_success(self, test_client: TestClient) -> None:
@@ -263,3 +283,23 @@ class TestLabelRarity:
             assert response.status_code == 503
         finally:
             rarity_router._pg_pool = original_pool
+
+    def test_postgres_backend_does_not_require_neo4j(self, test_client: TestClient) -> None:
+        import api.routers.rarity as rarity_router
+
+        original_backend = rarity_router._graph_backend
+        original_driver = rarity_router._neo4j_driver
+        backend = AsyncMock()
+        backend.get_rarity_by_label.return_value = ([_MOCK_LIST_ITEM], 1)
+        original_impl = rarity_router._rarity_backend
+        rarity_router._graph_backend = "postgres"
+        rarity_router._neo4j_driver = None
+        rarity_router._rarity_backend = backend
+        try:
+            response = test_client.get("/api/rarity/label/456")
+            assert response.status_code == 200
+            backend.get_rarity_by_label.assert_awaited_once()
+        finally:
+            rarity_router._graph_backend = original_backend
+            rarity_router._neo4j_driver = original_driver
+            rarity_router._rarity_backend = original_impl

@@ -59,6 +59,13 @@ def _handles() -> RarityHandles:
     return rarity_handles(_graph_backend, _neo4j_driver, _pg_pool)
 
 
+def _graph_lookup_ready() -> bool:
+    """Whether both stores selected by the rarity lookup are configured."""
+    if not _pg_pool:
+        return False
+    return bool(_pg_pool if _graph_backend == "postgres" else _neo4j_driver)
+
+
 def _family_signals(row: dict[str, Any]) -> dict[str, dict[str, float]]:
     """Read the family signals for a row: module id → signal → score.
 
@@ -198,7 +205,7 @@ async def artist_rarity(
     page_size: int = Query(20, ge=1, le=100),
 ) -> JSONResponse:
     """Get rarest releases by a specific artist."""
-    if not _pg_pool or not _neo4j_driver:
+    if not _graph_lookup_ready():
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     result = await _rarity_backend.get_rarity_by_artist(_handles(), artist_id, page, page_size)
@@ -225,7 +232,7 @@ async def label_rarity(
     page_size: int = Query(20, ge=1, le=100),
 ) -> JSONResponse:
     """Get rarest releases on a specific label."""
-    if not _pg_pool or not _neo4j_driver:
+    if not _graph_lookup_ready():
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     result = await _rarity_backend.get_rarity_by_label(_handles(), label_id, page, page_size)

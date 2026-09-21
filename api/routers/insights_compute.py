@@ -229,9 +229,10 @@ def _find_retryable_neo4j_error(exc: BaseException) -> Neo4jError | None:
 @limiter.limit("5/minute")
 async def rarity_scores(request: Request) -> JSONResponse:  # noqa: ARG001
     """Return computed rarity scores for every release, from the configured graph backend."""
-    if not _neo4j:
-        return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     backend_name = getattr(_config, "graph_backend", "neo4j") if _config is not None else "neo4j"
+    graph = _pool if backend_name == "postgres" else _neo4j
+    if not _pool or not graph:
+        return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     backend = get_rarity_backend(backend_name)
     try:
         results = await backend.fetch_all_rarity_signals(rarity_handles(backend_name, _neo4j, _pool))
