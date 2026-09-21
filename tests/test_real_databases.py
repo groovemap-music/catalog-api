@@ -32,9 +32,12 @@ from api.graph_backend import (
     CollaboratorIdentityBackend,
     CollaboratorsBackend,
     CreditsBackend,
+    GapAnalysisBackend,
     GapMetadataBackend,
     LabelDnaBackend,
     OneHopCollaboratorsBackend,
+    TasteBackend,
+    UserCollectionBackend,
     get_backend,
     registered_families,
 )
@@ -537,6 +540,9 @@ FAMILY_PROTOCOLS: dict[str, type] = {
     "gap_metadata": GapMetadataBackend,
     "catalog_overview": CatalogOverviewBackend,
     "label_dna": LabelDnaBackend,
+    "user_collection": UserCollectionBackend,
+    "taste": TasteBackend,
+    "gap_analysis": GapAnalysisBackend,
 }
 
 
@@ -739,6 +745,51 @@ register_parity_family("label_dna", LABEL_DNA_CALLS)
 FAMILY_PROTOCOLS["label_dna"] = LabelDnaBackend
 
 
+_COLLECTION_USER = graph_fixture.COLLECTION_USER_ID
+USER_COLLECTION_CALLS = (
+    ParityCall("get_user_collection", (_COLLECTION_USER,), {"limit": 50, "offset": 0}),
+    ParityCall("get_user_wantlist", (_COLLECTION_USER,), {"limit": 50, "offset": 0}),
+    ParityCall("get_user_recommendations", (_COLLECTION_USER,), {"limit": 20}),
+    ParityCall("get_user_collection_stats", (_COLLECTION_USER,)),
+    ParityCall("get_user_collection_timeline", (_COLLECTION_USER,), {"bucket": "year"}),
+    ParityCall("get_user_collection_timeline", (_COLLECTION_USER,), {"bucket": "decade"}),
+    *(ParityCall("get_user_collection_evolution", (_COLLECTION_USER,), {"metric": metric}) for metric in ("genre", "style", "label")),
+    ParityCall("check_releases_user_status", (_COLLECTION_USER, ["1201", "1204", "1212", "missing"])),
+)
+register_parity_family("user_collection", USER_COLLECTION_CALLS, requires_property_graph=False)
+
+TASTE_CALLS = (
+    ParityCall("get_collection_count", (_COLLECTION_USER,)),
+    ParityCall("get_taste_heatmap", (_COLLECTION_USER,)),
+    ParityCall("get_obscurity_score", (_COLLECTION_USER,)),
+    ParityCall("get_taste_drift", (_COLLECTION_USER,)),
+    ParityCall("get_blind_spots", (_COLLECTION_USER,), {"limit": 5}),
+    ParityCall("get_top_labels", (_COLLECTION_USER,), {"limit": 10}),
+)
+register_parity_family("taste", TASTE_CALLS, requires_property_graph=False)
+
+GAP_ANALYSIS_CALLS = (
+    ParityCall("get_label_gaps", (_COLLECTION_USER, graph_fixture.LABEL_DNA_TARGET_ID), {"limit": 50, "offset": 0}),
+    ParityCall(
+        "get_label_gaps",
+        (_COLLECTION_USER, graph_fixture.LABEL_DNA_TARGET_ID),
+        {"limit": 50, "offset": 0, "exclude_wantlist": True, "families": ["vinyl"], "mediums": ["optical_cd"]},
+    ),
+    ParityCall("get_label_gap_summary", (_COLLECTION_USER, graph_fixture.LABEL_DNA_TARGET_ID)),
+    ParityCall("get_artist_gaps", (_COLLECTION_USER, "1301"), {"limit": 50, "offset": 0}),
+    ParityCall("get_artist_gaps", (_COLLECTION_USER, "1301"), {"limit": 50, "offset": 0, "exclude_wantlist": True, "families": ["vinyl"]}),
+    ParityCall("get_artist_gap_summary", (_COLLECTION_USER, "1301")),
+    ParityCall("get_master_gaps", (_COLLECTION_USER, graph_fixture.COLLECTION_MASTER_ID), {"limit": 50, "offset": 0}),
+    ParityCall(
+        "get_master_gaps",
+        (_COLLECTION_USER, graph_fixture.COLLECTION_MASTER_ID),
+        {"limit": 50, "offset": 0, "exclude_wantlist": True, "mediums": ["optical_cd"]},
+    ),
+    ParityCall("get_master_gap_summary", (_COLLECTION_USER, graph_fixture.COLLECTION_MASTER_ID)),
+)
+register_parity_family("gap_analysis", GAP_ANALYSIS_CALLS, requires_property_graph=False)
+
+
 # `graph.catalog` exists only on a PostgreSQL 19 server whose initializer ran with the
 # switch on, which is what `just test-integration-pg19` arranges. Off that tier the
 # property-graph families are skipped at collection, so the default suite never starts a
@@ -786,6 +837,7 @@ async def test_graph_query_family_agrees_on_both_backends(
     assert_parity(family, call, neo4j_result=neo4j_result, postgres_result=postgres_result)
 
 
+@_NEEDS_PROPERTY_GRAPH
 @pytest.mark.parametrize("backend", ["neo4j", "postgres"])
 async def test_label_dna_fixture_proves_nonempty_profiles_candidates_and_media(
     parity_backends: graph_fixture.ParityBackends,
@@ -843,6 +895,7 @@ async def test_label_dna_fixture_proves_nonempty_profiles_candidates_and_media(
     assert fallback == [{"family": "vinyl", "count": 1, "mediums": []}]
 
 
+@_NEEDS_PROPERTY_GRAPH
 async def test_label_dna_media_traversal_uses_both_edge_directions_on_pg19(
     parity_backends: graph_fixture.ParityBackends,
 ) -> None:

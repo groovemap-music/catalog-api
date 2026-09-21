@@ -46,6 +46,10 @@ from api.queries import (
     neo4j_queries,
     network_pg_queries,
     network_queries,
+    taste_pg_queries,
+    taste_queries,
+    user_pg_queries,
+    user_queries,
 )
 
 
@@ -242,7 +246,75 @@ class LabelDnaBackend(Protocol):
 
 _NEO4J_LABEL_DNA: LabelDnaBackend = label_dna_queries
 _POSTGRES_LABEL_DNA: LabelDnaBackend = label_dna_pg_queries
-# ── end credits family ───────────────────────────────────────────────────────────────────
+
+
+class UserCollectionBackend(Protocol):
+    async def get_user_collection(self, handle: Any, user_id: str, /, limit: int = 50, offset: int = 0) -> tuple[list[dict[str, Any]], int]: ...
+    async def get_user_wantlist(self, handle: Any, user_id: str, /, limit: int = 50, offset: int = 0) -> tuple[list[dict[str, Any]], int]: ...
+    async def get_user_recommendations(self, handle: Any, user_id: str, /, limit: int = 20) -> list[dict[str, Any]]: ...
+    async def get_user_collection_stats(self, handle: Any, user_id: str, /) -> dict[str, Any]: ...
+    async def get_user_collection_timeline(self, handle: Any, user_id: str, /, bucket: str = "year") -> dict[str, Any]: ...
+    async def get_user_collection_evolution(self, handle: Any, user_id: str, /, metric: str = "genre") -> dict[str, Any]: ...
+    async def check_releases_user_status(self, handle: Any, user_id: str, release_ids: list[str], /) -> dict[str, dict[str, bool]]: ...
+
+
+class TasteBackend(Protocol):
+    async def get_collection_count(self, handle: Any, user_id: str, /) -> int: ...
+    async def get_taste_heatmap(self, handle: Any, user_id: str, /) -> tuple[list[dict[str, Any]], int]: ...
+    async def get_obscurity_score(self, handle: Any, user_id: str, /) -> dict[str, Any]: ...
+    async def get_taste_drift(self, handle: Any, user_id: str, /) -> list[dict[str, Any]]: ...
+    async def get_blind_spots(self, handle: Any, user_id: str, /, limit: int = 5) -> list[dict[str, Any]]: ...
+    async def get_top_labels(self, handle: Any, user_id: str, /, limit: int = 10) -> list[dict[str, Any]]: ...
+
+
+class GapAnalysisBackend(Protocol):
+    async def get_label_gaps(
+        self,
+        handle: Any,
+        user_id: str,
+        label_id: str,
+        /,
+        limit: int = 50,
+        offset: int = 0,
+        exclude_wantlist: bool = False,
+        families: list[str] | None = None,
+        mediums: list[str] | None = None,
+    ) -> tuple[list[dict[str, Any]], int]: ...
+    async def get_label_gap_summary(self, handle: Any, user_id: str, label_id: str, /) -> dict[str, Any]: ...
+    async def get_artist_gaps(
+        self,
+        handle: Any,
+        user_id: str,
+        artist_id: str,
+        /,
+        limit: int = 50,
+        offset: int = 0,
+        exclude_wantlist: bool = False,
+        families: list[str] | None = None,
+        mediums: list[str] | None = None,
+    ) -> tuple[list[dict[str, Any]], int]: ...
+    async def get_artist_gap_summary(self, handle: Any, user_id: str, artist_id: str, /) -> dict[str, Any]: ...
+    async def get_master_gaps(
+        self,
+        handle: Any,
+        user_id: str,
+        master_id: str,
+        /,
+        limit: int = 50,
+        offset: int = 0,
+        exclude_wantlist: bool = False,
+        families: list[str] | None = None,
+        mediums: list[str] | None = None,
+    ) -> tuple[list[dict[str, Any]], int]: ...
+    async def get_master_gap_summary(self, handle: Any, user_id: str, master_id: str, /) -> dict[str, Any]: ...
+
+
+_NEO4J_USER_COLLECTION: UserCollectionBackend = user_queries
+_POSTGRES_USER_COLLECTION: UserCollectionBackend = user_pg_queries
+_NEO4J_TASTE: TasteBackend = taste_queries
+_POSTGRES_TASTE: TasteBackend = taste_pg_queries
+_NEO4J_GAP_ANALYSIS: GapAnalysisBackend = gap_queries
+_POSTGRES_GAP_ANALYSIS: GapAnalysisBackend = gap_pg_queries
 
 
 # family name -> backend name -> module implementing that family's query functions.
@@ -284,7 +356,18 @@ _FAMILY_BACKENDS: dict[str, dict[str, ModuleType]] = {
         "neo4j": label_dna_queries,
         "postgres": label_dna_pg_queries,
     },
-    # ── end credits family ───────────────────────────────────────────────────
+    "user_collection": {
+        "neo4j": user_queries,
+        "postgres": user_pg_queries,
+    },
+    "taste": {
+        "neo4j": taste_queries,
+        "postgres": taste_pg_queries,
+    },
+    "gap_analysis": {
+        "neo4j": gap_queries,
+        "postgres": gap_pg_queries,
+    },
 }
 
 
@@ -379,7 +462,16 @@ def get_label_dna_backend(backend: str) -> LabelDnaBackend:
     return cast("LabelDnaBackend", get_backend("label_dna", backend))
 
 
-# ── end credits family ───────────────────────────────────────────────────────
+def get_user_collection_backend(backend: str) -> UserCollectionBackend:
+    return cast("UserCollectionBackend", get_backend("user_collection", backend))
+
+
+def get_taste_backend(backend: str) -> TasteBackend:
+    return cast("TasteBackend", get_backend("taste", backend))
+
+
+def get_gap_analysis_backend(backend: str) -> GapAnalysisBackend:
+    return cast("GapAnalysisBackend", get_backend("gap_analysis", backend))
 
 
 # ── Backend-neutral error mapping ─────────────────────────────────────────────

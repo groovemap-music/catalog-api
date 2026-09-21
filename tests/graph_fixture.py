@@ -391,6 +391,10 @@ LABEL_DNA_TARGET_ID = "1101"
 LABEL_DNA_CANDIDATE_ID = "1102"
 LABEL_DNA_LOW_RELEASE_ID = "1103"
 LABEL_DNA_FALLBACK_ID = "1104"
+COLLECTION_MASTER_ID = "1401"
+COLLECTION_USER_ID = "00000000-0000-0000-0000-000000000001"
+COLLECTION_OTHER_USER_ID = "00000000-0000-0000-0000-000000000002"
+COLLECTION_THIRD_USER_ID = "00000000-0000-0000-0000-000000000003"
 
 LABEL_DNA_LABELS: dict[str, str] = {
     LABEL_DNA_TARGET_ID: "Label DNA Target",
@@ -415,6 +419,7 @@ def _label_dna_release(
     formats: list[str],
     families: list[str],
     items: list[dict[str, Any]],
+    master_id: str | None = None,
 ) -> dict[str, Any]:
     return {
         "year": year,
@@ -424,6 +429,7 @@ def _label_dna_release(
         "styles": styles,
         "formats": formats,
         "media": {"families": families, "items": items},
+        "master_id": master_id,
     }
 
 
@@ -444,6 +450,7 @@ LABEL_DNA_RELEASES: dict[str, dict[str, Any]] = {
                     "label": '12" vinyl' if index < 4 else "CD",
                 }
             ],
+            master_id=COLLECTION_MASTER_ID if index >= 2 else None,
         )
         for index in range(6)
     },
@@ -491,6 +498,20 @@ LABEL_DNA_RELEASES: dict[str, dict[str, Any]] = {
         items=[],
     ),
 }
+
+COLLECTION_ROWS = (
+    {"user_id": COLLECTION_USER_ID, "release_id": "1201", "rating": 5, "folder_id": 1, "date_added": "2020-01-01T00:00:00Z"},
+    {"user_id": COLLECTION_USER_ID, "release_id": "1202", "rating": 4, "folder_id": 1, "date_added": "2021-01-01T00:00:00Z"},
+    {"user_id": COLLECTION_USER_ID, "release_id": "1203", "rating": 0, "folder_id": 2, "date_added": "2022-01-01T00:00:00Z"},
+    {"user_id": COLLECTION_OTHER_USER_ID, "release_id": "1201", "rating": 0, "folder_id": 1, "date_added": "2023-01-01T00:00:00Z"},
+    {"user_id": COLLECTION_OTHER_USER_ID, "release_id": "1202", "rating": 0, "folder_id": 1, "date_added": "2023-02-01T00:00:00Z"},
+    {"user_id": COLLECTION_THIRD_USER_ID, "release_id": "1201", "rating": 0, "folder_id": 1, "date_added": "2024-01-01T00:00:00Z"},
+)
+
+WANT_ROWS = (
+    {"user_id": COLLECTION_USER_ID, "release_id": "1204", "rating": 0, "date_added": "2023-03-01T00:00:00Z"},
+    {"user_id": COLLECTION_USER_ID, "release_id": "1211", "rating": 0, "date_added": "2023-04-01T00:00:00Z"},
+)
 
 
 def label_dna_edges(field: str, endpoint: str) -> list[dict[str, str]]:
@@ -557,7 +578,7 @@ def _endpoint_pairs(key: str, column: str) -> list[dict[str, str]]:
 
 # Reconciled from the two branches' TRUNCATEs: family 1 needs `masters` truncated too, on
 # top of the autocomplete family's `artists, labels, releases`.
-_TRUNCATE_ENTITIES = "TRUNCATE artists, labels, releases, masters CASCADE"
+_TRUNCATE_ENTITIES = "TRUNCATE artists, labels, releases, masters, users CASCADE"
 
 # What turns the seeded documents into graph rows. From the phase 2 schema revision the
 # `graph` relations a loader owns — every edge, and the `genre`, `style`, and `person`
@@ -576,6 +597,11 @@ _SEED_LABEL = "INSERT INTO labels (data_id, hash, data) VALUES (%s, %s, %s::json
 _SEED_RELEASE = "INSERT INTO releases (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
 _SEED_LABEL_DNA_RELEASE = "INSERT INTO releases (data_id, hash, data, media) VALUES (%s, %s, %s::jsonb, %s::jsonb)"
 _SEED_MASTER = "INSERT INTO masters (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
+_SEED_USER = "INSERT INTO users (id, email, hashed_password) VALUES (%s::uuid, %s, 'fixture')"
+_SEED_COLLECTION = (
+    "INSERT INTO user_collections (user_id, release_id, rating, folder_id, date_added) VALUES (%s::uuid, %s::bigint, %s, %s, %s::timestamptz)"
+)
+_SEED_WANT = "INSERT INTO user_wantlists (user_id, release_id, rating, date_added) VALUES (%s::uuid, %s::bigint, %s, %s::timestamptz)"
 
 _SEED_NEO4J = """
 UNWIND $artists AS artist
@@ -724,6 +750,34 @@ MERGE (r)-[:ISSUED_ON]->(m)
 MERGE (m)-[:IN_FAMILY]->(f)
 """
 
+_SEED_NEO4J_COLLECTION_USERS = """
+UNWIND $users AS user
+MERGE (:User {id: user.id})
+"""
+
+_SEED_NEO4J_COLLECTIONS = """
+UNWIND $rows AS row
+MATCH (u:User {id: row.user_id})
+MATCH (r:Release {id: row.release_id})
+MERGE (u)-[edge:COLLECTED {instance_id: row.release_id}]->(r)
+SET edge.rating = row.rating, edge.folder_id = row.folder_id, edge.date_added = row.date_added
+"""
+
+_SEED_NEO4J_WANTS = """
+UNWIND $rows AS row
+MATCH (u:User {id: row.user_id})
+MATCH (r:Release {id: row.release_id})
+MERGE (u)-[edge:WANTS]->(r)
+SET edge.rating = row.rating, edge.date_added = row.date_added
+"""
+
+_SEED_NEO4J_DERIVED_FROM = """
+MATCH (master:Master {id: $master_id})
+UNWIND $release_ids AS release_id
+MATCH (release:Release {id: release_id})
+MERGE (release)-[:DERIVED_FROM]->(master)
+"""
+
 # Lucene indexes are populated in the background, so a search issued the moment the seed
 # commits can read an index that is still building and answer with fewer rows than the
 # graph holds. Every full-text call in the suite is downstream of this.
@@ -845,6 +899,20 @@ async def seed_neo4j(driver: AsyncResilientNeo4jDriver) -> None:
     await consume(driver, _SEED_NEO4J_LABEL_DNA_GENRE, edges=label_dna_edges("genres", "name"))
     await consume(driver, _SEED_NEO4J_LABEL_DNA_STYLE, edges=label_dna_edges("styles", "name"))
     await consume(driver, _SEED_NEO4J_LABEL_DNA_MEDIA, edges=label_dna_media_edges())
+    await consume(driver, "MERGE (master:Master {id: $master_id}) SET master.title = 'Collection Master'", master_id=COLLECTION_MASTER_ID)
+    await consume(
+        driver,
+        _SEED_NEO4J_DERIVED_FROM,
+        master_id=COLLECTION_MASTER_ID,
+        release_ids=[release_id for release_id, release in LABEL_DNA_RELEASES.items() if release["master_id"]],
+    )
+    await consume(
+        driver,
+        _SEED_NEO4J_COLLECTION_USERS,
+        users=[{"id": user_id} for user_id in (COLLECTION_USER_ID, COLLECTION_OTHER_USER_ID, COLLECTION_THIRD_USER_ID)],
+    )
+    await consume(driver, _SEED_NEO4J_COLLECTIONS, rows=list(COLLECTION_ROWS))
+    await consume(driver, _SEED_NEO4J_WANTS, rows=list(WANT_ROWS))
     # ── end label-DNA component ─────────────────────────────────────────────
     await consume(driver, _AWAIT_NEO4J_INDEXES)
 
@@ -907,11 +975,22 @@ async def seed_postgres(pool: AsyncPostgreSQLPool) -> None:
                 "genres": release["genres"],
                 "styles": release["styles"],
                 "formats": [{"name": name} for name in release["formats"]],
+                "master_id": int(release["master_id"]) if release["master_id"] else None,
             }
             await cursor.execute(
                 _SEED_LABEL_DNA_RELEASE,
                 (release_id, "parity-fixture", json.dumps(document), json.dumps(release["media"])),
             )
+        await cursor.execute(_SEED_MASTER, (COLLECTION_MASTER_ID, "parity-fixture", json.dumps({"title": "Collection Master"})))
+        for user_id in (COLLECTION_USER_ID, COLLECTION_OTHER_USER_ID, COLLECTION_THIRD_USER_ID):
+            await cursor.execute(_SEED_USER, (user_id, f"{user_id[-1]}@fixture.invalid"))
+        for row in COLLECTION_ROWS:
+            await cursor.execute(
+                _SEED_COLLECTION,
+                (row["user_id"], row["release_id"], row["rating"], row["folder_id"], row["date_added"]),
+            )
+        for row in WANT_ROWS:
+            await cursor.execute(_SEED_WANT, (row["user_id"], row["release_id"], row["rating"], row["date_added"]))
         # ── end label-DNA component ─────────────────────────────────────────
         await cursor.execute(_BOOTSTRAP_FILL)
         await cursor.fetchall()
