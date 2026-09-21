@@ -33,10 +33,12 @@ from api.graph_backend import (
     CollaboratorIdentityBackend,
     CollaboratorsBackend,
     CreditsBackend,
+    FitBackend,
     GapAnalysisBackend,
     GapMetadataBackend,
     LabelDnaBackend,
     OneHopCollaboratorsBackend,
+    RecommendationsBackend,
     TasteBackend,
     UserCollectionBackend,
     get_backend,
@@ -44,8 +46,11 @@ from api.graph_backend import (
 )
 from api.queries import (
     collection_media_queries,
+    fit_queries,
     gap_queries,
     label_dna_pg_queries,
+    recommend_pg_queries,
+    recommend_queries,
     release_media_queries,
     taste_queries,
     user_queries,
@@ -551,6 +556,8 @@ FAMILY_PROTOCOLS: dict[str, type] = {
     "user_collection": UserCollectionBackend,
     "taste": TasteBackend,
     "gap_analysis": GapAnalysisBackend,
+    "recommendations": RecommendationsBackend,
+    "fit": FitBackend,
 }
 
 
@@ -796,6 +803,97 @@ GAP_ANALYSIS_CALLS = (
     ParityCall("get_master_gap_summary", (_COLLECTION_USER, graph_fixture.COLLECTION_MASTER_ID)),
 )
 register_parity_family("gap_analysis", GAP_ANALYSIS_CALLS, requires_property_graph=False)
+
+
+RECOMMENDATION_CALLS = (
+    ParityCall("get_artist_identity", ("1301",)),
+    ParityCall("get_artist_identity", ("missing",)),
+    ParityCall("get_artist_profile", ("1301",)),
+    ParityCall("get_candidate_artists", ("1301",)),
+    ParityCall("get_collector_counts", (["1201", "1202", "1242"],)),
+    ParityCall("get_collector_counts", ([],)),
+    ParityCall("get_label_affinity_candidates", (graph_fixture.COLLECTION_USER_ID,), {"limit": 50}),
+    ParityCall("get_blindspot_candidates", (graph_fixture.COLLECTION_USER_ID,), {"limit": 50}),
+)
+register_parity_family("recommendations", RECOMMENDATION_CALLS, requires_property_graph=False)
+
+FIT_CALLS = (
+    ParityCall("get_collection_ids", (graph_fixture.COLLECTION_USER_ID,)),
+    ParityCall("get_collection_ids", ("00000000-0000-0000-0000-000000000099",)),
+    ParityCall("get_release_context", ("1203",)),
+)
+register_parity_family("fit", FIT_CALLS, requires_property_graph=False)
+
+
+async def test_recommendation_and_fit_surfaces_are_fully_accounted_for() -> None:
+    recommendation_store_reads = {
+        name
+        for name, value in vars(recommend_queries).items()
+        if inspect.iscoroutinefunction(value) and getattr(value, "__module__", None) == recommend_queries.__name__
+    }
+    assert recommendation_store_reads == PARITY_FAMILIES["recommendations"].functions | {"_batch_artist_profiles", "get_explore_traversal"}
+    fit_store_reads = {
+        name
+        for name, value in vars(fit_queries).items()
+        if inspect.iscoroutinefunction(value) and getattr(value, "__module__", None) == fit_queries.__name__
+    }
+    assert fit_store_reads == PARITY_FAMILIES["fit"].functions | {"get_release_rarity"}
+
+
+@pytest.mark.parametrize("backend", ["neo4j", "postgres"])
+async def test_recommendation_fixture_has_real_candidates_and_fit_context(
+    parity_backends: graph_fixture.ParityBackends,
+    backend: str,
+) -> None:
+    handle = parity_backends.postgres if backend == "postgres" else parity_backends.neo4j
+    recommend = get_backend("recommendations", backend)
+    fit = get_backend("fit", backend)
+    candidates = await recommend.get_candidate_artists(handle, "1301")
+    assert [candidate["artist_id"] for candidate in candidates] == ["1303"]
+    assert candidates[0]["release_count"] == 4
+    assert candidates[0]["genres"] == [{"name": "Electronic", "count": 3}, {"name": "Rock", "count": 1}]
+
+    labels = await recommend.get_label_affinity_candidates(handle, graph_fixture.COLLECTION_USER_ID)
+    assert {row["id"] for row in labels} == {"1205", "1206"}
+    assert all(row["score"] == 4 for row in labels)  # physical duplicate copy counts
+    assert not {"1201", "1202", "1203", "1204", "1211"} & {row["id"] for row in labels}
+    blindspots = await recommend.get_blindspot_candidates(handle, graph_fixture.COLLECTION_USER_ID)
+    assert {row["id"] for row in blindspots} == {"1215", "1221", "1231"}
+    assert {row["genres"][0] for row in blindspots} == {"Ambient", "Rock"}
+    two_artist_blindspots = await recommend.get_blindspot_candidates(handle, graph_fixture.COLLECTION_RECOMMEND_USER_ID)
+    rock = {row["id"]: row for row in two_artist_blindspots if row["genres"] == ["Rock"]}
+    assert set(rock) == {"1222", "1244"}
+    assert {row["score"] for row in rock.values()} == {2}
+    assert await recommend.get_collector_counts(handle, ["1201", "1202", "1242"]) == {"1201": 3, "1202": 2, "1242": 0}
+
+    collection = await fit.get_collection_ids(handle, graph_fixture.COLLECTION_USER_ID)
+    assert collection["release_ids"] == ["1201", "1202", "1203"]
+    assert collection["artist_counts"]["1301"] == 3  # distinct held release, not copy count
+    context = await fit.get_release_context(handle, "1203")
+    assert context is not None
+    assert context["master_id"] == graph_fixture.COLLECTION_MASTER_ID
+    assert {sibling["id"] for sibling in context["siblings"]} == {"1204", "1205", "1206"}
+    assert await fit.get_release_context(handle, "does-not-exist") is None
+
+
+async def test_candidate_sample_cap_preserves_fixture_results_and_records_timing(
+    parity_backends: graph_fixture.ParityBackends,
+) -> None:
+    """Measure the kept 100k bound against the uncapped shape on the parity fixture."""
+    capped = recommend_pg_queries.CANDIDATE_ARTISTS_SQL
+    uncapped = capped.replace("ORDER BY release_id LIMIT 100000", "ORDER BY release_id")
+    params = {"artist_id": "1301", "min_releases": 3}
+    pool = parity_backends.postgres
+    await recommend_pg_queries._rows(pool, capped, params)
+    await recommend_pg_queries._rows(pool, uncapped, params)
+    samples: dict[str, list[float]] = {"capped": [], "uncapped": []}
+    for _ in range(5):
+        for name, statement in (("capped", capped), ("uncapped", uncapped)):
+            before = perf_counter()
+            rows = await recommend_pg_queries._rows(pool, statement, params)
+            samples[name].append((perf_counter() - before) * 1000)
+            assert rows == [("1303", "Recommendation Test Artist", 4)]
+    print("candidate-sample-cap-ms " + " ".join(f"{name}={sum(values) / len(values):.3f}" for name, values in samples.items()))
 
 
 # Family 6 names five source modules. Three media reads were PostgreSQL-only before

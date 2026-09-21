@@ -395,17 +395,20 @@ COLLECTION_MASTER_ID = "1401"
 COLLECTION_USER_ID = "00000000-0000-0000-0000-000000000001"
 COLLECTION_OTHER_USER_ID = "00000000-0000-0000-0000-000000000002"
 COLLECTION_THIRD_USER_ID = "00000000-0000-0000-0000-000000000003"
+COLLECTION_RECOMMEND_USER_ID = "00000000-0000-0000-0000-000000000004"
 
 LABEL_DNA_LABELS: dict[str, str] = {
     LABEL_DNA_TARGET_ID: "Label DNA Target",
     LABEL_DNA_CANDIDATE_ID: "Label DNA Candidate",
     LABEL_DNA_LOW_RELEASE_ID: "Label DNA Tiny",
     LABEL_DNA_FALLBACK_ID: "Label DNA Fallback",
+    "1150": "Recommendation Test Label",
 }
 
 LABEL_DNA_ARTISTS: dict[str, str] = {
     "1301": "Label DNA Artist One",
     "1302": "Label DNA Artist Two",
+    "1303": "Recommendation Test Artist",
 }
 
 
@@ -497,6 +500,29 @@ LABEL_DNA_RELEASES: dict[str, dict[str, Any]] = {
         families=["vinyl"],
         items=[],
     ),
+    **{
+        str(1241 + index): _label_dna_release(
+            year=2016 + index,
+            artists=["1303"],
+            label="1150",
+            genres=["Electronic"],
+            styles=["Label DNA Shared Style"],
+            formats=["Vinyl"],
+            families=["vinyl"],
+            items=[],
+        )
+        for index in range(3)
+    },
+    "1244": _label_dna_release(
+        year=2019,
+        artists=["1303"],
+        label="1150",
+        genres=["Rock"],
+        styles=["Label DNA Shared Style"],
+        formats=["Vinyl"],
+        families=["vinyl"],
+        items=[],
+    ),
 }
 
 COLLECTION_ROWS = (
@@ -507,6 +533,22 @@ COLLECTION_ROWS = (
     {"user_id": COLLECTION_OTHER_USER_ID, "release_id": "1201", "instance_id": 5, "rating": 0, "folder_id": 1, "date_added": "2023-01-01T00:00:00Z"},
     {"user_id": COLLECTION_OTHER_USER_ID, "release_id": "1202", "instance_id": 6, "rating": 0, "folder_id": 1, "date_added": "2023-02-01T00:00:00Z"},
     {"user_id": COLLECTION_THIRD_USER_ID, "release_id": "1201", "instance_id": 7, "rating": 0, "folder_id": 1, "date_added": "2024-01-01T00:00:00Z"},
+    {
+        "user_id": COLLECTION_RECOMMEND_USER_ID,
+        "release_id": "1204",
+        "instance_id": 8,
+        "rating": 0,
+        "folder_id": 1,
+        "date_added": "2024-02-01T00:00:00Z",
+    },
+    {
+        "user_id": COLLECTION_RECOMMEND_USER_ID,
+        "release_id": "1241",
+        "instance_id": 9,
+        "rating": 0,
+        "folder_id": 1,
+        "date_added": "2024-03-01T00:00:00Z",
+    },
 )
 
 WANT_ROWS = (
@@ -911,7 +953,7 @@ async def seed_neo4j(driver: AsyncResilientNeo4jDriver) -> None:
     await consume(
         driver,
         _SEED_NEO4J_COLLECTION_USERS,
-        users=[{"id": user_id} for user_id in (COLLECTION_USER_ID, COLLECTION_OTHER_USER_ID, COLLECTION_THIRD_USER_ID)],
+        users=[{"id": user_id} for user_id in (COLLECTION_USER_ID, COLLECTION_OTHER_USER_ID, COLLECTION_THIRD_USER_ID, COLLECTION_RECOMMEND_USER_ID)],
     )
     await consume(driver, _SEED_NEO4J_COLLECTIONS, rows=list(COLLECTION_ROWS))
     await consume(driver, _SEED_NEO4J_WANTS, rows=list(WANT_ROWS))
@@ -990,7 +1032,7 @@ async def seed_postgres(pool: AsyncPostgreSQLPool) -> None:
                 (release_id, "parity-fixture", json.dumps(document), json.dumps(release["media"])),
             )
         await cursor.execute(_SEED_MASTER, (COLLECTION_MASTER_ID, "parity-fixture", json.dumps({"title": "Collection Master"})))
-        for user_id in (COLLECTION_USER_ID, COLLECTION_OTHER_USER_ID, COLLECTION_THIRD_USER_ID):
+        for user_id in (COLLECTION_USER_ID, COLLECTION_OTHER_USER_ID, COLLECTION_THIRD_USER_ID, COLLECTION_RECOMMEND_USER_ID):
             await cursor.execute(_SEED_USER, (user_id, f"{user_id[-1]}@fixture.invalid"))
         for row in COLLECTION_ROWS:
             await cursor.execute(

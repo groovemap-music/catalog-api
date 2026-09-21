@@ -11,10 +11,10 @@ from fastapi.responses import JSONResponse
 
 import api.activity as activity
 from api.dependencies import UnifiedAuth, get_optional_user, require_user, require_user_or_app_token
-from api.graph_backend import UserCollectionBackend, get_user_collection_backend
+from api.graph_backend import RecommendationsBackend, UserCollectionBackend, get_recommendations_backend, get_user_collection_backend
 from api.identity import native_ids_for
 from api.limiter import bearer_token_key_func, limiter
-from api.queries.recommend_queries import (
+from api.queries.recommend_queries import (  # noqa: F401 -- preserve legacy patch points
     get_blindspot_candidates,
     get_collector_counts,
     get_label_affinity_candidates,
@@ -39,6 +39,7 @@ _neo4j_driver: Any = None
 _pg_pool: Any = None
 _graph_backend = "neo4j"
 _user_backend: UserCollectionBackend = get_user_collection_backend("neo4j")
+_recommendations_backend: RecommendationsBackend = get_recommendations_backend("neo4j")
 
 # In-memory cache for timeline/evolution queries (keyed by user_id + params)
 _timeline_cache: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
@@ -48,11 +49,12 @@ _timeline_cache_lock: asyncio.Lock | None = None  # lazy init to avoid binding t
 
 
 def configure(neo4j: Any, jwt_secret: str | None, graph_backend: str = "neo4j", pg_pool: Any = None) -> None:  # noqa: ARG001
-    global _neo4j_driver, _pg_pool, _graph_backend, _user_backend
+    global _neo4j_driver, _pg_pool, _graph_backend, _user_backend, _recommendations_backend
     _neo4j_driver = neo4j
     _pg_pool = pg_pool
     _graph_backend = graph_backend
     _user_backend = get_user_collection_backend(graph_backend)
+    _recommendations_backend = get_recommendations_backend(graph_backend)
 
 
 def _handle() -> Any:
@@ -61,6 +63,10 @@ def _handle() -> Any:
 
 def _query(name: str) -> Any:
     return getattr(_user_backend, name) if _graph_backend == "postgres" else globals()[name]
+
+
+def _recommend_query(name: str) -> Any:
+    return getattr(_recommendations_backend, name) if _graph_backend == "postgres" else globals()[name]
 
 
 async def _attach_recommendation_identity(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -169,8 +175,8 @@ async def user_recommendations(
     # Multi-signal strategy
     artist_results, label_results, blindspot_results = await asyncio.gather(
         _query("get_user_recommendations")(_handle(), user_id, limit=50),
-        get_label_affinity_candidates(_neo4j_driver, user_id, limit=50),
-        get_blindspot_candidates(_neo4j_driver, user_id, limit=50),
+        _recommend_query("get_label_affinity_candidates")(_handle(), user_id, limit=50),
+        _recommend_query("get_blindspot_candidates")(_handle(), user_id, limit=50),
     )
 
     # Normalize artist results to candidate format
@@ -190,7 +196,7 @@ async def user_recommendations(
 
     # Collect all unique release IDs for obscurity scoring
     all_ids = list({c["id"] for candidates in [artist_candidates, label_results, blindspot_results] for c in candidates if c.get("id")})
-    collector_counts = await get_collector_counts(_neo4j_driver, all_ids) if all_ids else {}
+    collector_counts = await _recommend_query("get_collector_counts")(_handle(), all_ids) if all_ids else {}
 
     merged = merge_recommendation_candidates(
         artist_candidates,
