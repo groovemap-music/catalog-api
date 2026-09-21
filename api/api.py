@@ -280,7 +280,7 @@ def _configure_routers(
     _taste_router.configure(neo4j, jwt_secret_for_neo4j)
     _collection_router.configure(neo4j, pool, jwt_secret_for_neo4j)
     _credits_router.configure(neo4j, redis, config.graph_backend, pg_pool=pool)
-    _label_dna_router.configure(neo4j, redis)
+    _label_dna_router.configure(neo4j, redis, config.graph_backend, pool)
     _recommend_router.configure(neo4j, jwt_secret_for_neo4j, redis)
     _fit_router.configure(neo4j, pool, redis)
     _search_router.configure(pool, redis)

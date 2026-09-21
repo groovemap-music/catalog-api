@@ -8,6 +8,7 @@ import structlog
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
+from api.graph_backend import LabelDnaBackend, get_label_dna_backend
 from api.limiter import limiter
 from api.models import (
     DecadeCount,
@@ -22,7 +23,7 @@ from api.models import (
     SimilarLabelsResponse,
     StyleWeight,
 )
-from api.queries.label_dna_queries import (
+from api.queries.label_dna_queries import (  # noqa: F401
     MIN_RELEASES,
     compute_similar_labels,
     get_candidate_labels_genre_vectors,
@@ -42,15 +43,30 @@ router = APIRouter()
 
 _neo4j_driver: Any = None
 _redis: Any = None
+_pg_pool: Any = None
+_graph_backend = "neo4j"
+_label_dna_backend: LabelDnaBackend = get_label_dna_backend("neo4j")
 
 # Redis cache TTL for label DNA (24 hours — data changes only on import)
 _LABEL_DNA_CACHE_TTL = 86400
 
 
-def configure(neo4j: Any, redis: Any = None) -> None:
-    global _neo4j_driver, _redis
+def configure(neo4j: Any, redis: Any = None, graph_backend: str = "neo4j", pg_pool: Any = None) -> None:
+    global _neo4j_driver, _redis, _pg_pool, _graph_backend, _label_dna_backend
     _neo4j_driver = neo4j
     _redis = redis
+    _pg_pool = pg_pool
+    _graph_backend = graph_backend
+    _label_dna_backend = get_label_dna_backend(graph_backend)
+
+
+def _handle() -> Any:
+    return _pg_pool if _graph_backend == "postgres" else _neo4j_driver
+
+
+def _query(name: str) -> Any:
+    """Resolve legacy Neo4j patch points while routing PostgreSQL through the family seam."""
+    return getattr(_label_dna_backend, name) if _graph_backend == "postgres" else globals()[name]
 
 
 def _add_percentages(items: list[dict[str, Any]], total: int) -> list[dict[str, Any]]:
@@ -108,7 +124,7 @@ async def _build_dna(label_id: str) -> tuple[LabelDNA | None, str]:
         except Exception:
             logger.debug("⚠️ Label DNA _build_dna cache get failed", key=cache_key)
 
-    profile = await get_label_full_profile(_neo4j_driver, label_id)
+    profile = await _query("get_label_full_profile")(_handle(), label_id)
     if not profile:
         return None, "not_found"
 
@@ -122,9 +138,9 @@ async def _build_dna(label_id: str) -> tuple[LabelDNA | None, str]:
     decades = profile["decades"]
 
     active_years, formats, media = await asyncio.gather(
-        get_label_active_years(_neo4j_driver, label_id),
-        get_label_format_profile(_neo4j_driver, label_id),
-        get_label_media_profile(_neo4j_driver, label_id),
+        _query("get_label_active_years")(_handle(), label_id),
+        _query("get_label_format_profile")(_handle(), label_id),
+        _query("get_label_media_profile")(_handle(), label_id),
     )
 
     # Artist diversity: unique artists / total releases (capped at 1.0)
@@ -179,7 +195,7 @@ async def label_dna(
     label_id: str,
 ) -> JSONResponse:
     """Get the full DNA fingerprint for a label."""
-    if not _neo4j_driver:
+    if not _handle():
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     # _build_dna already checks and populates the Redis cache — no redundant lookup here
@@ -207,7 +223,7 @@ async def similar_labels(
     limit: int = Query(10, ge=1, le=50),
 ) -> JSONResponse:
     """Find labels with the closest DNA fingerprint to the given label."""
-    if not _neo4j_driver:
+    if not _handle():
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     # Check Redis cache first (keyed by label_id + limit)
@@ -220,7 +236,7 @@ async def similar_labels(
         except Exception:
             logger.debug("⚠️ Label similar cache get failed", key=cache_key)
 
-    identity = await get_label_identity(_neo4j_driver, label_id)
+    identity = await _query("get_label_identity")(_handle(), label_id)
     if not identity:
         return JSONResponse(content={"error": f"Label '{label_id}' not found"}, status_code=404)
 
@@ -231,8 +247,8 @@ async def similar_labels(
         )
 
     target_genres, candidates = await asyncio.gather(
-        get_label_genre_profile(_neo4j_driver, label_id),
-        get_candidate_labels_genre_vectors(_neo4j_driver, label_id),
+        _query("get_label_genre_profile")(_handle(), label_id),
+        _query("get_candidate_labels_genre_vectors")(_handle(), label_id),
     )
 
     ranked = compute_similar_labels(target_genres, candidates, limit=limit)
@@ -261,7 +277,7 @@ async def compare_labels(
     ids: str = Query(..., description="Comma-separated label IDs (2-5)"),
 ) -> JSONResponse:
     """Side-by-side DNA comparison of multiple labels."""
-    if not _neo4j_driver:
+    if not _handle():
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     label_ids = [lid.strip() for lid in ids.split(",") if lid.strip()]

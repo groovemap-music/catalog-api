@@ -381,6 +381,137 @@ CREDITS_RELEASES: dict[str, dict[str, Any]] = {
 }
 
 
+# ── The label-DNA component (gm-catalog-api-dl8.2) ──────────────────────────
+# This component is intentionally disconnected from autocomplete labels 401-403 and the
+# credits labels 502-503. Its target has six releases, so every full-profile query runs;
+# the candidate has five releases sharing a style, so the two-phase similarity query has
+# a real result; the low-release label proves the MIN_RELEASES short-circuit; and the
+# fallback label has a media family but no ISSUED_ON edge.
+LABEL_DNA_TARGET_ID = "1101"
+LABEL_DNA_CANDIDATE_ID = "1102"
+LABEL_DNA_LOW_RELEASE_ID = "1103"
+LABEL_DNA_FALLBACK_ID = "1104"
+
+LABEL_DNA_LABELS: dict[str, str] = {
+    LABEL_DNA_TARGET_ID: "Label DNA Target",
+    LABEL_DNA_CANDIDATE_ID: "Label DNA Candidate",
+    LABEL_DNA_LOW_RELEASE_ID: "Label DNA Tiny",
+    LABEL_DNA_FALLBACK_ID: "Label DNA Fallback",
+}
+
+LABEL_DNA_ARTISTS: dict[str, str] = {
+    "1301": "Label DNA Artist One",
+    "1302": "Label DNA Artist Two",
+}
+
+
+def _label_dna_release(
+    *,
+    year: int | None,
+    artists: list[str],
+    label: str,
+    genres: list[str],
+    styles: list[str],
+    formats: list[str],
+    families: list[str],
+    items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "year": year,
+        "artists": artists,
+        "label": label,
+        "genres": genres,
+        "styles": styles,
+        "formats": formats,
+        "media": {"families": families, "items": items},
+    }
+
+
+LABEL_DNA_RELEASES: dict[str, dict[str, Any]] = {
+    **{
+        str(1201 + index): _label_dna_release(
+            year=1991 + index if index < 5 else None,
+            artists=["1301"] if index < 3 else ["1302"],
+            label=LABEL_DNA_TARGET_ID,
+            genres=["Electronic"] if index < 4 else ["Jazz"],
+            styles=["Label DNA Shared Style"],
+            formats=["Vinyl"] if index < 4 else ["CD"],
+            families=["vinyl"] if index < 4 else ["optical"],
+            items=[
+                {
+                    "medium": "vinyl_12" if index < 4 else "optical_cd",
+                    "family": "vinyl" if index < 4 else "optical",
+                    "label": '12" vinyl' if index < 4 else "CD",
+                }
+            ],
+        )
+        for index in range(6)
+    },
+    **{
+        str(1211 + index): _label_dna_release(
+            year=2001 + index,
+            artists=["1301"],
+            label=LABEL_DNA_CANDIDATE_ID,
+            genres=["Electronic"] if index < 4 else ["Ambient"],
+            styles=["Label DNA Shared Style"],
+            formats=["Vinyl"],
+            families=[],
+            items=[],
+        )
+        for index in range(5)
+    },
+    "1221": _label_dna_release(
+        year=2010,
+        artists=["1301"],
+        label=LABEL_DNA_LOW_RELEASE_ID,
+        genres=["Rock"],
+        styles=["Label DNA Tiny Style"],
+        formats=["Vinyl"],
+        families=[],
+        items=[],
+    ),
+    "1222": _label_dna_release(
+        year=2011,
+        artists=["1302"],
+        label=LABEL_DNA_LOW_RELEASE_ID,
+        genres=["Rock"],
+        styles=["Label DNA Tiny Style"],
+        formats=["CD"],
+        families=[],
+        items=[],
+    ),
+    "1231": _label_dna_release(
+        year=2015,
+        artists=["1301"],
+        label=LABEL_DNA_FALLBACK_ID,
+        genres=["Ambient"],
+        styles=["Label DNA Fallback Style"],
+        formats=["Vinyl"],
+        families=["vinyl"],
+        items=[],
+    ),
+}
+
+
+def label_dna_edges(field: str, endpoint: str) -> list[dict[str, str]]:
+    """Flatten one list-valued label-DNA release field into Neo4j seed rows."""
+    return [{"release_id": release_id, endpoint: str(value)} for release_id, release in LABEL_DNA_RELEASES.items() for value in release[field]]
+
+
+def label_dna_media_edges() -> list[dict[str, str]]:
+    """Return canonical media rows with labels for Neo4j's shared vertices."""
+    return [
+        {
+            "release_id": release_id,
+            "medium_id": str(item["medium"]),
+            "family": str(item["family"]),
+            "label": str(item["label"]),
+        }
+        for release_id, release in LABEL_DNA_RELEASES.items()
+        for item in release["media"]["items"]
+    ]
+
+
 def _release_document(release_id: str, release: dict[str, Any]) -> dict[str, Any]:
     """Render one credits release as the Discogs document both sides are projected from."""
     return {
@@ -443,6 +574,7 @@ _BOOTSTRAP_FILL = "SELECT relation, row_count FROM graph.bootstrap_fill()"
 _SEED_ARTIST = "INSERT INTO artists (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
 _SEED_LABEL = "INSERT INTO labels (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
 _SEED_RELEASE = "INSERT INTO releases (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
+_SEED_LABEL_DNA_RELEASE = "INSERT INTO releases (data_id, hash, data, media) VALUES (%s, %s, %s::jsonb, %s::jsonb)"
 _SEED_MASTER = "INSERT INTO masters (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
 
 _SEED_NEO4J = """
@@ -549,6 +681,49 @@ MATCH (a:Artist {id: credit.artist_id})
 MERGE (p)-[:SAME_AS]->(a)
 """
 
+# ── The label-DNA component's Neo4j half (gm-catalog-api-dl8.2) ─────────────
+_SEED_NEO4J_LABEL_DNA_ENTITIES = """
+UNWIND $labels AS label
+MERGE (l:Label {id: label.id})
+SET l.name = label.name,
+    l.release_count = label.release_count,
+    l.artist_count = label.artist_count
+WITH count(*) AS _labels
+UNWIND $artists AS artist
+MERGE (a:Artist {id: artist.id}) SET a.name = artist.name
+WITH count(*) AS _artists
+UNWIND $releases AS release
+MERGE (r:Release {id: release.id})
+SET r.title = release.title,
+    r.year = release.year,
+    r.formats = release.formats,
+    r.media_families = release.media_families
+"""
+
+_SEED_NEO4J_LABEL_DNA_GENRE = """
+UNWIND $edges AS edge
+MATCH (r:Release {id: edge.release_id})
+MERGE (genre:Genre {name: edge.name})
+MERGE (r)-[:IS]->(genre)
+"""
+
+_SEED_NEO4J_LABEL_DNA_STYLE = """
+UNWIND $edges AS edge
+MATCH (r:Release {id: edge.release_id})
+MERGE (style:Style {name: edge.name})
+MERGE (r)-[:IS]->(style)
+"""
+
+_SEED_NEO4J_LABEL_DNA_MEDIA = """
+UNWIND $edges AS edge
+MATCH (r:Release {id: edge.release_id})
+MERGE (m:Medium {id: edge.medium_id})
+SET m.family = edge.family, m.label = edge.label
+MERGE (f:MediaFamily {name: edge.family})
+MERGE (r)-[:ISSUED_ON]->(m)
+MERGE (m)-[:IN_FAMILY]->(f)
+"""
+
 # Lucene indexes are populated in the background, so a search issued the moment the seed
 # commits can read an index that is still building and answer with fewer rows than the
 # graph holds. Every full-text call in the suite is downstream of this.
@@ -634,6 +809,43 @@ async def seed_neo4j(driver: AsyncResilientNeo4jDriver) -> None:
     await consume(driver, _SEED_NEO4J_CREDITED_ON, credits=credit_edges())
     await consume(driver, _SEED_NEO4J_SAME_AS, credits=same_as_edges())
     # ── end credits component ────────────────────────────────────────────────
+    # ── label-DNA component (gm-catalog-api-dl8.2) ──────────────────────────
+    await consume(
+        driver,
+        _SEED_NEO4J_LABEL_DNA_ENTITIES,
+        labels=[
+            {
+                "id": label_id,
+                "name": name,
+                "release_count": sum(release["label"] == label_id for release in LABEL_DNA_RELEASES.values()),
+                "artist_count": len(
+                    {artist_id for release in LABEL_DNA_RELEASES.values() if release["label"] == label_id for artist_id in release["artists"]}
+                ),
+            }
+            for label_id, name in LABEL_DNA_LABELS.items()
+        ],
+        artists=[{"id": artist_id, "name": name} for artist_id, name in LABEL_DNA_ARTISTS.items()],
+        releases=[
+            {
+                "id": release_id,
+                "title": f"Label DNA Release {release_id}",
+                "year": release["year"],
+                "formats": release["formats"],
+                "media_families": release["media"]["families"],
+            }
+            for release_id, release in LABEL_DNA_RELEASES.items()
+        ],
+    )
+    await consume(driver, _SEED_NEO4J_BY, edges=label_dna_edges("artists", "artist_id"))
+    await consume(
+        driver,
+        _SEED_NEO4J_ON,
+        edges=[{"release_id": release_id, "label_id": release["label"]} for release_id, release in LABEL_DNA_RELEASES.items()],
+    )
+    await consume(driver, _SEED_NEO4J_LABEL_DNA_GENRE, edges=label_dna_edges("genres", "name"))
+    await consume(driver, _SEED_NEO4J_LABEL_DNA_STYLE, edges=label_dna_edges("styles", "name"))
+    await consume(driver, _SEED_NEO4J_LABEL_DNA_MEDIA, edges=label_dna_media_edges())
+    # ── end label-DNA component ─────────────────────────────────────────────
     await consume(driver, _AWAIT_NEO4J_INDEXES)
 
 
@@ -681,6 +893,26 @@ async def seed_postgres(pool: AsyncPostgreSQLPool) -> None:
         for release_id, release in CREDITS_RELEASES.items():
             await cursor.execute(_SEED_RELEASE, (release_id, "parity-fixture", json.dumps(_release_document(release_id, release))))
         # ── end credits component ────────────────────────────────────────────
+        # ── label-DNA component (gm-catalog-api-dl8.2) ──────────────────────
+        for artist_id, name in LABEL_DNA_ARTISTS.items():
+            await cursor.execute(_SEED_ARTIST, (artist_id, "parity-fixture", json.dumps({"name": name})))
+        for label_id, name in LABEL_DNA_LABELS.items():
+            await cursor.execute(_SEED_LABEL, (label_id, "parity-fixture", json.dumps({"name": name})))
+        for release_id, release in LABEL_DNA_RELEASES.items():
+            document = {
+                "title": f"Label DNA Release {release_id}",
+                "year": release["year"],
+                "artists": [{"id": int(artist_id)} for artist_id in release["artists"]],
+                "labels": [{"id": int(release["label"])}],
+                "genres": release["genres"],
+                "styles": release["styles"],
+                "formats": [{"name": name} for name in release["formats"]],
+            }
+            await cursor.execute(
+                _SEED_LABEL_DNA_RELEASE,
+                (release_id, "parity-fixture", json.dumps(document), json.dumps(release["media"])),
+            )
+        # ── end label-DNA component ─────────────────────────────────────────
         await cursor.execute(_BOOTSTRAP_FILL)
         await cursor.fetchall()
 

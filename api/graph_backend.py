@@ -40,6 +40,8 @@ from api.queries import (
     credits_queries,
     gap_pg_queries,
     gap_queries,
+    label_dna_pg_queries,
+    label_dna_queries,
     neo4j_pg_queries,
     neo4j_queries,
     network_pg_queries,
@@ -221,6 +223,25 @@ class CreditsBackend(Protocol):
 
 _NEO4J_CREDITS: CreditsBackend = credits_queries
 _POSTGRES_CREDITS: CreditsBackend = credits_pg_queries
+
+
+class LabelDnaBackend(Protocol):
+    async def get_label_identity(self, handle: Any, label_id: str, /) -> dict[str, Any] | None: ...
+    async def get_label_genre_profile(self, handle: Any, label_id: str, /) -> list[dict[str, Any]]: ...
+    async def get_label_style_profile(self, handle: Any, label_id: str, /) -> list[dict[str, Any]]: ...
+    async def get_label_decade_profile(self, handle: Any, label_id: str, /) -> list[dict[str, Any]]: ...
+    async def get_label_active_years(self, handle: Any, label_id: str, /) -> list[int]: ...
+    async def get_label_format_profile(self, handle: Any, label_id: str, /) -> list[dict[str, Any]]: ...
+    async def get_label_media_family_counts(self, handle: Any, label_id: str, /) -> list[dict[str, Any]]: ...
+    async def get_label_medium_counts(self, handle: Any, label_id: str, /) -> list[dict[str, Any]]: ...
+    async def get_label_media_families_fallback(self, handle: Any, label_id: str, /) -> list[dict[str, Any]]: ...
+    async def get_label_media_profile(self, handle: Any, label_id: str, /) -> list[dict[str, Any]]: ...
+    async def get_label_full_profile(self, handle: Any, label_id: str, /) -> dict[str, Any] | None: ...
+    async def get_candidate_labels_genre_vectors(self, handle: Any, label_id: str, /) -> list[dict[str, Any]]: ...
+
+
+_NEO4J_LABEL_DNA: LabelDnaBackend = label_dna_queries
+_POSTGRES_LABEL_DNA: LabelDnaBackend = label_dna_pg_queries
 # ── end credits family ───────────────────────────────────────────────────────────────────
 
 
@@ -258,6 +279,10 @@ _FAMILY_BACKENDS: dict[str, dict[str, ModuleType]] = {
     "credits": {
         "neo4j": credits_queries,
         "postgres": credits_pg_queries,
+    },
+    "label_dna": {
+        "neo4j": label_dna_queries,
+        "postgres": label_dna_pg_queries,
     },
     # ── end credits family ───────────────────────────────────────────────────
 }
@@ -348,6 +373,10 @@ def get_credits_backend(backend: str) -> CreditsBackend:
     bound to `CreditsBackend` above, which is where mypy checks them.
     """
     return cast("CreditsBackend", get_backend("credits", backend))
+
+
+def get_label_dna_backend(backend: str) -> LabelDnaBackend:
+    return cast("LabelDnaBackend", get_backend("label_dna", backend))
 
 
 # ── end credits family ───────────────────────────────────────────────────────
