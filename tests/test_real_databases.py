@@ -35,6 +35,7 @@ from api.graph_backend import (
     InsightsBackend,
     MusicBrainzBackend,
     OneHopCollaboratorsBackend,
+    PathsBackend,
     RarityBackend,
     get_backend,
     musicbrainz_handles,
@@ -104,9 +105,8 @@ async def postgres_pool() -> AsyncIterator[AsyncPostgreSQLPool]:
     """Apply the real PostgreSQL schema to the integration container, then reset it.
 
     The schema comes from ``groovemap_schema.postgres.create_postgres_schema``, pinned as
-    a dev dependency on database-schema revision
-    ``ea36cfa66672cb1e3f565165fea56d01b9b19c95`` — the same producer revision
-    ``contracts/persistence/v1/source.json`` records this repository as tested against.
+    a dev dependency pinned to a reviewed database-schema revision. The promoted persistence
+    compatibility artifact remains independently traced by ``contracts/persistence/v1/source.json``.
     Applying the producer's own DDL is what keeps the fixture from drifting behind the
     tables the syncer, identity, and projection paths read; a hand-rolled subset is what
     let ``provider_aliases`` go missing after ADR 0009.
@@ -734,6 +734,45 @@ EXPECTED_DIFFERENCES.update(
     }
 )
 # ── end musicbrainz family ───────────────────────────────────────────────────
+
+
+# ── The paths family (gm-catalog-api-wpku.4) ─────────────────────────────────
+PATH_CALLS: tuple[ParityCall, ...] = (
+    *(
+        ParityCall(
+            "find_shortest_path",
+            (graph_fixture.PATH_ANCHOR_ARTIST_ID, target_id),
+            {"max_depth": distance, "from_type": "artist", "to_type": target_type},
+        )
+        for distance, (target_type, target_id) in enumerate(graph_fixture.PATH_DISTANCE_TARGETS, start=1)
+    ),
+    ParityCall(
+        "find_shortest_path",
+        (graph_fixture.PATH_ANCHOR_ARTIST_ID, graph_fixture.PATH_UNREACHABLE_ARTIST_ID),
+        {"max_depth": 10, "from_type": "artist", "to_type": "artist"},
+    ),
+    *(
+        ParityCall("find_shortest_path", (left_id, right_id), {"max_depth": 1, "from_type": left_type, "to_type": right_type})
+        for source_type, source_id, target_type, target_id in (
+            ("release", "1301", "artist", graph_fixture.PATH_ANCHOR_ARTIST_ID),
+            ("release", "731", "label", graph_fixture.RARITY_LABEL_ID),
+            ("release", "731", "genre", graph_fixture.RARITY_GENRE_NAME),
+            ("release", "731", "master", graph_fixture.RARITY_MASTER_ID),
+            ("artist", "1", "artist", "2"),
+            ("artist", graph_fixture.PATH_ALIAS_ARTIST_ID, "artist", "1204"),
+        )
+        for left_type, left_id, right_type, right_id in (
+            (source_type, source_id, target_type, target_id),
+            (target_type, target_id, source_type, source_id),
+        )
+    ),
+    ParityCall("get_explore_traversal", ("artist", graph_fixture.PATH_ANCHOR_ARTIST_ID), {"hops": 2, "row_limit": 100}),
+    ParityCall("get_explore_traversal", ("artist", graph_fixture.PATH_ANCHOR_ARTIST_ID), {"hops": 3, "row_limit": 100}),
+)
+
+register_parity_family("paths", PATH_CALLS, requires_property_graph=False)
+FAMILY_PROTOCOLS["paths"] = PathsBackend
+# ── end paths family ─────────────────────────────────────────────────────────
 
 
 # ── The rarity family (gm-catalog-api-wpku.1) ────────────────────────────────

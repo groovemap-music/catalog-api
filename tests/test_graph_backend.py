@@ -26,6 +26,7 @@ from api.graph_backend import (
     get_collaborators_backend,
     get_insights_backend,
     get_musicbrainz_backend,
+    get_paths_backend,
     is_graph_backend_unavailable,
     is_graph_query_timeout,
     verify_postgres_graph_backend,
@@ -39,6 +40,8 @@ from api.queries import (
     musicbrainz_queries,
     network_pg_queries,
     network_queries,
+    paths_pg_queries,
+    paths_queries,
 )
 from tests.fake_postgres import FakePool
 
@@ -107,6 +110,12 @@ class TestGetBackend:
         assert get_backend("musicbrainz", "postgres") is musicbrainz_pg_queries
         assert get_musicbrainz_backend("neo4j") is musicbrainz_queries
         assert get_musicbrainz_backend("postgres") is musicbrainz_pg_queries
+
+    def test_paths_family_resolves_to_both_implementations(self) -> None:
+        assert get_backend("paths", "neo4j") is paths_queries
+        assert get_backend("paths", "postgres") is paths_pg_queries
+        assert get_paths_backend("neo4j") is paths_queries
+        assert get_paths_backend("postgres") is paths_pg_queries
 
     @pytest.mark.asyncio
     async def test_the_neo4j_autocomplete_module_delegates_rather_than_re_exporting(self) -> None:

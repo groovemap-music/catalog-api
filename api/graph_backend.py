@@ -46,6 +46,8 @@ from api.queries import (
     neo4j_queries,
     network_pg_queries,
     network_queries,
+    paths_pg_queries,
+    paths_queries,
     rarity_pg_queries,
     rarity_queries,
 )
@@ -275,6 +277,23 @@ _POSTGRES_MUSICBRAINZ: MusicBrainzBackend = musicbrainz_pg_queries
 # ── end musicbrainz family ───────────────────────────────────────────────────
 
 
+class PathsBackend(Protocol):
+    """The two bounded variable-length traversals."""
+
+    async def find_shortest_path(
+        self, handle: Any, from_id: str, to_id: str, max_depth: int = 6, from_type: str = "", to_type: str = ""
+    ) -> dict[str, Any] | None: ...
+
+    async def get_explore_traversal(
+        self, handle: Any, entity_type: str, entity_id: str, hops: int = 2, row_limit: int = 100
+    ) -> list[dict[str, Any]]: ...
+
+
+_NEO4J_PATHS: PathsBackend = paths_queries
+_POSTGRES_PATHS: PathsBackend = paths_pg_queries
+# ── end paths family ─────────────────────────────────────────────────────────
+
+
 # family name -> backend name -> module implementing that family's query functions.
 _FAMILY_BACKENDS: dict[str, dict[str, ModuleType]] = {
     "collaborators": {
@@ -316,6 +335,10 @@ _FAMILY_BACKENDS: dict[str, dict[str, ModuleType]] = {
     "musicbrainz": {
         "neo4j": musicbrainz_queries,
         "postgres": musicbrainz_pg_queries,
+    },
+    "paths": {
+        "neo4j": paths_queries,
+        "postgres": paths_pg_queries,
     },
 }
 
@@ -410,6 +433,11 @@ def get_insights_backend(backend: str) -> InsightsBackend:
 def get_musicbrainz_backend(backend: str) -> MusicBrainzBackend:
     """Resolve the "musicbrainz" family for *backend*, typed rather than as a module."""
     return cast("MusicBrainzBackend", get_backend("musicbrainz", backend))
+
+
+def get_paths_backend(backend: str) -> PathsBackend:
+    """Resolve the "paths" family for *backend*, typed rather than as a module."""
+    return cast("PathsBackend", get_backend("paths", backend))
 
 
 def musicbrainz_handles(backend: str, neo4j: Any, pg_pool: Any) -> MusicBrainzHandles:

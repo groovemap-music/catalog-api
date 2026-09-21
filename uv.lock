@@ -672,7 +672,7 @@ dev = [
     { name = "commitizen", specifier = ">=4.18.0" },
     { name = "cyclonedx-bom", specifier = ">=7.3.1" },
     { name = "fakeredis", specifier = ">=2.37.1" },
-    { name = "groovemap-database-schema", git = "https://github.com/groovemap-music/database-schema.git?rev=ea36cfa66672cb1e3f565165fea56d01b9b19c95" },
+    { name = "groovemap-database-schema", git = "https://github.com/groovemap-music/database-schema.git?rev=4b154de2a85ff6feb88eebbde75e1830772cb456" },
     { name = "hypothesis", specifier = ">=6.167.1" },
     { name = "mypy", specifier = ">=2.3.1" },
     { name = "pip-audit", specifier = ">=2.10.1" },
@@ -691,7 +691,7 @@ dev = [
 [[package]]
 name = "groovemap-database-schema"
 version = "0.3.0"
-source = { git = "https://github.com/groovemap-music/database-schema.git?rev=ea36cfa66672cb1e3f565165fea56d01b9b19c95#ea36cfa66672cb1e3f565165fea56d01b9b19c95" }
+source = { git = "https://github.com/groovemap-music/database-schema.git?rev=4b154de2a85ff6feb88eebbde75e1830772cb456#4b154de2a85ff6feb88eebbde75e1830772cb456" }
 dependencies = [
     { name = "groovemap-runtime", extra = ["neo4j", "otel", "postgres"] },
     { name = "psycopg", extra = ["binary"] },
