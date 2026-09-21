@@ -17,7 +17,7 @@ read -r -a integration_targets <<< "${INTEGRATION_TEST_TARGET:-tests/test_real_d
 property_graph="${SCHEMA_PROPERTY_GRAPH:-}"
 
 cleanup() {
-    docker rm --force "${postgres_container}" "${neo4j_container}" >/dev/null 2>&1 || true
+    docker rm --force --volumes "${postgres_container}" "${neo4j_container}" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 

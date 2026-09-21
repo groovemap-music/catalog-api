@@ -162,7 +162,7 @@ async def get_user_recommendations(
     RETURN rec.id AS id, rec.title AS title, rec.year AS year,
            artist_name AS artist, label_name AS label,
            genres, score
-    ORDER BY score DESC
+    ORDER BY score DESC, rec.id
     LIMIT $limit
     """
     return await run_query(driver, cypher, user_id=user_id, limit=limit)
