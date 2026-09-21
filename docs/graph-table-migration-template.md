@@ -175,7 +175,8 @@ Three things follow from registering first:
 
 ### Declaring an expected difference
 
-`EXPECTED_DIFFERENCES` is a plain mapping in the same module, keyed by `(family, function)`:
+`EXPECTED_DIFFERENCES` is a plain mapping in the same module. A `(family, function)` key
+applies to every call of that function:
 
 ```python
 ("label_dna", "get_label_profile"): ExpectedDifference(
@@ -189,6 +190,9 @@ is tolerated instead of switching the assertion off. The harness fails on any di
 not declared — and names the mapping when it does — and it also fails on a declaration whose
 difference did not materialise, so a tolerance cannot outlive the behaviour it was granted for.
 The collaborators family reaches column-for-column agreement with no entry, which is the bar.
+When only one fixture question differs, key the entry by `(family, str(call))` instead. The
+rendered-call key is checked first, so an accepted non-empty divergence cannot accidentally
+tolerate an empty or filtering call that should still agree exactly.
 
 ### The fixture
 

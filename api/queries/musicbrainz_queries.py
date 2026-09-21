@@ -1,18 +1,18 @@
-"""Query functions for MusicBrainz enrichment data."""
+"""Neo4j implementation of the MusicBrainz enrichment read family."""
 
-from typing import Any
+from typing import Any, cast
 
 from common.query_debug import execute_sql
 from psycopg import sql
-from psycopg.rows import dict_row
 
 from api.queries.helpers import run_query, run_single
+from api.queries.musicbrainz_pipeline import MusicBrainzHandles
 
 
-async def get_artist_musicbrainz(neo4j_driver: Any, discogs_id: int | str) -> dict[str, Any] | None:
+async def get_artist_musicbrainz(handles: MusicBrainzHandles, discogs_id: int | str) -> dict[str, Any] | None:
     """Fetch MusicBrainz metadata for a Discogs artist from Neo4j."""
     row = await run_single(
-        neo4j_driver,
+        handles.graph,
         """MATCH (a:Artist {id: $discogs_id})
            WHERE a.mbid IS NOT NULL
            RETURN a.mbid AS mbid, a.mb_type AS type, a.mb_gender AS gender,
@@ -23,23 +23,13 @@ async def get_artist_musicbrainz(neo4j_driver: Any, discogs_id: int | str) -> di
     )
     if not row:
         return None
-    return {
-        "discogs_id": discogs_id,
-        "mbid": row["mbid"],
-        "type": row["type"],
-        "gender": row["gender"],
-        "begin_date": row["begin_date"],
-        "end_date": row["end_date"],
-        "area": row["area"],
-        "begin_area": row["begin_area"],
-        "disambiguation": row["disambiguation"],
-    }
+    return {"discogs_id": discogs_id, **row}
 
 
-async def get_artist_mb_relationships(neo4j_driver: Any, discogs_id: int | str) -> list[dict[str, Any]]:
+async def get_artist_mb_relationships(handles: MusicBrainzHandles, discogs_id: int | str) -> list[dict[str, Any]]:
     """Fetch MusicBrainz-sourced relationships for a Discogs artist from Neo4j."""
     return await run_query(
-        neo4j_driver,
+        handles.graph,
         """MATCH (a:Artist {id: $discogs_id})-[r]->(target:Artist)
            WHERE r.source = 'musicbrainz'
            RETURN type(r) AS type, target.id AS target_id, target.name AS target_name,
@@ -50,75 +40,58 @@ async def get_artist_mb_relationships(neo4j_driver: Any, discogs_id: int | str) 
            WHERE r.source = 'musicbrainz'
            RETURN type(r) AS type, source.id AS target_id, source.name AS target_name,
                   'incoming' AS direction, r.begin_date AS begin_date,
-                  r.end_date AS end_date, r.attributes AS attributes""",
+                  r.end_date AS end_date, r.attributes AS attributes
+           ORDER BY type, target_id, direction, begin_date, end_date, attributes""",
         discogs_id=discogs_id,
     )
 
 
-async def get_artist_external_links(pool: Any, discogs_id: int) -> list[dict[str, Any]]:
-    """Fetch external links for a Discogs artist from PostgreSQL."""
-    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+async def get_artist_external_links(handles: MusicBrainzHandles, discogs_id: int | str) -> list[dict[str, Any]]:
+    """Fetch external links from the relational store shared by both backends."""
+    async with handles.relational.connection() as conn, conn.cursor() as cursor_cm:
+        cursor = cast("Any", cursor_cm)
         await execute_sql(
-            cur,
-            """SELECT el.service_name AS service, el.url
-               FROM musicbrainz.external_links el
-               JOIN musicbrainz.artists a ON a.mbid = el.mbid
-               WHERE a.discogs_artist_id = %s AND el.entity_type = 'artist'
-               ORDER BY el.service_name""",
-            (discogs_id,),
+            cursor,
+            """SELECT link.service_name AS service, link.url
+               FROM musicbrainz.external_links AS link
+               JOIN musicbrainz.artists AS artist ON artist.mbid = link.mbid
+               WHERE artist.discogs_artist_id = %(discogs_id)s
+                 AND link.entity_type = 'artist'
+               ORDER BY link.service_name COLLATE "C", link.url COLLATE "C"
+            """,
+            {"discogs_id": discogs_id},
         )
-        rows: list[dict[str, Any]] = await cur.fetchall()
-        return rows
+        rows = await cursor.fetchall()
+    return [{"service": row[0], "url": row[1]} for row in rows]
 
 
-async def get_enrichment_status(pool: Any, neo4j_driver: Any) -> dict[str, Any]:
-    """Fetch enrichment coverage statistics from both databases."""
+async def get_enrichment_status(handles: MusicBrainzHandles) -> dict[str, Any]:
+    """Fetch source-table totals and Neo4j enrichment counts."""
     stats: dict[str, Any] = {"musicbrainz": {}}
+    async with handles.relational.connection() as conn, conn.cursor() as cursor_cm:
+        cursor = cast("Any", cursor_cm)
+        for entity, discogs_col in (("artists", "discogs_artist_id"), ("labels", "discogs_label_id"), ("releases", "discogs_release_id")):
+            total_query = sql.SQL("SELECT count(*) FROM musicbrainz.{table}").format(table=sql.Identifier(entity))
+            matched_query = sql.SQL("SELECT count(*) FROM musicbrainz.{table} WHERE {column} IS NOT NULL").format(
+                table=sql.Identifier(entity), column=sql.Identifier(discogs_col)
+            )
+            await cursor.execute(total_query)
+            total_row = await cursor.fetchone()
+            await cursor.execute(matched_query)
+            matched_row = await cursor.fetchone()
+            stats["musicbrainz"][entity] = {
+                "total_mb": total_row[0] if total_row else 0,
+                "matched_to_discogs": matched_row[0] if matched_row else 0,
+            }
 
-    # PostgreSQL counts
-    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        for entity in ["artists", "labels", "releases"]:
-            if entity == "releases":
-                discogs_col = "discogs_release_id"
-            elif entity == "artists":
-                discogs_col = "discogs_artist_id"
-            else:
-                discogs_col = "discogs_label_id"
+        await cursor.execute("SELECT count(*) FROM musicbrainz.relationships")
+        relationship_row = await cursor.fetchone()
+        stats["musicbrainz"]["relationships"] = {"total_in_mb": relationship_row[0] if relationship_row else 0}
 
-            # Safe: entity and discogs_col are from hardcoded lists, not user input.
-            # Using sql.Identifier for defense-in-depth.
-            total_query = sql.SQL(  # nosemgrep
-                "SELECT COUNT(*) AS total FROM {schema}.{table}"
-            ).format(schema=sql.Identifier("musicbrainz"), table=sql.Identifier(entity))
-            await cur.execute(total_query)  # nosemgrep
-            total_row = await cur.fetchone()
-            total = total_row["total"] if total_row else 0
-
-            matched_query = sql.SQL(  # nosemgrep
-                "SELECT COUNT(*) AS matched FROM {schema}.{table} WHERE {col} IS NOT NULL"
-            ).format(schema=sql.Identifier("musicbrainz"), table=sql.Identifier(entity), col=sql.Identifier(discogs_col))
-            await cur.execute(matched_query)  # nosemgrep
-            matched_row = await cur.fetchone()
-            matched = matched_row["matched"] if matched_row else 0
-
-            stats["musicbrainz"][entity] = {"total_mb": total, "matched_to_discogs": matched}
-
-        await execute_sql(cur, "SELECT COUNT(*) AS total FROM musicbrainz.relationships")
-        rel_row = await cur.fetchone()
-        stats["musicbrainz"]["relationships"] = {"total_in_mb": rel_row["total"] if rel_row else 0}
-
-    # Neo4j enrichment counts
-    for entity, label in [("artists", "Artist"), ("labels", "Label"), ("releases", "Release")]:
-        row = await run_single(
-            neo4j_driver,
-            f"MATCH (n:{label}) WHERE n.mbid IS NOT NULL RETURN COUNT(n) AS total",  # nosemgrep
-        )
+    for entity, label in (("artists", "Artist"), ("labels", "Label"), ("releases", "Release")):
+        row = await run_single(handles.graph, f"MATCH (n:{label}) WHERE n.mbid IS NOT NULL RETURN COUNT(n) AS total")  # nosemgrep
         stats["musicbrainz"][entity]["enriched_in_neo4j"] = row["total"] if row else 0
 
-    row = await run_single(
-        neo4j_driver,
-        "MATCH ()-[r]->() WHERE r.source = 'musicbrainz' RETURN COUNT(r) AS total",
-    )
+    row = await run_single(handles.graph, "MATCH ()-[r]->() WHERE r.source = 'musicbrainz' RETURN COUNT(r) AS total")
     stats["musicbrainz"]["relationships"]["created_in_neo4j"] = row["total"] if row else 0
-
     return stats

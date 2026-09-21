@@ -33,14 +33,17 @@ from api.graph_backend import (
     CollaboratorsBackend,
     GapMetadataBackend,
     InsightsBackend,
+    MusicBrainzBackend,
     OneHopCollaboratorsBackend,
     RarityBackend,
     get_backend,
+    musicbrainz_handles,
     rarity_handles,
     registered_families,
 )
 from api.queries.credits_queries import get_person_connections
 from api.queries.helpers import run_count, run_query, run_single
+from api.queries.musicbrainz_pipeline import MusicBrainzHandles
 from api.queries.rarity_pipeline import RarityHandles
 from api.syncer import DISCOGS_API_BASE, sync_collection
 from tests import graph_fixture
@@ -399,9 +402,11 @@ class ExpectedDifference:
     normalize: Callable[[Any], Any]
 
 
-# (family, function) -> the difference that is allowed to stand between its two backends.
+# (family, function-or-rendered-call) -> the difference allowed between its two backends.
 #
-# The harness fails on any divergence that is not in here, and names this mapping when it
+# A rendered-call key makes a tolerance as narrow as one fixture question; a function key
+# remains the fallback for differences (such as autocomplete scoring) that apply to every
+# call. The harness fails on any divergence that is not in here, and names this mapping when it
 # does: a diff is tolerated only once someone has written down what it is and why. It also
 # fails on an entry whose difference did not materialise, so a tolerance cannot outlive
 # the behaviour it was granted for.
@@ -436,7 +441,8 @@ def _type_shape(result: Any) -> Any:
 
 def assert_parity(family: str, call: ParityCall, *, neo4j_result: Any, postgres_result: Any) -> None:
     """Fail unless the two backends agreed, or agreed as far as a declared difference allows."""
-    declared = EXPECTED_DIFFERENCES.get((family, call.function))
+    difference_key = (family, str(call)) if (family, str(call)) in EXPECTED_DIFFERENCES else (family, call.function)
+    declared = EXPECTED_DIFFERENCES.get(difference_key)
     agrees = postgres_result == neo4j_result and _type_shape(postgres_result) == _type_shape(neo4j_result)
 
     if declared is None:
@@ -455,7 +461,7 @@ def assert_parity(family: str, call: ParityCall, *, neo4j_result: Any, postgres_
 
     if agrees:
         pytest.fail(
-            f"EXPECTED_DIFFERENCES declares a difference for ({family!r}, {call.function!r}) — "
+            f"EXPECTED_DIFFERENCES declares a difference for {difference_key!r} — "
             f"{declared.reason} — but the two backends agree on {call}. Delete the entry."
         )
 
@@ -655,6 +661,79 @@ INSIGHTS_CALLS: tuple[ParityCall, ...] = (
 register_parity_family("insights", INSIGHTS_CALLS, requires_property_graph=False)
 FAMILY_PROTOCOLS["insights"] = InsightsBackend
 # ── end insights family ──────────────────────────────────────────────────────
+
+
+# ── The musicbrainz family (gm-catalog-api-wpku.3) ─────────────────────────
+def _musicbrainz_handle(backend: str, backends: graph_fixture.ParityBackends) -> MusicBrainzHandles:
+    return musicbrainz_handles(backend, backends.neo4j, backends.postgres)
+
+
+MUSICBRAINZ_CALLS: tuple[ParityCall, ...] = (
+    ParityCall("get_artist_musicbrainz", (graph_fixture.ANCHOR_ARTIST_ID,)),
+    ParityCall("get_artist_musicbrainz", ("999999",)),
+    ParityCall("get_artist_mb_relationships", (graph_fixture.ANCHOR_ARTIST_ID,)),
+    ParityCall("get_artist_mb_relationships", ("2",)),
+    ParityCall("get_artist_mb_relationships", ("999999",)),
+    ParityCall("get_artist_external_links", (graph_fixture.ANCHOR_ARTIST_ID,)),
+    ParityCall("get_artist_external_links", ("999999",)),
+    ParityCall("get_enrichment_status"),
+)
+
+# Spike gm-database-schema-9c8.2, "The MusicBrainz relationship-type vocabulary" and
+# "Unbound relationship patterns", predicted two differences before the loader molecules
+# landed: raw relationship vocabulary and the enricher's post-MERGE source stamping. Neither
+# remains observable here. The SQL path reads the mapped `relationship_type` and filters NULL
+# mappings exactly as the enricher does; both stores expose the same stamped edge identity.
+#
+# The fidelity review found one different, production-observable mismatch that the spike did
+# not list. `musicbrainz.relationships` preserves separate instances by dates/attributes,
+# while musicbrainz-graph-enricher's MERGE key is only (source, mapped type, target) and the
+# enricher writes none of those properties. PostgreSQL intentionally returns its richer rows.
+# The narrow call-level declaration below tolerates exactly that instance/property difference;
+# it still compares mapped type, endpoint, name, and direction. The missing-artist call has no
+# declaration and must continue agreeing exactly, so the tolerance cannot hide filtering bugs.
+# The issued_on/IN_FAMILY media divergences and deletion-boundary assumptions recorded by
+# the loader review do not intersect any of these four reads, so they remain loader
+# carry-forwards rather than parity exceptions here. These statements use phase-0 views and
+# therefore run on PostgreSQL 18 too; GRAPH_BACKEND=postgres startup still independently
+# requires graph.catalog through verify_postgres_graph_backend.
+register_parity_family("musicbrainz", MUSICBRAINZ_CALLS, requires_property_graph=False, handle=_musicbrainz_handle)
+FAMILY_PROTOCOLS["musicbrainz"] = MusicBrainzBackend
+
+
+def _musicbrainz_edge_identities(rows: Any) -> list[dict[str, Any]]:
+    """Collapse relationship instances to the edge identity Neo4j's MERGE retains."""
+    identities = {(row["type"], row["target_id"], row["target_name"], row["direction"]) for row in rows}
+    return [
+        {
+            "type": relationship_type,
+            "target_id": target_id,
+            "target_name": target_name,
+            "direction": direction,
+            "begin_date": None,
+            "end_date": None,
+            "attributes": None,
+        }
+        for relationship_type, target_id, target_name, direction in sorted(identities)
+    ]
+
+
+_MB_INSTANCE_DIFFERENCE = ExpectedDifference(
+    reason=(
+        "PostgreSQL preserves MusicBrainz relationship instances and their dates/attributes; "
+        "the production Neo4j enricher MERGEs by mapped type and endpoints and writes only source "
+        "(fidelity finding following gm-database-schema-9c8.2)"
+    ),
+    normalize=_musicbrainz_edge_identities,
+)
+EXPECTED_DIFFERENCES.update(
+    {
+        ("musicbrainz", str(call)): _MB_INSTANCE_DIFFERENCE
+        for call in MUSICBRAINZ_CALLS
+        if call.function == "get_artist_mb_relationships" and call.args[0] != "999999"
+    }
+)
+# ── end musicbrainz family ───────────────────────────────────────────────────
 
 
 # ── The rarity family (gm-catalog-api-wpku.1) ────────────────────────────────
