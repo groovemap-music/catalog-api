@@ -621,6 +621,7 @@ class TestEventLoopMonitor:
             neo4j_host="",
             neo4j_username="",
             neo4j_password="",  # nosec B106  # test fixture value, not a real credential
+            graph_backend="neo4j",  # Isolate telemetry from the PostgreSQL startup gate.
             resend_api_key=None,
         )
 

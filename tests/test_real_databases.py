@@ -1560,3 +1560,13 @@ async def test_every_registered_family_is_either_proven_by_parity_or_explicitly_
         f"{sorted(unaccounted)} are registered in api/graph_backend.py but neither proven by "
         f"the parity harness nor listed in PARITY_EXEMPT_FAMILIES with a reason"
     )
+
+
+async def test_every_protocol_family_has_a_postgres_implementation() -> None:
+    """The default cannot flip while any protocol-backed family is missing PostgreSQL."""
+    assert frozenset(FAMILY_PROTOCOLS) == registered_families() - PARITY_EXEMPT_FAMILIES
+    for family in registered_families():
+        try:
+            get_backend(family, "postgres")
+        except KeyError:
+            pytest.fail(f"{family} has no PostgreSQL implementation")

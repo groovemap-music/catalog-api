@@ -712,6 +712,17 @@ quietly changing reachability semantics.
 
 ## Migrating the next family
 
+The default has flipped to `GRAPH_BACKEND=postgres` because every registered query family
+has a PostgreSQL implementation. The registry-completeness test enumerates
+`FAMILY_PROTOCOLS` and fails if any protocol-backed family lacks that implementation;
+the parity harness still compares its registered calls. Production startup additionally
+requires `server_version_num >= 190000` and `graph.catalog`. Deployment must select
+`GRAPH_BACKEND=postgres` explicitly, after the PostgreSQL 19 GA pin in `gm-deployment-2sb`
+lands. Until then the Beta 3 image here remains an advisory test tier, not a production
+pin. To revert the API selector, set `GRAPH_BACKEND=neo4j` explicitly and restart the API;
+retain Neo4j and its credentials during rollback. This does not alter MCP `find_path`'s
+default distance cap of 10.
+
 1. Register the family with the parity harness in `tests/test_real_databases.py` — one
    `register_parity_family` line and the calls it should be asked — and extend
    `tests/graph_fixture.py` with a component that is unambiguous under the family's own ordering.

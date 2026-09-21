@@ -1397,6 +1397,7 @@ class TestLifespanShutdownClosesAnthropicClient:
             neo4j_host="bolt://localhost:7687",
             neo4j_username="neo4j",
             neo4j_password="pw",  # nosec B106  # noqa: S106  # test fixture value, not a real credential
+            graph_backend="neo4j",
             resend_api_key=None,
         )
 

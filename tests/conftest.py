@@ -154,6 +154,7 @@ def test_api_config() -> ApiConfig:
         neo4j_host="bolt://localhost:7687",
         neo4j_username="neo4j",
         neo4j_password="testpassword",  # noqa: S106
+        graph_backend="neo4j",  # Legacy endpoint fixtures exercise the Neo4j branch explicitly.
         insights_internal_secret=TEST_INTERNAL_SECRET,
     )
 

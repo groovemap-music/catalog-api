@@ -45,7 +45,7 @@ password in the environment. Do not set both forms to conflicting values.
 | `POSTGRES_POOL_MAX_SIZE` | `8` | Maximum API pool size |
 | `NEO4J_TLS_ENABLED` | `false` | Enable Bolt TLS for a host without a TLS URI scheme |
 | `NEO4J_TLS_VERIFY` | `true` | Verify the Bolt certificate when TLS is enabled |
-| `GRAPH_BACKEND` | `neo4j` | Backend that answers graph query families (`neo4j` or `postgres`); rejected at startup if set to anything else |
+| `GRAPH_BACKEND` | `postgres` | Backend that answers graph query families (`neo4j` or `postgres`); rejected at startup if set to anything else |
 | `REDIS_HOST` | `redis://redis:6379/0` | Redis host or URL |
 | `REDIS_PASSWORD` | unset | Optional Redis password; `REDIS_PASSWORD_FILE` is supported |
 
@@ -54,32 +54,26 @@ TLS policy. Deployment-specific certificate and network guidance belongs in `dep
 
 `GRAPH_BACKEND` implements ADR 0012 (Neo4j → PostgreSQL 19 property graph migration, see
 [architecture-decisions.md](architecture-decisions.md)): a selector resolves each graph query
-family to the module implementing it for the configured backend. Leaving the variable unset —
-or setting it explicitly to `neo4j` — keeps every family on Neo4j.
-
-Setting `postgres` currently moves two families, using the API's existing PostgreSQL pool:
-
-- **collaborators**, backing `GET /api/network/artist/{id}/collaborators`, answered by SQL/PGQ
-  `GRAPH_TABLE` queries over the `graph.catalog` property graph.
-- **autocomplete**, backing `GET /api/autocomplete` and `GET /api/credits/autocomplete`,
-  answered by `pg_trgm` searches over the `graph` vertex relations. Nothing in it traverses,
-  so it needs no property graph and runs on any supported server — but it does need the
-  `pg_trgm` extension, which the schema initializer creates. Its results are **ranked
-  differently** from the Neo4j ones; see
-  [The GRAPH_TABLE migration template](graph-table-migration-template.md#the-family-that-is-not-a-traversal-trigram-autocomplete).
-
-Every other family still resolves to Neo4j regardless of this setting. The natural-language
-query tool surface keeps its own Cypher autocomplete and is not affected by this variable.
-See [The GRAPH_TABLE migration template](graph-table-migration-template.md).
+family to the module implementing it for the configured backend. All registered families now
+have PostgreSQL implementations and the default is `postgres`. Set `GRAPH_BACKEND=neo4j`
+explicitly to revert all selected graph query families to Neo4j; keep the Neo4j service and
+credentials available for that rollback. The natural-language query tool surface retains its
+own Cypher autocomplete and is not affected by this selector. See
+[The GRAPH_TABLE migration template](graph-table-migration-template.md).
 
 `graph.catalog` is not present on every server: the `groovemap-database-schema` initializer
 declares it only on PostgreSQL 19 or later and only with its own `SCHEMA_PROPERTY_GRAPH` switch
 enabled. With `GRAPH_BACKEND=postgres` the API therefore checks both at startup — that
 `server_version_num` is at least `190000`, and that `graph.catalog` exists — and refuses to
-start with a message naming which condition failed. That turns a misconfiguration into one
+start with a message naming which condition failed. This is the production startup gate, and
+deployment must set `GRAPH_BACKEND=postgres` explicitly so its choice does not depend on the
+API default. That turns a misconfiguration into one
 clear line at boot rather than a missing-relation error on the first request that reaches the
-endpoint. Note that the required PostgreSQL tier for this service is 18, where the property
-graph is deliberately absent; `postgres` is usable only against the advisory 19 tier.
+endpoint. PostgreSQL 19 Beta 3 is still an advisory integration tier, not the GA deployment
+pin. Do not deploy this default until `gm-deployment-2sb` lands with a PostgreSQL 19 GA pin,
+the schema initializer enables `SCHEMA_PROPERTY_GRAPH`, and the startup gate passes. The
+required PostgreSQL 18 integration tier deliberately lacks the property graph; set
+`GRAPH_BACKEND=neo4j` when starting the API against it.
 
 ## Authentication and public URLs
 

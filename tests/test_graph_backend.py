@@ -64,8 +64,9 @@ def _config(**overrides: str) -> ApiConfig:
         return ApiConfig.from_env()
 
 
-def test_graph_backend_defaults_to_neo4j() -> None:
-    assert _config().graph_backend == "neo4j"
+def test_graph_backend_defaults_to_postgres() -> None:
+    assert ApiConfig.__dataclass_fields__["graph_backend"].default == "postgres"
+    assert _config().graph_backend == "postgres"
 
 
 @pytest.mark.parametrize("value", ["neo4j", "postgres"])
