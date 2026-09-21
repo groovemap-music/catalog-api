@@ -514,6 +514,47 @@ issuing its eleven statements over three pooled connections against Neo4j's elev
 The ratio between the two rows is the number worth watching when the catalog-scale run is
 timed: Neo4j's batch cost rose 3.2x going from one page to six, PostgreSQL's 2.2x.
 
+## Paths: procedural traversal rather than SQL/PGQ
+
+The `paths` family is the exception to the preceding `GRAPH_TABLE` examples. PostgreSQL calls
+the schema's bounded `graph.find_shortest_path` and `graph.explore_traversal` functions, then
+hydrates the compact `kind:key` path identities into the response shape the Cypher callers
+already consume. `find_shortest_path` resolves an omitted endpoint kind before invoking the
+procedure; `explore_traversal` always supplies its mandatory `row_limit`. Both searches are
+undirected over `BY`, `ON`, `IS`, `DERIVED_FROM`, `ALIAS_OF`, and `MEMBER_OF`, including the
+union of Discogs and MusicBrainz membership provenances.
+
+The public contracts did not move with the backend: shortest path defaults to 6 and clamps to
+1–10, explore defaults to 2 and clamps to 1–3, and the MCP `find_path` default remains 10. The
+fixture proves shortest-path distances 1 through 6 plus an unreachable vertex, both directions
+of every relationship type, and explore at two and three hops. There is no paths entry in
+`EXPECTED_DIFFERENCES`; node values, relationship order, and discovery order agree exactly.
+
+### Path timing and the cap-10 tradeoff
+
+The following p95 values are 20 timed calls after one warm-up on the same laptop and disposable
+containers used by `just test-integration-pg19`. They measure the small correctness fixture,
+whose alternating artist/release chain supplies one unambiguous target at each distance; they
+are regression evidence, not a production capacity estimate.
+
+| Fixture distance | Neo4j p95 | PostgreSQL p95 |
+| --- | --- | --- |
+| 1 | 14.403 ms | 11.698 ms |
+| 2 | 19.450 ms | 13.023 ms |
+| 3 | 21.922 ms | 17.619 ms |
+| 4 | 22.738 ms | 26.150 ms |
+| 5 | 27.855 ms | 24.082 ms |
+| 6 | 30.080 ms | 19.619 ms |
+
+Do not extrapolate the distance-5 and distance-6 fixture rows. The producer's
+[catalog-scale procedural-pathfinder spike](https://github.com/groovemap-music/database-schema/blob/4b154de2a85ff6feb88eebbde75e1830772cb456/docs/spikes/gm-database-schema-gkt.1-procedural-pathfinder.md)
+measured every cap-4 case at or below 11.3 ms p95, but measured the expensive rim pairs at
+1.9 seconds locally and 4.1 seconds on the IBM Cloud host. Its
+[architecture decision](https://github.com/groovemap-music/database-schema/blob/4b154de2a85ff6feb88eebbde75e1830772cb456/docs/architecture.md#the-shortest-path)
+records the owner's explicit choice to retain cap 10 for Neo4j parity despite that tail cost.
+The API therefore preserves cap 10 and surfaces the existing timeout response instead of
+quietly changing reachability semantics.
+
 ## Migrating the next family
 
 1. Register the family with the parity harness in `tests/test_real_databases.py` — one

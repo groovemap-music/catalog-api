@@ -110,6 +110,20 @@ ANCHOR_ARTIST_ID = "1"
 # The vantage point the no-revisit predicate probes are made from.
 PROBE_ANCHOR_ARTIST_ID = "8"
 
+# A disconnected six-edge chain for the procedural path family. Alternating artist and
+# release vertices gives one unambiguous target at every distance from one through six.
+PATH_ANCHOR_ARTIST_ID = "1201"
+PATH_UNREACHABLE_ARTIST_ID = "1299"
+PATH_DISTANCE_TARGETS: tuple[tuple[str, str], ...] = (
+    ("release", "1301"),
+    ("artist", "1202"),
+    ("release", "1302"),
+    ("artist", "1203"),
+    ("release", "1303"),
+    ("artist", "1204"),
+)
+PATH_ALIAS_ARTIST_ID = "1298"
+
 # The release whose third credit is what a revisiting walk reaches.
 THREE_CREDIT_RELEASE_ID = "201"
 
@@ -125,6 +139,12 @@ ARTISTS: dict[str, str] = {
     "9": "Probe Bridge",
     "10": "Probe Third Credit",
     "11": "Probe Two Hop",
+    "1201": "Path Zero",
+    "1202": "Path Two",
+    "1203": "Path Four",
+    "1204": "Path Six",
+    PATH_ALIAS_ARTIST_ID: "Path Alias",
+    PATH_UNREACHABLE_ARTIST_ID: "Path Unreachable",
 }
 
 # release id -> the artist ids credited on it.
@@ -147,6 +167,9 @@ RELEASES: dict[str, tuple[str, ...]] = {
     THREE_CREDIT_RELEASE_ID: ("8", "9", "10"),
     "202": ("8", "9"),
     "203": ("9", "11"),
+    "1301": ("1201", "1202"),
+    "1302": ("1202", "1203"),
+    "1303": ("1203", "1204"),
 }
 
 # ── Coverage spike family 1 fixture data (gm-catalog-api-91a.2) ─────────────────────────
@@ -200,6 +223,9 @@ RELEASE_YEARS: dict[str, int] = {
     THREE_CREDIT_RELEASE_ID: 1995,
     "202": 1998,
     "203": 2001,
+    "1301": 2002,
+    "1302": 2003,
+    "1303": 2004,
 }
 
 # ── The full-text component ─────────────────────────────────────────────────
@@ -810,6 +836,12 @@ MERGE (source)-[relationship:MEMBER_OF]->(target)
 SET relationship.source = 'musicbrainz'
 """
 
+_SEED_ALIAS_EDGE = """
+MATCH (alias:Artist {id: $alias_id})
+MATCH (artist:Artist {id: $artist_id})
+MERGE (alias)-[:ALIAS_OF]->(artist)
+"""
+
 # Lucene indexes are populated in the background, so a search issued the moment the seed
 # commits can read an index that is still building and answer with fewer rows than the
 # graph holds. Every full-text call in the suite is downstream of this.
@@ -1011,6 +1043,7 @@ async def seed_neo4j(driver: AsyncResilientNeo4jDriver) -> None:
         source_id="1",
         target_id="2",
     )
+    await consume(driver, _SEED_ALIAS_EDGE, alias_id=PATH_ALIAS_ARTIST_ID, artist_id="1204")
 
     await consume(driver, _AWAIT_NEO4J_INDEXES)
 
@@ -1049,6 +1082,8 @@ async def seed_postgres(pool: AsyncPostgreSQLPool) -> None:
                 # Both stores therefore count one relationship in artist_degree before
                 # the enricher stamps it as MusicBrainz, rather than creating a second edge.
                 document["groups"] = [{"id": 2, "name": ARTISTS["2"]}]
+            if artist_id == "1204":
+                document["aliases"] = [{"id": int(PATH_ALIAS_ARTIST_ID), "name": ARTISTS[PATH_ALIAS_ARTIST_ID]}]
             await cursor.execute(_SEED_ARTIST, (artist_id, "parity-fixture", json.dumps(document)))
         for label_id, name in all_labels().items():
             await cursor.execute(_SEED_LABEL, (label_id, "parity-fixture", json.dumps({"name": name})))

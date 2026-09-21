@@ -237,6 +237,34 @@ async def test_execute_find_path(runner: NLQToolRunner) -> None:
 
 
 @pytest.mark.asyncio
+async def test_execute_find_path_uses_postgres_backend_and_pool(
+    mock_neo4j_driver: MagicMock,
+    mock_pg_pool: MagicMock,
+    mock_redis_client: AsyncMock,
+) -> None:
+    """GRAPH_BACKEND=postgres routes the NLQ path call through the selected pool."""
+    runner = NLQToolRunner(mock_neo4j_driver, mock_pg_pool, mock_redis_client, graph_backend="postgres")
+    fake_result: dict[str, Any] = {"nodes": [{"id": "1", "name": "A", "labels": ["Artist"]}], "rels": []}
+    mock_find = AsyncMock(return_value=fake_result)
+
+    with patch("api.queries.paths_pg_queries.find_shortest_path", mock_find):
+        result = await runner.execute(
+            "find_path",
+            {"from_id": "1", "from_type": "artist", "to_id": "2", "to_type": "artist"},
+        )
+
+    assert result == fake_result
+    mock_find.assert_awaited_once_with(
+        mock_pg_pool,
+        "1",
+        "2",
+        max_depth=6,
+        from_type="artist",
+        to_type="artist",
+    )
+
+
+@pytest.mark.asyncio
 async def test_execute_find_path_no_path(runner: NLQToolRunner) -> None:
     """Find path returns error when no path found (None result)."""
     with patch("api.queries.neo4j_queries.find_shortest_path", new_callable=AsyncMock, return_value=None):

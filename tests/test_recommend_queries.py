@@ -814,7 +814,7 @@ class TestGetExploreTraversal:
         # And the final RETURN/ORDER BY/LIMIT must operate on the collapsed
         # per-node aggregate, not the raw per-path rows.
         assert "best.dist" in cypher
-        assert "LIMIT 100" in cypher
+        assert "LIMIT $row_limit" in cypher
 
 
 # ---------------------------------------------------------------------------
