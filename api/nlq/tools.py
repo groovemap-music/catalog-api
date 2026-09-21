@@ -657,12 +657,15 @@ class NLQToolRunner:
     async def _handle_explore_entity(self, params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:
         import common.agent_tools as agent_tools  # noqa: PLC0415
 
+        from api.graph_backend import get_explore_backend  # noqa: PLC0415
         from api.queries import neo4j_queries  # noqa: PLC0415
 
         entity_type = params.get("type", "artist")
-        handler = neo4j_queries.EXPLORE_DISPATCH.get(entity_type)
-        if handler is None:
+        if entity_type not in neo4j_queries.EXPLORE_DISPATCH:
             return {"error": f"Unknown explore type: {entity_type}"}
+        backend = get_explore_backend(self._graph_backend)
+        handler = getattr(backend, f"explore_{entity_type}") if self._graph_backend == "postgres" else neo4j_queries.EXPLORE_DISPATCH[entity_type]
+        handle = self._pool if self._graph_backend == "postgres" else self._driver
 
         tool_fn = {
             "artist": agent_tools.get_artist_details,
@@ -674,7 +677,7 @@ class NLQToolRunner:
         if tool_fn is None:
             return {"error": f"Unknown explore type: {entity_type}"}
 
-        return await tool_fn(driver=self._driver, name=params.get("name", ""), handler=handler)
+        return await tool_fn(driver=handle, name=params.get("name", ""), handler=handler)
 
     async def _handle_find_path(self, params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:
         import common.agent_tools as agent_tools  # noqa: PLC0415
@@ -760,12 +763,19 @@ class NLQToolRunner:
     async def _handle_get_trends(self, params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:
         import common.agent_tools as agent_tools  # noqa: PLC0415
 
+        from api.graph_backend import get_explore_backend  # noqa: PLC0415
         from api.queries import neo4j_queries  # noqa: PLC0415
 
         entity_type = params.get("type", "artist")
-        handler = neo4j_queries.TRENDS_DISPATCH.get(entity_type)
+        backend = get_explore_backend(self._graph_backend)
+        handler = (
+            (getattr(backend, f"trends_{entity_type}") if self._graph_backend == "postgres" else neo4j_queries.TRENDS_DISPATCH[entity_type])
+            if entity_type in neo4j_queries.TRENDS_DISPATCH
+            else None
+        )
+        handle = self._pool if self._graph_backend == "postgres" else self._driver
         return await agent_tools.get_trends(
-            driver=self._driver,
+            driver=handle,
             entity_type=entity_type,
             name=params.get("name", ""),
             handler=handler,
@@ -774,16 +784,20 @@ class NLQToolRunner:
     async def _handle_get_genre_tree(self, _params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:
         import common.agent_tools as agent_tools  # noqa: PLC0415
 
-        from api.queries import genre_tree_queries  # noqa: PLC0415
+        from api.graph_backend import get_genre_tree_backend  # noqa: PLC0415
 
-        return await agent_tools.get_genre_tree(driver=self._driver, tree_fn=genre_tree_queries.get_genre_tree)
+        backend = get_genre_tree_backend(self._graph_backend)
+        handle = self._pool if self._graph_backend == "postgres" else self._driver
+        return await agent_tools.get_genre_tree(driver=handle, tree_fn=backend.get_genre_tree)
 
     async def _handle_get_graph_stats(self, _params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:
         import common.agent_tools as agent_tools  # noqa: PLC0415
 
-        from api.queries import neo4j_queries  # noqa: PLC0415
+        from api.graph_backend import get_catalog_overview_backend  # noqa: PLC0415
 
-        return await agent_tools.get_graph_stats(driver=self._driver, stats_fn=neo4j_queries.get_graph_stats)
+        backend = get_catalog_overview_backend(self._graph_backend)
+        handle = self._pool if self._graph_backend == "postgres" else self._driver
+        return await agent_tools.get_graph_stats(driver=handle, stats_fn=backend.get_graph_stats)
 
     async def _handle_get_collection_gaps(self, params: dict[str, Any], user_id: str | None) -> dict[str, Any]:
         from api.graph_backend import get_gap_analysis_backend  # noqa: PLC0415
