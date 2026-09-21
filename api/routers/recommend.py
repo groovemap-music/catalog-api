@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 import api.activity as activity
 from api.cache import RecommendCache
 from api.dependencies import get_optional_user, require_user
+from api.graph_backend import RecommendationsBackend, TasteBackend, get_recommendations_backend, get_taste_backend
 from api.identity import NativeIdCache, catalog_ref, native_ids_for, native_ids_for_pairs
 from api.limiter import limiter
 from api.models import (
@@ -19,7 +20,7 @@ from api.models import (
     SimilarArtist,
     SimilarArtistsResponse,
 )
-from api.queries.recommend_queries import (
+from api.queries.recommend_queries import (  # noqa: F401 -- preserve legacy patch points
     MIN_ARTIST_RELEASES,
     compute_similar_artists,
     get_artist_identity,
@@ -28,7 +29,7 @@ from api.queries.recommend_queries import (
     get_explore_traversal,
     score_discoveries,
 )
-from api.queries.taste_queries import get_blind_spots, get_taste_heatmap
+from api.queries.taste_queries import get_blind_spots, get_taste_heatmap  # noqa: F401 -- legacy patch points
 
 
 logger = structlog.get_logger(__name__)
@@ -36,18 +37,43 @@ logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 _neo4j_driver: Any = None
+_pg_pool: Any = None
+_graph_backend = "neo4j"
+_taste_backend: TasteBackend = get_taste_backend("neo4j")
+_recommendations_backend: RecommendationsBackend = get_recommendations_backend("neo4j")
 _cache: RecommendCache | None = None
 
 
-def configure(neo4j: Any, jwt_secret: str | None, redis: Any | None) -> None:  # noqa: ARG001
+def configure(neo4j: Any, jwt_secret: str | None, redis: Any | None, graph_backend: str = "neo4j", pg_pool: Any = None) -> None:  # noqa: ARG001
     """Configure the recommend router with Neo4j driver, JWT secret, and Redis cache."""
-    global _neo4j_driver, _cache
+    global _neo4j_driver, _pg_pool, _graph_backend, _taste_backend, _recommendations_backend, _cache
     _neo4j_driver = neo4j
+    _pg_pool = pg_pool
+    _graph_backend = graph_backend
+    _taste_backend = get_taste_backend(graph_backend)
+    _recommendations_backend = get_recommendations_backend(graph_backend)
     if redis is not None:
         _cache = RecommendCache(redis=redis, default_ttl=3600)
 
 
 _VALID_ENTITY_TYPES = {"artist", "label", "genre", "style"}
+
+
+def _taste_handle() -> Any:
+    return _pg_pool if _graph_backend == "postgres" else _neo4j_driver
+
+
+def _taste_query(name: str) -> Any:
+    return getattr(_taste_backend, name) if _graph_backend == "postgres" else globals()[name]
+
+
+def _recommend_handle() -> Any:
+    return _pg_pool if _graph_backend == "postgres" else _neo4j_driver
+
+
+def _recommend_query(name: str) -> Any:
+    return getattr(_recommendations_backend, name) if _graph_backend == "postgres" else globals()[name]
+
 
 _SIMILARITY_CACHE_TTL = 86400  # 24 hours
 _EXPLORE_CACHE_TTL = 3600  # 1 hour
@@ -76,7 +102,7 @@ async def similar_artists(
     Open to anonymous callers, so the impression is recorded only when the caller carries
     a token: a showing the service cannot pseudonymise leaves no behavioural record.
     """
-    if not _neo4j_driver:
+    if not _recommend_handle():
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     # Check cache
@@ -88,7 +114,7 @@ async def similar_artists(
             await _record_similar_impressions(current_user, cached["similar"])
             return JSONResponse(content=cached)
 
-    identity = await get_artist_identity(_neo4j_driver, artist_id)
+    identity = await _recommend_query("get_artist_identity")(_recommend_handle(), artist_id)
     if not identity:
         return JSONResponse(content={"error": f"Artist '{artist_id}' not found"}, status_code=404)
 
@@ -99,8 +125,8 @@ async def similar_artists(
         )
 
     target_profile, candidates = await asyncio.gather(
-        get_artist_profile(_neo4j_driver, artist_id),
-        get_candidate_artists(_neo4j_driver, artist_id),
+        _recommend_query("get_artist_profile")(_recommend_handle(), artist_id),
+        _recommend_query("get_candidate_artists")(_recommend_handle(), artist_id),
     )
 
     ranked = compute_similar_artists(target_profile, candidates, limit=50)
@@ -163,8 +189,8 @@ async def explore_from_here(
     # Run traversal and user taste queries in parallel
     traversal_results, heatmap_result, blind_spots_raw = await asyncio.gather(
         get_explore_traversal(_neo4j_driver, entity_type, entity_id, hops=hops),
-        get_taste_heatmap(_neo4j_driver, user_id),
-        get_blind_spots(_neo4j_driver, user_id),
+        _taste_query("get_taste_heatmap")(_taste_handle(), user_id),
+        _taste_query("get_blind_spots")(_taste_handle(), user_id),
     )
 
     # Build flat genre vector from heatmap (aggregate across decades)

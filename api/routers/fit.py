@@ -38,6 +38,7 @@ import api.activity as activity
 from api.cache import RecommendCache
 from api.dependencies import UnifiedAuth, require_user_or_app_token
 from api.fit import compute_fit
+from api.graph_backend import FitBackend, get_fit_backend
 from api.identity import native_ids_for
 from api.limiter import limiter
 from api.models import FitProfile
@@ -51,6 +52,8 @@ router = APIRouter()
 _neo4j_driver: Any = None
 _pool: Any = None
 _cache: RecommendCache | None = None
+_graph_backend = "neo4j"
+_fit_backend: FitBackend = get_fit_backend("neo4j")
 
 # Ten minutes, matching the collection read the profile is computed from: caching the body
 # for longer than its inputs would serve a profile whose evidence the collector could
@@ -58,11 +61,13 @@ _cache: RecommendCache | None = None
 _FIT_CACHE_TTL = 600
 
 
-def configure(neo4j: Any, pool: Any, redis: Any | None) -> None:
+def configure(neo4j: Any, pool: Any, redis: Any | None, graph_backend: str = "neo4j") -> None:
     """Configure the fit router with the Neo4j driver, the PostgreSQL pool, and Redis."""
-    global _neo4j_driver, _pool, _cache
+    global _neo4j_driver, _pool, _cache, _graph_backend, _fit_backend
     _neo4j_driver = neo4j
     _pool = pool
+    _graph_backend = graph_backend
+    _fit_backend = get_fit_backend(graph_backend)
     if redis is not None:
         _cache = RecommendCache(redis=redis, default_ttl=_FIT_CACHE_TTL)
 
@@ -115,7 +120,8 @@ async def release_fit(
     profile is computed against the caller's own collection, because a fit answer about
     somebody else's shelves is not an answer.
     """
-    if not _neo4j_driver:
+    handle = _pool if _graph_backend == "postgres" else _neo4j_driver
+    if not handle:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     user_id = auth.user_id
@@ -126,11 +132,13 @@ async def release_fit(
             await _stamp_impression(user_id, cached)
             return JSONResponse(content=cached)
 
-    context = await get_release_context(_neo4j_driver, release_id)
+    context_query = _fit_backend.get_release_context if _graph_backend == "postgres" else get_release_context
+    collection_query = _fit_backend.get_collection_ids if _graph_backend == "postgres" else get_collection_ids
+    context = await context_query(handle, release_id)
     if context is None:
         return JSONResponse(content={"error": f"Release '{release_id}' not found"}, status_code=404)
 
-    collection = await get_collection_ids(_neo4j_driver, user_id, cache=_cache)
+    collection = await collection_query(handle, user_id, cache=_cache)
     profile = compute_fit(collection, context)
 
     rarity = await get_release_rarity(_pool, release_id)

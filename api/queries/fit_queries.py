@@ -299,14 +299,14 @@ async def get_release_context(driver: AsyncResilientNeo4jDriver, release_id: str
         "id": str(row.get("id")),
         "title": row.get("title"),
         "year": row.get("year"),
-        "artists": [dict(entry) for entry in row.get("artists") or []],
-        "labels": [dict(entry) for entry in row.get("labels") or []],
+        "artists": sorted((dict(entry) for entry in row.get("artists") or []), key=lambda entry: str(entry["id"])),
+        "labels": sorted((dict(entry) for entry in row.get("labels") or []), key=lambda entry: str(entry["id"])),
         "genres": [str(value) for value in row.get("genres") or [] if value],
         "styles": [str(value) for value in row.get("styles") or [] if value],
         "media_families": [str(value) for value in row.get("media_families") or [] if value],
         "master_id": str(row["master_id"]) if row.get("master_id") else None,
         "master_title": row.get("master_title"),
-        "siblings": [dict(entry) for entry in row.get("siblings") or []],
+        "siblings": sorted((dict(entry) for entry in row.get("siblings") or []), key=lambda entry: str(entry["id"])),
     }
 
 

@@ -9,6 +9,7 @@ migrating a family.
 
 from __future__ import annotations
 
+import inspect
 import os
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -31,10 +32,30 @@ from api.graph_backend import (
     CatalogOverviewBackend,
     CollaboratorIdentityBackend,
     CollaboratorsBackend,
+    CreditsBackend,
+    ExploreBackend,
+    FitBackend,
+    GapAnalysisBackend,
     GapMetadataBackend,
+    GenreTreeBackend,
+    LabelDnaBackend,
     OneHopCollaboratorsBackend,
+    RecommendationsBackend,
+    TasteBackend,
+    UserCollectionBackend,
     get_backend,
     registered_families,
+)
+from api.queries import (
+    collection_media_queries,
+    fit_queries,
+    gap_queries,
+    label_dna_pg_queries,
+    recommend_pg_queries,
+    recommend_queries,
+    release_media_queries,
+    taste_queries,
+    user_queries,
 )
 from api.queries.credits_queries import get_person_connections
 from api.queries.helpers import run_count, run_query, run_single
@@ -465,6 +486,10 @@ COLLABORATORS_CALLS: tuple[ParityCall, ...] = (
     *(ParityCall("get_multi_hop_collaborators", (anchor,), {"depth": depth, "limit": 50}) for anchor in _COLLABORATOR_ANCHORS for depth in (1, 2, 3)),
     *(ParityCall("get_multi_hop_collaborators", (graph_fixture.ANCHOR_ARTIST_ID,), {"depth": 2, "limit": limit}) for limit in (1, 4)),
     *(ParityCall("count_multi_hop_collaborators", (anchor,), {"depth": depth}) for anchor in _COLLABORATOR_ANCHORS for depth in (1, 2, 3)),
+    *(
+        ParityCall("get_artist_centrality", (anchor,))
+        for anchor in (*_COLLABORATOR_ANCHORS, graph_fixture.ALIAS_ARTIST_ID, graph_fixture.PRIMARY_ARTIST_ID, "does-not-exist")
+    ),
 )
 
 register_parity_family("collaborators", COLLABORATORS_CALLS)
@@ -524,6 +549,58 @@ CATALOG_OVERVIEW_CALLS: tuple[ParityCall, ...] = (
 register_parity_family("catalog_overview", CATALOG_OVERVIEW_CALLS, requires_property_graph=False)
 
 
+_EXPLORE_ANCHORS = {
+    "artist": (graph_fixture.LABEL_DNA_ARTISTS["1301"], "1301"),
+    "genre": ("Electronic", "Electronic"),
+    "label": (graph_fixture.LABEL_DNA_LABELS[graph_fixture.LABEL_DNA_TARGET_ID], graph_fixture.LABEL_DNA_TARGET_ID),
+    "style": ("Label DNA Shared Style", "Label DNA Shared Style"),
+}
+_EXPLORE_CHILDREN = {
+    "artist": ("releases", "labels", "aliases"),
+    "genre": ("releases", "artists", "labels", "styles"),
+    "label": ("releases", "artists", "genres"),
+    "style": ("releases", "artists", "labels", "genres"),
+}
+EXPLORE_CALLS: tuple[ParityCall, ...] = (
+    *(ParityCall(f"explore_{center}", (anchor[0],)) for center, anchor in _EXPLORE_ANCHORS.items()),
+    ParityCall("explore_artist", (graph_fixture.LABEL_DNA_ARTISTS[graph_fixture.PRIMARY_ARTIST_ID],)),
+    *(
+        ParityCall(f"expand_{center}_{child}", (_EXPLORE_ANCHORS[center][0],), {"limit": 50, "offset": 0})
+        for center, children in _EXPLORE_CHILDREN.items()
+        for child in children
+    ),
+    *(ParityCall(f"count_{center}_{child}", (_EXPLORE_ANCHORS[center][0],)) for center, children in _EXPLORE_CHILDREN.items() for child in children),
+    ParityCall("expand_artist_aliases", (graph_fixture.LABEL_DNA_ARTISTS[graph_fixture.PRIMARY_ARTIST_ID],), {"limit": 50, "offset": 0}),
+    ParityCall("count_artist_aliases", (graph_fixture.LABEL_DNA_ARTISTS[graph_fixture.PRIMARY_ARTIST_ID],)),
+    *(ParityCall(f"get_{center}_details", (anchor[1],)) for center, anchor in _EXPLORE_ANCHORS.items()),
+    ParityCall("get_release_details", ("1201",)),
+    *(ParityCall(f"trends_{center}", (anchor[0],)) for center, anchor in _EXPLORE_ANCHORS.items()),
+    ParityCall("get_genre_emergence", (2025,)),
+)
+register_parity_family("explore", EXPLORE_CALLS)
+register_parity_family("genre_tree", (ParityCall("get_genre_tree"),))
+
+
+@pytest.mark.parametrize("backend", ["neo4j", "postgres"])
+async def test_alias_fixture_proves_outgoing_alias_to_primary_direction(parity_backends: graph_fixture.ParityBackends, backend: str) -> None:
+    handle = parity_backends.postgres if backend == "postgres" else parity_backends.neo4j
+    explore = get_backend("explore", backend)
+    network = get_backend("collaborators", backend)
+    alias_name = graph_fixture.LABEL_DNA_ARTISTS[graph_fixture.ALIAS_ARTIST_ID]
+    primary_name = graph_fixture.LABEL_DNA_ARTISTS[graph_fixture.PRIMARY_ARTIST_ID]
+
+    assert (await explore.explore_artist(handle, alias_name))["alias_count"] == 1
+    assert (await explore.explore_artist(handle, primary_name))["alias_count"] == 0
+    assert await explore.count_artist_aliases(handle, alias_name) == 1
+    assert await explore.count_artist_aliases(handle, primary_name) == 0
+    assert await explore.expand_artist_aliases(handle, alias_name) == [
+        {"id": graph_fixture.PRIMARY_ARTIST_ID, "name": primary_name, "type": "artist"}
+    ]
+    assert await explore.expand_artist_aliases(handle, primary_name) == []
+    assert (await network.get_artist_centrality(handle, graph_fixture.ALIAS_ARTIST_ID))["alias_count"] == 1
+    assert (await network.get_artist_centrality(handle, graph_fixture.PRIMARY_ARTIST_ID))["alias_count"] == 0
+
+
 # The protocol each family's two backends are bound to in `api/graph_backend.py`. It is
 # what the coverage test below reads to check that registering a family did not quietly
 # leave one of its functions unproven.
@@ -533,6 +610,14 @@ FAMILY_PROTOCOLS: dict[str, type] = {
     "collaborator_identity": CollaboratorIdentityBackend,
     "gap_metadata": GapMetadataBackend,
     "catalog_overview": CatalogOverviewBackend,
+    "explore": ExploreBackend,
+    "genre_tree": GenreTreeBackend,
+    "label_dna": LabelDnaBackend,
+    "user_collection": UserCollectionBackend,
+    "taste": TasteBackend,
+    "gap_analysis": GapAnalysisBackend,
+    "recommendations": RecommendationsBackend,
+    "fit": FitBackend,
 }
 
 
@@ -607,6 +692,416 @@ FAMILY_PROTOCOLS["autocomplete"] = AutocompleteBackend
 EXPECTED_DIFFERENCES.update({("autocomplete", function): _LUCENE_SCORE_DIFFERENCE for function in PARITY_FAMILIES["autocomplete"].functions})
 
 
+# ── The credits family (gm-catalog-api-dl8.1) ────────────────────────────────
+# Coverage spike family 4, minus its full-text search: eight traversals over
+# `graph.credited_on`, `graph.same_as` and `graph.person`, every one of them
+# `GRAPH_TABLE + SQL`, so the family keeps the default `requires_property_graph=True` and
+# runs only on the PostgreSQL 19 tier. `autocomplete_person` is the ninth function of
+# `api/queries/credits_queries.py` and is registered above, under `autocomplete`; see
+# `CreditsBackend` in `api/graph_backend.py` for why it is not registered twice.
+#
+# Every call below is made from a vantage point where the function's own `ORDER BY` is
+# total over the fixture, and the people and releases it is *not* made from are as much a
+# part of the design — `tests/graph_fixture.py` names each one and why. Four cases recur:
+#
+# - A person credited twice on one release ties `get_person_credits` on (year, title) and
+#   `get_shared_credits` on year, so "Rex Quill" and "Wren Halloway" are asked neither.
+# - A person in two categories leaves `get_person_profile`'s `collect(DISTINCT c.category)`
+#   with an order Cypher does not define, so "Rex Quill" is not asked for a profile — he is
+#   asked for the role breakdown instead, where his two categories have different counts.
+# - A category two people are tied on has no defined leaderboard order, which rules out
+#   `engineering` and `session` and leaves `mastering` as the one call with three rows.
+# - `OVERFLOWING_RELEASE_ID` is the only release either `collect(...)` cap bites on, and
+#   which names survive an undefined order is undefined too, so its credited person is
+#   asked for a release breakdown but never for their credits.
+
+_CREDITS_PERSON = graph_fixture.SAME_AS_PERSON
+_CREDITS_BRIDGE = "Marlon Hale"
+_CREDITS_LEAF = "Ida Okonkwo"
+_CREDITS_DUAL_ROLE_PERSON = "Rex Quill"
+_CREDITS_REPEAT_PERSON = "Wren Halloway"
+_CREDITS_DESIGNER = "Nadia Brightwater"
+_CREDITS_OVERFLOW_PERSON = "Owen Fairweather"
+_CREDITS_UNKNOWN = "does-not-exist"
+
+CREDITS_CALLS: tuple[ParityCall, ...] = (
+    # One row per (release, role), with the release's artists and labels collected beside
+    # it. Each anchor holds exactly one role per release and each release it reaches names
+    # at most one artist and one label, so both the row order and the two lists are total.
+    *(ParityCall("get_person_credits", (person,)) for person in (_CREDITS_PERSON, _CREDITS_BRIDGE, _CREDITS_LEAF, _CREDITS_DESIGNER)),
+    ParityCall("get_person_credits", (_CREDITS_UNKNOWN,)),
+    # "Marlon Hale" is the year with two credits in one category: one row, count two.
+    *(
+        ParityCall("get_person_timeline", (person,))
+        for person in (_CREDITS_PERSON, _CREDITS_BRIDGE, _CREDITS_LEAF, _CREDITS_DESIGNER, _CREDITS_OVERFLOW_PERSON)
+    ),
+    ParityCall("get_person_timeline", (_CREDITS_UNKNOWN,)),
+    # The dual-role release is the whole point of this one: the same person twice under two
+    # roles in two categories, beside a person whose `SAME_AS` artist fills the outer join
+    # the other two leave null.
+    ParityCall("get_release_credits", (graph_fixture.DUAL_ROLE_RELEASE_ID,)),
+    ParityCall("get_release_credits", (graph_fixture.SESSION_RELEASE_ID,)),
+    ParityCall("get_release_credits", (graph_fixture.OVERFLOWING_RELEASE_ID,)),
+    ParityCall("get_release_credits", (_CREDITS_UNKNOWN,)),
+    # `mastering` is the one category with three people on distinct release counts — and
+    # the one that proves `count(DISTINCT r)`: its leader holds four credits on four
+    # releases, the runner-up three credits on two.
+    ParityCall("get_role_leaderboard", ("mastering",), {"limit": 20}),
+    *(ParityCall("get_role_leaderboard", ("mastering",), {"limit": limit}) for limit in (1, 2)),
+    *(ParityCall("get_role_leaderboard", (category,), {"limit": 20}) for category in ("production", "design", "management", "other")),
+    # Both directions of the same pair, so the two credit edges are provably not
+    # interchangeable, and a self-pair, which is where SQL/PGQ's walk semantics would let
+    # one `credited_on` edge bind to both halves of the pattern and report four shared
+    # releases Neo4j's relationship isomorphism forbids.
+    ParityCall("get_shared_credits", (_CREDITS_PERSON, _CREDITS_BRIDGE)),
+    ParityCall("get_shared_credits", (_CREDITS_BRIDGE, _CREDITS_PERSON)),
+    ParityCall("get_shared_credits", (_CREDITS_BRIDGE, _CREDITS_LEAF)),
+    ParityCall("get_shared_credits", (_CREDITS_PERSON, _CREDITS_PERSON)),
+    ParityCall("get_shared_credits", (_CREDITS_PERSON, _CREDITS_DESIGNER)),
+    ParityCall("get_shared_credits", (_CREDITS_UNKNOWN, _CREDITS_BRIDGE)),
+    # Depth 1 and depth 2 are two different statements returning two different column sets;
+    # depth 3 is accepted by the endpoint and must behave as depth 2, exactly as the Cypher
+    # does. Every anchor reaches at most one second hop per bridge, because the Cypher
+    # collects them into a list it never orders.
+    *(ParityCall("get_person_connections", (_CREDITS_PERSON,), {"depth": depth, "limit": 50}) for depth in (1, 2, 3)),
+    *(ParityCall("get_person_connections", (_CREDITS_PERSON,), {"depth": depth, "limit": 1}) for depth in (1, 2)),
+    # "Ida Okonkwo" is the bridge with no second hop at all, which is the empty-list branch
+    # of the Cypher's `CASE WHEN hop2 IS NOT NULL`.
+    ParityCall("get_person_connections", (_CREDITS_BRIDGE,), {"depth": 2, "limit": 50}),
+    *(ParityCall("get_person_connections", (_CREDITS_LEAF,), {"depth": depth, "limit": 50}) for depth in (1, 2)),
+    ParityCall("get_person_connections", (_CREDITS_DESIGNER,), {"depth": 2, "limit": 50}),
+    *(ParityCall("get_person_connections", (_CREDITS_OVERFLOW_PERSON,), {"depth": depth, "limit": 50}) for depth in (1, 2)),
+    *(ParityCall("get_person_connections", (_CREDITS_UNKNOWN,), {"depth": depth, "limit": 50}) for depth in (1, 2)),
+    # "Wren Halloway" holds three credits across two releases, which is the only thing that
+    # separates the profile's `count(c)` from the leaderboard's `count(DISTINCT r)`.
+    *(
+        ParityCall("get_person_profile", (person,))
+        for person in (_CREDITS_PERSON, _CREDITS_BRIDGE, _CREDITS_REPEAT_PERSON, _CREDITS_LEAF, _CREDITS_OVERFLOW_PERSON)
+    ),
+    ParityCall("get_person_profile", (_CREDITS_UNKNOWN,)),
+    # "Rex Quill" is the two-category breakdown, and his counts differ, so the order the
+    # Cypher asks for is the only order either engine may answer in.
+    *(
+        ParityCall("get_person_role_breakdown", (person,))
+        for person in (_CREDITS_DUAL_ROLE_PERSON, _CREDITS_PERSON, _CREDITS_BRIDGE, _CREDITS_REPEAT_PERSON)
+    ),
+    ParityCall("get_person_role_breakdown", (_CREDITS_UNKNOWN,)),
+)
+
+register_parity_family("credits", CREDITS_CALLS)
+FAMILY_PROTOCOLS["credits"] = CreditsBackend
+# ── end credits family ───────────────────────────────────────────────────────
+
+
+_LABEL_DNA_ID = graph_fixture.LABEL_DNA_TARGET_ID
+LABEL_DNA_CALLS = (
+    *(
+        ParityCall(name, (_LABEL_DNA_ID,))
+        for name in (
+            "get_label_identity",
+            "get_label_genre_profile",
+            "get_label_style_profile",
+            "get_label_decade_profile",
+            "get_label_active_years",
+            "get_label_format_profile",
+            "get_label_media_family_counts",
+            "get_label_medium_counts",
+            "get_label_media_families_fallback",
+            "get_label_media_profile",
+            "get_label_full_profile",
+            "get_candidate_labels_genre_vectors",
+        )
+    ),
+    ParityCall("get_label_full_profile", (graph_fixture.LABEL_DNA_LOW_RELEASE_ID,)),
+    ParityCall("get_label_media_families_fallback", (graph_fixture.LABEL_DNA_FALLBACK_ID,)),
+    ParityCall("get_label_media_profile", (graph_fixture.LABEL_DNA_FALLBACK_ID,)),
+)
+register_parity_family("label_dna", LABEL_DNA_CALLS)
+FAMILY_PROTOCOLS["label_dna"] = LabelDnaBackend
+
+
+_COLLECTION_USER = graph_fixture.COLLECTION_USER_ID
+USER_COLLECTION_CALLS = (
+    ParityCall("get_user_collection", (_COLLECTION_USER,), {"limit": 50, "offset": 0}),
+    ParityCall("get_user_wantlist", (_COLLECTION_USER,), {"limit": 50, "offset": 0}),
+    ParityCall("get_user_recommendations", (_COLLECTION_USER,), {"limit": 20}),
+    ParityCall("get_user_collection_stats", (_COLLECTION_USER,)),
+    ParityCall("get_user_collection_timeline", (_COLLECTION_USER,), {"bucket": "year"}),
+    ParityCall("get_user_collection_timeline", (_COLLECTION_USER,), {"bucket": "decade"}),
+    *(ParityCall("get_user_collection_evolution", (_COLLECTION_USER,), {"metric": metric}) for metric in ("genre", "style", "label")),
+    ParityCall("check_releases_user_status", (_COLLECTION_USER, ["1201", "1204", "1212", "missing"])),
+)
+register_parity_family("user_collection", USER_COLLECTION_CALLS, requires_property_graph=False)
+
+TASTE_CALLS = (
+    ParityCall("get_collection_count", (_COLLECTION_USER,)),
+    ParityCall("get_taste_heatmap", (_COLLECTION_USER,)),
+    ParityCall("get_obscurity_score", (_COLLECTION_USER,)),
+    ParityCall("get_taste_drift", (_COLLECTION_USER,)),
+    ParityCall("get_blind_spots", (_COLLECTION_USER,), {"limit": 5}),
+    ParityCall("get_top_labels", (_COLLECTION_USER,), {"limit": 10}),
+)
+register_parity_family("taste", TASTE_CALLS, requires_property_graph=False)
+
+GAP_ANALYSIS_CALLS = (
+    ParityCall("get_label_gaps", (_COLLECTION_USER, graph_fixture.LABEL_DNA_TARGET_ID), {"limit": 50, "offset": 0}),
+    ParityCall(
+        "get_label_gaps",
+        (_COLLECTION_USER, graph_fixture.LABEL_DNA_TARGET_ID),
+        {"limit": 50, "offset": 0, "exclude_wantlist": True, "families": ["vinyl"], "mediums": ["optical_cd"]},
+    ),
+    ParityCall("get_label_gap_summary", (_COLLECTION_USER, graph_fixture.LABEL_DNA_TARGET_ID)),
+    ParityCall("get_artist_gaps", (_COLLECTION_USER, "1301"), {"limit": 50, "offset": 0}),
+    ParityCall("get_artist_gaps", (_COLLECTION_USER, "1301"), {"limit": 50, "offset": 0, "exclude_wantlist": True, "families": ["vinyl"]}),
+    ParityCall("get_artist_gap_summary", (_COLLECTION_USER, "1301")),
+    ParityCall("get_master_gaps", (_COLLECTION_USER, graph_fixture.COLLECTION_MASTER_ID), {"limit": 50, "offset": 0}),
+    ParityCall(
+        "get_master_gaps",
+        (_COLLECTION_USER, graph_fixture.COLLECTION_MASTER_ID),
+        {"limit": 50, "offset": 0, "exclude_wantlist": True, "mediums": ["optical_cd"]},
+    ),
+    ParityCall("get_master_gap_summary", (_COLLECTION_USER, graph_fixture.COLLECTION_MASTER_ID)),
+)
+register_parity_family("gap_analysis", GAP_ANALYSIS_CALLS, requires_property_graph=False)
+
+
+RECOMMENDATION_CALLS = (
+    ParityCall("get_artist_identity", ("1301",)),
+    ParityCall("get_artist_identity", ("missing",)),
+    ParityCall("get_artist_profile", ("1301",)),
+    ParityCall("get_candidate_artists", ("1301",)),
+    ParityCall("get_collector_counts", (["1201", "1202", "1242"],)),
+    ParityCall("get_collector_counts", ([],)),
+    ParityCall("get_label_affinity_candidates", (graph_fixture.COLLECTION_USER_ID,), {"limit": 50}),
+    ParityCall("get_blindspot_candidates", (graph_fixture.COLLECTION_USER_ID,), {"limit": 50}),
+)
+register_parity_family("recommendations", RECOMMENDATION_CALLS, requires_property_graph=False)
+
+FIT_CALLS = (
+    ParityCall("get_collection_ids", (graph_fixture.COLLECTION_USER_ID,)),
+    ParityCall("get_collection_ids", ("00000000-0000-0000-0000-000000000099",)),
+    ParityCall("get_release_context", ("1203",)),
+)
+register_parity_family("fit", FIT_CALLS, requires_property_graph=False)
+
+
+async def test_recommendation_and_fit_surfaces_are_fully_accounted_for() -> None:
+    recommendation_store_reads = {
+        name
+        for name, value in vars(recommend_queries).items()
+        if inspect.iscoroutinefunction(value) and getattr(value, "__module__", None) == recommend_queries.__name__
+    }
+    assert recommendation_store_reads == PARITY_FAMILIES["recommendations"].functions | {"_batch_artist_profiles", "get_explore_traversal"}
+    fit_store_reads = {
+        name
+        for name, value in vars(fit_queries).items()
+        if inspect.iscoroutinefunction(value) and getattr(value, "__module__", None) == fit_queries.__name__
+    }
+    assert fit_store_reads == PARITY_FAMILIES["fit"].functions | {"get_release_rarity"}
+
+
+@pytest.mark.parametrize("backend", ["neo4j", "postgres"])
+async def test_recommendation_fixture_has_real_candidates_and_fit_context(
+    parity_backends: graph_fixture.ParityBackends,
+    backend: str,
+) -> None:
+    handle = parity_backends.postgres if backend == "postgres" else parity_backends.neo4j
+    recommend = get_backend("recommendations", backend)
+    fit = get_backend("fit", backend)
+    candidates = await recommend.get_candidate_artists(handle, "1301")
+    assert [candidate["artist_id"] for candidate in candidates] == ["1303"]
+    assert candidates[0]["release_count"] == 4
+    assert candidates[0]["genres"] == [{"name": "Electronic", "count": 3}, {"name": "Rock", "count": 1}]
+
+    labels = await recommend.get_label_affinity_candidates(handle, graph_fixture.COLLECTION_USER_ID)
+    assert {row["id"] for row in labels} == {"1205", "1206"}
+    assert all(row["score"] == 4 for row in labels)  # physical duplicate copy counts
+    assert not {"1201", "1202", "1203", "1204", "1211"} & {row["id"] for row in labels}
+    blindspots = await recommend.get_blindspot_candidates(handle, graph_fixture.COLLECTION_USER_ID)
+    assert {row["id"] for row in blindspots} == {"1215", "1221", "1231"}
+    assert {row["genres"][0] for row in blindspots} == {"Ambient", "Rock"}
+    two_artist_blindspots = await recommend.get_blindspot_candidates(handle, graph_fixture.COLLECTION_RECOMMEND_USER_ID)
+    rock = {row["id"]: row for row in two_artist_blindspots if row["genres"] == ["Rock"]}
+    assert set(rock) == {"1222", "1244"}
+    assert {row["score"] for row in rock.values()} == {2}
+    assert await recommend.get_collector_counts(handle, ["1201", "1202", "1242"]) == {"1201": 3, "1202": 2, "1242": 0}
+
+    collection = await fit.get_collection_ids(handle, graph_fixture.COLLECTION_USER_ID)
+    assert collection["release_ids"] == ["1201", "1202", "1203"]
+    assert collection["artist_counts"]["1301"] == 3  # distinct held release, not copy count
+    context = await fit.get_release_context(handle, "1203")
+    assert context is not None
+    assert context["master_id"] == graph_fixture.COLLECTION_MASTER_ID
+    assert {sibling["id"] for sibling in context["siblings"]} == {"1204", "1205", "1206"}
+    assert await fit.get_release_context(handle, "does-not-exist") is None
+
+
+async def test_candidate_sample_cap_preserves_fixture_results_and_records_timing(
+    parity_backends: graph_fixture.ParityBackends,
+) -> None:
+    """Measure the kept 100k bound against the uncapped shape on the parity fixture."""
+    capped = recommend_pg_queries.CANDIDATE_ARTISTS_SQL
+    uncapped = capped.replace("ORDER BY release_id LIMIT 100000", "ORDER BY release_id")
+    params = {"artist_id": "1301", "min_releases": 3}
+    pool = parity_backends.postgres
+    await recommend_pg_queries._rows(pool, capped, params)
+    await recommend_pg_queries._rows(pool, uncapped, params)
+    samples: dict[str, list[float]] = {"capped": [], "uncapped": []}
+    for _ in range(5):
+        for name, statement in (("capped", capped), ("uncapped", uncapped)):
+            before = perf_counter()
+            rows = await recommend_pg_queries._rows(pool, statement, params)
+            samples[name].append((perf_counter() - before) * 1000)
+            assert rows == [("1303", "Recommendation Test Artist", 4)]
+    print("candidate-sample-cap-ms " + " ".join(f"{name}={sum(values) / len(values):.3f}" for name, values in samples.items()))
+
+
+# Family 6 names five source modules. Three media reads were PostgreSQL-only before
+# the Neo4j migration: they have no Cypher counterpart and already receive a
+# PostgreSQL pool regardless of GRAPH_BACKEND. Comparing two calls to the same
+# SQL module would be a vacuous "parity" test. Account for them here and test
+# their real-store contract below; the shared identity decorators are exercised
+# through their owning query functions on both backend sides.
+FAMILY6_POSTGRES_ONLY_READS = frozenset(
+    {
+        "collection_media_queries.get_collection_media_summary",
+        "release_media_queries.get_release_media",
+        "release_media_queries.get_release_catalog_blocks",
+    }
+)
+FAMILY6_SHARED_IDENTITY_DECORATORS = frozenset({"user_queries.attach_release_identity", "gap_queries.attach_gap_identity"})
+
+
+async def test_family6_five_module_surface_is_fully_accounted_for() -> None:
+    modules = (user_queries, taste_queries, gap_queries, collection_media_queries, release_media_queries)
+    public_functions = {
+        f"{module.__name__.rsplit('.', 1)[-1]}.{name}"
+        for module in modules
+        for name, value in vars(module).items()
+        if inspect.iscoroutinefunction(value) and not name.startswith("_") and getattr(value, "__module__", None) == module.__name__
+    }
+    parity_functions = {
+        f"{module}.{member}"
+        for module, family in (
+            ("user_queries", "user_collection"),
+            ("taste_queries", "taste"),
+            ("gap_queries", "gap_analysis"),
+            ("gap_queries", "gap_metadata"),
+        )
+        for member in PARITY_FAMILIES[family].functions
+    }
+    assert public_functions == parity_functions | FAMILY6_POSTGRES_ONLY_READS | FAMILY6_SHARED_IDENTITY_DECORATORS
+
+
+@pytest.mark.parametrize("backend", ["neo4j", "postgres"])
+async def test_collection_fixture_proves_users_instances_and_anti_joins(parity_backends: graph_fixture.ParityBackends, backend: str) -> None:
+    handle = parity_backends.postgres if backend == "postgres" else parity_backends.neo4j
+    users = get_backend("user_collection", backend)
+    taste = get_backend("taste", backend)
+    gaps = get_backend("gap_analysis", backend)
+    primary = graph_fixture.COLLECTION_USER_ID
+    other = graph_fixture.COLLECTION_OTHER_USER_ID
+    third = graph_fixture.COLLECTION_THIRD_USER_ID
+
+    # Four physical edges but three distinct releases for the primary user;
+    # other users' edges must not leak into its collection or wantlist.
+    for user_id, expected_ids in (
+        (primary, ["1203", "1202", "1201", "1201"]),
+        (other, ["1202", "1201"]),
+        (third, ["1201"]),
+    ):
+        rows, total = await users.get_user_collection(handle, user_id)
+        assert [row["id"] for row in rows] == expected_ids
+        assert total == len(expected_ids)
+        assert await taste.get_collection_count(handle, user_id) == total
+
+    wanted, wanted_total = await users.get_user_wantlist(handle, primary)
+    assert [row["id"] for row in wanted] == ["1211", "1204"]
+    assert wanted_total == 2
+    for user_id in (other, third):
+        assert await users.get_user_wantlist(handle, user_id) == ([], 0)
+
+    status = await users.check_releases_user_status(handle, primary, ["1201", "1204", "1205"])
+    assert status == {
+        "1201": {"in_collection": True, "in_wantlist": False},
+        "1204": {"in_collection": False, "in_wantlist": True},
+        "1205": {"in_collection": False, "in_wantlist": False},
+    }
+    assert await users.check_releases_user_status(handle, other, ["1201", "1204"]) == {
+        "1201": {"in_collection": True, "in_wantlist": False},
+        "1204": {"in_collection": False, "in_wantlist": False},
+    }
+
+    recommendations = await users.get_user_recommendations(handle, primary)
+    assert recommendations
+    assert "1212" in {row["id"] for row in recommendations}
+    assert not {"1201", "1202", "1203", "1204", "1211"} & {row["id"] for row in recommendations}
+
+    label_gaps, label_total = await gaps.get_label_gaps(handle, primary, graph_fixture.LABEL_DNA_TARGET_ID)
+    assert {row["id"] for row in label_gaps} == {"1204", "1205", "1206"}
+    assert label_total == 3
+    assert next(row for row in label_gaps if row["id"] == "1204")["on_wantlist"] is True
+    without_wants, without_wants_total = await gaps.get_label_gaps(handle, primary, graph_fixture.LABEL_DNA_TARGET_ID, exclude_wantlist=True)
+    assert {row["id"] for row in without_wants} == {"1205", "1206"}
+    assert without_wants_total == 2
+    other_gaps, other_total = await gaps.get_label_gaps(handle, other, graph_fixture.LABEL_DNA_TARGET_ID)
+    assert {row["id"] for row in other_gaps} == {"1203", "1204", "1205", "1206"}
+    assert other_total == 4
+    third_gaps, third_total = await gaps.get_label_gaps(handle, third, graph_fixture.LABEL_DNA_TARGET_ID)
+    assert {row["id"] for row in third_gaps} == {"1202", "1203", "1204", "1205", "1206"}
+    assert third_total == 5
+
+    artist_gaps, artist_total = await gaps.get_artist_gaps(handle, primary, "1301")
+    assert {row["id"] for row in artist_gaps} == {"1211", "1212", "1213", "1214", "1215", "1221", "1231"}
+    assert artist_total == 7
+    artist_without_wants, artist_without_wants_total = await gaps.get_artist_gaps(handle, primary, "1301", exclude_wantlist=True)
+    assert {row["id"] for row in artist_without_wants} == {"1212", "1213", "1214", "1215", "1221", "1231"}
+    assert artist_without_wants_total == 6
+
+    master_gaps, master_total = await gaps.get_master_gaps(handle, primary, graph_fixture.COLLECTION_MASTER_ID)
+    assert {row["id"] for row in master_gaps} == {"1204", "1205", "1206"}
+    assert master_total == 3
+    master_without_wants, master_without_wants_total = await gaps.get_master_gaps(
+        handle, primary, graph_fixture.COLLECTION_MASTER_ID, exclude_wantlist=True
+    )
+    assert {row["id"] for row in master_without_wants} == {"1205", "1206"}
+    assert master_without_wants_total == 2
+
+    stats = await users.get_user_collection_stats(handle, primary)
+    assert stats["total"] == 4
+    assert (await users.get_user_collection_timeline(handle, primary))["timeline"] == [
+        {"year": 1991, "count": 1, "genres": {"Electronic": 1}, "top_labels": ["Label DNA Target"], "top_styles": ["Label DNA Shared Style"]},
+        {"year": 1992, "count": 1, "genres": {"Electronic": 1}, "top_labels": ["Label DNA Target"], "top_styles": ["Label DNA Shared Style"]},
+        {"year": 1993, "count": 1, "genres": {"Electronic": 1}, "top_labels": ["Label DNA Target"], "top_styles": ["Label DNA Shared Style"]},
+    ]
+    assert await taste.get_obscurity_score(handle, primary) == {
+        "score": 0.5,
+        "median_collectors": 1.0,
+        "total_releases": 3,
+    }
+    assert {row["genre"] for row in await taste.get_blind_spots(handle, primary)} == {"Ambient", "Rock"}
+
+
+async def test_existing_postgres_only_media_reads_have_real_store_contract(
+    parity_backends: graph_fixture.ParityBackends,
+) -> None:
+    pool = parity_backends.postgres
+    assert await collection_media_queries.get_collection_media_summary(pool, graph_fixture.COLLECTION_USER_ID) == {
+        "families": [{"id": "vinyl", "count": 3}],
+        "mediums": [{"id": "vinyl_12", "label": '12" vinyl', "family": "vinyl", "count": 3}],
+    }
+    assert await collection_media_queries.get_collection_media_summary(pool, graph_fixture.COLLECTION_OTHER_USER_ID) == {
+        "families": [{"id": "vinyl", "count": 2}],
+        "mediums": [{"id": "vinyl_12", "label": '12" vinyl', "family": "vinyl", "count": 2}],
+    }
+    assert await release_media_queries.get_release_media(pool, "1205") == graph_fixture.LABEL_DNA_RELEASES["1205"]["media"]
+    assert await release_media_queries.get_release_catalog_blocks(pool, "1201") == {
+        "identifiers": [{"type": "Barcode", "value": "1201-TEST"}],
+        "companies": [{"name": "Fixture Pressing"}],
+        "country": "US",
+    }
+
+
 # `graph.catalog` exists only on a PostgreSQL 19 server whose initializer ran with the
 # switch on, which is what `just test-integration-pg19` arranges. Off that tier the
 # property-graph families are skipped at collection, so the default suite never starts a
@@ -652,6 +1147,84 @@ async def test_graph_query_family_agrees_on_both_backends(
     postgres_result = await _invoke(get_backend(family, "postgres"), call, parity_backends.postgres)
 
     assert_parity(family, call, neo4j_result=neo4j_result, postgres_result=postgres_result)
+
+
+@_NEEDS_PROPERTY_GRAPH
+@pytest.mark.parametrize("backend", ["neo4j", "postgres"])
+async def test_label_dna_fixture_proves_nonempty_profiles_candidates_and_media(
+    parity_backends: graph_fixture.ParityBackends,
+    backend: str,
+) -> None:
+    """The label-DNA parity calls exercise data, not mutually empty answers."""
+    handle = parity_backends.postgres if backend == "postgres" else parity_backends.neo4j
+    module = get_backend("label_dna", backend)
+
+    identity = await _invoke(module, ParityCall("get_label_identity", (_LABEL_DNA_ID,)), handle)
+    formats = await _invoke(module, ParityCall("get_label_format_profile", (_LABEL_DNA_ID,)), handle)
+    families = await _invoke(module, ParityCall("get_label_media_family_counts", (_LABEL_DNA_ID,)), handle)
+    mediums = await _invoke(module, ParityCall("get_label_medium_counts", (_LABEL_DNA_ID,)), handle)
+    candidates = await _invoke(module, ParityCall("get_candidate_labels_genre_vectors", (_LABEL_DNA_ID,)), handle)
+    low_profile = await _invoke(
+        module,
+        ParityCall("get_label_full_profile", (graph_fixture.LABEL_DNA_LOW_RELEASE_ID,)),
+        handle,
+    )
+    fallback = await _invoke(
+        module,
+        ParityCall("get_label_media_profile", (graph_fixture.LABEL_DNA_FALLBACK_ID,)),
+        handle,
+    )
+
+    assert identity == {
+        "label_id": _LABEL_DNA_ID,
+        "label_name": "Label DNA Target",
+        "release_count": 6,
+        "artist_count": 2,
+    }
+    assert formats == [{"name": "Vinyl", "count": 4}, {"name": "CD", "count": 2}]
+    assert families == [{"family": "vinyl", "count": 4}, {"family": "optical", "count": 2}]
+    assert mediums == [
+        {"family": "optical", "medium_id": "optical_cd", "medium_label": "CD", "count": 2},
+        {"family": "vinyl", "medium_id": "vinyl_12", "medium_label": '12" vinyl', "count": 4},
+    ]
+    assert candidates == [
+        {
+            "label_id": graph_fixture.LABEL_DNA_CANDIDATE_ID,
+            "label_name": "Label DNA Candidate",
+            "release_count": 5,
+            "genres": [{"name": "Electronic", "count": 4}, {"name": "Ambient", "count": 1}],
+        }
+    ]
+    assert low_profile == {
+        "label_id": graph_fixture.LABEL_DNA_LOW_RELEASE_ID,
+        "label_name": "Label DNA Tiny",
+        "release_count": 2,
+        "artist_count": 2,
+        "genres": [],
+        "styles": [],
+        "decades": [],
+    }
+    assert fallback == [{"family": "vinyl", "count": 1, "mediums": []}]
+
+
+@_NEEDS_PROPERTY_GRAPH
+async def test_label_dna_media_traversal_uses_both_edge_directions_on_pg19(
+    parity_backends: graph_fixture.ParityBackends,
+) -> None:
+    """The three-hop media plan uses the reverse ON index and forward media indexes."""
+    async with parity_backends.postgres.connection() as conn, conn.cursor() as cursor:
+        await cursor.execute("SET LOCAL enable_seqscan = off")
+        await cursor.execute(
+            f"EXPLAIN (FORMAT JSON, COSTS OFF) {label_dna_pg_queries.LABEL_MEDIA_FAMILY_COUNTS_SQL}",
+            {"label_id": _LABEL_DNA_ID},
+        )
+        row = await cursor.fetchone()
+
+    plan = str(row[0] if row else "")
+    assert "on_label_reverse" in plan
+    assert "issued_on_pkey" in plan or "issued_on_reverse" in plan
+    assert "medium_pkey" in plan
+    assert "media_family_pkey" in plan
 
 
 # ── The inputs the Lucene escaping was there for ─────────────────────────────

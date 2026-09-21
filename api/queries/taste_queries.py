@@ -127,13 +127,13 @@ async def get_blind_spots(
     MATCH (a)<-[:BY]-(other:Release)-[:IS]->(g:Genre)
     WHERE NOT (u)-[:COLLECTED]->(other)
     WITH u, g.name AS genre, count(DISTINCT a) AS artist_overlap,
-         collect(DISTINCT other.title)[0] AS example_release
+         min(other.title) AS example_release
     OPTIONAL MATCH (u)-[:COLLECTED]->(cr:Release)-[:IS]->(cg:Genre)
     WHERE cg.name = genre
     WITH genre, artist_overlap, example_release, count(cr) AS already_have
     WHERE already_have = 0
     RETURN genre, artist_overlap, example_release
-    ORDER BY artist_overlap DESC
+    ORDER BY artist_overlap DESC, genre
     LIMIT $limit
     """
     return await run_query(driver, cypher, timeout=120, user_id=user_id, limit=limit)

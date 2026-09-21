@@ -173,6 +173,59 @@ Three things follow from registering first:
   side is ordinary SQL over the `graph` views passes `requires_property_graph=False` and runs on
   every tier.
 
+### Existing PostgreSQL-only reads in the collection workstream
+
+The collection bead names five source modules, but two of them were already relational
+before `GRAPH_BACKEND` existed: `collection_media_queries.get_collection_media_summary`
+reads the canonical media block on `user_collections`, while
+`release_media_queries.get_release_media` and `get_release_catalog_blocks` read the
+catalog's `releases` rows. Their callers pass the PostgreSQL pool in both backend modes;
+there is no Cypher implementation to replace. Registering the same SQL module as both
+sides of a graph-backend family would manufacture a vacuous parity result and would
+incorrectly pass a Neo4j driver to these functions.
+
+Family 6 therefore accounts for these three reads as an explicit PostgreSQL-only
+carve-out in `tests/test_real_databases.py`. A surface guard inventories all public
+functions in the five modules, including the shared native-identity decorators, and
+fails if any newly added function is neither parity-registered nor accounted for.
+An engine-backed test checks the three relational reads against nonempty media and
+catalog blocks, including a duplicate physical copy that must count only once in the
+media summary. The dual-store collection, taste, and gap reads still use the normal
+family selector and Neo4j/PostgreSQL parity harness.
+
+### Recommendation and CrateFit migration: bounded candidate sampling
+
+Family 7 registers the six store reads in `recommend_queries` under `recommendations`
+and the two graph reads in `fit_queries` under `fit`. Pure cosine scoring, signal
+merging, discovery scoring, collection folding, and cache-key construction stay
+shared Python functions: running the same pure function through two backend
+registrations would be vacuous. `fit_queries.get_release_rarity` was already a
+PostgreSQL-only lookup of precomputed release rarity; it remains so in both graph
+backend modes. `get_explore_traversal` belongs to the following exploration bead,
+not the recommendation family. `tests/test_real_databases.py` inventories these
+carve-outs and compares every registered store read on both engines, with exact
+nonempty candidate and fit assertions on a four-user fixture, including a
+two-artist blind-spot overlap.
+
+**Decision:** Keep the Cypher query's 100,000-release scan cap per top genre on
+the SQL side, before expanding artist edges. Also retain its top-five genres,
+top-500 artists per genre, top-200 aggregate artists, and top-50 profile caps.
+The PostgreSQL query orders sampled release IDs explicitly, so a repeated call
+is reproducible; both engines now break equal-score ties by ID. The profile
+lookup uses four batched SQL statements, not one statement per candidate.
+Removing the cap would make the broadest genre an unbounded input to candidate
+aggregation even though indexes can make reaching that genre selective.
+
+The local PostgreSQL 18/Neo4j parity fixture is below the cap. The committed
+measurement test runs capped and uncapped SQL five times each after warmup and
+checks the same nonempty candidate result. On this small fixture, the measured
+mean was **2.866 ms capped versus 2.688 ms uncapped**; the 0.178 ms difference
+is benchmark noise/overhead, not evidence of a production speedup. The measured
+*result* effect is zero at this size. A high-cardinality production-shaped
+sample is still needed before claiming a runtime benefit or reconsidering the
+cap; the cap's present rationale is the finite worst-case scan and parity with
+the Neo4j cost control, not a claimed speedup on this small fixture.
+
 ### Declaring an expected difference
 
 `EXPECTED_DIFFERENCES` is a plain mapping in the same module, keyed by `(family, function)`:
@@ -335,6 +388,108 @@ Two rules follow for a family with a declared difference, and both bite:
 An apostrophe turned out **not** to be in that set: Lucene's tokenizer keeps `O'Connor` as
 one token, so both engines answer and `Sinéad O'Connor` is a parity call. It is worth one
 anyway, for the character a hand-built SQL string would have broken on.
+
+## The family with a rename, and an order Cypher does not have: credits
+
+The third family migrated is **credits** — coverage spike family 4, the whole of
+[`api/queries/credits_queries.py`](../api/queries/credits_queries.py) bar its full-text
+search, answered by
+[`api/queries/credits_pg_queries.py`](../api/queries/credits_pg_queries.py). It is the
+first family to hit three things the two before it did not.
+
+### A property that changed its name
+
+`discogs-graph-enricher` writes `CREDITED_ON.category`. The relational edge publishes the same value
+as **`role_category`**, a column generated over `graph.credit_role_category(role)` — a
+function the schema producer renders from `common.credit_roles.ROLE_CATEGORIES`, the same
+taxonomy `categorize_role` scans, so the two stores compute one answer from one vocabulary
+rather than agreeing by coincidence.
+
+Six statements read it. The spike singles the rename out because **a missed one is a
+silent null, not an error**: `c.category` on an edge that has no such property is `NULL` in
+Cypher and a planner error in SQL only if you are lucky. So it is written down at each of
+the six, and `tests/test_credits_pg_queries.py` checks the list rather than grepping for
+it. The API column keeps the Cypher's name — every statement projects
+`role_category AS category` — because this is a backend swap underneath an unchanged
+response schema.
+
+Expect one of these per family from here on. The spike's "the property each function
+reads" table is where to look before writing any SQL.
+
+### A pattern that meets itself
+
+The pilot's walk-semantics problem was a *path* doubling back. This family's is smaller and
+easier to miss: `get_shared_credits` matches
+
+```
+(p1:Person)-[c1:CREDITED_ON]->(r:Release)<-[c2:CREDITED_ON]-(p2:Person)
+```
+
+and the endpoint accepts the same name for both people. Neo4j's relationship isomorphism
+keeps `c1` and `c2` from binding the same relationship, so it answers with nothing.
+SQL/PGQ lets them, so it answers with every release that person is credited on. The guard
+is edge inequality written out in the columns the edge key is made of:
+
+```sql
+WHERE NOT (credit_one.person_name = credit_two.person_name AND credit_one.role = credit_two.role)
+```
+
+**Two edge variables pointing at one vertex is the shape to check.** Every other pattern in
+this family is closed by a name predicate the Cypher already carries for its own reasons —
+`connected.name <> $name`, `hop2.name <> hop1.name` — and each of those predicates happens
+to imply the edge inequality too. That is worth verifying rather than assuming, which is
+what `tests/test_graph_parity.py` does.
+
+Unlike the pilot's four predicates, nothing masks this one: the harness's self-pair parity
+call fails outright without it. The masking problem has not gone away, though — it just
+moved to the caps below.
+
+### Three results Cypher builds from `collect`, which has no order
+
+`get_person_credits` returns `collect(DISTINCT a.name)[..3]`, `get_person_profile` returns
+`collect(DISTINCT c.category)`, and `get_person_connections` returns a `[..10]` list of
+maps. **`collect` has no defined order in Cypher.** So a row containing one of those lists
+with more than one element cannot be a parity call: the harness compares row values, and
+two arbitrary orders are not a divergence either backend is answerable for.
+
+The rule the family follows, and the next one should:
+
+1. **The PostgreSQL side orders anyway** — by name, or by the sort `array_agg(DISTINCT ...)`
+   already performs. A backend should be deterministic even where its sibling is not.
+2. **The fixture keeps every parity call's lists to one element or none**, which is why the
+   credits component gives most of its releases a single artist and a single label.
+3. **The cap is proven separately, by length.** One release credits four artists and names
+   two labels, and `test_both_engines_cap_the_collected_lists_at_the_same_length` asks both
+   engines how many names survived — not which. The person credited on that release is
+   deliberately not asked for their credits by the harness.
+
+That third point is this family's version of "what the harness cannot see". A parity suite
+that only compared rows would go green with the `[..3]` slice deleted.
+
+### Ordering is a fixture design problem
+
+More generally: the credits family has eight functions with seven different `ORDER BY`
+clauses and no tiebreakers, and the fixture's whole shape is the answer to "from which
+vantage point is each of them total?". `tests/graph_fixture.py` names every person and
+release the harness deliberately does *not* ask about, and why — a tie on `(year, title)`,
+a category two people are level on, a `collect` with two elements. **Write that list down
+while designing the fixture, not after the first red run.**
+
+Two smaller ordering notes that will recur:
+
+- `ORDER BY r.year DESC` puts nulls first on both engines and `ASC` puts them last, so the
+  defaults already agree; nothing needs `NULLS FIRST` spelled out.
+- `ORDER BY p.name` is Unicode-codepoint ordering in Neo4j and **database-collation**
+  ordering in PostgreSQL. They agree on ASCII and need not agree on anything else, so an
+  ordered parity call should be anchored on names where they do.
+
+### What did not need doing
+
+`autocomplete_person` is the ninth function of `credits_queries.py` and the spike counts it
+in both family 2 and family 4. It was migrated with family 2 and stays there: the seam
+resolves a family to exactly one module, so a function reachable through two families would
+be a function with two backends for one call. A family that overlaps an already-migrated one
+should take the remainder and say so in its `Protocol`, which is what `CreditsBackend` does.
 
 ## Migrating the next family
 

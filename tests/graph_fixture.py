@@ -54,6 +54,38 @@ rather than by a parity call because the Lucene side does not return the same ro
 `Sinéad O'Connor` is the third and is different: an apostrophe survives Lucene's tokenizer
 intact, so both engines answer and it is a parity call — it is there for the character that
 would have broken a hand-built SQL string rather than a query parser.
+
+**The credits component** (ids 701-710 / 801-804 / 502-503) belongs to the credits family
+(`gm-catalog-api-dl8.1`) and is disconnected from the other three: its releases credit only
+its own people and are credited to only its own artists and labels, so no walk from an
+anchor of another component can reach it and no walk from it can leave.
+
+Its shape is dictated by what the credits family orders by, one function at a time — every
+registered parity call is made from a vantage point where that function's own `ORDER BY` is
+total, because neither backend adds a tiebreaker and a tie would make row order legitimately
+unspecified on both sides. Four consequences are worth naming, because each of them is the
+reason some row is here:
+
+- **A release carrying one person twice under two roles** (`DUAL_ROLE_RELEASE_ID`, two
+  different categories) is what separates `count(c)` from `count(DISTINCT r)`: the profile
+  counts credits, the leaderboard counts releases, and only a duplicated release tells the
+  two apart. A second such release carries the same person twice in *one* category, which is
+  what `get_person_profile`'s `total_credits` is read from.
+- **A person with a `SAME_AS` artist** (`SAME_AS_PERSON`, linked to `SAME_AS_ARTIST_ID`)
+  and people without one share `DUAL_ROLE_RELEASE_ID`, so `get_release_credits`' outer join
+  is exercised on both sides in a single call.
+- **Two credited people on the same release whose names are the only tiebreaker**
+  (`SESSION_RELEASE_ID`) is what proves `ORDER BY c.category, p.name` rather than just
+  `ORDER BY c.category`.
+- **A release crediting four artists and two labels** (`OVERFLOWING_RELEASE_ID`) is the only
+  place `collect(DISTINCT a.name)[..3]` and `collect(DISTINCT l.name)[..1]` are capped at
+  all. It is deliberately *not* reachable from a registered `get_person_credits` parity
+  call: Cypher's `collect` has no defined order, so which three names survive the cap is
+  unspecified on the Neo4j side and the two engines can only be asked how *many* survive.
+  `tests/test_graph_parity.py` asks them exactly that.
+
+Every other credits release carries at most one artist and at most one label for the same
+reason — a one-element list has only one order.
 """
 
 from __future__ import annotations
@@ -67,6 +99,7 @@ from typing import Any
 
 import pytest
 from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver, parse_postgres_host_port
+from common.credit_roles import categorize_role
 from groovemap_schema.neo4j import create_neo4j_schema
 from groovemap_schema.postgres import (
     PROPERTY_GRAPH_MINIMUM_SERVER_VERSION,
@@ -228,9 +261,372 @@ AUTOCOMPLETE_PEOPLE: tuple[str, ...] = (
 )
 
 
+# ── The credits component (gm-catalog-api-dl8.1) ─────────────────────────────
+# Read by the credits family, which walks `graph.credited_on` and `graph.same_as`. Ids
+# start at 701 (releases), 801 (artists) and 502 (labels) so nothing here can collide with
+# the three components above, and no release here credits an artist or names a label that
+# any of them uses — the component is reachable only from its own people.
+#
+# The years are distinct from every year in `RELEASE_YEARS` and lie strictly inside it, so
+# `catalog_overview`'s `get_year_range` still reads its minimum off release "101" and its
+# maximum off release "203".
+
+SAME_AS_PERSON = "Tessa Vance"
+SAME_AS_ARTIST_ID = "801"
+# One person, two roles, two categories: `get_release_credits` orders by (category, name)
+# and still sees two unambiguous rows, while `get_role_leaderboard` sees one release.
+DUAL_ROLE_RELEASE_ID = "701"
+# Two different people, same category, so `p.name` is the only thing separating them.
+SESSION_RELEASE_ID = "705"
+# Four artists and two labels — the only release either `collect(...)` cap applies to.
+OVERFLOWING_RELEASE_ID = "707"
+
+CREDITS_ARTISTS: dict[str, str] = {
+    "801": "Vance Machine",
+    "802": "Hale Combo",
+    "803": "Quill Ensemble",
+    "804": "Okonkwo Trio",
+}
+
+CREDITS_LABELS: dict[str, str] = {
+    "502": "Provenance Records",
+    "503": "Second Pressing",
+}
+
+# release id -> the document it is seeded as. `artists` and `labels` are Discogs id lists
+# (rendered into the `{"id": ...}` blocks the projections read); `extraartists` is the
+# credit block verbatim, and an entry's optional `id` is what both engines turn into a
+# `SAME_AS` edge to that artist.
+CREDITS_RELEASES: dict[str, dict[str, Any]] = {
+    DUAL_ROLE_RELEASE_ID: {
+        "year": 1963,
+        "artists": ["801"],
+        "labels": ["502"],
+        "extraartists": [
+            {"name": SAME_AS_PERSON, "role": "Mastered By", "id": 801},
+            {"name": "Rex Quill", "role": "Producer"},
+            {"name": "Rex Quill", "role": "Mixed By"},
+        ],
+    },
+    "702": {
+        "year": 1966,
+        "artists": ["802"],
+        "labels": ["502"],
+        "extraartists": [
+            {"name": SAME_AS_PERSON, "role": "Mastered By", "id": 801},
+            {"name": "Marlon Hale", "role": "Guitar"},
+        ],
+    },
+    "703": {
+        "year": 1969,
+        "artists": ["802"],
+        "labels": [],
+        "extraartists": [
+            {"name": SAME_AS_PERSON, "role": "Mastered By", "id": 801},
+            {"name": "Marlon Hale", "role": "Bass"},
+        ],
+    },
+    "704": {
+        "year": 1972,
+        "artists": [],
+        "labels": ["502"],
+        "extraartists": [
+            {"name": SAME_AS_PERSON, "role": "Mastered By", "id": 801},
+            {"name": "Marlon Hale", "role": "Guitar"},
+        ],
+    },
+    SESSION_RELEASE_ID: {
+        "year": 1975,
+        "artists": [],
+        "labels": [],
+        "extraartists": [
+            {"name": "Marlon Hale", "role": "Guitar"},
+            {"name": "Ida Okonkwo", "role": "Vocals"},
+        ],
+    },
+    # The same person twice in ONE category, which is what makes `get_person_profile`'s
+    # `count(c)` differ from the leaderboard's `count(DISTINCT r)`. It is deliberately not
+    # a `get_release_credits` parity call: two rows agreeing on (category, name) have no
+    # defined order on either side.
+    "706": {
+        "year": 1978,
+        "artists": ["801"],
+        "labels": ["503"],
+        "extraartists": [
+            {"name": "Rex Quill", "role": "Producer"},
+            {"name": "Rex Quill", "role": "Executive Producer"},
+            {"name": "Nadia Brightwater", "role": "Artwork"},
+        ],
+    },
+    OVERFLOWING_RELEASE_ID: {
+        "year": 1981,
+        "artists": ["801", "802", "803", "804"],
+        "labels": ["502", "503"],
+        "extraartists": [{"name": "Owen Fairweather", "role": "A&R"}],
+    },
+    # A second 1966 release, so one person has two credits in one year and
+    # `get_person_timeline` reports a count above one without reporting two rows for a year.
+    # Its title is what keeps `get_person_credits`' (year DESC, title) order total.
+    "708": {"year": 1966, "artists": [], "labels": [], "extraartists": [{"name": "Marlon Hale", "role": "Bass"}]},
+    "709": {
+        "year": 1984,
+        "artists": [],
+        "labels": [],
+        "extraartists": [
+            {"name": "Wren Halloway", "role": "Mastered By"},
+            {"name": "Wren Halloway", "role": "Lacquer Cut By"},
+        ],
+    },
+    "710": {"year": 1987, "artists": [], "labels": [], "extraartists": [{"name": "Wren Halloway", "role": "Mastered By"}]},
+}
+
+
+# ── The label-DNA component (gm-catalog-api-dl8.2) ──────────────────────────
+# This component is intentionally disconnected from autocomplete labels 401-403 and the
+# credits labels 502-503. Its target has six releases, so every full-profile query runs;
+# the candidate has five releases sharing a style, so the two-phase similarity query has
+# a real result; the low-release label proves the MIN_RELEASES short-circuit; and the
+# fallback label has a media family but no ISSUED_ON edge.
+LABEL_DNA_TARGET_ID = "1101"
+LABEL_DNA_CANDIDATE_ID = "1102"
+LABEL_DNA_LOW_RELEASE_ID = "1103"
+LABEL_DNA_FALLBACK_ID = "1104"
+COLLECTION_MASTER_ID = "1401"
+COLLECTION_USER_ID = "00000000-0000-0000-0000-000000000001"
+COLLECTION_OTHER_USER_ID = "00000000-0000-0000-0000-000000000002"
+COLLECTION_THIRD_USER_ID = "00000000-0000-0000-0000-000000000003"
+COLLECTION_RECOMMEND_USER_ID = "00000000-0000-0000-0000-000000000004"
+
+LABEL_DNA_LABELS: dict[str, str] = {
+    LABEL_DNA_TARGET_ID: "Label DNA Target",
+    LABEL_DNA_CANDIDATE_ID: "Label DNA Candidate",
+    LABEL_DNA_LOW_RELEASE_ID: "Label DNA Tiny",
+    LABEL_DNA_FALLBACK_ID: "Label DNA Fallback",
+    "1150": "Recommendation Test Label",
+}
+
+LABEL_DNA_ARTISTS: dict[str, str] = {
+    "1301": "Label DNA Artist One",
+    "1302": "Label DNA Artist Two",
+    "1303": "Recommendation Test Artist",
+}
+
+# Graphinator emits ALIAS_OF from alias to primary. The primary artist document
+# lists its aliases, while the Neo4j edge below follows alias -> primary.
+ALIAS_ARTIST_ID = "1301"
+PRIMARY_ARTIST_ID = "1302"
+
+
+def _label_dna_release(
+    *,
+    year: int | None,
+    artists: list[str],
+    label: str,
+    genres: list[str],
+    styles: list[str],
+    formats: list[str],
+    families: list[str],
+    items: list[dict[str, Any]],
+    master_id: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "year": year,
+        "artists": artists,
+        "label": label,
+        "genres": genres,
+        "styles": styles,
+        "formats": formats,
+        "media": {"families": families, "items": items},
+        "master_id": master_id,
+    }
+
+
+LABEL_DNA_RELEASES: dict[str, dict[str, Any]] = {
+    **{
+        str(1201 + index): _label_dna_release(
+            year=1991 + index if index < 5 else None,
+            artists=["1301"] if index < 3 else ["1302"],
+            label=LABEL_DNA_TARGET_ID,
+            genres=["Electronic"] if index < 4 else ["Jazz"],
+            styles=["Label DNA Shared Style"],
+            formats=["Vinyl"] if index < 4 else ["CD"],
+            families=["vinyl"] if index < 4 else ["optical"],
+            items=[
+                {
+                    "medium": "vinyl_12" if index < 4 else "optical_cd",
+                    "family": "vinyl" if index < 4 else "optical",
+                    "label": '12" vinyl' if index < 4 else "CD",
+                }
+            ],
+            master_id=COLLECTION_MASTER_ID if index >= 2 else None,
+        )
+        for index in range(6)
+    },
+    **{
+        str(1211 + index): _label_dna_release(
+            year=2001 + index,
+            artists=["1301"],
+            label=LABEL_DNA_CANDIDATE_ID,
+            genres=["Electronic"] if index < 4 else ["Ambient"],
+            styles=["Label DNA Shared Style"],
+            formats=["Vinyl"],
+            families=[],
+            items=[],
+        )
+        for index in range(5)
+    },
+    "1221": _label_dna_release(
+        year=2010,
+        artists=["1301"],
+        label=LABEL_DNA_LOW_RELEASE_ID,
+        genres=["Rock"],
+        styles=["Label DNA Tiny Style"],
+        formats=["Vinyl"],
+        families=[],
+        items=[],
+    ),
+    "1222": _label_dna_release(
+        year=2011,
+        artists=["1302"],
+        label=LABEL_DNA_LOW_RELEASE_ID,
+        genres=["Rock"],
+        styles=["Label DNA Tiny Style"],
+        formats=["CD"],
+        families=[],
+        items=[],
+    ),
+    "1231": _label_dna_release(
+        year=2015,
+        artists=["1301"],
+        label=LABEL_DNA_FALLBACK_ID,
+        genres=["Ambient"],
+        styles=["Label DNA Fallback Style"],
+        formats=["Vinyl"],
+        families=["vinyl"],
+        items=[],
+    ),
+    **{
+        str(1241 + index): _label_dna_release(
+            year=2016 + index,
+            artists=["1303"],
+            label="1150",
+            genres=["Electronic"],
+            styles=["Label DNA Shared Style"],
+            formats=["Vinyl"],
+            families=["vinyl"],
+            items=[],
+        )
+        for index in range(3)
+    },
+    "1244": _label_dna_release(
+        year=2019,
+        artists=["1303"],
+        label="1150",
+        genres=["Rock"],
+        styles=["Label DNA Shared Style"],
+        formats=["Vinyl"],
+        families=["vinyl"],
+        items=[],
+    ),
+}
+
+COLLECTION_ROWS = (
+    {"user_id": COLLECTION_USER_ID, "release_id": "1201", "instance_id": 1, "rating": 5, "folder_id": 1, "date_added": "2020-01-01T00:00:00Z"},
+    {"user_id": COLLECTION_USER_ID, "release_id": "1201", "instance_id": 2, "rating": 4, "folder_id": 2, "date_added": "2020-02-01T00:00:00Z"},
+    {"user_id": COLLECTION_USER_ID, "release_id": "1202", "instance_id": 3, "rating": 4, "folder_id": 1, "date_added": "2021-01-01T00:00:00Z"},
+    {"user_id": COLLECTION_USER_ID, "release_id": "1203", "instance_id": 4, "rating": 0, "folder_id": 2, "date_added": "2022-01-01T00:00:00Z"},
+    {"user_id": COLLECTION_OTHER_USER_ID, "release_id": "1201", "instance_id": 5, "rating": 0, "folder_id": 1, "date_added": "2023-01-01T00:00:00Z"},
+    {"user_id": COLLECTION_OTHER_USER_ID, "release_id": "1202", "instance_id": 6, "rating": 0, "folder_id": 1, "date_added": "2023-02-01T00:00:00Z"},
+    {"user_id": COLLECTION_THIRD_USER_ID, "release_id": "1201", "instance_id": 7, "rating": 0, "folder_id": 1, "date_added": "2024-01-01T00:00:00Z"},
+    {
+        "user_id": COLLECTION_RECOMMEND_USER_ID,
+        "release_id": "1204",
+        "instance_id": 8,
+        "rating": 0,
+        "folder_id": 1,
+        "date_added": "2024-02-01T00:00:00Z",
+    },
+    {
+        "user_id": COLLECTION_RECOMMEND_USER_ID,
+        "release_id": "1241",
+        "instance_id": 9,
+        "rating": 0,
+        "folder_id": 1,
+        "date_added": "2024-03-01T00:00:00Z",
+    },
+)
+
+WANT_ROWS = (
+    {"user_id": COLLECTION_USER_ID, "release_id": "1204", "rating": 0, "date_added": "2023-03-01T00:00:00Z"},
+    {"user_id": COLLECTION_USER_ID, "release_id": "1211", "rating": 0, "date_added": "2023-04-01T00:00:00Z"},
+)
+
+
+def label_dna_edges(field: str, endpoint: str) -> list[dict[str, str]]:
+    """Flatten one list-valued label-DNA release field into Neo4j seed rows."""
+    return [{"release_id": release_id, endpoint: str(value)} for release_id, release in LABEL_DNA_RELEASES.items() for value in release[field]]
+
+
+def label_dna_media_edges() -> list[dict[str, str]]:
+    """Return canonical media rows with labels for Neo4j's shared vertices."""
+    return [
+        {
+            "release_id": release_id,
+            "medium_id": str(item["medium"]),
+            "family": str(item["family"]),
+            "label": str(item["label"]),
+        }
+        for release_id, release in LABEL_DNA_RELEASES.items()
+        for item in release["media"]["items"]
+    ]
+
+
+def _release_document(release_id: str, release: dict[str, Any]) -> dict[str, Any]:
+    """Render one credits release as the Discogs document both sides are projected from."""
+    return {
+        "title": f"Release {release_id}",
+        "year": release["year"],
+        "artists": [{"id": int(artist_id)} for artist_id in release["artists"]],
+        "labels": [{"id": int(label_id)} for label_id in release["labels"]],
+        "extraartists": release["extraartists"],
+    }
+
+
+def credit_edges() -> list[dict[str, Any]]:
+    """Return every `CREDITED_ON` edge the seeded documents imply, as the enricher writes it.
+
+    Both the credits component and the full-text component contribute: `graph.person` and
+    `graph.credited_on` are filled from *every* `extraartists` block in `public.releases`,
+    so a document whose credits Neo4j was never told about is a divergence the credits
+    family reads as a missing person. `category` is computed with the same
+    `categorize_role` the graph enricher calls, which is also what the schema producer
+    renders `graph.credit_role_category` from — one taxonomy, not three copies of one.
+    """
+    documents: dict[str, Any] = {
+        **{release_id: release["extraartists"] for release_id, release in CREDITS_RELEASES.items()},
+        **{release_id: tags["extraartists"] for release_id, tags in AUTOCOMPLETE_RELEASES.items()},
+    }
+    return [
+        {"release_id": release_id, "name": credit["name"], "role": credit["role"], "category": categorize_role(credit["role"])}
+        for release_id, credits in documents.items()
+        for credit in credits
+    ]
+
+
+def same_as_edges() -> list[dict[str, str]]:
+    """Return every `SAME_AS` edge the seeded credits imply, deduplicated as the graph is."""
+    seen = {(credit["name"], str(credit["id"])) for release in CREDITS_RELEASES.values() for credit in release["extraartists"] if credit.get("id")}
+    return [{"name": name, "artist_id": artist_id} for name, artist_id in sorted(seen)]
+
+
+def _endpoint_pairs(key: str, column: str) -> list[dict[str, str]]:
+    """Return the (release, endpoint) pairs one document key implies, flattened for UNWIND."""
+    return [{"release_id": release_id, column: endpoint_id} for release_id, release in CREDITS_RELEASES.items() for endpoint_id in release[key]]
+
+
 # Reconciled from the two branches' TRUNCATEs: family 1 needs `masters` truncated too, on
 # top of the autocomplete family's `artists, labels, releases`.
-_TRUNCATE_ENTITIES = "TRUNCATE artists, labels, releases, masters CASCADE"
+_TRUNCATE_ENTITIES = "TRUNCATE artists, labels, releases, masters, users CASCADE"
 
 # What turns the seeded documents into graph rows. From the phase 2 schema revision the
 # `graph` relations a loader owns — every edge, and the `genre`, `style`, and `person`
@@ -247,7 +643,14 @@ _BOOTSTRAP_FILL = "SELECT relation, row_count FROM graph.bootstrap_fill()"
 _SEED_ARTIST = "INSERT INTO artists (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
 _SEED_LABEL = "INSERT INTO labels (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
 _SEED_RELEASE = "INSERT INTO releases (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
+_SEED_LABEL_DNA_RELEASE = "INSERT INTO releases (data_id, hash, data, media) VALUES (%s, %s, %s::jsonb, %s::jsonb)"
 _SEED_MASTER = "INSERT INTO masters (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
+_SEED_USER = "INSERT INTO users (id, email, hashed_password) VALUES (%s::uuid, %s, 'fixture')"
+_SEED_COLLECTION = (
+    "INSERT INTO user_collections (user_id, release_id, instance_id, rating, folder_id, date_added, media) "
+    "VALUES (%s::uuid, %s::bigint, %s::bigint, %s, %s, %s::timestamptz, %s::jsonb)"
+)
+_SEED_WANT = "INSERT INTO user_wantlists (user_id, release_id, rating, date_added) VALUES (%s::uuid, %s::bigint, %s, %s::timestamptz)"
 
 _SEED_NEO4J = """
 UNWIND $artists AS artist
@@ -256,7 +659,7 @@ SET a.name = artist.name
 WITH count(*) AS _seeded
 UNWIND $releases AS release
 MERGE (r:Release {id: release.id})
-SET r.year = release.year
+SET r.year = release.year, r.title = 'Release ' + release.id
 WITH r, release
 UNWIND release.artists AS artist_id
 MATCH (a:Artist {id: artist_id})
@@ -269,6 +672,41 @@ SET m.title = $master_name
 MERGE (g:Genre {name: $genre_name})
 MERGE (s:Style {name: $style_name})
 """
+
+_SEED_NEO4J_EXPLORE_TAGS = """
+UNWIND $rows AS row
+MATCH (r:Release {id: row.id})
+FOREACH (genre IN row.genres |
+    MERGE (g:Genre {name: genre}) MERGE (r)-[:IS]->(g))
+FOREACH (style IN row.styles |
+    MERGE (s:Style {name: style}) MERGE (r)-[:IS]->(s))
+"""
+
+_SEED_NEO4J_EXPLORE_COUNTERS = (
+    """MATCH (g:Genre)
+       OPTIONAL MATCH (g)<-[:IS]-(r:Release)
+       WITH g, min(CASE WHEN r.year > 0 THEN r.year END) AS first_year
+       SET g.first_year = first_year,
+           g.release_count = COUNT { MATCH (release:Release)-[:IS]->(g) RETURN DISTINCT release },
+           g.artist_count = COUNT { MATCH (release:Release)-[:IS]->(g), (release)-[:BY]->(artist:Artist) RETURN DISTINCT artist },
+           g.label_count = COUNT { MATCH (release:Release)-[:IS]->(g), (release)-[:ON]->(label:Label) RETURN DISTINCT label },
+           g.style_count = COUNT { MATCH (release:Release)-[:IS]->(g), (release)-[:IS]->(style:Style) RETURN DISTINCT style }
+    """,
+    """MATCH (s:Style)
+       OPTIONAL MATCH (s)<-[:IS]-(r:Release)
+       WITH s, min(CASE WHEN r.year > 0 THEN r.year END) AS first_year
+       SET s.first_year = first_year,
+           s.release_count = COUNT { MATCH (release:Release)-[:IS]->(s) RETURN DISTINCT release },
+           s.artist_count = COUNT { MATCH (release:Release)-[:IS]->(s), (release)-[:BY]->(artist:Artist) RETURN DISTINCT artist },
+           s.label_count = COUNT { MATCH (release:Release)-[:IS]->(s), (release)-[:ON]->(label:Label) RETURN DISTINCT label },
+           s.genre_count = COUNT { MATCH (release:Release)-[:IS]->(s), (release)-[:IS]->(genre:Genre) RETURN DISTINCT genre }
+    """,
+    """MATCH (l:Label)
+       SET l.release_count = COUNT { MATCH (release:Release)-[:ON]->(l) RETURN DISTINCT release },
+           l.artist_count = COUNT { MATCH (release:Release)-[:ON]->(l), (release)-[:BY]->(artist:Artist) RETURN DISTINCT artist },
+           l.genre_count = COUNT { MATCH (release:Release)-[:ON]->(l), (release)-[:IS]->(genre:Genre) RETURN DISTINCT genre }
+    """,
+)
 
 # The full-text component's Neo4j half. `graphinator` writes these five node kinds from the
 # same document keys `graph.bootstrap_fill` projects the PostgreSQL tables from, so the two
@@ -301,7 +739,127 @@ UNWIND $people AS person
 MERGE (:Person {name: person})
 WITH count(*) AS _people
 UNWIND $releases AS release
-MERGE (:Release {id: release})
+MERGE (r:Release {id: release}) SET r.title = 'Release ' + release
+"""
+
+# ── The credits component's Neo4j half (gm-catalog-api-dl8.1) ────────────────
+# Five statements rather than one, because `UNWIND` of an empty list drops the row it was
+# unwinding from: a release with no artists would take itself out of the stream and never
+# get its `:Release` node. Flattening each edge kind into its own list keeps every
+# statement's input non-empty and independent.
+_SEED_NEO4J_CREDITS_ENTITIES = """
+UNWIND $artists AS artist
+MERGE (a:Artist {id: artist.id}) SET a.name = artist.name
+WITH count(*) AS _artists
+UNWIND $labels AS label
+MERGE (l:Label {id: label.id}) SET l.name = label.name
+WITH count(*) AS _labels
+UNWIND $releases AS release
+MERGE (r:Release {id: release.id}) SET r.title = release.title, r.year = release.year
+"""
+
+_SEED_NEO4J_BY = """
+UNWIND $edges AS edge
+MATCH (r:Release {id: edge.release_id})
+MATCH (a:Artist {id: edge.artist_id})
+MERGE (r)-[:BY]->(a)
+"""
+
+_SEED_NEO4J_ON = """
+UNWIND $edges AS edge
+MATCH (r:Release {id: edge.release_id})
+MATCH (l:Label {id: edge.label_id})
+MERGE (r)-[:ON]->(l)
+"""
+
+# Both credit statements are `discogs-graph-enricher`'s own, copied from
+# `graphinator/batch_projection.py` rather than paraphrased: `CREDITED_ON` MERGEs on
+# `{role}` alone and SETs `category` afterwards, which is what makes one person credited
+# twice on one release two edges instead of one.
+_SEED_NEO4J_CREDITED_ON = """
+UNWIND $credits AS credit
+MATCH (r:Release {id: credit.release_id})
+MERGE (p:Person {name: credit.name})
+MERGE (p)-[c:CREDITED_ON {role: credit.role}]->(r)
+SET c.category = credit.category
+"""
+
+_SEED_NEO4J_SAME_AS = """
+UNWIND $credits AS credit
+MATCH (p:Person {name: credit.name})
+MATCH (a:Artist {id: credit.artist_id})
+MERGE (p)-[:SAME_AS]->(a)
+"""
+
+# ── The label-DNA component's Neo4j half (gm-catalog-api-dl8.2) ─────────────
+_SEED_NEO4J_LABEL_DNA_ENTITIES = """
+UNWIND $labels AS label
+MERGE (l:Label {id: label.id})
+SET l.name = label.name,
+    l.release_count = label.release_count,
+    l.artist_count = label.artist_count
+WITH count(*) AS _labels
+UNWIND $artists AS artist
+MERGE (a:Artist {id: artist.id}) SET a.name = artist.name
+WITH count(*) AS _artists
+UNWIND $releases AS release
+MERGE (r:Release {id: release.id})
+SET r.title = release.title,
+    r.year = release.year,
+    r.formats = release.formats,
+    r.media_families = release.media_families
+"""
+
+_SEED_NEO4J_LABEL_DNA_GENRE = """
+UNWIND $edges AS edge
+MATCH (r:Release {id: edge.release_id})
+MERGE (genre:Genre {name: edge.name})
+MERGE (r)-[:IS]->(genre)
+"""
+
+_SEED_NEO4J_LABEL_DNA_STYLE = """
+UNWIND $edges AS edge
+MATCH (r:Release {id: edge.release_id})
+MERGE (style:Style {name: edge.name})
+MERGE (r)-[:IS]->(style)
+"""
+
+_SEED_NEO4J_LABEL_DNA_MEDIA = """
+UNWIND $edges AS edge
+MATCH (r:Release {id: edge.release_id})
+MERGE (m:Medium {id: edge.medium_id})
+SET m.family = edge.family, m.label = edge.label
+MERGE (f:MediaFamily {name: edge.family})
+MERGE (r)-[:ISSUED_ON]->(m)
+MERGE (m)-[:IN_FAMILY]->(f)
+"""
+
+_SEED_NEO4J_COLLECTION_USERS = """
+UNWIND $users AS user
+MERGE (:User {id: user.id})
+"""
+
+_SEED_NEO4J_COLLECTIONS = """
+UNWIND $rows AS row
+MATCH (u:User {id: row.user_id})
+MATCH (r:Release {id: row.release_id})
+MERGE (u)-[edge:COLLECTED {instance_id: row.instance_id}]->(r)
+SET edge.rating = row.rating, edge.folder_id = row.folder_id, edge.date_added = row.date_added
+"""
+
+_SEED_NEO4J_WANTS = """
+UNWIND $rows AS row
+MATCH (u:User {id: row.user_id})
+MATCH (r:Release {id: row.release_id})
+MERGE (u)-[edge:WANTS]->(r)
+SET edge.rating = row.rating, edge.date_added = row.date_added
+"""
+
+_SEED_NEO4J_DERIVED_FROM = """
+MATCH (master:Master {id: $master_id})
+UNWIND $release_ids AS release_id
+MATCH (release:Release {id: release_id})
+MERGE (release)-[:DERIVED_FROM]->(master)
 """
 
 # Lucene indexes are populated in the background, so a search issued the moment the seed
@@ -370,6 +928,92 @@ async def seed_neo4j(driver: AsyncResilientNeo4jDriver) -> None:
         people=list(AUTOCOMPLETE_PEOPLE),
         releases=list(AUTOCOMPLETE_RELEASES),
     )
+    # ── credits component (gm-catalog-api-dl8.1) ─────────────────────────────
+    # Last, because `CREDITED_ON` and `SAME_AS` MATCH the `:Release` and `:Artist` nodes
+    # the two statements above create. `credit_edges()` covers the full-text component's
+    # documents as well as this one's: those two releases carry an `extraartists` block,
+    # so PostgreSQL derives four `graph.credited_on` rows from them whether Neo4j was told
+    # about them or not, and a credits query that scans a whole category reads the gap as
+    # a person PostgreSQL has and Neo4j does not.
+    await consume(
+        driver,
+        _SEED_NEO4J_CREDITS_ENTITIES,
+        artists=[{"id": artist_id, "name": name} for artist_id, name in CREDITS_ARTISTS.items()],
+        labels=[{"id": label_id, "name": name} for label_id, name in CREDITS_LABELS.items()],
+        releases=[{"id": release_id, "title": f"Release {release_id}", "year": release["year"]} for release_id, release in CREDITS_RELEASES.items()],
+    )
+    await consume(driver, _SEED_NEO4J_BY, edges=_endpoint_pairs("artists", "artist_id"))
+    await consume(driver, _SEED_NEO4J_ON, edges=_endpoint_pairs("labels", "label_id"))
+    await consume(driver, _SEED_NEO4J_CREDITED_ON, credits=credit_edges())
+    await consume(driver, _SEED_NEO4J_SAME_AS, credits=same_as_edges())
+    # ── end credits component ────────────────────────────────────────────────
+    # ── label-DNA component (gm-catalog-api-dl8.2) ──────────────────────────
+    await consume(
+        driver,
+        _SEED_NEO4J_LABEL_DNA_ENTITIES,
+        labels=[
+            {
+                "id": label_id,
+                "name": name,
+                "release_count": sum(release["label"] == label_id for release in LABEL_DNA_RELEASES.values()),
+                "artist_count": len(
+                    {artist_id for release in LABEL_DNA_RELEASES.values() if release["label"] == label_id for artist_id in release["artists"]}
+                ),
+            }
+            for label_id, name in LABEL_DNA_LABELS.items()
+        ],
+        artists=[{"id": artist_id, "name": name} for artist_id, name in LABEL_DNA_ARTISTS.items()],
+        releases=[
+            {
+                "id": release_id,
+                "title": f"Label DNA Release {release_id}",
+                "year": release["year"],
+                "formats": release["formats"],
+                "media_families": release["media"]["families"],
+            }
+            for release_id, release in LABEL_DNA_RELEASES.items()
+        ],
+    )
+    await consume(driver, _SEED_NEO4J_BY, edges=label_dna_edges("artists", "artist_id"))
+    await consume(
+        driver,
+        "MATCH (alias:Artist {id: $alias_id}), (primary:Artist {id: $primary_id}) MERGE (alias)-[:ALIAS_OF]->(primary)",
+        alias_id=ALIAS_ARTIST_ID,
+        primary_id=PRIMARY_ARTIST_ID,
+    )
+    await consume(
+        driver,
+        _SEED_NEO4J_ON,
+        edges=[{"release_id": release_id, "label_id": release["label"]} for release_id, release in LABEL_DNA_RELEASES.items()],
+    )
+    await consume(driver, _SEED_NEO4J_LABEL_DNA_GENRE, edges=label_dna_edges("genres", "name"))
+    await consume(driver, _SEED_NEO4J_LABEL_DNA_STYLE, edges=label_dna_edges("styles", "name"))
+    await consume(driver, _SEED_NEO4J_LABEL_DNA_MEDIA, edges=label_dna_media_edges())
+    await consume(
+        driver,
+        _SEED_NEO4J_EXPLORE_TAGS,
+        rows=[
+            {"id": _TAGGED_RELEASE_ID, "genres": [GENRE_NAME], "styles": [STYLE_NAME]},
+            *({"id": release_id, "genres": release["genres"], "styles": release["styles"]} for release_id, release in AUTOCOMPLETE_RELEASES.items()),
+        ],
+    )
+    for cypher in _SEED_NEO4J_EXPLORE_COUNTERS:
+        await consume(driver, cypher)
+    await consume(driver, "MERGE (master:Master {id: $master_id}) SET master.title = 'Collection Master'", master_id=COLLECTION_MASTER_ID)
+    await consume(
+        driver,
+        _SEED_NEO4J_DERIVED_FROM,
+        master_id=COLLECTION_MASTER_ID,
+        release_ids=[release_id for release_id, release in LABEL_DNA_RELEASES.items() if release["master_id"]],
+    )
+    await consume(
+        driver,
+        _SEED_NEO4J_COLLECTION_USERS,
+        users=[{"id": user_id} for user_id in (COLLECTION_USER_ID, COLLECTION_OTHER_USER_ID, COLLECTION_THIRD_USER_ID, COLLECTION_RECOMMEND_USER_ID)],
+    )
+    await consume(driver, _SEED_NEO4J_COLLECTIONS, rows=list(COLLECTION_ROWS))
+    await consume(driver, _SEED_NEO4J_WANTS, rows=list(WANT_ROWS))
+    # ── end label-DNA component ─────────────────────────────────────────────
     await consume(driver, _AWAIT_NEO4J_INDEXES)
 
 
@@ -409,6 +1053,62 @@ async def seed_postgres(pool: AsyncPostgreSQLPool) -> None:
         for release_id, tags in AUTOCOMPLETE_RELEASES.items():
             document = {"title": f"Release {release_id}", **tags}
             await cursor.execute(_SEED_RELEASE, (release_id, "parity-fixture", json.dumps(document)))
+        # ── credits component (gm-catalog-api-dl8.1) ─────────────────────────
+        for artist_id, name in CREDITS_ARTISTS.items():
+            await cursor.execute(_SEED_ARTIST, (artist_id, "parity-fixture", json.dumps({"name": name})))
+        for label_id, name in CREDITS_LABELS.items():
+            await cursor.execute(_SEED_LABEL, (label_id, "parity-fixture", json.dumps({"name": name})))
+        for release_id, release in CREDITS_RELEASES.items():
+            await cursor.execute(_SEED_RELEASE, (release_id, "parity-fixture", json.dumps(_release_document(release_id, release))))
+        # ── end credits component ────────────────────────────────────────────
+        # ── label-DNA component (gm-catalog-api-dl8.2) ──────────────────────
+        for artist_id, name in LABEL_DNA_ARTISTS.items():
+            document = {"name": name}
+            if artist_id == PRIMARY_ARTIST_ID:
+                document["aliases"] = [{"id": int(ALIAS_ARTIST_ID)}]
+            await cursor.execute(_SEED_ARTIST, (artist_id, "parity-fixture", json.dumps(document)))
+        for label_id, name in LABEL_DNA_LABELS.items():
+            await cursor.execute(_SEED_LABEL, (label_id, "parity-fixture", json.dumps({"name": name})))
+        for release_id, release in LABEL_DNA_RELEASES.items():
+            document = {
+                "title": f"Label DNA Release {release_id}",
+                "year": release["year"],
+                "artists": [{"id": int(artist_id)} for artist_id in release["artists"]],
+                "labels": [{"id": int(release["label"])}],
+                "genres": release["genres"],
+                "styles": release["styles"],
+                "formats": [{"name": name} for name in release["formats"]],
+                "master_id": int(release["master_id"]) if release["master_id"] else None,
+            }
+            if release_id == "1201":
+                document.update(
+                    identifiers={"items": [{"type": "Barcode", "value": "1201-TEST"}]},
+                    companies={"items": [{"name": "Fixture Pressing"}]},
+                    country="US",
+                )
+            await cursor.execute(
+                _SEED_LABEL_DNA_RELEASE,
+                (release_id, "parity-fixture", json.dumps(document), json.dumps(release["media"])),
+            )
+        await cursor.execute(_SEED_MASTER, (COLLECTION_MASTER_ID, "parity-fixture", json.dumps({"title": "Collection Master"})))
+        for user_id in (COLLECTION_USER_ID, COLLECTION_OTHER_USER_ID, COLLECTION_THIRD_USER_ID, COLLECTION_RECOMMEND_USER_ID):
+            await cursor.execute(_SEED_USER, (user_id, f"{user_id[-1]}@fixture.invalid"))
+        for row in COLLECTION_ROWS:
+            await cursor.execute(
+                _SEED_COLLECTION,
+                (
+                    row["user_id"],
+                    row["release_id"],
+                    row["instance_id"],
+                    row["rating"],
+                    row["folder_id"],
+                    row["date_added"],
+                    json.dumps(LABEL_DNA_RELEASES[row["release_id"]]["media"]),
+                ),
+            )
+        for row in WANT_ROWS:
+            await cursor.execute(_SEED_WANT, (row["user_id"], row["release_id"], row["rating"], row["date_added"]))
+        # ── end label-DNA component ─────────────────────────────────────────
         await cursor.execute(_BOOTSTRAP_FILL)
         await cursor.fetchall()
 

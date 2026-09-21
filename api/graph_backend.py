@@ -36,12 +36,27 @@ from api.queries import (
     autocomplete_queries,
     collaborator_pg_queries,
     collaborator_queries,
+    credits_pg_queries,
+    credits_queries,
+    explore_pg_queries,
+    fit_pg_queries,
+    fit_queries,
     gap_pg_queries,
     gap_queries,
+    genre_tree_pg_queries,
+    genre_tree_queries,
+    label_dna_pg_queries,
+    label_dna_queries,
     neo4j_pg_queries,
     neo4j_queries,
     network_pg_queries,
     network_queries,
+    recommend_pg_queries,
+    recommend_queries,
+    taste_pg_queries,
+    taste_queries,
+    user_pg_queries,
+    user_queries,
 )
 
 
@@ -64,6 +79,8 @@ class CollaboratorsBackend(Protocol):
     async def get_multi_hop_collaborators(self, handle: Any, artist_id: str, /, depth: int = 2, limit: int = 50) -> list[dict[str, Any]]: ...
 
     async def count_multi_hop_collaborators(self, handle: Any, artist_id: str, /, depth: int = 2) -> int: ...
+
+    async def get_artist_centrality(self, handle: Any, artist_id: str, /) -> dict[str, Any] | None: ...
 
 
 # ── The "autocomplete" family ────────────────────────────────────────────────
@@ -178,8 +195,241 @@ _POSTGRES_GAP_METADATA: GapMetadataBackend = gap_pg_queries
 _NEO4J_CATALOG_OVERVIEW: CatalogOverviewBackend = neo4j_queries
 _POSTGRES_CATALOG_OVERVIEW: CatalogOverviewBackend = neo4j_pg_queries
 
+
+class ExploreBackend(Protocol):
+    """Center, expansion, count, detail, trend, and emergence queries."""
+
+    async def explore_artist(self, handle: Any, name: str, /) -> dict[str, Any] | None: ...
+    async def explore_genre(self, handle: Any, name: str, /) -> dict[str, Any] | None: ...
+    async def explore_label(self, handle: Any, name: str, /) -> dict[str, Any] | None: ...
+    async def explore_style(self, handle: Any, name: str, /) -> dict[str, Any] | None: ...
+    async def expand_artist_releases(
+        self, handle: Any, name: str, /, limit: int = 50, offset: int = 0, *, before_year: int | None = None
+    ) -> list[dict[str, Any]]: ...
+    async def expand_artist_labels(
+        self, handle: Any, name: str, /, limit: int = 50, offset: int = 0, *, before_year: int | None = None
+    ) -> list[dict[str, Any]]: ...
+    async def expand_artist_aliases(
+        self, handle: Any, name: str, /, limit: int = 50, offset: int = 0, *, before_year: int | None = None
+    ) -> list[dict[str, Any]]: ...
+    async def expand_genre_releases(
+        self, handle: Any, name: str, /, limit: int = 50, offset: int = 0, *, before_year: int | None = None
+    ) -> list[dict[str, Any]]: ...
+    async def expand_genre_artists(
+        self, handle: Any, name: str, /, limit: int = 50, offset: int = 0, *, before_year: int | None = None
+    ) -> list[dict[str, Any]]: ...
+    async def expand_genre_labels(
+        self, handle: Any, name: str, /, limit: int = 50, offset: int = 0, *, before_year: int | None = None
+    ) -> list[dict[str, Any]]: ...
+    async def expand_genre_styles(
+        self, handle: Any, name: str, /, limit: int = 50, offset: int = 0, *, before_year: int | None = None
+    ) -> list[dict[str, Any]]: ...
+    async def expand_label_releases(
+        self, handle: Any, name: str, /, limit: int = 50, offset: int = 0, *, before_year: int | None = None
+    ) -> list[dict[str, Any]]: ...
+    async def expand_label_artists(
+        self, handle: Any, name: str, /, limit: int = 50, offset: int = 0, *, before_year: int | None = None
+    ) -> list[dict[str, Any]]: ...
+    async def expand_label_genres(
+        self, handle: Any, name: str, /, limit: int = 50, offset: int = 0, *, before_year: int | None = None
+    ) -> list[dict[str, Any]]: ...
+    async def expand_style_releases(
+        self, handle: Any, name: str, /, limit: int = 50, offset: int = 0, *, before_year: int | None = None
+    ) -> list[dict[str, Any]]: ...
+    async def expand_style_artists(
+        self, handle: Any, name: str, /, limit: int = 50, offset: int = 0, *, before_year: int | None = None
+    ) -> list[dict[str, Any]]: ...
+    async def expand_style_labels(
+        self, handle: Any, name: str, /, limit: int = 50, offset: int = 0, *, before_year: int | None = None
+    ) -> list[dict[str, Any]]: ...
+    async def expand_style_genres(
+        self, handle: Any, name: str, /, limit: int = 50, offset: int = 0, *, before_year: int | None = None
+    ) -> list[dict[str, Any]]: ...
+    async def count_artist_releases(self, handle: Any, name: str, /, *, before_year: int | None = None) -> int: ...
+    async def count_artist_labels(self, handle: Any, name: str, /, *, before_year: int | None = None) -> int: ...
+    async def count_artist_aliases(self, handle: Any, name: str, /, *, before_year: int | None = None) -> int: ...
+    async def count_genre_releases(self, handle: Any, name: str, /, *, before_year: int | None = None) -> int: ...
+    async def count_genre_artists(self, handle: Any, name: str, /, *, before_year: int | None = None) -> int: ...
+    async def count_genre_labels(self, handle: Any, name: str, /, *, before_year: int | None = None) -> int: ...
+    async def count_genre_styles(self, handle: Any, name: str, /, *, before_year: int | None = None) -> int: ...
+    async def count_label_releases(self, handle: Any, name: str, /, *, before_year: int | None = None) -> int: ...
+    async def count_label_artists(self, handle: Any, name: str, /, *, before_year: int | None = None) -> int: ...
+    async def count_label_genres(self, handle: Any, name: str, /, *, before_year: int | None = None) -> int: ...
+    async def count_style_releases(self, handle: Any, name: str, /, *, before_year: int | None = None) -> int: ...
+    async def count_style_artists(self, handle: Any, name: str, /, *, before_year: int | None = None) -> int: ...
+    async def count_style_labels(self, handle: Any, name: str, /, *, before_year: int | None = None) -> int: ...
+    async def count_style_genres(self, handle: Any, name: str, /, *, before_year: int | None = None) -> int: ...
+    async def get_artist_details(self, handle: Any, node_id: str, /) -> dict[str, Any] | None: ...
+    async def get_release_details(self, handle: Any, node_id: str, /) -> dict[str, Any] | None: ...
+    async def get_label_details(self, handle: Any, node_id: str, /) -> dict[str, Any] | None: ...
+    async def get_genre_details(self, handle: Any, node_id: str, /) -> dict[str, Any] | None: ...
+    async def get_style_details(self, handle: Any, node_id: str, /) -> dict[str, Any] | None: ...
+    async def trends_artist(self, handle: Any, name: str, /) -> list[dict[str, Any]]: ...
+    async def trends_genre(self, handle: Any, name: str, /) -> list[dict[str, Any]]: ...
+    async def trends_label(self, handle: Any, name: str, /) -> list[dict[str, Any]]: ...
+    async def trends_style(self, handle: Any, name: str, /) -> list[dict[str, Any]]: ...
+    async def get_genre_emergence(self, handle: Any, before_year: int, /) -> dict[str, list[dict[str, Any]]]: ...
+
+
+class GenreTreeBackend(Protocol):
+    async def get_genre_tree(self, handle: Any, /) -> list[dict[str, Any]]: ...
+
+
+_NEO4J_EXPLORE: ExploreBackend = neo4j_queries
+# Expansion/count wrappers are installed from the fixed mapping at module import.
+_POSTGRES_EXPLORE: ExploreBackend = explore_pg_queries  # type: ignore[assignment]
+_NEO4J_GENRE_TREE: GenreTreeBackend = genre_tree_queries
+_POSTGRES_GENRE_TREE: GenreTreeBackend = genre_tree_pg_queries
+
 _NEO4J_ADMIN_STORAGE: AdminStorageBackend = admin_queries
 _POSTGRES_ADMIN_STORAGE: AdminStorageBackend = admin_pg_queries
+
+
+# ── Coverage spike family 4: credits and provenance (gm-catalog-api-dl8.1) ───────────────
+# The whole of `api/queries/credits_queries.py` over one edge type (`graph.credited_on`),
+# one vertex label (`graph.person`), and the identity edge beside it (`graph.same_as`).
+#
+# Eight functions, not the nine the coverage spike counts in that module: the ninth,
+# `autocomplete_person`, is the module's full-text search, which the spike classifies
+# SQL-only and lists under *its* family 2 as well. It was migrated there — it is a member
+# of `AutocompleteBackend` above, resolved through the "autocomplete" family, and answered
+# by `api/queries/autocomplete_pg_queries.py` — and a function the seam resolves through
+# two families would be a function with two backends for one call. So the credits family
+# takes the eight traversals and leaves the search where it already works.
+class CreditsBackend(Protocol):
+    """The eight traversal queries the "credits" family is made of.
+
+    See `CollaboratorsBackend` for why the handle is positional-only and typed `Any`.
+    `depth` and `limit` are named because `api/routers/credits.py` varies them per request.
+    """
+
+    async def get_person_credits(self, handle: Any, name: str, /) -> list[dict[str, Any]]: ...
+
+    async def get_person_timeline(self, handle: Any, name: str, /) -> list[dict[str, Any]]: ...
+
+    async def get_release_credits(self, handle: Any, release_id: str, /) -> list[dict[str, Any]]: ...
+
+    async def get_role_leaderboard(self, handle: Any, category: str, /, limit: int = 20) -> list[dict[str, Any]]: ...
+
+    async def get_shared_credits(self, handle: Any, person1: str, person2: str, /) -> list[dict[str, Any]]: ...
+
+    async def get_person_connections(self, handle: Any, name: str, /, depth: int = 2, limit: int = 50) -> list[dict[str, Any]]: ...
+
+    async def get_person_profile(self, handle: Any, name: str, /) -> dict[str, Any] | None: ...
+
+    async def get_person_role_breakdown(self, handle: Any, name: str, /) -> list[dict[str, Any]]: ...
+
+
+_NEO4J_CREDITS: CreditsBackend = credits_queries
+_POSTGRES_CREDITS: CreditsBackend = credits_pg_queries
+
+
+class LabelDnaBackend(Protocol):
+    async def get_label_identity(self, handle: Any, label_id: str, /) -> dict[str, Any] | None: ...
+    async def get_label_genre_profile(self, handle: Any, label_id: str, /) -> list[dict[str, Any]]: ...
+    async def get_label_style_profile(self, handle: Any, label_id: str, /) -> list[dict[str, Any]]: ...
+    async def get_label_decade_profile(self, handle: Any, label_id: str, /) -> list[dict[str, Any]]: ...
+    async def get_label_active_years(self, handle: Any, label_id: str, /) -> list[int]: ...
+    async def get_label_format_profile(self, handle: Any, label_id: str, /) -> list[dict[str, Any]]: ...
+    async def get_label_media_family_counts(self, handle: Any, label_id: str, /) -> list[dict[str, Any]]: ...
+    async def get_label_medium_counts(self, handle: Any, label_id: str, /) -> list[dict[str, Any]]: ...
+    async def get_label_media_families_fallback(self, handle: Any, label_id: str, /) -> list[dict[str, Any]]: ...
+    async def get_label_media_profile(self, handle: Any, label_id: str, /) -> list[dict[str, Any]]: ...
+    async def get_label_full_profile(self, handle: Any, label_id: str, /) -> dict[str, Any] | None: ...
+    async def get_candidate_labels_genre_vectors(self, handle: Any, label_id: str, /) -> list[dict[str, Any]]: ...
+
+
+_NEO4J_LABEL_DNA: LabelDnaBackend = label_dna_queries
+_POSTGRES_LABEL_DNA: LabelDnaBackend = label_dna_pg_queries
+
+
+class UserCollectionBackend(Protocol):
+    async def get_user_collection(self, handle: Any, user_id: str, /, limit: int = 50, offset: int = 0) -> tuple[list[dict[str, Any]], int]: ...
+    async def get_user_wantlist(self, handle: Any, user_id: str, /, limit: int = 50, offset: int = 0) -> tuple[list[dict[str, Any]], int]: ...
+    async def get_user_recommendations(self, handle: Any, user_id: str, /, limit: int = 20) -> list[dict[str, Any]]: ...
+    async def get_user_collection_stats(self, handle: Any, user_id: str, /) -> dict[str, Any]: ...
+    async def get_user_collection_timeline(self, handle: Any, user_id: str, /, bucket: str = "year") -> dict[str, Any]: ...
+    async def get_user_collection_evolution(self, handle: Any, user_id: str, /, metric: str = "genre") -> dict[str, Any]: ...
+    async def check_releases_user_status(self, handle: Any, user_id: str, release_ids: list[str], /) -> dict[str, dict[str, bool]]: ...
+
+
+class TasteBackend(Protocol):
+    async def get_collection_count(self, handle: Any, user_id: str, /) -> int: ...
+    async def get_taste_heatmap(self, handle: Any, user_id: str, /) -> tuple[list[dict[str, Any]], int]: ...
+    async def get_obscurity_score(self, handle: Any, user_id: str, /) -> dict[str, Any]: ...
+    async def get_taste_drift(self, handle: Any, user_id: str, /) -> list[dict[str, Any]]: ...
+    async def get_blind_spots(self, handle: Any, user_id: str, /, limit: int = 5) -> list[dict[str, Any]]: ...
+    async def get_top_labels(self, handle: Any, user_id: str, /, limit: int = 10) -> list[dict[str, Any]]: ...
+
+
+class GapAnalysisBackend(Protocol):
+    async def get_label_gaps(
+        self,
+        handle: Any,
+        user_id: str,
+        label_id: str,
+        /,
+        limit: int = 50,
+        offset: int = 0,
+        exclude_wantlist: bool = False,
+        families: list[str] | None = None,
+        mediums: list[str] | None = None,
+    ) -> tuple[list[dict[str, Any]], int]: ...
+    async def get_label_gap_summary(self, handle: Any, user_id: str, label_id: str, /) -> dict[str, Any]: ...
+    async def get_artist_gaps(
+        self,
+        handle: Any,
+        user_id: str,
+        artist_id: str,
+        /,
+        limit: int = 50,
+        offset: int = 0,
+        exclude_wantlist: bool = False,
+        families: list[str] | None = None,
+        mediums: list[str] | None = None,
+    ) -> tuple[list[dict[str, Any]], int]: ...
+    async def get_artist_gap_summary(self, handle: Any, user_id: str, artist_id: str, /) -> dict[str, Any]: ...
+    async def get_master_gaps(
+        self,
+        handle: Any,
+        user_id: str,
+        master_id: str,
+        /,
+        limit: int = 50,
+        offset: int = 0,
+        exclude_wantlist: bool = False,
+        families: list[str] | None = None,
+        mediums: list[str] | None = None,
+    ) -> tuple[list[dict[str, Any]], int]: ...
+    async def get_master_gap_summary(self, handle: Any, user_id: str, master_id: str, /) -> dict[str, Any]: ...
+
+
+_NEO4J_USER_COLLECTION: UserCollectionBackend = user_queries
+_POSTGRES_USER_COLLECTION: UserCollectionBackend = user_pg_queries
+_NEO4J_TASTE: TasteBackend = taste_queries
+_POSTGRES_TASTE: TasteBackend = taste_pg_queries
+_NEO4J_GAP_ANALYSIS: GapAnalysisBackend = gap_queries
+_POSTGRES_GAP_ANALYSIS: GapAnalysisBackend = gap_pg_queries
+
+
+class RecommendationsBackend(Protocol):
+    async def get_artist_identity(self, handle: Any, artist_id: str, /) -> dict[str, Any] | None: ...
+    async def get_artist_profile(self, handle: Any, artist_id: str, /) -> dict[str, Any]: ...
+    async def get_candidate_artists(self, handle: Any, artist_id: str, /) -> list[dict[str, Any]]: ...
+    async def get_collector_counts(self, handle: Any, release_ids: list[str], /) -> dict[str, int]: ...
+    async def get_label_affinity_candidates(self, handle: Any, user_id: str, /, limit: int = 50) -> list[dict[str, Any]]: ...
+    async def get_blindspot_candidates(self, handle: Any, user_id: str, /, limit: int = 50) -> list[dict[str, Any]]: ...
+
+
+class FitBackend(Protocol):
+    async def get_collection_ids(self, handle: Any, user_id: str, /, *, cache: Any = None) -> dict[str, Any]: ...
+    async def get_release_context(self, handle: Any, release_id: str, /) -> dict[str, Any] | None: ...
+
+
+_NEO4J_RECOMMENDATIONS: RecommendationsBackend = recommend_queries
+_POSTGRES_RECOMMENDATIONS: RecommendationsBackend = recommend_pg_queries
+_NEO4J_FIT: FitBackend = fit_queries
+_POSTGRES_FIT: FitBackend = fit_pg_queries
 
 
 # family name -> backend name -> module implementing that family's query functions.
@@ -208,10 +458,35 @@ _FAMILY_BACKENDS: dict[str, dict[str, ModuleType]] = {
         "neo4j": neo4j_queries,
         "postgres": neo4j_pg_queries,
     },
+    "explore": {"neo4j": neo4j_queries, "postgres": explore_pg_queries},
+    "genre_tree": {"neo4j": genre_tree_queries, "postgres": genre_tree_pg_queries},
     "admin_storage": {
         "neo4j": admin_queries,
         "postgres": admin_pg_queries,
     },
+    # ── credits family (gm-catalog-api-dl8.1) ────────────────────────────────
+    "credits": {
+        "neo4j": credits_queries,
+        "postgres": credits_pg_queries,
+    },
+    "label_dna": {
+        "neo4j": label_dna_queries,
+        "postgres": label_dna_pg_queries,
+    },
+    "user_collection": {
+        "neo4j": user_queries,
+        "postgres": user_pg_queries,
+    },
+    "taste": {
+        "neo4j": taste_queries,
+        "postgres": taste_pg_queries,
+    },
+    "gap_analysis": {
+        "neo4j": gap_queries,
+        "postgres": gap_pg_queries,
+    },
+    "recommendations": {"neo4j": recommend_queries, "postgres": recommend_pg_queries},
+    "fit": {"neo4j": fit_queries, "postgres": fit_pg_queries},
 }
 
 
@@ -287,9 +562,53 @@ def get_catalog_overview_backend(backend: str) -> CatalogOverviewBackend:
     return cast("CatalogOverviewBackend", get_backend("catalog_overview", backend))
 
 
+def get_explore_backend(backend: str) -> ExploreBackend:
+    """Resolve the Explore family without exposing backend-specific handles to callers."""
+    return cast("ExploreBackend", get_backend("explore", backend))
+
+
+def get_genre_tree_backend(backend: str) -> GenreTreeBackend:
+    """Resolve the genre-tree family."""
+    return cast("GenreTreeBackend", get_backend("genre_tree", backend))
+
+
 def get_admin_storage_backend(backend: str) -> AdminStorageBackend:
     """Resolve the "admin_storage" family for *backend*, typed rather than as a module."""
     return cast("AdminStorageBackend", get_backend("admin_storage", backend))
+
+
+# ── credits family (gm-catalog-api-dl8.1) ────────────────────────────────────
+def get_credits_backend(backend: str) -> CreditsBackend:
+    """Resolve the "credits" family for *backend*, typed rather than as a module.
+
+    Sound for the same reason `get_collaborators_backend` is: both registered modules are
+    bound to `CreditsBackend` above, which is where mypy checks them.
+    """
+    return cast("CreditsBackend", get_backend("credits", backend))
+
+
+def get_label_dna_backend(backend: str) -> LabelDnaBackend:
+    return cast("LabelDnaBackend", get_backend("label_dna", backend))
+
+
+def get_user_collection_backend(backend: str) -> UserCollectionBackend:
+    return cast("UserCollectionBackend", get_backend("user_collection", backend))
+
+
+def get_taste_backend(backend: str) -> TasteBackend:
+    return cast("TasteBackend", get_backend("taste", backend))
+
+
+def get_gap_analysis_backend(backend: str) -> GapAnalysisBackend:
+    return cast("GapAnalysisBackend", get_backend("gap_analysis", backend))
+
+
+def get_recommendations_backend(backend: str) -> RecommendationsBackend:
+    return cast("RecommendationsBackend", get_backend("recommendations", backend))
+
+
+def get_fit_backend(backend: str) -> FitBackend:
+    return cast("FitBackend", get_backend("fit", backend))
 
 
 # ── Backend-neutral error mapping ─────────────────────────────────────────────
