@@ -783,7 +783,7 @@ class NLQToolRunner:
         return await agent_tools.get_graph_stats(driver=self._driver, stats_fn=neo4j_queries.get_graph_stats)
 
     async def _handle_get_collection_gaps(self, params: dict[str, Any], user_id: str | None) -> dict[str, Any]:
-        from api.queries import gap_queries  # noqa: PLC0415
+        from api.graph_backend import get_gap_analysis_backend  # noqa: PLC0415
         from api.queries.media_filters import UnknownMediaIdsError, resolve_media_filter  # noqa: PLC0415
 
         entity_type = params.get("entity_type", "label")
@@ -797,9 +797,11 @@ class NLQToolRunner:
         except UnknownMediaIdsError as exc:
             return {"error": str(exc)}
 
+        backend = get_gap_analysis_backend(self._graph_backend)
+        handle = self._pool if self._graph_backend == "postgres" else self._driver
         if entity_type == "label":
-            gaps, total = await gap_queries.get_label_gaps(
-                self._driver,
+            gaps, total = await backend.get_label_gaps(
+                handle,
                 user_id,  # type: ignore[arg-type]
                 entity_id,
                 limit=limit,
@@ -807,8 +809,8 @@ class NLQToolRunner:
                 mediums=mediums,
             )
         elif entity_type == "artist":
-            gaps, total = await gap_queries.get_artist_gaps(
-                self._driver,
+            gaps, total = await backend.get_artist_gaps(
+                handle,
                 user_id,  # type: ignore[arg-type]
                 entity_id,
                 limit=limit,
@@ -820,20 +822,26 @@ class NLQToolRunner:
         return {"gaps": gaps, "total": total}
 
     async def _handle_get_taste_fingerprint(self, _params: dict[str, Any], user_id: str | None) -> dict[str, Any]:
-        from api.queries import taste_queries  # noqa: PLC0415
+        from api.graph_backend import get_taste_backend  # noqa: PLC0415
 
-        cells, total = await taste_queries.get_taste_heatmap(self._driver, user_id)  # type: ignore[arg-type]
+        backend = get_taste_backend(self._graph_backend)
+        handle = self._pool if self._graph_backend == "postgres" else self._driver
+        cells, total = await backend.get_taste_heatmap(handle, user_id)  # type: ignore[arg-type]
         return {"heatmap": cells, "total": total}
 
     async def _handle_get_taste_blindspots(self, params: dict[str, Any], user_id: str | None) -> dict[str, Any]:
-        from api.queries import taste_queries  # noqa: PLC0415
+        from api.graph_backend import get_taste_backend  # noqa: PLC0415
 
         limit = params.get("limit", 5)
-        spots = await taste_queries.get_blind_spots(self._driver, user_id, limit=limit)  # type: ignore[arg-type]
+        backend = get_taste_backend(self._graph_backend)
+        handle = self._pool if self._graph_backend == "postgres" else self._driver
+        spots = await backend.get_blind_spots(handle, user_id, limit=limit)  # type: ignore[arg-type]
         return {"blind_spots": spots}
 
     async def _handle_get_collection_stats(self, _params: dict[str, Any], user_id: str | None) -> dict[str, Any]:
-        from api.queries import taste_queries  # noqa: PLC0415
+        from api.graph_backend import get_taste_backend  # noqa: PLC0415
 
-        count = await taste_queries.get_collection_count(self._driver, user_id)  # type: ignore[arg-type]
+        backend = get_taste_backend(self._graph_backend)
+        handle = self._pool if self._graph_backend == "postgres" else self._driver
+        count = await backend.get_collection_count(handle, user_id)  # type: ignore[arg-type]
         return {"collection_count": count}
