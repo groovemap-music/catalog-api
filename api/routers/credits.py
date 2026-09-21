@@ -8,7 +8,15 @@ from common.credit_roles import ALL_CATEGORIES
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
-from api.graph_backend import AutocompleteBackend, get_autocomplete_backend
+from api.graph_backend import (
+    GRAPH_BACKEND_ERROR_TYPES,
+    AutocompleteBackend,
+    CreditsBackend,
+    get_autocomplete_backend,
+    get_credits_backend,
+    is_graph_backend_unavailable,
+    is_graph_query_timeout,
+)
 from api.limiter import limiter
 from api.models import (
     ConnectionEntry,
@@ -26,17 +34,7 @@ from api.models import (
     SharedCreditsResponse,
     TimelineEntry,
 )
-from api.queries import autocomplete_queries
-from api.queries.credits_queries import (
-    get_person_connections,
-    get_person_credits,
-    get_person_profile,
-    get_person_role_breakdown,
-    get_person_timeline,
-    get_release_credits,
-    get_role_leaderboard,
-    get_shared_credits,
-)
+from api.queries import autocomplete_queries, credits_queries
 from api.telemetry import CACHE_CREDITS_LEADERBOARD, CACHE_CREDITS_PERSON, cache_get
 
 
@@ -46,31 +44,70 @@ router = APIRouter()
 
 _neo4j_driver: Any = None
 _redis: Any = None
-# The PostgreSQL pool, held alongside the Neo4j driver because the person search is the one
-# route here that either engine can serve. Every other credits route walks CREDITED_ON and
-# reads `_neo4j_driver` directly.
+# The PostgreSQL pool, held alongside the Neo4j driver because every route on this router
+# is now served by whichever backend `GRAPH_BACKEND` selects: the person search through the
+# "autocomplete" family, the eight traversals through the "credits" family
+# (`gm-catalog-api-dl8.1`).
 _pg_pool: Any = None
 _graph_backend: str = "neo4j"
-# Resolved through the graph-backend selector; defaults to the Neo4j implementation so an
-# unconfigured router behaves exactly as it did before the seam existed.
+# Resolved through the graph-backend selector; both default to the Neo4j implementation so
+# an unconfigured router behaves exactly as it did before the seam existed.
 _autocomplete_backend: AutocompleteBackend = autocomplete_queries
+_credits_backend: CreditsBackend = credits_queries
+
+# Every credits row's `category` column reads `CREDITED_ON.category` on Neo4j and
+# `graph.credited_on.role_category` on PostgreSQL — one rename, absorbed entirely inside
+# the two backends (see `api/queries/credits_pg_queries.py`). The column the handlers below
+# read, the response models, and the cached payloads are all still spelled `category`.
 
 # Redis cache TTL for credits (24 hours — data changes only on import)
 _CREDITS_CACHE_TTL = 86400
 
 
 def configure(neo4j: Any, redis: Any = None, graph_backend: str = "neo4j", pg_pool: Any = None) -> None:
-    global _neo4j_driver, _redis, _pg_pool, _graph_backend, _autocomplete_backend
+    global _neo4j_driver, _redis, _pg_pool, _graph_backend, _autocomplete_backend, _credits_backend
     _neo4j_driver = neo4j
     _redis = redis
     _pg_pool = pg_pool
     _graph_backend = graph_backend
     _autocomplete_backend = get_autocomplete_backend(graph_backend)
+    _credits_backend = get_credits_backend(graph_backend)
+
+
+def _handle() -> Any:
+    """Return the connection handle the resolved backends expect.
+
+    Read at call time rather than frozen in `configure`, so the handle always tracks the
+    module-level connection the rest of this router uses. Both families this router
+    resolves take the same handle, because both are selected by the same `GRAPH_BACKEND`.
+    """
+    return _pg_pool if _graph_backend == "postgres" else _neo4j_driver
 
 
 def _autocomplete_handle() -> Any:
     """Return the connection handle the resolved autocomplete backend expects."""
-    return _pg_pool if _graph_backend == "postgres" else _neo4j_driver
+    return _handle()
+
+
+def _backend_failure(exc: BaseException, what: str, **context: Any) -> JSONResponse:
+    """Map a backend failure to a response, or re-raise it.
+
+    `context` is merged into the log event under its own key rather than splatted, so a
+    caller naming a field the same thing this function logs cannot turn a handled failure
+    into a `TypeError` and a 500.
+
+    Backend-neutral, the way `api/routers/network.py` is: a query that ran out of time is
+    a 504 whichever engine timed it out, a backend that could not be reached at all is the
+    same 503 a not-configured backend returns, and anything else is a genuine bug that
+    still reaches the 500 both backends always produced.
+    """
+    if is_graph_query_timeout(exc):
+        logger.warning("⏱️ Credits query timed out", credits_query=what, context=context)
+        return JSONResponse(content={"error": f"{what} query timed out — try again with a narrower request"}, status_code=504)
+    if is_graph_backend_unavailable(exc):
+        logger.warning("🔌 Credits graph backend unavailable", credits_query=what, context=context)
+        return JSONResponse(content={"error": "Graph backend unavailable — try again later"}, status_code=503)
+    raise exc
 
 
 # ── Person sub-routes MUST be declared before the catch-all {name} route ──
@@ -83,10 +120,14 @@ async def person_timeline(
     name: str,
 ) -> JSONResponse:
     """Credits over time — year-by-year activity."""
-    if not _neo4j_driver:
+    handle = _handle()
+    if not handle:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
-    records = await get_person_timeline(_neo4j_driver, name)
+    try:
+        records = await _credits_backend.get_person_timeline(handle, name)
+    except GRAPH_BACKEND_ERROR_TYPES as exc:
+        return _backend_failure(exc, "Person timeline", person=name)
     if not records:
         return JSONResponse(content={"error": f"No timeline data for '{name}'"}, status_code=404)
 
@@ -102,14 +143,18 @@ async def person_profile(
     name: str,
 ) -> JSONResponse:
     """Summary profile for a credited person."""
-    if not _neo4j_driver:
+    handle = _handle()
+    if not handle:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
-    profile = await get_person_profile(_neo4j_driver, name)
-    if not profile:
-        return JSONResponse(content={"error": f"Person '{name}' not found"}, status_code=404)
+    try:
+        profile = await _credits_backend.get_person_profile(handle, name)
+        if not profile:
+            return JSONResponse(content={"error": f"Person '{name}' not found"}, status_code=404)
 
-    role_breakdown = await get_person_role_breakdown(_neo4j_driver, name)
+        role_breakdown = await _credits_backend.get_person_role_breakdown(handle, name)
+    except GRAPH_BACKEND_ERROR_TYPES as exc:
+        return _backend_failure(exc, "Person profile", person=name)
 
     response = PersonProfileResponse(
         name=profile["name"],
@@ -131,7 +176,8 @@ async def person_credits(
     name: str,
 ) -> JSONResponse:
     """All releases a person is credited on, grouped by role."""
-    if not _neo4j_driver:
+    handle = _handle()
+    if not handle:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     cache_key = f"credits:person:{name}"
@@ -143,7 +189,10 @@ async def person_credits(
         except Exception:
             logger.debug("⚠️ Credits person cache get failed", key=cache_key)
 
-    records = await get_person_credits(_neo4j_driver, name)
+    try:
+        records = await _credits_backend.get_person_credits(handle, name)
+    except GRAPH_BACKEND_ERROR_TYPES as exc:
+        return _backend_failure(exc, "Person credits", person=name)
     if not records:
         return JSONResponse(content={"error": f"No credits found for '{name}'"}, status_code=404)
 
@@ -178,10 +227,14 @@ async def release_credits(
     release_id: str,
 ) -> JSONResponse:
     """Full credits breakdown for a release."""
-    if not _neo4j_driver:
+    handle = _handle()
+    if not handle:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
-    records = await get_release_credits(_neo4j_driver, release_id)
+    try:
+        records = await _credits_backend.get_release_credits(handle, release_id)
+    except GRAPH_BACKEND_ERROR_TYPES as exc:
+        return _backend_failure(exc, "Release credits", release_id=release_id)
     if not records:
         return JSONResponse(content={"error": f"No credits found for release '{release_id}'"}, status_code=404)
 
@@ -207,7 +260,8 @@ async def role_leaderboard(
     limit: int = Query(20, ge=1, le=100),
 ) -> JSONResponse:
     """Most prolific people in a given role category."""
-    if not _neo4j_driver:
+    handle = _handle()
+    if not handle:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     if role not in ALL_CATEGORIES:
@@ -225,7 +279,10 @@ async def role_leaderboard(
         except Exception:
             logger.debug("⚠️ Credits leaderboard cache get failed", key=cache_key)
 
-    records = await get_role_leaderboard(_neo4j_driver, role, limit)
+    try:
+        records = await _credits_backend.get_role_leaderboard(handle, role, limit)
+    except GRAPH_BACKEND_ERROR_TYPES as exc:
+        return _backend_failure(exc, "Role leaderboard", category=role)
     entries = [LeaderboardEntry(name=r["name"], credit_count=r["credit_count"]) for r in records]
     response = RoleLeaderboardResponse(category=role, entries=entries)
     response_data = response.model_dump()
@@ -247,10 +304,14 @@ async def shared_credits(
     person2: str = Query(..., description="Second person name"),
 ) -> JSONResponse:
     """Releases where two people are both credited."""
-    if not _neo4j_driver:
+    handle = _handle()
+    if not handle:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
-    records = await get_shared_credits(_neo4j_driver, person1, person2)
+    try:
+        records = await _credits_backend.get_shared_credits(handle, person1, person2)
+    except GRAPH_BACKEND_ERROR_TYPES as exc:
+        return _backend_failure(exc, "Shared credits", person1=person1, person2=person2)
     shared = [
         SharedCreditEntry(
             release_id=r["release_id"],
@@ -275,10 +336,14 @@ async def person_connections(
     limit: int = Query(50, ge=1, le=200),
 ) -> JSONResponse:
     """People connected through shared releases (collaboration graph)."""
-    if not _neo4j_driver:
+    handle = _handle()
+    if not handle:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
-    records = await get_person_connections(_neo4j_driver, name, depth, limit)
+    try:
+        records = await _credits_backend.get_person_connections(handle, name, depth, limit)
+    except GRAPH_BACKEND_ERROR_TYPES as exc:
+        return _backend_failure(exc, "Person connections", person=name, depth=depth)
     connections = [ConnectionEntry(name=r["name"], shared_count=r["shared_count"]) for r in records]
     response = PersonConnectionsResponse(name=name, connections=connections)
     return JSONResponse(content=response.model_dump())
@@ -296,6 +361,9 @@ async def credits_autocomplete(
     if not handle:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
-    records = await _autocomplete_backend.autocomplete_person(handle, q, limit)
+    try:
+        records = await _autocomplete_backend.autocomplete_person(handle, q, limit)
+    except GRAPH_BACKEND_ERROR_TYPES as exc:
+        return _backend_failure(exc, "Person autocomplete", search=q)
     results = [PersonAutocompleteEntry(name=r["name"], score=r["score"]) for r in records]
     return JSONResponse(content={"results": [r.model_dump() for r in results]})

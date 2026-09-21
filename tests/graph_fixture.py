@@ -54,6 +54,38 @@ rather than by a parity call because the Lucene side does not return the same ro
 `Sinéad O'Connor` is the third and is different: an apostrophe survives Lucene's tokenizer
 intact, so both engines answer and it is a parity call — it is there for the character that
 would have broken a hand-built SQL string rather than a query parser.
+
+**The credits component** (ids 701-710 / 801-804 / 502-503) belongs to the credits family
+(`gm-catalog-api-dl8.1`) and is disconnected from the other three: its releases credit only
+its own people and are credited to only its own artists and labels, so no walk from an
+anchor of another component can reach it and no walk from it can leave.
+
+Its shape is dictated by what the credits family orders by, one function at a time — every
+registered parity call is made from a vantage point where that function's own `ORDER BY` is
+total, because neither backend adds a tiebreaker and a tie would make row order legitimately
+unspecified on both sides. Four consequences are worth naming, because each of them is the
+reason some row is here:
+
+- **A release carrying one person twice under two roles** (`DUAL_ROLE_RELEASE_ID`, two
+  different categories) is what separates `count(c)` from `count(DISTINCT r)`: the profile
+  counts credits, the leaderboard counts releases, and only a duplicated release tells the
+  two apart. A second such release carries the same person twice in *one* category, which is
+  what `get_person_profile`'s `total_credits` is read from.
+- **A person with a `SAME_AS` artist** (`SAME_AS_PERSON`, linked to `SAME_AS_ARTIST_ID`)
+  and people without one share `DUAL_ROLE_RELEASE_ID`, so `get_release_credits`' outer join
+  is exercised on both sides in a single call.
+- **Two credited people on the same release whose names are the only tiebreaker**
+  (`SESSION_RELEASE_ID`) is what proves `ORDER BY c.category, p.name` rather than just
+  `ORDER BY c.category`.
+- **A release crediting four artists and two labels** (`OVERFLOWING_RELEASE_ID`) is the only
+  place `collect(DISTINCT a.name)[..3]` and `collect(DISTINCT l.name)[..1]` are capped at
+  all. It is deliberately *not* reachable from a registered `get_person_credits` parity
+  call: Cypher's `collect` has no defined order, so which three names survive the cap is
+  unspecified on the Neo4j side and the two engines can only be asked how *many* survive.
+  `tests/test_graph_parity.py` asks them exactly that.
+
+Every other credits release carries at most one artist and at most one label for the same
+reason — a one-element list has only one order.
 """
 
 from __future__ import annotations
@@ -67,6 +99,7 @@ from typing import Any
 
 import pytest
 from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver, parse_postgres_host_port
+from common.credit_roles import categorize_role
 from groovemap_schema.neo4j import create_neo4j_schema
 from groovemap_schema.postgres import (
     PROPERTY_GRAPH_MINIMUM_SERVER_VERSION,
@@ -228,6 +261,169 @@ AUTOCOMPLETE_PEOPLE: tuple[str, ...] = (
 )
 
 
+# ── The credits component (gm-catalog-api-dl8.1) ─────────────────────────────
+# Read by the credits family, which walks `graph.credited_on` and `graph.same_as`. Ids
+# start at 701 (releases), 801 (artists) and 502 (labels) so nothing here can collide with
+# the three components above, and no release here credits an artist or names a label that
+# any of them uses — the component is reachable only from its own people.
+#
+# The years are distinct from every year in `RELEASE_YEARS` and lie strictly inside it, so
+# `catalog_overview`'s `get_year_range` still reads its minimum off release "101" and its
+# maximum off release "203".
+
+SAME_AS_PERSON = "Tessa Vance"
+SAME_AS_ARTIST_ID = "801"
+# One person, two roles, two categories: `get_release_credits` orders by (category, name)
+# and still sees two unambiguous rows, while `get_role_leaderboard` sees one release.
+DUAL_ROLE_RELEASE_ID = "701"
+# Two different people, same category, so `p.name` is the only thing separating them.
+SESSION_RELEASE_ID = "705"
+# Four artists and two labels — the only release either `collect(...)` cap applies to.
+OVERFLOWING_RELEASE_ID = "707"
+
+CREDITS_ARTISTS: dict[str, str] = {
+    "801": "Vance Machine",
+    "802": "Hale Combo",
+    "803": "Quill Ensemble",
+    "804": "Okonkwo Trio",
+}
+
+CREDITS_LABELS: dict[str, str] = {
+    "502": "Provenance Records",
+    "503": "Second Pressing",
+}
+
+# release id -> the document it is seeded as. `artists` and `labels` are Discogs id lists
+# (rendered into the `{"id": ...}` blocks the projections read); `extraartists` is the
+# credit block verbatim, and an entry's optional `id` is what both engines turn into a
+# `SAME_AS` edge to that artist.
+CREDITS_RELEASES: dict[str, dict[str, Any]] = {
+    DUAL_ROLE_RELEASE_ID: {
+        "year": 1963,
+        "artists": ["801"],
+        "labels": ["502"],
+        "extraartists": [
+            {"name": SAME_AS_PERSON, "role": "Mastered By", "id": 801},
+            {"name": "Rex Quill", "role": "Producer"},
+            {"name": "Rex Quill", "role": "Mixed By"},
+        ],
+    },
+    "702": {
+        "year": 1966,
+        "artists": ["802"],
+        "labels": ["502"],
+        "extraartists": [
+            {"name": SAME_AS_PERSON, "role": "Mastered By", "id": 801},
+            {"name": "Marlon Hale", "role": "Guitar"},
+        ],
+    },
+    "703": {
+        "year": 1969,
+        "artists": ["802"],
+        "labels": [],
+        "extraartists": [
+            {"name": SAME_AS_PERSON, "role": "Mastered By", "id": 801},
+            {"name": "Marlon Hale", "role": "Bass"},
+        ],
+    },
+    "704": {
+        "year": 1972,
+        "artists": [],
+        "labels": ["502"],
+        "extraartists": [
+            {"name": SAME_AS_PERSON, "role": "Mastered By", "id": 801},
+            {"name": "Marlon Hale", "role": "Guitar"},
+        ],
+    },
+    SESSION_RELEASE_ID: {
+        "year": 1975,
+        "artists": [],
+        "labels": [],
+        "extraartists": [
+            {"name": "Marlon Hale", "role": "Guitar"},
+            {"name": "Ida Okonkwo", "role": "Vocals"},
+        ],
+    },
+    # The same person twice in ONE category, which is what makes `get_person_profile`'s
+    # `count(c)` differ from the leaderboard's `count(DISTINCT r)`. It is deliberately not
+    # a `get_release_credits` parity call: two rows agreeing on (category, name) have no
+    # defined order on either side.
+    "706": {
+        "year": 1978,
+        "artists": ["801"],
+        "labels": ["503"],
+        "extraartists": [
+            {"name": "Rex Quill", "role": "Producer"},
+            {"name": "Rex Quill", "role": "Executive Producer"},
+            {"name": "Nadia Brightwater", "role": "Artwork"},
+        ],
+    },
+    OVERFLOWING_RELEASE_ID: {
+        "year": 1981,
+        "artists": ["801", "802", "803", "804"],
+        "labels": ["502", "503"],
+        "extraartists": [{"name": "Owen Fairweather", "role": "A&R"}],
+    },
+    # A second 1966 release, so one person has two credits in one year and
+    # `get_person_timeline` reports a count above one without reporting two rows for a year.
+    # Its title is what keeps `get_person_credits`' (year DESC, title) order total.
+    "708": {"year": 1966, "artists": [], "labels": [], "extraartists": [{"name": "Marlon Hale", "role": "Bass"}]},
+    "709": {
+        "year": 1984,
+        "artists": [],
+        "labels": [],
+        "extraartists": [
+            {"name": "Wren Halloway", "role": "Mastered By"},
+            {"name": "Wren Halloway", "role": "Lacquer Cut By"},
+        ],
+    },
+    "710": {"year": 1987, "artists": [], "labels": [], "extraartists": [{"name": "Wren Halloway", "role": "Mastered By"}]},
+}
+
+
+def _release_document(release_id: str, release: dict[str, Any]) -> dict[str, Any]:
+    """Render one credits release as the Discogs document both sides are projected from."""
+    return {
+        "title": f"Release {release_id}",
+        "year": release["year"],
+        "artists": [{"id": int(artist_id)} for artist_id in release["artists"]],
+        "labels": [{"id": int(label_id)} for label_id in release["labels"]],
+        "extraartists": release["extraartists"],
+    }
+
+
+def credit_edges() -> list[dict[str, Any]]:
+    """Return every `CREDITED_ON` edge the seeded documents imply, as the enricher writes it.
+
+    Both the credits component and the full-text component contribute: `graph.person` and
+    `graph.credited_on` are filled from *every* `extraartists` block in `public.releases`,
+    so a document whose credits Neo4j was never told about is a divergence the credits
+    family reads as a missing person. `category` is computed with the same
+    `categorize_role` the graph enricher calls, which is also what the schema producer
+    renders `graph.credit_role_category` from — one taxonomy, not three copies of one.
+    """
+    documents: dict[str, Any] = {
+        **{release_id: release["extraartists"] for release_id, release in CREDITS_RELEASES.items()},
+        **{release_id: tags["extraartists"] for release_id, tags in AUTOCOMPLETE_RELEASES.items()},
+    }
+    return [
+        {"release_id": release_id, "name": credit["name"], "role": credit["role"], "category": categorize_role(credit["role"])}
+        for release_id, credits in documents.items()
+        for credit in credits
+    ]
+
+
+def same_as_edges() -> list[dict[str, str]]:
+    """Return every `SAME_AS` edge the seeded credits imply, deduplicated as the graph is."""
+    seen = {(credit["name"], str(credit["id"])) for release in CREDITS_RELEASES.values() for credit in release["extraartists"] if credit.get("id")}
+    return [{"name": name, "artist_id": artist_id} for name, artist_id in sorted(seen)]
+
+
+def _endpoint_pairs(key: str, column: str) -> list[dict[str, str]]:
+    """Return the (release, endpoint) pairs one document key implies, flattened for UNWIND."""
+    return [{"release_id": release_id, column: endpoint_id} for release_id, release in CREDITS_RELEASES.items() for endpoint_id in release[key]]
+
+
 # Reconciled from the two branches' TRUNCATEs: family 1 needs `masters` truncated too, on
 # top of the autocomplete family's `artists, labels, releases`.
 _TRUNCATE_ENTITIES = "TRUNCATE artists, labels, releases, masters CASCADE"
@@ -304,6 +500,55 @@ UNWIND $releases AS release
 MERGE (:Release {id: release})
 """
 
+# ── The credits component's Neo4j half (gm-catalog-api-dl8.1) ────────────────
+# Five statements rather than one, because `UNWIND` of an empty list drops the row it was
+# unwinding from: a release with no artists would take itself out of the stream and never
+# get its `:Release` node. Flattening each edge kind into its own list keeps every
+# statement's input non-empty and independent.
+_SEED_NEO4J_CREDITS_ENTITIES = """
+UNWIND $artists AS artist
+MERGE (a:Artist {id: artist.id}) SET a.name = artist.name
+WITH count(*) AS _artists
+UNWIND $labels AS label
+MERGE (l:Label {id: label.id}) SET l.name = label.name
+WITH count(*) AS _labels
+UNWIND $releases AS release
+MERGE (r:Release {id: release.id}) SET r.title = release.title, r.year = release.year
+"""
+
+_SEED_NEO4J_BY = """
+UNWIND $edges AS edge
+MATCH (r:Release {id: edge.release_id})
+MATCH (a:Artist {id: edge.artist_id})
+MERGE (r)-[:BY]->(a)
+"""
+
+_SEED_NEO4J_ON = """
+UNWIND $edges AS edge
+MATCH (r:Release {id: edge.release_id})
+MATCH (l:Label {id: edge.label_id})
+MERGE (r)-[:ON]->(l)
+"""
+
+# Both credit statements are `discogs-graph-enricher`'s own, copied from
+# `graphinator/batch_projection.py` rather than paraphrased: `CREDITED_ON` MERGEs on
+# `{role}` alone and SETs `category` afterwards, which is what makes one person credited
+# twice on one release two edges instead of one.
+_SEED_NEO4J_CREDITED_ON = """
+UNWIND $credits AS credit
+MATCH (r:Release {id: credit.release_id})
+MERGE (p:Person {name: credit.name})
+MERGE (p)-[c:CREDITED_ON {role: credit.role}]->(r)
+SET c.category = credit.category
+"""
+
+_SEED_NEO4J_SAME_AS = """
+UNWIND $credits AS credit
+MATCH (p:Person {name: credit.name})
+MATCH (a:Artist {id: credit.artist_id})
+MERGE (p)-[:SAME_AS]->(a)
+"""
+
 # Lucene indexes are populated in the background, so a search issued the moment the seed
 # commits can read an index that is still building and answer with fewer rows than the
 # graph holds. Every full-text call in the suite is downstream of this.
@@ -370,6 +615,25 @@ async def seed_neo4j(driver: AsyncResilientNeo4jDriver) -> None:
         people=list(AUTOCOMPLETE_PEOPLE),
         releases=list(AUTOCOMPLETE_RELEASES),
     )
+    # ── credits component (gm-catalog-api-dl8.1) ─────────────────────────────
+    # Last, because `CREDITED_ON` and `SAME_AS` MATCH the `:Release` and `:Artist` nodes
+    # the two statements above create. `credit_edges()` covers the full-text component's
+    # documents as well as this one's: those two releases carry an `extraartists` block,
+    # so PostgreSQL derives four `graph.credited_on` rows from them whether Neo4j was told
+    # about them or not, and a credits query that scans a whole category reads the gap as
+    # a person PostgreSQL has and Neo4j does not.
+    await consume(
+        driver,
+        _SEED_NEO4J_CREDITS_ENTITIES,
+        artists=[{"id": artist_id, "name": name} for artist_id, name in CREDITS_ARTISTS.items()],
+        labels=[{"id": label_id, "name": name} for label_id, name in CREDITS_LABELS.items()],
+        releases=[{"id": release_id, "title": f"Release {release_id}", "year": release["year"]} for release_id, release in CREDITS_RELEASES.items()],
+    )
+    await consume(driver, _SEED_NEO4J_BY, edges=_endpoint_pairs("artists", "artist_id"))
+    await consume(driver, _SEED_NEO4J_ON, edges=_endpoint_pairs("labels", "label_id"))
+    await consume(driver, _SEED_NEO4J_CREDITED_ON, credits=credit_edges())
+    await consume(driver, _SEED_NEO4J_SAME_AS, credits=same_as_edges())
+    # ── end credits component ────────────────────────────────────────────────
     await consume(driver, _AWAIT_NEO4J_INDEXES)
 
 
@@ -409,6 +673,14 @@ async def seed_postgres(pool: AsyncPostgreSQLPool) -> None:
         for release_id, tags in AUTOCOMPLETE_RELEASES.items():
             document = {"title": f"Release {release_id}", **tags}
             await cursor.execute(_SEED_RELEASE, (release_id, "parity-fixture", json.dumps(document)))
+        # ── credits component (gm-catalog-api-dl8.1) ─────────────────────────
+        for artist_id, name in CREDITS_ARTISTS.items():
+            await cursor.execute(_SEED_ARTIST, (artist_id, "parity-fixture", json.dumps({"name": name})))
+        for label_id, name in CREDITS_LABELS.items():
+            await cursor.execute(_SEED_LABEL, (label_id, "parity-fixture", json.dumps({"name": name})))
+        for release_id, release in CREDITS_RELEASES.items():
+            await cursor.execute(_SEED_RELEASE, (release_id, "parity-fixture", json.dumps(_release_document(release_id, release))))
+        # ── end credits component ────────────────────────────────────────────
         await cursor.execute(_BOOTSTRAP_FILL)
         await cursor.fetchall()
 
