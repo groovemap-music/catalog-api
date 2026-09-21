@@ -486,6 +486,7 @@ COLLABORATORS_CALLS: tuple[ParityCall, ...] = (
     *(ParityCall("get_multi_hop_collaborators", (anchor,), {"depth": depth, "limit": 50}) for anchor in _COLLABORATOR_ANCHORS for depth in (1, 2, 3)),
     *(ParityCall("get_multi_hop_collaborators", (graph_fixture.ANCHOR_ARTIST_ID,), {"depth": 2, "limit": limit}) for limit in (1, 4)),
     *(ParityCall("count_multi_hop_collaborators", (anchor,), {"depth": depth}) for anchor in _COLLABORATOR_ANCHORS for depth in (1, 2, 3)),
+    *(ParityCall("get_artist_centrality", (anchor,)) for anchor in (*_COLLABORATOR_ANCHORS, "does-not-exist")),
 )
 
 register_parity_family("collaborators", COLLABORATORS_CALLS)

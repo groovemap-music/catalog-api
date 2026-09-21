@@ -29,6 +29,29 @@ ALL_STATEMENTS = (
 )
 
 
+class TestArtistCentrality:
+    async def test_uses_precomputed_degree_and_bound_artist_id(self) -> None:
+        sql = pg.ARTIST_CENTRALITY_SQL
+        assert "FROM graph.artist_vertex a" in sql
+        assert "a.degree" in sql
+        assert "a.artist_id = %(artist_id)s" in sql
+        assert "count(DISTINCT peer.artist_id)" in sql
+
+    async def test_result_shape_and_missing_artist(self) -> None:
+        pool = FakePool([[("1", "Artist", 6, 2, 1, 1, 0)]])
+        assert await pg.get_artist_centrality(pool, "1") == {
+            "artist_id": "1",
+            "artist_name": "Artist",
+            "degree": 6,
+            "collaborator_count": 2,
+            "collaboration_releases": 1,
+            "group_count": 1,
+            "alias_count": 0,
+        }
+        assert pool.params == {"artist_id": "1"}
+        assert await pg.get_artist_centrality(FakePool([[]]), "missing") is None
+
+
 class TestStatementShape:
     """What the module-level SQL constants are made of."""
 

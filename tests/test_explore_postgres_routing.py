@@ -62,6 +62,25 @@ def test_rest_explore_family_routes_to_postgres_without_neo4j(test_client: TestC
         route.configure(saved[0], None, saved[1], pg_pool=saved[2], graph_backend=saved[3])
 
 
+def test_expand_forwards_nondefault_pagination_and_year_to_postgres(test_client: TestClient) -> None:
+    import api.routers.explore as route
+
+    pool = object()
+    saved = (route._neo4j_driver, route._redis, route._pg_pool, route._graph_backend)
+    try:
+        route.configure(None, None, None, pg_pool=pool, graph_backend="postgres")
+        with (
+            patch.object(explore_pg_queries, "expand_artist_releases", AsyncMock(return_value=[])) as expand,
+            patch.object(explore_pg_queries, "count_artist_releases", AsyncMock(return_value=0)) as count,
+        ):
+            response = test_client.get("/api/expand?node_id=Artist&type=artist&category=releases&limit=7&offset=3&before_year=2001")
+        assert response.status_code == 200
+        expand.assert_awaited_once_with(pool, "Artist", 7, 3, before_year=2001)
+        count.assert_awaited_once_with(pool, "Artist", before_year=2001)
+    finally:
+        route.configure(saved[0], None, saved[1], pg_pool=saved[2], graph_backend=saved[3])
+
+
 @pytest.mark.asyncio
 async def test_nlq_explore_trends_tree_and_stats_use_postgres_pool() -> None:
     pool = object()

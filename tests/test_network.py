@@ -744,6 +744,30 @@ class TestCollaboratorsBackendSelection:
         collaborators_call.assert_awaited_once_with(pool, "123", depth=2, limit=50)
         count_call.assert_awaited_once_with(pool, "123", depth=2)
 
+    def test_postgres_centrality_without_neo4j_uses_counter_backend(self, test_client: TestClient) -> None:
+        import api.routers.network as mod
+
+        saved = self._saved_state()
+        pool = AsyncMock()
+        result = {
+            "artist_id": "123",
+            "artist_name": "Artist",
+            "degree": 6,
+            "collaborator_count": 2,
+            "collaboration_releases": 1,
+            "group_count": 1,
+            "alias_count": 0,
+        }
+        try:
+            mod.configure(None, None, "postgres", pg_pool=pool)
+            with patch("api.queries.network_pg_queries.get_artist_centrality", new_callable=AsyncMock, return_value=result) as query:
+                response = test_client.get("/api/network/artist/123/centrality")
+        finally:
+            (mod._neo4j, mod._redis, mod._pg_pool, mod._graph_backend, mod._collaborators_backend) = saved
+        assert response.status_code == 200
+        assert response.json()["centrality"]["degree"] == 6
+        query.assert_awaited_once_with(pool, "123")
+
     def test_postgres_backend_without_a_pool_is_not_ready(self, test_client: TestClient) -> None:
         import api.routers.network as mod
 

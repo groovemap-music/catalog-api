@@ -80,6 +80,8 @@ class CollaboratorsBackend(Protocol):
 
     async def count_multi_hop_collaborators(self, handle: Any, artist_id: str, /, depth: int = 2) -> int: ...
 
+    async def get_artist_centrality(self, handle: Any, artist_id: str, /) -> dict[str, Any] | None: ...
+
 
 # ── The "autocomplete" family ────────────────────────────────────────────────
 class AutocompleteBackend(Protocol):
