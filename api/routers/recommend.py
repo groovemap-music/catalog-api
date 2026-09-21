@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 import api.activity as activity
 from api.cache import RecommendCache
 from api.dependencies import get_optional_user, require_user
-from api.graph_backend import TasteBackend, get_taste_backend
+from api.graph_backend import RecommendationsBackend, TasteBackend, get_recommendations_backend, get_taste_backend
 from api.identity import NativeIdCache, catalog_ref, native_ids_for, native_ids_for_pairs
 from api.limiter import limiter
 from api.models import (
@@ -20,7 +20,7 @@ from api.models import (
     SimilarArtist,
     SimilarArtistsResponse,
 )
-from api.queries.recommend_queries import (
+from api.queries.recommend_queries import (  # noqa: F401 -- preserve legacy patch points
     MIN_ARTIST_RELEASES,
     compute_similar_artists,
     get_artist_identity,
@@ -40,16 +40,18 @@ _neo4j_driver: Any = None
 _pg_pool: Any = None
 _graph_backend = "neo4j"
 _taste_backend: TasteBackend = get_taste_backend("neo4j")
+_recommendations_backend: RecommendationsBackend = get_recommendations_backend("neo4j")
 _cache: RecommendCache | None = None
 
 
 def configure(neo4j: Any, jwt_secret: str | None, redis: Any | None, graph_backend: str = "neo4j", pg_pool: Any = None) -> None:  # noqa: ARG001
     """Configure the recommend router with Neo4j driver, JWT secret, and Redis cache."""
-    global _neo4j_driver, _pg_pool, _graph_backend, _taste_backend, _cache
+    global _neo4j_driver, _pg_pool, _graph_backend, _taste_backend, _recommendations_backend, _cache
     _neo4j_driver = neo4j
     _pg_pool = pg_pool
     _graph_backend = graph_backend
     _taste_backend = get_taste_backend(graph_backend)
+    _recommendations_backend = get_recommendations_backend(graph_backend)
     if redis is not None:
         _cache = RecommendCache(redis=redis, default_ttl=3600)
 
@@ -63,6 +65,14 @@ def _taste_handle() -> Any:
 
 def _taste_query(name: str) -> Any:
     return getattr(_taste_backend, name) if _graph_backend == "postgres" else globals()[name]
+
+
+def _recommend_handle() -> Any:
+    return _pg_pool if _graph_backend == "postgres" else _neo4j_driver
+
+
+def _recommend_query(name: str) -> Any:
+    return getattr(_recommendations_backend, name) if _graph_backend == "postgres" else globals()[name]
 
 
 _SIMILARITY_CACHE_TTL = 86400  # 24 hours
@@ -92,7 +102,7 @@ async def similar_artists(
     Open to anonymous callers, so the impression is recorded only when the caller carries
     a token: a showing the service cannot pseudonymise leaves no behavioural record.
     """
-    if not _neo4j_driver:
+    if not _recommend_handle():
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     # Check cache
@@ -104,7 +114,7 @@ async def similar_artists(
             await _record_similar_impressions(current_user, cached["similar"])
             return JSONResponse(content=cached)
 
-    identity = await get_artist_identity(_neo4j_driver, artist_id)
+    identity = await _recommend_query("get_artist_identity")(_recommend_handle(), artist_id)
     if not identity:
         return JSONResponse(content={"error": f"Artist '{artist_id}' not found"}, status_code=404)
 
@@ -115,8 +125,8 @@ async def similar_artists(
         )
 
     target_profile, candidates = await asyncio.gather(
-        get_artist_profile(_neo4j_driver, artist_id),
-        get_candidate_artists(_neo4j_driver, artist_id),
+        _recommend_query("get_artist_profile")(_recommend_handle(), artist_id),
+        _recommend_query("get_candidate_artists")(_recommend_handle(), artist_id),
     )
 
     ranked = compute_similar_artists(target_profile, candidates, limit=50)

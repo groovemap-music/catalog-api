@@ -282,7 +282,7 @@ def _configure_routers(
     _credits_router.configure(neo4j, redis, config.graph_backend, pg_pool=pool)
     _label_dna_router.configure(neo4j, redis, config.graph_backend, pool)
     _recommend_router.configure(neo4j, jwt_secret_for_neo4j, redis, config.graph_backend, pool)
-    _fit_router.configure(neo4j, pool, redis)
+    _fit_router.configure(neo4j, pool, redis, config.graph_backend)
     _search_router.configure(pool, redis)
     _lookup_router.configure(pool)
     _insights_compute_router.configure(neo4j, pool, redis, config)

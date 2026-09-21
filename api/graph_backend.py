@@ -38,6 +38,8 @@ from api.queries import (
     collaborator_queries,
     credits_pg_queries,
     credits_queries,
+    fit_pg_queries,
+    fit_queries,
     gap_pg_queries,
     gap_queries,
     label_dna_pg_queries,
@@ -46,6 +48,8 @@ from api.queries import (
     neo4j_queries,
     network_pg_queries,
     network_queries,
+    recommend_pg_queries,
+    recommend_queries,
     taste_pg_queries,
     taste_queries,
     user_pg_queries,
@@ -317,6 +321,26 @@ _NEO4J_GAP_ANALYSIS: GapAnalysisBackend = gap_queries
 _POSTGRES_GAP_ANALYSIS: GapAnalysisBackend = gap_pg_queries
 
 
+class RecommendationsBackend(Protocol):
+    async def get_artist_identity(self, handle: Any, artist_id: str, /) -> dict[str, Any] | None: ...
+    async def get_artist_profile(self, handle: Any, artist_id: str, /) -> dict[str, Any]: ...
+    async def get_candidate_artists(self, handle: Any, artist_id: str, /) -> list[dict[str, Any]]: ...
+    async def get_collector_counts(self, handle: Any, release_ids: list[str], /) -> dict[str, int]: ...
+    async def get_label_affinity_candidates(self, handle: Any, user_id: str, /, limit: int = 50) -> list[dict[str, Any]]: ...
+    async def get_blindspot_candidates(self, handle: Any, user_id: str, /, limit: int = 50) -> list[dict[str, Any]]: ...
+
+
+class FitBackend(Protocol):
+    async def get_collection_ids(self, handle: Any, user_id: str, /, *, cache: Any = None) -> dict[str, Any]: ...
+    async def get_release_context(self, handle: Any, release_id: str, /) -> dict[str, Any] | None: ...
+
+
+_NEO4J_RECOMMENDATIONS: RecommendationsBackend = recommend_queries
+_POSTGRES_RECOMMENDATIONS: RecommendationsBackend = recommend_pg_queries
+_NEO4J_FIT: FitBackend = fit_queries
+_POSTGRES_FIT: FitBackend = fit_pg_queries
+
+
 # family name -> backend name -> module implementing that family's query functions.
 _FAMILY_BACKENDS: dict[str, dict[str, ModuleType]] = {
     "collaborators": {
@@ -368,6 +392,8 @@ _FAMILY_BACKENDS: dict[str, dict[str, ModuleType]] = {
         "neo4j": gap_queries,
         "postgres": gap_pg_queries,
     },
+    "recommendations": {"neo4j": recommend_queries, "postgres": recommend_pg_queries},
+    "fit": {"neo4j": fit_queries, "postgres": fit_pg_queries},
 }
 
 
@@ -472,6 +498,14 @@ def get_taste_backend(backend: str) -> TasteBackend:
 
 def get_gap_analysis_backend(backend: str) -> GapAnalysisBackend:
     return cast("GapAnalysisBackend", get_backend("gap_analysis", backend))
+
+
+def get_recommendations_backend(backend: str) -> RecommendationsBackend:
+    return cast("RecommendationsBackend", get_backend("recommendations", backend))
+
+
+def get_fit_backend(backend: str) -> FitBackend:
+    return cast("FitBackend", get_backend("fit", backend))
 
 
 # ── Backend-neutral error mapping ─────────────────────────────────────────────

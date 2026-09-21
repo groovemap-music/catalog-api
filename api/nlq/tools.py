@@ -733,14 +733,17 @@ class NLQToolRunner:
         )
 
     async def _handle_get_similar_artists(self, params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:
-        from api.queries.recommend_queries import compute_similar_artists, get_artist_profile, get_candidate_artists  # noqa: PLC0415
+        from api.graph_backend import get_recommendations_backend  # noqa: PLC0415
+        from api.queries.recommend_queries import compute_similar_artists  # noqa: PLC0415
 
         artist_id = params.get("artist_id", "")
         limit = params.get("limit", 20)
 
+        backend = get_recommendations_backend(self._graph_backend)
+        handle = self._pool if self._graph_backend == "postgres" else self._driver
         target_profile, candidates = await asyncio.gather(
-            get_artist_profile(self._driver, artist_id),
-            get_candidate_artists(self._driver, artist_id),
+            backend.get_artist_profile(handle, artist_id),
+            backend.get_candidate_artists(handle, artist_id),
         )
         ranked = compute_similar_artists(target_profile, candidates, limit=limit)
         return {"artist_id": artist_id, "similar": ranked}

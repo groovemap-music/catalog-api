@@ -193,6 +193,39 @@ catalog blocks, including a duplicate physical copy that must count only once in
 media summary. The dual-store collection, taste, and gap reads still use the normal
 family selector and Neo4j/PostgreSQL parity harness.
 
+### Recommendation and CrateFit migration: bounded candidate sampling
+
+Family 7 registers the six store reads in `recommend_queries` under `recommendations`
+and the two graph reads in `fit_queries` under `fit`. Pure cosine scoring, signal
+merging, discovery scoring, collection folding, and cache-key construction stay
+shared Python functions: running the same pure function through two backend
+registrations would be vacuous. `fit_queries.get_release_rarity` was already a
+PostgreSQL-only lookup of precomputed release rarity; it remains so in both graph
+backend modes. `get_explore_traversal` belongs to the following exploration bead,
+not the recommendation family. `tests/test_real_databases.py` inventories these
+carve-outs and compares every registered store read on both engines, with exact
+nonempty candidate and fit assertions on a four-user fixture, including a
+two-artist blind-spot overlap.
+
+**Decision:** Keep the Cypher query's 100,000-release scan cap per top genre on
+the SQL side, before expanding artist edges. Also retain its top-five genres,
+top-500 artists per genre, top-200 aggregate artists, and top-50 profile caps.
+The PostgreSQL query orders sampled release IDs explicitly, so a repeated call
+is reproducible; both engines now break equal-score ties by ID. The profile
+lookup uses four batched SQL statements, not one statement per candidate.
+Removing the cap would make the broadest genre an unbounded input to candidate
+aggregation even though indexes can make reaching that genre selective.
+
+The local PostgreSQL 18/Neo4j parity fixture is below the cap. The committed
+measurement test runs capped and uncapped SQL five times each after warmup and
+checks the same nonempty candidate result. On this small fixture, the measured
+mean was **2.866 ms capped versus 2.688 ms uncapped**; the 0.178 ms difference
+is benchmark noise/overhead, not evidence of a production speedup. The measured
+*result* effect is zero at this size. A high-cardinality production-shaped
+sample is still needed before claiming a runtime benefit or reconsidering the
+cap; the cap's present rationale is the finite worst-case scan and parity with
+the Neo4j cost control, not a claimed speedup on this small fixture.
+
 ### Declaring an expected difference
 
 `EXPECTED_DIFFERENCES` is a plain mapping in the same module, keyed by `(family, function)`:
