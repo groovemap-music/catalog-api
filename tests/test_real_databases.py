@@ -33,10 +33,12 @@ from api.graph_backend import (
     CollaboratorsBackend,
     CreditsBackend,
     GapMetadataBackend,
+    LabelDnaBackend,
     OneHopCollaboratorsBackend,
     get_backend,
     registered_families,
 )
+from api.queries import label_dna_pg_queries
 from api.queries.credits_queries import get_person_connections
 from api.queries.helpers import run_count, run_query, run_single
 from api.syncer import DISCOGS_API_BASE, sync_collection
@@ -534,6 +536,7 @@ FAMILY_PROTOCOLS: dict[str, type] = {
     "collaborator_identity": CollaboratorIdentityBackend,
     "gap_metadata": GapMetadataBackend,
     "catalog_overview": CatalogOverviewBackend,
+    "label_dna": LabelDnaBackend,
 }
 
 
@@ -709,6 +712,33 @@ FAMILY_PROTOCOLS["credits"] = CreditsBackend
 # ── end credits family ───────────────────────────────────────────────────────
 
 
+_LABEL_DNA_ID = graph_fixture.LABEL_DNA_TARGET_ID
+LABEL_DNA_CALLS = (
+    *(
+        ParityCall(name, (_LABEL_DNA_ID,))
+        for name in (
+            "get_label_identity",
+            "get_label_genre_profile",
+            "get_label_style_profile",
+            "get_label_decade_profile",
+            "get_label_active_years",
+            "get_label_format_profile",
+            "get_label_media_family_counts",
+            "get_label_medium_counts",
+            "get_label_media_families_fallback",
+            "get_label_media_profile",
+            "get_label_full_profile",
+            "get_candidate_labels_genre_vectors",
+        )
+    ),
+    ParityCall("get_label_full_profile", (graph_fixture.LABEL_DNA_LOW_RELEASE_ID,)),
+    ParityCall("get_label_media_families_fallback", (graph_fixture.LABEL_DNA_FALLBACK_ID,)),
+    ParityCall("get_label_media_profile", (graph_fixture.LABEL_DNA_FALLBACK_ID,)),
+)
+register_parity_family("label_dna", LABEL_DNA_CALLS)
+FAMILY_PROTOCOLS["label_dna"] = LabelDnaBackend
+
+
 # `graph.catalog` exists only on a PostgreSQL 19 server whose initializer ran with the
 # switch on, which is what `just test-integration-pg19` arranges. Off that tier the
 # property-graph families are skipped at collection, so the default suite never starts a
@@ -754,6 +784,82 @@ async def test_graph_query_family_agrees_on_both_backends(
     postgres_result = await _invoke(get_backend(family, "postgres"), call, parity_backends.postgres)
 
     assert_parity(family, call, neo4j_result=neo4j_result, postgres_result=postgres_result)
+
+
+@pytest.mark.parametrize("backend", ["neo4j", "postgres"])
+async def test_label_dna_fixture_proves_nonempty_profiles_candidates_and_media(
+    parity_backends: graph_fixture.ParityBackends,
+    backend: str,
+) -> None:
+    """The label-DNA parity calls exercise data, not mutually empty answers."""
+    handle = parity_backends.postgres if backend == "postgres" else parity_backends.neo4j
+    module = get_backend("label_dna", backend)
+
+    identity = await _invoke(module, ParityCall("get_label_identity", (_LABEL_DNA_ID,)), handle)
+    formats = await _invoke(module, ParityCall("get_label_format_profile", (_LABEL_DNA_ID,)), handle)
+    families = await _invoke(module, ParityCall("get_label_media_family_counts", (_LABEL_DNA_ID,)), handle)
+    mediums = await _invoke(module, ParityCall("get_label_medium_counts", (_LABEL_DNA_ID,)), handle)
+    candidates = await _invoke(module, ParityCall("get_candidate_labels_genre_vectors", (_LABEL_DNA_ID,)), handle)
+    low_profile = await _invoke(
+        module,
+        ParityCall("get_label_full_profile", (graph_fixture.LABEL_DNA_LOW_RELEASE_ID,)),
+        handle,
+    )
+    fallback = await _invoke(
+        module,
+        ParityCall("get_label_media_profile", (graph_fixture.LABEL_DNA_FALLBACK_ID,)),
+        handle,
+    )
+
+    assert identity == {
+        "label_id": _LABEL_DNA_ID,
+        "label_name": "Label DNA Target",
+        "release_count": 6,
+        "artist_count": 2,
+    }
+    assert formats == [{"name": "Vinyl", "count": 4}, {"name": "CD", "count": 2}]
+    assert families == [{"family": "vinyl", "count": 4}, {"family": "optical", "count": 2}]
+    assert mediums == [
+        {"family": "optical", "medium_id": "optical_cd", "medium_label": "CD", "count": 2},
+        {"family": "vinyl", "medium_id": "vinyl_12", "medium_label": '12" vinyl', "count": 4},
+    ]
+    assert candidates == [
+        {
+            "label_id": graph_fixture.LABEL_DNA_CANDIDATE_ID,
+            "label_name": "Label DNA Candidate",
+            "release_count": 5,
+            "genres": [{"name": "Electronic", "count": 4}, {"name": "Ambient", "count": 1}],
+        }
+    ]
+    assert low_profile == {
+        "label_id": graph_fixture.LABEL_DNA_LOW_RELEASE_ID,
+        "label_name": "Label DNA Tiny",
+        "release_count": 2,
+        "artist_count": 2,
+        "genres": [],
+        "styles": [],
+        "decades": [],
+    }
+    assert fallback == [{"family": "vinyl", "count": 1, "mediums": []}]
+
+
+async def test_label_dna_media_traversal_uses_both_edge_directions_on_pg19(
+    parity_backends: graph_fixture.ParityBackends,
+) -> None:
+    """The three-hop media plan uses the reverse ON index and forward media indexes."""
+    async with parity_backends.postgres.connection() as conn, conn.cursor() as cursor:
+        await cursor.execute("SET LOCAL enable_seqscan = off")
+        await cursor.execute(
+            f"EXPLAIN (FORMAT JSON, COSTS OFF) {label_dna_pg_queries.LABEL_MEDIA_FAMILY_COUNTS_SQL}",
+            {"label_id": _LABEL_DNA_ID},
+        )
+        row = await cursor.fetchone()
+
+    plan = str(row[0] if row else "")
+    assert "on_label_reverse" in plan
+    assert "issued_on_pkey" in plan or "issued_on_reverse" in plan
+    assert "medium_pkey" in plan
+    assert "media_family_pkey" in plan
 
 
 # ── The inputs the Lucene escaping was there for ─────────────────────────────
