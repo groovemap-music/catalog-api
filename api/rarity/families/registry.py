@@ -18,6 +18,8 @@ here is the API that service would be handed.
 3. Declare its ``queries`` if it needs graph facts the core does not fetch. Each Cypher takes
    an ``$ids`` page and must return a ``release_id`` column; the fact name keys the row into
    :attr:`api.rarity.core.ReleaseContext.facts`. Fact names are unique across all modules.
+   Declare the same facts in ``sql_queries`` for the PostgreSQL backend, keyed identically —
+   the question belongs to the module, so both of its spellings do too.
 4. Register it in ``api/rarity/families/__init__.py`` against the taxonomy family ids it
    serves.
 
@@ -44,11 +46,16 @@ class FamilySignals(Protocol):
             core weights. Applied only when the module applies.
         queries: Fact name to Cypher, for graph facts the core does not fetch. Each query takes
             an ``$ids`` page and returns a ``release_id`` column. May be empty.
+        sql_queries: The same facts in SQL, for the PostgreSQL backend ADR 0012 migrates the
+            family to. Same fact names, same ``release_id`` column, and the ``$ids`` page
+            spelled ``= ANY(%(ids)s)``. May be empty, and a module that declares ``queries``
+            but no ``sql_queries`` simply contributes nothing on that backend.
     """
 
     module_id: str
     weights: Mapping[str, float]
     queries: Mapping[str, str]
+    sql_queries: Mapping[str, str]
 
     def applies_to(self, families: Collection[str]) -> bool:
         """Return whether this module contributes to a release covering ``families``."""
@@ -131,5 +138,15 @@ def module_weights() -> dict[str, dict[str, float]]:
 
 
 def family_queries() -> dict[str, str]:
-    """Return every registered module's graph queries, keyed by fact name."""
+    """Return every registered module's Cypher graph queries, keyed by fact name."""
     return {fact: cypher for module in distinct_modules() for fact, cypher in module.queries.items()}
+
+
+def family_sql_queries() -> dict[str, str]:
+    """Return every registered module's SQL graph queries, keyed by fact name.
+
+    The PostgreSQL backend's half of :func:`family_queries`. Keyed by the same fact names, so
+    a module contributes the same row to :attr:`api.rarity.core.ReleaseContext.facts`
+    whichever backend answered it.
+    """
+    return {fact: sql for module in distinct_modules() for fact, sql in module.sql_queries.items()}

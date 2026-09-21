@@ -336,6 +336,180 @@ An apostrophe turned out **not** to be in that set: Lucene's tokenizer keeps `O'
 one token, so both engines answer and `Sinéad O'Connor` is a parity call. It is worth one
 anyway, for the character a hand-built SQL string would have broken on.
 
+## The family that is a walk: the rarity signal batch
+
+The third family migrated is **rarity**, and it is worth reading beside both of the above
+because it is neither one question nor a set of independent ones. It is a *walk*: a keyset page
+of release ids, nine page-scoped signal queries against that page, a join, a scoring pass, and
+a second pass for percentile ranks over the global distributions. Eleven Cypher constants and
+six driver functions, in [`api/queries/rarity_queries.py`](../api/queries/rarity_queries.py)
+and [`api/rarity/families/grooved.py`](../api/rarity/families/grooved.py); the PostgreSQL side
+is [`api/queries/rarity_pg_queries.py`](../api/queries/rarity_pg_queries.py).
+
+| Function | Answers |
+| --- | --- |
+| `fetch_release_id_page` | Which release ids come after this cursor? |
+| `fetch_page_signals` | Every core and family signal, for one page of ids. |
+| `count_releases` | How many releases are there, for the walk's coverage check? |
+| `fetch_all_rarity_signals` | The whole batch: every release, scored. |
+| `get_rarity_by_artist` | The rarest releases credited to this artist. |
+| `get_rarity_by_label` | The rarest releases on this label. |
+
+### Only the reads are the family
+
+Everything after the reads — the join, the composition through `api/rarity`, the percentile
+pass, the coverage warning — is arithmetic over rows and is identical whichever engine produced
+them. Duplicating it into the second backend would have been about 150 lines of the most
+load-bearing code in the module, twice. It lives in
+[`api/queries/rarity_pipeline.py`](../api/queries/rarity_pipeline.py) instead, and each backend
+binds it to three reads. **Split the walk from the reads before writing the second one.** A
+family whose PostgreSQL module is a transcription of its Cypher module is one that will drift.
+
+### The chunking contract, in SQL
+
+This is the part to get right before anything else. The signal queries once ran as eight
+unbounded `MATCH (r:Release)` scans; on the production graph Neo4j killed the transaction at
+`db.transaction.timeout` every time, and `release_rarity` failed on 33 consecutive daily cycles
+(2026-06-22 → 2026-07-23). Every query is now bound to an explicit page, and
+`UNWIND $ids AS rid / MATCH (r:Release {id: rid})` becomes:
+
+```sql
+MATCH (r IS release WHERE r.release_id = ANY(%(ids)s))
+```
+
+**Inside the element pattern.** A `GRAPH_TABLE` that matched every release and was filtered by
+a surrounding `WHERE` returns exactly the same rows and traverses the whole catalog to do it,
+which is the outage reintroduced silently. `tests/test_rarity_pg_queries.py` pins it: every
+signal statement binds the page, no `MATCH` anchors on an unbound vertex, no read of
+`graph.release` is unbounded, and no signal statement carries a `LIMIT` of its own — paging
+belongs to the keyset walk, and a signal query that also paged would drop releases the walk had
+already committed to scoring.
+
+The per-query budget comes across too, as a `statement_timeout`. `SET statement_timeout = %s`
+is not available — `SET` is a utility statement and the server rejects a bind parameter in it —
+so it is `SELECT set_config('statement_timeout', %(timeout_ms)s, false)`, which is an ordinary
+expression and keeps rule 3. The pool hands out autocommit connections, so `SET LOCAL` would be
+a no-op and the setting is reset explicitly before the connection goes back.
+
+### Counters are read, never recomputed
+
+Four signals read a node property the graph enricher writes in a post-import pass:
+`Label.release_count`, `Genre.release_count`, and the two unbound degrees `COUNT { (a)--() }`
+and `COUNT { (r)--() }`. Re-aggregating those on request is the same failure the chunking
+contract exists to prevent, so they stay property reads. The phase 2 schema revision makes
+`genre`, `style`, `label`, and `artist` bind a `<label>_vertex` projection joining the storage
+relation to its counter relation, so `l.release_count` and `a.degree` read exactly as the Cypher
+reads them, and the LEFT JOIN is free when no counter is named. A counter the loader has never
+computed reads `0` and not null, because the projection coalesces it.
+
+`graph.release_degree` is the exception and the one spelling to carry forward:
+
+```sql
+MATCH (d IS release_degree WHERE d.release_id = ANY(%(ids)s))
+```
+
+It is a label of its own because its live half is a pair of lateral counts over
+`user_collections` and `user_wantlists` that no unique key makes removable; folding it onto the
+`release` vertex would make every traversal that binds a release pay for them. Its value is the
+loader's catalog-edge count plus those two counts, which is what `COUNT { (r)--() }` counts.
+One bound follows and is worth knowing: `graph.release_degree_base` is grouped over the edge
+tables, so a release with no catalog edge at all has no row in it and reads 0 here where Neo4j
+would still count a `COLLECTED` edge. Every release a loader ingests has at least one edge, so
+that is an empty catalog entry rather than a live one.
+
+### The family's handle is not a connection
+
+Every family above this one is called with its backend's own connection. This one cannot be.
+The batch reads the community-counts table and the two lookups read the stored rarity table,
+and those are PostgreSQL relations on **both** backends, because ADR 0012 migrates the graph
+reads and not the results table. So the Neo4j backend needs two connections where the PostgreSQL
+backend needs one, and a family whose two implementations took different argument counts could
+not be bound to one `Protocol`. Both take a `RarityHandles` carrying the graph connection and
+the results-store pool;
+`api/graph_backend.py`'s `rarity_handles()` is what a router uses to build it, and
+`register_parity_family(..., handle=...)` is how the harness is told.
+
+That is also what makes the two lookups collapse. On Neo4j each is four round trips — does the
+vertex exist, which releases hang off it, one page of stored rarity rows, the count —
+because nothing could join across two databases. On PostgreSQL both fields are the same pool
+and each is one statement. The shape worth copying is how it keeps three answers apart when the
+page is empty: a one-row `summary` carrying `EXISTS (...) AS vertex_exists` and the total, with
+the page `LEFT JOIN LATERAL`ed onto it, so the statement always returns at least one row.
+`vertex_exists` false is the 404; true with `total` 0 is a vertex with nothing scored; true with
+rows is a page. A plain `SELECT ... LIMIT` collapses the first two into zero rows.
+
+### Two orderings, and one Cypher change, that parity forced
+
+Neither engine promises an order for an aggregated row set, and the harness compares row order.
+Three things had to become deterministic, and none of them is in the SQL:
+
+- **The scoring loop walks the page's id list**, not the release query's row order. The ids are
+  ordered by both engines; an aggregate is ordered by neither.
+- **`rows_by_release_id`** is what every backend's `fetch_page_signals` returns its rows
+  through. The join indexes by id and never cared, so this costs a sort per page and changes no
+  result.
+- **`artist_name` is `min(a.name)`**, where the Cypher was `collect(DISTINCT a.name)[0]`. The
+  `[0]` took an arbitrary element of an unordered collect, so a release with more than one
+  credit had no defined display name — the value depended on the order Neo4j's expand returned
+  the `BY` edges in, and no SQL spelling can reproduce that. Both sides pin `COLLATE "C"` where
+  they compare names or release ids, including the keyset page boundary: Neo4j orders strings by
+  code point and PostgreSQL by the database collation, and Discogs ids being digit strings is
+  exactly the kind of thing that holds until it does not.
+
+`graph.release.year` is one more asymmetry, and the same one
+`api/queries/neo4j_pg_queries.py` already documents: it is text off the Discogs document where
+Neo4j's is an integer property, so every read of it filters `btrim(year) ~ '^[0-9]{4}$'` before
+the cast rather than failing the whole aggregate on the first bad value.
+
+**The family has no `EXPECTED_DIFFERENCES` entry.** All twenty-two parity calls agree
+column-for-column, which is the bar the collaborators pilot set.
+
+### What the fixture had to become
+
+This is the first family that needs the fixture to be *complete* rather than sufficient for one
+traversal, because the batch reads every release there is and asks for its degree. A genre,
+style, or credit edge that a document implied and only PostgreSQL ever projected is a
+divergence, whatever family seeded the document. So `tests/graph_fixture.py` now projects both
+engines from one `release_documents()` builder, and the Neo4j side gained the `IS` and
+`CREDITED_ON` edges, the titles, and the `formats` and `media_families` list properties it never
+had. The counters the graph enricher writes as node properties are computed from the same
+documents
+and set on the Neo4j nodes, because that is what `graph.bootstrap_fill()` derives on the other
+side; the degrees are not, because Neo4j counts those live and matching edges are what makes the
+two agree.
+
+The rarity component itself (ids 701+) is sized by what the signals need: a label on four
+releases, a genre on three, a master with three pressings and a second master with exactly one —
+the `groovemap-cu2.75` case, where a unique pressing must score 100.0 and not the 90.0 of a
+release with no master link — a standalone release with no master, a canonical `vinyl_12` medium
+so the grooved family actually applies, one release credited to two artists so
+`artist_name` has something to choose between, and one collection row and one wantlist row,
+which is the only way `graph.release_degree`'s live half is exercised at all. Names are chosen
+clear of every autocomplete query prefix: a row matching `radio`, `warp`, `roc`, `elec`, `ambi`,
+`tech`, `bob`, or `chuck` would change that family's answer on both engines, and the harness
+would be proving the fixture rather than the SQL.
+
+### Timing on the fixture
+
+Measured over `tests/graph_fixture.py` on the `just test-integration-pg19` containers —
+`postgres:19beta3-alpine` and `neo4j:2026-community`, both on one laptop — with seven
+alternating runs per backend and the median reported. Both backends score the same 22 releases.
+
+| Page size | Pages | Neo4j median | PostgreSQL median |
+| --- | --- | --- | --- |
+| 20,000 (production) | 1 | 88.8 ms | 42.7 ms |
+| 4 | 6 | 283.2 ms | 92.5 ms |
+
+Read the second row, not the first. A 22-release fixture in a single page measures almost
+nothing but connection overhead, and neither number says anything about a catalog-scale run:
+the PostgreSQL signal statements read `graph.release`, which is still a view over
+`public.releases`, so the keyset walk there is a sequential scan per page where Neo4j's is an
+index seek. What the six-page row does show is the per-page cost, which is the axis the outage
+was on — the batch's whole shape is a fixed number of round trips per page, and PostgreSQL is
+issuing its eleven statements over three pooled connections against Neo4j's eleven sessions.
+The ratio between the two rows is the number worth watching when the catalog-scale run is
+timed: Neo4j's batch cost rose 3.2x going from one page to six, PostgreSQL's 2.2x.
+
 ## Migrating the next family
 
 1. Register the family with the parity harness in `tests/test_real_databases.py` — one
@@ -351,3 +525,9 @@ anyway, for the character a hand-built SQL string would have broken on.
    for this one.
 5. Add query-shape unit tests with the fake pool in `tests/fake_postgres.py`.
 6. Run `just test-integration-pg19`.
+
+If the family's two backends need different connections — as rarity's do, because its results
+table stayed in PostgreSQL — give it one handle object carrying both rather than two arguments,
+and register it with `register_parity_family(..., handle=...)`. A `Protocol` cannot bind two
+implementations whose functions take different argument counts, and that binding is the whole
+signature check.

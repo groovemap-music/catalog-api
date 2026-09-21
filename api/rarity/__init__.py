@@ -43,7 +43,7 @@ from api.rarity.core import (
     medium_rarity_score,
     resolve_media,
 )
-from api.rarity.families import FamilySignals, family_queries, module_weights, modules_for, registry
+from api.rarity.families import FamilySignals, family_queries, family_sql_queries, module_weights, modules_for, registry
 from api.rarity.families.grooved import GROOVED_FAMILIES, compute_pressing_scarcity_score
 
 
@@ -70,6 +70,7 @@ __all__ = [
     "compute_temporal_scarcity_score",
     "effective_weights",
     "family_queries",
+    "family_sql_queries",
     "medium_rarity_score",
     "module_weights",
     "modules_for",
