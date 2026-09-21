@@ -211,8 +211,8 @@ SELECT a.artist_id, a.name AS artist_name, a.degree,
                       WHERE peer.release_id = own.release_id AND peer.artist_id <> a.artist_id)) AS collaboration_releases,
        (SELECT count(DISTINCT group_artist_id)::bigint FROM graph.member_of
         WHERE member_artist_id = a.artist_id) AS group_count,
-       (SELECT count(DISTINCT alias_artist_id)::bigint FROM graph.alias_of
-        WHERE artist_id = a.artist_id) AS alias_count
+       (SELECT count(DISTINCT artist_id)::bigint FROM graph.alias_of
+        WHERE alias_artist_id = a.artist_id) AS alias_count
 FROM graph.artist_vertex a
 WHERE a.artist_id = %(artist_id)s
 LIMIT 1

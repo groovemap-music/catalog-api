@@ -34,7 +34,7 @@ async def _number(pool: Any, sql: str, params: dict[str, Any]) -> int:
 
 
 _ALIASES = """
-SELECT alias_artist_id AS artist_id FROM graph.alias_of WHERE artist_id = %(artist_id)s
+SELECT artist_id FROM graph.alias_of WHERE alias_artist_id = %(artist_id)s
 UNION SELECT group_artist_id FROM graph.member_of WHERE member_artist_id = %(artist_id)s
 UNION SELECT member_artist_id FROM graph.member_of WHERE group_artist_id = %(artist_id)s
 """

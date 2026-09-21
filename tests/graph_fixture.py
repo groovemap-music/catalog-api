@@ -411,6 +411,11 @@ LABEL_DNA_ARTISTS: dict[str, str] = {
     "1303": "Recommendation Test Artist",
 }
 
+# Graphinator emits ALIAS_OF from alias to primary. The primary artist document
+# lists its aliases, while the Neo4j edge below follows alias -> primary.
+ALIAS_ARTIST_ID = "1301"
+PRIMARY_ARTIST_ID = "1302"
+
 
 def _label_dna_release(
     *,
@@ -972,6 +977,12 @@ async def seed_neo4j(driver: AsyncResilientNeo4jDriver) -> None:
     await consume(driver, _SEED_NEO4J_BY, edges=label_dna_edges("artists", "artist_id"))
     await consume(
         driver,
+        "MATCH (alias:Artist {id: $alias_id}), (primary:Artist {id: $primary_id}) MERGE (alias)-[:ALIAS_OF]->(primary)",
+        alias_id=ALIAS_ARTIST_ID,
+        primary_id=PRIMARY_ARTIST_ID,
+    )
+    await consume(
+        driver,
         _SEED_NEO4J_ON,
         edges=[{"release_id": release_id, "label_id": release["label"]} for release_id, release in LABEL_DNA_RELEASES.items()],
     )
@@ -1052,7 +1063,10 @@ async def seed_postgres(pool: AsyncPostgreSQLPool) -> None:
         # ── end credits component ────────────────────────────────────────────
         # ── label-DNA component (gm-catalog-api-dl8.2) ──────────────────────
         for artist_id, name in LABEL_DNA_ARTISTS.items():
-            await cursor.execute(_SEED_ARTIST, (artist_id, "parity-fixture", json.dumps({"name": name})))
+            document = {"name": name}
+            if artist_id == PRIMARY_ARTIST_ID:
+                document["aliases"] = [{"id": int(ALIAS_ARTIST_ID)}]
+            await cursor.execute(_SEED_ARTIST, (artist_id, "parity-fixture", json.dumps(document)))
         for label_id, name in LABEL_DNA_LABELS.items():
             await cursor.execute(_SEED_LABEL, (label_id, "parity-fixture", json.dumps({"name": name})))
         for release_id, release in LABEL_DNA_RELEASES.items():

@@ -15,6 +15,11 @@ from tests.fake_postgres import FakePool
 pytestmark = pytest.mark.asyncio
 
 
+async def test_alias_expansion_follows_outgoing_alias_to_primary_edge() -> None:
+    assert "SELECT artist_id FROM graph.alias_of WHERE alias_artist_id = %(artist_id)s" in pg._ALIASES
+    assert "SELECT alias_artist_id AS artist_id" not in pg._ALIASES
+
+
 async def test_counter_centers_read_vertex_properties(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[str] = []
 
