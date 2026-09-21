@@ -1517,7 +1517,7 @@ async def test_trigram_autocomplete_answers_the_inputs_lucene_mishandled(
     )
 
 
-@pytest.mark.parametrize("family", sorted(PARITY_FAMILIES))
+@pytest.mark.parametrize("family", sorted(FAMILY_PROTOCOLS))
 async def test_every_function_of_a_registered_family_is_covered_by_a_parity_call(family: str) -> None:
     """A family is at parity only if every function the seam exposes was compared.
 
@@ -1525,6 +1525,7 @@ async def test_every_function_of_a_registered_family_is_covered_by_a_parity_call
     list the harness owes a call. Registering a family and forgetting one of its three
     functions is otherwise a silent gap: the suite goes green having never run it.
     """
+    assert family in PARITY_FAMILIES, f"{family} has no registered parity calls"
     expected = frozenset(get_protocol_members(FAMILY_PROTOCOLS[family]))
     covered = PARITY_FAMILIES[family].functions
 
@@ -1563,7 +1564,8 @@ async def test_every_registered_family_is_either_proven_by_parity_or_explicitly_
 
 
 async def test_every_protocol_family_has_a_postgres_implementation() -> None:
-    """The default cannot flip while any protocol-backed family is missing PostgreSQL."""
+    """Only admin_storage is exempt; every other registered family is parity-proven."""
+    assert frozenset({"admin_storage"}) == PARITY_EXEMPT_FAMILIES
     assert frozenset(FAMILY_PROTOCOLS) == registered_families() - PARITY_EXEMPT_FAMILIES
     for family in registered_families():
         try:

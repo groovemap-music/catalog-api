@@ -61,6 +61,11 @@ credentials available for that rollback. The natural-language query tool surface
 own Cypher autocomplete and is not affected by this selector. See
 [The GRAPH_TABLE migration template](graph-table-migration-template.md).
 
+Every comparable registered family has complete function coverage in the Neo4j/PostgreSQL
+parity harness. `admin_storage` is the sole parity exception: Neo4j's JMX store sizes and
+full relationship vocabulary cannot be compared row-for-row with PostgreSQL. Its PostgreSQL
+SQL and response shapes are verified separately in `tests/test_admin_pg_queries.py`.
+
 `graph.catalog` is not present on every server: the `groovemap-database-schema` initializer
 declares it only on PostgreSQL 19 or later and only with its own `SCHEMA_PROPERTY_GRAPH` switch
 enabled. With `GRAPH_BACKEND=postgres` the API therefore checks both at startup — that

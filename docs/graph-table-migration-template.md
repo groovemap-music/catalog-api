@@ -714,8 +714,11 @@ quietly changing reachability semantics.
 
 The default has flipped to `GRAPH_BACKEND=postgres` because every registered query family
 has a PostgreSQL implementation. The registry-completeness test enumerates
-`FAMILY_PROTOCOLS` and fails if any protocol-backed family lacks that implementation;
-the parity harness still compares its registered calls. Production startup additionally
+`FAMILY_PROTOCOLS` and fails if any comparable family lacks that implementation or a
+parity call for every protocol function. `admin_storage` is the sole documented parity
+exception: JMX store sizes and the full relationship vocabulary are backend-specific, so
+`tests/test_admin_pg_queries.py` verifies its PostgreSQL SQL and response shapes instead.
+Production startup additionally
 requires `server_version_num >= 190000` and `graph.catalog`. Deployment must select
 `GRAPH_BACKEND=postgres` explicitly, after the PostgreSQL 19 GA pin in `gm-deployment-2sb`
 lands. Until then the Beta 3 image here remains an advisory test tier, not a production
