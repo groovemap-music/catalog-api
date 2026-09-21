@@ -654,7 +654,7 @@ class TestJWT:
         from api.auth import decode_token
         from tests.conftest import make_test_jwt
 
-        token = make_test_jwt(exp=1)  # expired in 1970
+        token = make_test_jwt(exp=1)  # Fixed epoch keeps the expiry case deterministic.
         with pytest.raises(ValueError, match="expired"):
             decode_token(token, "test-jwt-secret-for-unit-tests")
 

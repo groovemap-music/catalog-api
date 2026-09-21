@@ -803,7 +803,6 @@ class TestGetExploreTraversal:
         call_args = driver.session.return_value.__aenter__.return_value.run.call_args
         cypher = call_args[0][0]
 
-        # The old buggy pattern must be gone.
         assert "WITH DISTINCT discovered," not in cypher
 
         # Discovered nodes must be collapsed via an aggregation keyed on
