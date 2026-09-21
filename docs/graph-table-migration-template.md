@@ -173,6 +173,26 @@ Three things follow from registering first:
   side is ordinary SQL over the `graph` views passes `requires_property_graph=False` and runs on
   every tier.
 
+### Existing PostgreSQL-only reads in the collection workstream
+
+The collection bead names five source modules, but two of them were already relational
+before `GRAPH_BACKEND` existed: `collection_media_queries.get_collection_media_summary`
+reads the canonical media block on `user_collections`, while
+`release_media_queries.get_release_media` and `get_release_catalog_blocks` read the
+catalog's `releases` rows. Their callers pass the PostgreSQL pool in both backend modes;
+there is no Cypher implementation to replace. Registering the same SQL module as both
+sides of a graph-backend family would manufacture a vacuous parity result and would
+incorrectly pass a Neo4j driver to these functions.
+
+Family 6 therefore accounts for these three reads as an explicit PostgreSQL-only
+carve-out in `tests/test_real_databases.py`. A surface guard inventories all public
+functions in the five modules, including the shared native-identity decorators, and
+fails if any newly added function is neither parity-registered nor accounted for.
+An engine-backed test checks the three relational reads against nonempty media and
+catalog blocks, including a duplicate physical copy that must count only once in the
+media summary. The dual-store collection, taste, and gap reads still use the normal
+family selector and Neo4j/PostgreSQL parity harness.
+
 ### Declaring an expected difference
 
 `EXPECTED_DIFFERENCES` is a plain mapping in the same module, keyed by `(family, function)`:

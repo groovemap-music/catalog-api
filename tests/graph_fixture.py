@@ -500,12 +500,13 @@ LABEL_DNA_RELEASES: dict[str, dict[str, Any]] = {
 }
 
 COLLECTION_ROWS = (
-    {"user_id": COLLECTION_USER_ID, "release_id": "1201", "rating": 5, "folder_id": 1, "date_added": "2020-01-01T00:00:00Z"},
-    {"user_id": COLLECTION_USER_ID, "release_id": "1202", "rating": 4, "folder_id": 1, "date_added": "2021-01-01T00:00:00Z"},
-    {"user_id": COLLECTION_USER_ID, "release_id": "1203", "rating": 0, "folder_id": 2, "date_added": "2022-01-01T00:00:00Z"},
-    {"user_id": COLLECTION_OTHER_USER_ID, "release_id": "1201", "rating": 0, "folder_id": 1, "date_added": "2023-01-01T00:00:00Z"},
-    {"user_id": COLLECTION_OTHER_USER_ID, "release_id": "1202", "rating": 0, "folder_id": 1, "date_added": "2023-02-01T00:00:00Z"},
-    {"user_id": COLLECTION_THIRD_USER_ID, "release_id": "1201", "rating": 0, "folder_id": 1, "date_added": "2024-01-01T00:00:00Z"},
+    {"user_id": COLLECTION_USER_ID, "release_id": "1201", "instance_id": 1, "rating": 5, "folder_id": 1, "date_added": "2020-01-01T00:00:00Z"},
+    {"user_id": COLLECTION_USER_ID, "release_id": "1201", "instance_id": 2, "rating": 4, "folder_id": 2, "date_added": "2020-02-01T00:00:00Z"},
+    {"user_id": COLLECTION_USER_ID, "release_id": "1202", "instance_id": 3, "rating": 4, "folder_id": 1, "date_added": "2021-01-01T00:00:00Z"},
+    {"user_id": COLLECTION_USER_ID, "release_id": "1203", "instance_id": 4, "rating": 0, "folder_id": 2, "date_added": "2022-01-01T00:00:00Z"},
+    {"user_id": COLLECTION_OTHER_USER_ID, "release_id": "1201", "instance_id": 5, "rating": 0, "folder_id": 1, "date_added": "2023-01-01T00:00:00Z"},
+    {"user_id": COLLECTION_OTHER_USER_ID, "release_id": "1202", "instance_id": 6, "rating": 0, "folder_id": 1, "date_added": "2023-02-01T00:00:00Z"},
+    {"user_id": COLLECTION_THIRD_USER_ID, "release_id": "1201", "instance_id": 7, "rating": 0, "folder_id": 1, "date_added": "2024-01-01T00:00:00Z"},
 )
 
 WANT_ROWS = (
@@ -599,7 +600,8 @@ _SEED_LABEL_DNA_RELEASE = "INSERT INTO releases (data_id, hash, data, media) VAL
 _SEED_MASTER = "INSERT INTO masters (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
 _SEED_USER = "INSERT INTO users (id, email, hashed_password) VALUES (%s::uuid, %s, 'fixture')"
 _SEED_COLLECTION = (
-    "INSERT INTO user_collections (user_id, release_id, rating, folder_id, date_added) VALUES (%s::uuid, %s::bigint, %s, %s, %s::timestamptz)"
+    "INSERT INTO user_collections (user_id, release_id, instance_id, rating, folder_id, date_added, media) "
+    "VALUES (%s::uuid, %s::bigint, %s::bigint, %s, %s, %s::timestamptz, %s::jsonb)"
 )
 _SEED_WANT = "INSERT INTO user_wantlists (user_id, release_id, rating, date_added) VALUES (%s::uuid, %s::bigint, %s, %s::timestamptz)"
 
@@ -759,7 +761,7 @@ _SEED_NEO4J_COLLECTIONS = """
 UNWIND $rows AS row
 MATCH (u:User {id: row.user_id})
 MATCH (r:Release {id: row.release_id})
-MERGE (u)-[edge:COLLECTED {instance_id: row.release_id}]->(r)
+MERGE (u)-[edge:COLLECTED {instance_id: row.instance_id}]->(r)
 SET edge.rating = row.rating, edge.folder_id = row.folder_id, edge.date_added = row.date_added
 """
 
@@ -977,6 +979,12 @@ async def seed_postgres(pool: AsyncPostgreSQLPool) -> None:
                 "formats": [{"name": name} for name in release["formats"]],
                 "master_id": int(release["master_id"]) if release["master_id"] else None,
             }
+            if release_id == "1201":
+                document.update(
+                    identifiers={"items": [{"type": "Barcode", "value": "1201-TEST"}]},
+                    companies={"items": [{"name": "Fixture Pressing"}]},
+                    country="US",
+                )
             await cursor.execute(
                 _SEED_LABEL_DNA_RELEASE,
                 (release_id, "parity-fixture", json.dumps(document), json.dumps(release["media"])),
@@ -987,7 +995,15 @@ async def seed_postgres(pool: AsyncPostgreSQLPool) -> None:
         for row in COLLECTION_ROWS:
             await cursor.execute(
                 _SEED_COLLECTION,
-                (row["user_id"], row["release_id"], row["rating"], row["folder_id"], row["date_added"]),
+                (
+                    row["user_id"],
+                    row["release_id"],
+                    row["instance_id"],
+                    row["rating"],
+                    row["folder_id"],
+                    row["date_added"],
+                    json.dumps(LABEL_DNA_RELEASES[row["release_id"]]["media"]),
+                ),
             )
         for row in WANT_ROWS:
             await cursor.execute(_SEED_WANT, (row["user_id"], row["release_id"], row["rating"], row["date_added"]))

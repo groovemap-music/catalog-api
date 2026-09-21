@@ -9,6 +9,7 @@ migrating a family.
 
 from __future__ import annotations
 
+import inspect
 import os
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -41,7 +42,14 @@ from api.graph_backend import (
     get_backend,
     registered_families,
 )
-from api.queries import label_dna_pg_queries
+from api.queries import (
+    collection_media_queries,
+    gap_queries,
+    label_dna_pg_queries,
+    release_media_queries,
+    taste_queries,
+    user_queries,
+)
 from api.queries.credits_queries import get_person_connections
 from api.queries.helpers import run_count, run_query, run_single
 from api.syncer import DISCOGS_API_BASE, sync_collection
@@ -788,6 +796,152 @@ GAP_ANALYSIS_CALLS = (
     ParityCall("get_master_gap_summary", (_COLLECTION_USER, graph_fixture.COLLECTION_MASTER_ID)),
 )
 register_parity_family("gap_analysis", GAP_ANALYSIS_CALLS, requires_property_graph=False)
+
+
+# Family 6 names five source modules. Three media reads were PostgreSQL-only before
+# the Neo4j migration: they have no Cypher counterpart and already receive a
+# PostgreSQL pool regardless of GRAPH_BACKEND. Comparing two calls to the same
+# SQL module would be a vacuous "parity" test. Account for them here and test
+# their real-store contract below; the shared identity decorators are exercised
+# through their owning query functions on both backend sides.
+FAMILY6_POSTGRES_ONLY_READS = frozenset(
+    {
+        "collection_media_queries.get_collection_media_summary",
+        "release_media_queries.get_release_media",
+        "release_media_queries.get_release_catalog_blocks",
+    }
+)
+FAMILY6_SHARED_IDENTITY_DECORATORS = frozenset({"user_queries.attach_release_identity", "gap_queries.attach_gap_identity"})
+
+
+async def test_family6_five_module_surface_is_fully_accounted_for() -> None:
+    modules = (user_queries, taste_queries, gap_queries, collection_media_queries, release_media_queries)
+    public_functions = {
+        f"{module.__name__.rsplit('.', 1)[-1]}.{name}"
+        for module in modules
+        for name, value in vars(module).items()
+        if inspect.iscoroutinefunction(value) and not name.startswith("_") and getattr(value, "__module__", None) == module.__name__
+    }
+    parity_functions = {
+        f"{module}.{member}"
+        for module, family in (
+            ("user_queries", "user_collection"),
+            ("taste_queries", "taste"),
+            ("gap_queries", "gap_analysis"),
+            ("gap_queries", "gap_metadata"),
+        )
+        for member in PARITY_FAMILIES[family].functions
+    }
+    assert public_functions == parity_functions | FAMILY6_POSTGRES_ONLY_READS | FAMILY6_SHARED_IDENTITY_DECORATORS
+
+
+@pytest.mark.parametrize("backend", ["neo4j", "postgres"])
+async def test_collection_fixture_proves_users_instances_and_anti_joins(parity_backends: graph_fixture.ParityBackends, backend: str) -> None:
+    handle = parity_backends.postgres if backend == "postgres" else parity_backends.neo4j
+    users = get_backend("user_collection", backend)
+    taste = get_backend("taste", backend)
+    gaps = get_backend("gap_analysis", backend)
+    primary = graph_fixture.COLLECTION_USER_ID
+    other = graph_fixture.COLLECTION_OTHER_USER_ID
+    third = graph_fixture.COLLECTION_THIRD_USER_ID
+
+    # Four physical edges but three distinct releases for the primary user;
+    # other users' edges must not leak into its collection or wantlist.
+    for user_id, expected_ids in (
+        (primary, ["1203", "1202", "1201", "1201"]),
+        (other, ["1202", "1201"]),
+        (third, ["1201"]),
+    ):
+        rows, total = await users.get_user_collection(handle, user_id)
+        assert [row["id"] for row in rows] == expected_ids
+        assert total == len(expected_ids)
+        assert await taste.get_collection_count(handle, user_id) == total
+
+    wanted, wanted_total = await users.get_user_wantlist(handle, primary)
+    assert [row["id"] for row in wanted] == ["1211", "1204"]
+    assert wanted_total == 2
+    for user_id in (other, third):
+        assert await users.get_user_wantlist(handle, user_id) == ([], 0)
+
+    status = await users.check_releases_user_status(handle, primary, ["1201", "1204", "1205"])
+    assert status == {
+        "1201": {"in_collection": True, "in_wantlist": False},
+        "1204": {"in_collection": False, "in_wantlist": True},
+        "1205": {"in_collection": False, "in_wantlist": False},
+    }
+    assert await users.check_releases_user_status(handle, other, ["1201", "1204"]) == {
+        "1201": {"in_collection": True, "in_wantlist": False},
+        "1204": {"in_collection": False, "in_wantlist": False},
+    }
+
+    recommendations = await users.get_user_recommendations(handle, primary)
+    assert recommendations
+    assert "1212" in {row["id"] for row in recommendations}
+    assert not {"1201", "1202", "1203", "1204", "1211"} & {row["id"] for row in recommendations}
+
+    label_gaps, label_total = await gaps.get_label_gaps(handle, primary, graph_fixture.LABEL_DNA_TARGET_ID)
+    assert {row["id"] for row in label_gaps} == {"1204", "1205", "1206"}
+    assert label_total == 3
+    assert next(row for row in label_gaps if row["id"] == "1204")["on_wantlist"] is True
+    without_wants, without_wants_total = await gaps.get_label_gaps(handle, primary, graph_fixture.LABEL_DNA_TARGET_ID, exclude_wantlist=True)
+    assert {row["id"] for row in without_wants} == {"1205", "1206"}
+    assert without_wants_total == 2
+    other_gaps, other_total = await gaps.get_label_gaps(handle, other, graph_fixture.LABEL_DNA_TARGET_ID)
+    assert {row["id"] for row in other_gaps} == {"1203", "1204", "1205", "1206"}
+    assert other_total == 4
+    third_gaps, third_total = await gaps.get_label_gaps(handle, third, graph_fixture.LABEL_DNA_TARGET_ID)
+    assert {row["id"] for row in third_gaps} == {"1202", "1203", "1204", "1205", "1206"}
+    assert third_total == 5
+
+    artist_gaps, artist_total = await gaps.get_artist_gaps(handle, primary, "1301")
+    assert {row["id"] for row in artist_gaps} == {"1211", "1212", "1213", "1214", "1215", "1221", "1231"}
+    assert artist_total == 7
+    artist_without_wants, artist_without_wants_total = await gaps.get_artist_gaps(handle, primary, "1301", exclude_wantlist=True)
+    assert {row["id"] for row in artist_without_wants} == {"1212", "1213", "1214", "1215", "1221", "1231"}
+    assert artist_without_wants_total == 6
+
+    master_gaps, master_total = await gaps.get_master_gaps(handle, primary, graph_fixture.COLLECTION_MASTER_ID)
+    assert {row["id"] for row in master_gaps} == {"1204", "1205", "1206"}
+    assert master_total == 3
+    master_without_wants, master_without_wants_total = await gaps.get_master_gaps(
+        handle, primary, graph_fixture.COLLECTION_MASTER_ID, exclude_wantlist=True
+    )
+    assert {row["id"] for row in master_without_wants} == {"1205", "1206"}
+    assert master_without_wants_total == 2
+
+    stats = await users.get_user_collection_stats(handle, primary)
+    assert stats["total"] == 4
+    assert (await users.get_user_collection_timeline(handle, primary))["timeline"] == [
+        {"year": 1991, "count": 1, "genres": {"Electronic": 1}, "top_labels": ["Label DNA Target"], "top_styles": ["Label DNA Shared Style"]},
+        {"year": 1992, "count": 1, "genres": {"Electronic": 1}, "top_labels": ["Label DNA Target"], "top_styles": ["Label DNA Shared Style"]},
+        {"year": 1993, "count": 1, "genres": {"Electronic": 1}, "top_labels": ["Label DNA Target"], "top_styles": ["Label DNA Shared Style"]},
+    ]
+    assert await taste.get_obscurity_score(handle, primary) == {
+        "score": 0.5,
+        "median_collectors": 1.0,
+        "total_releases": 3,
+    }
+    assert {row["genre"] for row in await taste.get_blind_spots(handle, primary)} == {"Ambient", "Rock"}
+
+
+async def test_existing_postgres_only_media_reads_have_real_store_contract(
+    parity_backends: graph_fixture.ParityBackends,
+) -> None:
+    pool = parity_backends.postgres
+    assert await collection_media_queries.get_collection_media_summary(pool, graph_fixture.COLLECTION_USER_ID) == {
+        "families": [{"id": "vinyl", "count": 3}],
+        "mediums": [{"id": "vinyl_12", "label": '12" vinyl', "family": "vinyl", "count": 3}],
+    }
+    assert await collection_media_queries.get_collection_media_summary(pool, graph_fixture.COLLECTION_OTHER_USER_ID) == {
+        "families": [{"id": "vinyl", "count": 2}],
+        "mediums": [{"id": "vinyl_12", "label": '12" vinyl', "family": "vinyl", "count": 2}],
+    }
+    assert await release_media_queries.get_release_media(pool, "1205") == graph_fixture.LABEL_DNA_RELEASES["1205"]["media"]
+    assert await release_media_queries.get_release_catalog_blocks(pool, "1201") == {
+        "identifiers": [{"type": "Barcode", "value": "1201-TEST"}],
+        "companies": [{"name": "Fixture Pressing"}],
+        "country": "US",
+    }
 
 
 # `graph.catalog` exists only on a PostgreSQL 19 server whose initializer ran with the
