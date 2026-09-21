@@ -161,9 +161,17 @@ class TestExploreFromHereEndpoint:
     ) -> None:
         """GRAPH_BACKEND=postgres invokes the bounded traversal with the pool and row limit."""
         import api.routers.recommend as mod
-        from api.queries import paths_pg_queries
+        from api.queries import paths_pg_queries, taste_pg_queries
 
-        saved = (mod._neo4j_driver, mod._pg_pool, mod._graph_backend, mod._paths_backend, mod._cache)
+        saved = (
+            mod._neo4j_driver,
+            mod._pg_pool,
+            mod._graph_backend,
+            mod._paths_backend,
+            mod._taste_backend,
+            mod._recommendations_backend,
+            mod._cache,
+        )
         pool = object()
         mock_traversal = AsyncMock(return_value=[])
         try:
@@ -172,15 +180,23 @@ class TestExploreFromHereEndpoint:
             assert mod._paths_backend is paths_pg_queries
             with (
                 patch("api.queries.paths_pg_queries.get_explore_traversal", mock_traversal),
-                patch("api.routers.recommend.get_taste_heatmap", AsyncMock(return_value=([], 0))),
-                patch("api.routers.recommend.get_blind_spots", AsyncMock(return_value=[])),
+                patch.object(taste_pg_queries, "get_taste_heatmap", AsyncMock(return_value=([], 0))),
+                patch.object(taste_pg_queries, "get_blind_spots", AsyncMock(return_value=[])),
             ):
                 response = test_client.get(
                     "/api/recommend/explore/artist/postgres-path-fixture?hops=3",
                     headers=auth_headers,
                 )
         finally:
-            mod._neo4j_driver, mod._pg_pool, mod._graph_backend, mod._paths_backend, mod._cache = saved
+            (
+                mod._neo4j_driver,
+                mod._pg_pool,
+                mod._graph_backend,
+                mod._paths_backend,
+                mod._taste_backend,
+                mod._recommendations_backend,
+                mod._cache,
+            ) = saved
 
         assert response.status_code == 200
         mock_traversal.assert_awaited_once_with(pool, "artist", "postgres-path-fixture", hops=3, row_limit=100)

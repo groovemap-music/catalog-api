@@ -39,11 +39,24 @@ import pytest
 import pytest_asyncio
 from groovemap_schema.postgres import PROPERTY_GRAPH_NAME
 
+from api.queries import credits_pg_queries as credits_postgres_backend
+from api.queries import credits_queries as credits_neo4j_backend
 from api.queries import network_pg_queries as postgres_backend
 from api.queries import network_queries as neo4j_backend
 from api.queries.helpers import run_query
 from tests import graph_fixture
-from tests.graph_fixture import ANCHOR_ARTIST_ID, ARTISTS, PROBE_ANCHOR_ARTIST_ID, RELEASES, THREE_CREDIT_RELEASE_ID, ParityBackends
+from tests.graph_fixture import (
+    ANCHOR_ARTIST_ID,
+    ARTISTS,
+    CREDITS_RELEASES,
+    DUAL_ROLE_RELEASE_ID,
+    OVERFLOWING_RELEASE_ID,
+    PROBE_ANCHOR_ARTIST_ID,
+    RELEASES,
+    SAME_AS_PERSON,
+    THREE_CREDIT_RELEASE_ID,
+    ParityBackends,
+)
 from tests.test_real_databases import ParityCall, assert_parity
 
 
@@ -347,3 +360,117 @@ async def test_the_anti_join_absorbs_a_dropped_predicate_in_the_assembled_statem
     )
 
     assert mutant == cypher
+
+
+# ── The credits family: what its parity calls cannot see (gm-catalog-api-dl8.1) ──
+# Two claims the row-for-row harness is structurally unable to make, for two different
+# reasons, and both are load-bearing.
+#
+# The first is a **cap**. `get_person_credits` reproduces `collect(DISTINCT a.name)[..3]`
+# and `collect(DISTINCT l.name)[..1]`, and the only release either cap bites on names four
+# artists and two labels. It cannot be a parity call: Cypher's `collect` has no defined
+# order, so *which* three names survive is undefined on the Neo4j side, and comparing the
+# two lists would be comparing two arbitrary choices. How many survive is not arbitrary on
+# either side, so that is what is asserted — on both engines, against the same release.
+#
+# The second is a **guard**. `get_shared_credits` walks two `credited_on` edges into one
+# release, and Neo4j's relationship isomorphism keeps them from being the same edge.
+# SQL/PGQ's walk semantics do not, so the statement writes the constraint out. Unlike the
+# collaborators pilot's four no-revisit predicates, nothing downstream masks this one — the
+# harness's self-pair call fails outright without it — but the mutation is still probed
+# here, because a reader deserves to see what the guard is holding back rather than only
+# that something does.
+
+_CREDITS_WALK_GUARD = "WHERE NOT (credit_one.person_name = credit_two.person_name AND credit_one.role = credit_two.role)"
+
+
+def _shared_credits_without_the_guard() -> str:
+    """The shared-credits statement with its walk-semantics guard removed."""
+    assert _CREDITS_WALK_GUARD in credits_postgres_backend.SHARED_CREDITS_SQL, (
+        "the guard this mutation removes is no longer spelled the way this test expects"
+    )
+    return credits_postgres_backend.SHARED_CREDITS_SQL.replace(_CREDITS_WALK_GUARD, "", 1)
+
+
+async def _shared_release_ids(pool: Any, sql: str, person1: str, person2: str) -> list[str]:
+    """Run a shared-credits statement and return the release ids it reports."""
+    async with pool.connection() as conn, conn.cursor() as cursor:
+        await cursor.execute(sql, {"person1": person1, "person2": person2})
+        rows = await cursor.fetchall()
+    return sorted(row[0] for row in rows)
+
+
+async def test_the_fixture_carries_the_two_releases_the_credits_probes_need() -> None:
+    """Both claims below are unobservable without them, so this is load-bearing."""
+    overflowing = CREDITS_RELEASES[OVERFLOWING_RELEASE_ID]
+    assert len(overflowing["artists"]) > 3, "no release credits enough artists for the [..3] cap to bite"
+    assert len(overflowing["labels"]) > 1, "no release names enough labels for the [..1] cap to bite"
+
+    credits = CREDITS_RELEASES[DUAL_ROLE_RELEASE_ID]["extraartists"]
+    names = [credit["name"] for credit in credits]
+    assert len(names) > len(set(names)), "no release credits one person twice, so one edge binding twice is unobservable"
+    assert SAME_AS_PERSON in names, "the dual-role release does not also carry the SAME_AS person"
+
+
+@pytest.mark.parametrize(("column", "cap"), [("artists", 3), ("labels", 1)])
+async def test_both_engines_cap_the_collected_lists_at_the_same_length(
+    parity_backends: ParityBackends,
+    column: str,
+    cap: int,
+) -> None:
+    """The `[..3]` and `[..1]` slices, asserted by length because order is undefined.
+
+    The release this reads credits four artists and names two labels, and the person
+    credited on it is deliberately not a `get_person_credits` parity call for exactly the
+    reason this test exists: the row the two engines would be compared on differs in which
+    names it kept, not in how many.
+    """
+    person = CREDITS_RELEASES[OVERFLOWING_RELEASE_ID]["extraartists"][0]["name"]
+    neo4j_rows = await credits_neo4j_backend.get_person_credits(parity_backends.neo4j, person)
+    postgres_rows = await credits_postgres_backend.get_person_credits(parity_backends.postgres, person)
+
+    assert [row["release_id"] for row in neo4j_rows] == [OVERFLOWING_RELEASE_ID]
+    assert [row["release_id"] for row in postgres_rows] == [OVERFLOWING_RELEASE_ID]
+    assert len(neo4j_rows[0][column]) == cap
+    assert len(postgres_rows[0][column]) == cap
+
+
+async def test_dropping_the_shared_credits_guard_admits_a_walk_the_cypher_forbids(
+    parity_backends: ParityBackends,
+) -> None:
+    """One `credited_on` edge binding to both halves of the pattern, as walk semantics allow.
+
+    Asked for the releases one person shares with themselves, Neo4j answers with nothing:
+    `c1` and `c2` are two relationship variables of one `MATCH`, so they may not bind the
+    same relationship, and this person holds one role per release. Drop the guard and
+    SQL/PGQ reports every release they are credited on.
+    """
+    cypher = await credits_neo4j_backend.get_shared_credits(parity_backends.neo4j, SAME_AS_PERSON, SAME_AS_PERSON)
+    guarded = await _shared_release_ids(parity_backends.postgres, credits_postgres_backend.SHARED_CREDITS_SQL, SAME_AS_PERSON, SAME_AS_PERSON)
+    mutant = await _shared_release_ids(parity_backends.postgres, _shared_credits_without_the_guard(), SAME_AS_PERSON, SAME_AS_PERSON)
+
+    assert cypher == []
+    assert guarded == []
+    assert mutant, "dropping the guard changed nothing; the fixture cannot falsify it"
+
+    credited_on = sorted(
+        release_id for release_id, release in CREDITS_RELEASES.items() if any(credit["name"] == SAME_AS_PERSON for credit in release["extraartists"])
+    )
+    assert mutant == credited_on
+
+
+async def test_the_shared_credits_guard_keeps_two_different_people_intact(
+    parity_backends: ParityBackends,
+) -> None:
+    """The guard excludes an edge binding twice, not a person credited twice.
+
+    A guard that also dropped the second of two roles one person holds on a shared release
+    would pass the test above and quietly lose rows here, so the mutation is measured
+    against a pair the guard must not touch at all.
+    """
+    call = ParityCall("get_shared_credits", (SAME_AS_PERSON, "Marlon Hale"))
+    cypher = await credits_neo4j_backend.get_shared_credits(parity_backends.neo4j, SAME_AS_PERSON, "Marlon Hale")
+    postgres = await credits_postgres_backend.get_shared_credits(parity_backends.postgres, SAME_AS_PERSON, "Marlon Hale")
+
+    assert cypher, "the fixture stopped giving these two a shared release"
+    assert_parity("credits", call, neo4j_result=cypher, postgres_result=postgres)

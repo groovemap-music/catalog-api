@@ -20,7 +20,7 @@ UNWIND genres AS gi
 OPTIONAL MATCH (r2:Release)-[:IS]->(g2:Genre {name: gi.name}),
                (r2)-[:IS]->(s:Style)
 WITH gi, s.name AS style, count(DISTINCT r2) AS style_count
-ORDER BY gi.name, style_count DESC
+ORDER BY gi.name, style_count DESC, style
 WITH gi, collect(
        CASE WHEN style IS NOT NULL
          THEN {name: style, release_count: style_count}
@@ -28,7 +28,7 @@ WITH gi, collect(
      ) AS raw_styles
 WITH gi, [s IN raw_styles WHERE s IS NOT NULL] AS styles
 RETURN gi.name AS name, gi.count AS release_count, styles
-ORDER BY gi.count DESC
+ORDER BY gi.count DESC, gi.name
 """
 
 

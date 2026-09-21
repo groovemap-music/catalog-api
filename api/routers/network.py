@@ -30,9 +30,8 @@ router = APIRouter(prefix="/api/network", tags=["network"])
 
 _neo4j: Any = None
 _redis: Any = None
-# The PostgreSQL pool, held alongside the Neo4j driver because the collaborators family is
-# the one part of this router that can be served by either engine. Every other endpoint here
-# is Neo4j-only (GDS centrality, cluster detection) and reads `_neo4j` directly.
+# The PostgreSQL pool serves collaborators and artist centrality; cluster detection
+# remains Neo4j-only.
 _pg_pool: Any = None
 _graph_backend: str = "neo4j"
 # Resolved via the graph-backend selector; defaults to the Neo4j implementation so an
@@ -135,7 +134,8 @@ async def artist_centrality(
     artist_id: str,
 ) -> JSONResponse:
     """Return degree and collaboration centrality scores for an artist."""
-    if not _neo4j:
+    handle = _collaborators_handle()
+    if not handle:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     # Check Redis cache
@@ -149,14 +149,16 @@ async def artist_centrality(
             logger.debug("⚠️ Network centrality cache get failed", key=cache_key)
 
     try:
-        result = await network_queries.get_artist_centrality(_neo4j, artist_id)
-    except Neo4jClientError as exc:
-        if "TransactionTimedOut" in str(exc):
+        result = await _collaborators_backend.get_artist_centrality(handle, artist_id)
+    except GRAPH_BACKEND_ERROR_TYPES as exc:
+        if is_graph_query_timeout(exc):
             logger.warning("⏱️ Network centrality query timed out", artist_id=artist_id)
             return JSONResponse(
                 content={"error": "Centrality query timed out — try again later"},
                 status_code=504,
             )
+        if is_graph_backend_unavailable(exc):
+            return JSONResponse(content={"error": "Graph backend unavailable — try again later"}, status_code=503)
         raise
 
     if not result:

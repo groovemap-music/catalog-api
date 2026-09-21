@@ -1,8 +1,17 @@
-"""Unit tests for Credits & Provenance router endpoints."""
+"""Unit tests for Credits & Provenance router endpoints.
+
+Every query function is patched on `api.queries.credits_queries` rather than on the router,
+because the router reaches all eight of them through the graph-backend seam
+(`gm-catalog-api-dl8.1`) instead of importing them. The seam resolves a family to the
+target *module*, not to copies of its functions, so patching the module's attribute is
+still what the router sees — that patchability is a property the seam promises, and these
+tests are where it is relied on.
+"""
 
 import json
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -12,7 +21,7 @@ from fastapi.testclient import TestClient
 class TestPersonCreditsEndpoint:
     """Tests for GET /api/credits/person/{name}."""
 
-    @patch("api.routers.credits.get_person_credits")
+    @patch("api.queries.credits_queries.get_person_credits")
     def test_person_credits_success(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = [
             {
@@ -33,7 +42,7 @@ class TestPersonCreditsEndpoint:
         assert len(data["credits"]) == 1
         assert data["credits"][0]["role"] == "Mastered By"
 
-    @patch("api.routers.credits.get_person_credits")
+    @patch("api.queries.credits_queries.get_person_credits")
     def test_person_credits_not_found(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = []
         response = test_client.get("/api/credits/person/Nobody")
@@ -54,7 +63,7 @@ class TestPersonCreditsEndpoint:
 class TestPersonTimelineEndpoint:
     """Tests for GET /api/credits/person/{name}/timeline."""
 
-    @patch("api.routers.credits.get_person_timeline")
+    @patch("api.queries.credits_queries.get_person_timeline")
     def test_timeline_success(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = [
             {"year": 1990, "category": "mastering", "count": 5},
@@ -66,7 +75,7 @@ class TestPersonTimelineEndpoint:
         assert data["name"] == "Bob Ludwig"
         assert len(data["timeline"]) == 2
 
-    @patch("api.routers.credits.get_person_timeline")
+    @patch("api.queries.credits_queries.get_person_timeline")
     def test_timeline_not_found(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = []
         response = test_client.get("/api/credits/person/Nobody/timeline")
@@ -76,7 +85,7 @@ class TestPersonTimelineEndpoint:
 class TestReleaseCreditsEndpoint:
     """Tests for GET /api/credits/release/{release_id}."""
 
-    @patch("api.routers.credits.get_release_credits")
+    @patch("api.queries.credits_queries.get_release_credits")
     def test_release_credits_success(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = [
             {
@@ -100,7 +109,7 @@ class TestReleaseCreditsEndpoint:
         assert data["release_id"] == "123"
         assert len(data["credits"]) == 2
 
-    @patch("api.routers.credits.get_release_credits")
+    @patch("api.queries.credits_queries.get_release_credits")
     def test_release_credits_not_found(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = []
         response = test_client.get("/api/credits/release/99999")
@@ -110,7 +119,7 @@ class TestReleaseCreditsEndpoint:
 class TestRoleLeaderboardEndpoint:
     """Tests for GET /api/credits/role/{role}/top."""
 
-    @patch("api.routers.credits.get_role_leaderboard")
+    @patch("api.queries.credits_queries.get_role_leaderboard")
     def test_leaderboard_success(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = [
             {"name": "Bob Ludwig", "credit_count": 500},
@@ -127,7 +136,7 @@ class TestRoleLeaderboardEndpoint:
         assert response.status_code == 400
         assert "Invalid role category" in response.json()["error"]
 
-    @patch("api.routers.credits.get_role_leaderboard")
+    @patch("api.queries.credits_queries.get_role_leaderboard")
     def test_leaderboard_with_limit(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = [{"name": "Test", "credit_count": 10}]
         response = test_client.get("/api/credits/role/production/top?limit=5")
@@ -137,7 +146,7 @@ class TestRoleLeaderboardEndpoint:
 class TestSharedCreditsEndpoint:
     """Tests for GET /api/credits/shared."""
 
-    @patch("api.routers.credits.get_shared_credits")
+    @patch("api.queries.credits_queries.get_shared_credits")
     def test_shared_credits_success(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = [
             {
@@ -156,7 +165,7 @@ class TestSharedCreditsEndpoint:
         assert data["person2"] == "Alan Moulder"
         assert len(data["shared_releases"]) == 1
 
-    @patch("api.routers.credits.get_shared_credits")
+    @patch("api.queries.credits_queries.get_shared_credits")
     def test_shared_credits_empty(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = []
         response = test_client.get("/api/credits/shared?person1=A&person2=B")
@@ -167,7 +176,7 @@ class TestSharedCreditsEndpoint:
 class TestPersonConnectionsEndpoint:
     """Tests for GET /api/credits/connections/{name}."""
 
-    @patch("api.routers.credits.get_person_connections")
+    @patch("api.queries.credits_queries.get_person_connections")
     def test_connections_success(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         mock_query.return_value = [
             {"name": "Connected Person", "shared_count": 10},
@@ -226,8 +235,8 @@ class TestPersonProfileEndpoint:
 
     def test_profile_success(self, test_client: TestClient) -> None:
         with (
-            patch("api.routers.credits.get_person_profile") as mock_profile,
-            patch("api.routers.credits.get_person_role_breakdown") as mock_breakdown,
+            patch("api.queries.credits_queries.get_person_profile") as mock_profile,
+            patch("api.queries.credits_queries.get_person_role_breakdown") as mock_breakdown,
         ):
             mock_profile.return_value = {
                 "name": "Bob Ludwig",
@@ -246,7 +255,7 @@ class TestPersonProfileEndpoint:
             assert data["total_credits"] == 500
             assert len(data["role_breakdown"]) == 1
 
-    @patch("api.routers.credits.get_person_profile")
+    @patch("api.queries.credits_queries.get_person_profile")
     def test_profile_not_found(self, mock_profile: AsyncMock, test_client: TestClient) -> None:
         mock_profile.return_value = None
         response = test_client.get("/api/credits/person/Nobody/profile")
@@ -291,7 +300,7 @@ class TestCreditsServiceNotReady:
 class TestCreditsRedisCaching:
     """Tests for Redis cache hit/miss paths."""
 
-    @patch("api.routers.credits.get_person_credits")
+    @patch("api.queries.credits_queries.get_person_credits")
     def test_person_credits_cache_hit(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         """Test that cached data is returned without querying Neo4j."""
         import api.routers.credits as credits_router
@@ -315,7 +324,7 @@ class TestCreditsRedisCaching:
         finally:
             credits_router._redis = original_redis
 
-    @patch("api.routers.credits.get_person_credits")
+    @patch("api.queries.credits_queries.get_person_credits")
     def test_person_credits_cache_miss_sets_cache(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         """Test that cache miss queries Neo4j and stores result."""
         import api.routers.credits as credits_router
@@ -335,7 +344,7 @@ class TestCreditsRedisCaching:
         finally:
             credits_router._redis = original_redis
 
-    @patch("api.routers.credits.get_person_credits")
+    @patch("api.queries.credits_queries.get_person_credits")
     def test_person_credits_cache_get_error(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         """Test that Redis get error falls through to Neo4j query."""
         import api.routers.credits as credits_router
@@ -355,7 +364,7 @@ class TestCreditsRedisCaching:
         finally:
             credits_router._redis = original_redis
 
-    @patch("api.routers.credits.get_role_leaderboard")
+    @patch("api.queries.credits_queries.get_role_leaderboard")
     def test_leaderboard_cache_hit(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         """Test leaderboard returns cached data."""
         import api.routers.credits as credits_router
@@ -373,7 +382,7 @@ class TestCreditsRedisCaching:
         finally:
             credits_router._redis = original_redis
 
-    @patch("api.routers.credits.get_role_leaderboard")
+    @patch("api.queries.credits_queries.get_role_leaderboard")
     def test_leaderboard_cache_error(self, mock_query: AsyncMock, test_client: TestClient) -> None:
         """Test leaderboard falls through on Redis error."""
         import api.routers.credits as credits_router
@@ -389,3 +398,136 @@ class TestCreditsRedisCaching:
             assert response.status_code == 200
         finally:
             credits_router._redis = original_redis
+
+
+class TestCreditsBackendErrorMapping:
+    """The backend-neutral error mapping, on every endpoint this router serves.
+
+    `gm-catalog-api-dl8.1` routed the eight traversals through the graph-backend seam, and
+    the seam is what makes a failure's *kind* readable without knowing which engine raised
+    it: `api.graph_backend.is_graph_query_timeout` for a statement that ran out of time,
+    `is_graph_backend_unavailable` for a backend that could not be reached at all, and
+    neither for a genuine bug, which still reaches the 500 both backends always produced.
+
+    Every endpoint is covered rather than one of them, because each has its own `except`
+    and a handler that forgot one would be invisible here otherwise.
+    """
+
+    # (patched function, request) — one per `except GRAPH_BACKEND_ERROR_TYPES` clause.
+    ENDPOINTS: tuple[tuple[str, str], ...] = (
+        ("get_person_timeline", "/api/credits/person/Tessa%20Vance/timeline"),
+        ("get_person_profile", "/api/credits/person/Tessa%20Vance/profile"),
+        ("get_person_credits", "/api/credits/person/Tessa%20Vance"),
+        ("get_release_credits", "/api/credits/release/701"),
+        ("get_role_leaderboard", "/api/credits/role/mastering/top"),
+        ("get_shared_credits", "/api/credits/shared?person1=Tessa%20Vance&person2=Marlon%20Hale"),
+        ("get_person_connections", "/api/credits/connections/Tessa%20Vance"),
+    )
+    ENDPOINT_IDS: tuple[str, ...] = tuple(function for function, _ in ENDPOINTS)
+
+    @pytest.mark.parametrize(("function", "url"), ENDPOINTS, ids=ENDPOINT_IDS)
+    def test_a_neo4j_transaction_timeout_is_504(self, function: str, url: str, test_client: TestClient) -> None:
+        from neo4j.exceptions import ClientError as Neo4jClientError
+
+        with patch(f"api.queries.credits_queries.{function}", new_callable=AsyncMock, side_effect=Neo4jClientError("TransactionTimedOut")):
+            response = test_client.get(url)
+        assert response.status_code == 504
+
+    @pytest.mark.parametrize(("function", "url"), ENDPOINTS, ids=ENDPOINT_IDS)
+    def test_an_unreachable_backend_is_503(self, function: str, url: str, test_client: TestClient) -> None:
+        """Not 504: no query ran, so "try again with a narrower request" would be advice
+        about something that never happened."""
+        from neo4j.exceptions import ServiceUnavailable
+
+        with patch(f"api.queries.credits_queries.{function}", new_callable=AsyncMock, side_effect=ServiceUnavailable("no reachable server")):
+            response = test_client.get(url)
+        assert response.status_code == 503
+        assert "narrower" not in response.json()["error"]
+
+    def test_the_person_search_maps_its_failures_the_same_way(self, test_client: TestClient) -> None:
+        """The autocomplete endpoint reaches a backend too, through its own family."""
+        from neo4j.exceptions import ClientError as Neo4jClientError
+
+        with patch(
+            "api.queries.autocomplete_queries.autocomplete_person",
+            new_callable=AsyncMock,
+            side_effect=Neo4jClientError("TransactionTimedOut"),
+        ):
+            response = test_client.get("/api/credits/autocomplete?q=bob")
+        assert response.status_code == 504
+
+    def test_any_other_backend_error_still_reaches_the_500_it_always_did(self, test_client: TestClient) -> None:
+        from neo4j.exceptions import ClientError as Neo4jClientError
+
+        with patch("api.queries.credits_queries.get_person_credits", new_callable=AsyncMock, side_effect=Neo4jClientError("SomeOtherError")):
+            response = test_client.get("/api/credits/person/Tessa%20Vance")
+        assert response.status_code == 500
+
+    def test_a_postgres_statement_timeout_is_the_same_504(self, test_client: TestClient) -> None:
+        """The whole point of the mapping: the same contract from the other engine."""
+        import psycopg
+
+        import api.routers.credits as credits_module
+
+        saved = (credits_module._neo4j_driver, credits_module._redis, credits_module._graph_backend, credits_module._pg_pool)
+        try:
+            credits_module.configure(saved[0], saved[1], "postgres", pg_pool=AsyncMock())
+            with patch(
+                "api.queries.credits_pg_queries.get_person_credits",
+                new_callable=AsyncMock,
+                side_effect=psycopg.errors.QueryCanceled("canceling statement due to statement timeout"),
+            ):
+                response = test_client.get("/api/credits/person/Tessa%20Vance")
+        finally:
+            credits_module.configure(saved[0], saved[1], saved[2], pg_pool=saved[3])
+        assert response.status_code == 504
+
+    def test_the_postgres_pool_giving_up_is_503_not_504(self, test_client: TestClient) -> None:
+        from common.db_resilience import ConnectionEstablishmentError
+
+        import api.routers.credits as credits_module
+
+        saved = (credits_module._neo4j_driver, credits_module._redis, credits_module._graph_backend, credits_module._pg_pool)
+        try:
+            credits_module.configure(saved[0], saved[1], "postgres", pg_pool=AsyncMock())
+            with patch(
+                "api.queries.credits_pg_queries.get_person_connections",
+                new_callable=AsyncMock,
+                side_effect=ConnectionEstablishmentError("Failed to get PostgreSQL connection after 5 attempts"),
+            ):
+                response = test_client.get("/api/credits/connections/Tessa%20Vance")
+        finally:
+            credits_module.configure(saved[0], saved[1], saved[2], pg_pool=saved[3])
+        assert response.status_code == 503
+
+
+class TestCreditsBackendResolution:
+    """`GRAPH_BACKEND=postgres` sends the eight traversals to the SQL/PGQ module."""
+
+    def test_the_seam_resolves_the_postgres_credits_module(self, test_client: TestClient) -> None:
+        import api.routers.credits as credits_module
+
+        rows = [{"category": "mastering", "count": 4}]
+        saved = (credits_module._neo4j_driver, credits_module._redis, credits_module._graph_backend, credits_module._pg_pool)
+        try:
+            credits_module.configure(saved[0], saved[1], "postgres", pg_pool=AsyncMock())
+            profile = {
+                "name": "Tessa Vance",
+                "total_credits": 4,
+                "categories": ["mastering"],
+                "first_year": 1963,
+                "last_year": 1972,
+                "artist_id": "801",
+                "artist_name": "Vance Machine",
+            }
+            with (
+                patch("api.queries.credits_pg_queries.get_person_role_breakdown", new_callable=AsyncMock, return_value=rows) as postgres_call,
+                patch("api.queries.credits_pg_queries.get_person_profile", new_callable=AsyncMock, return_value=profile),
+            ):
+                response = test_client.get("/api/credits/person/Tessa%20Vance/profile")
+        finally:
+            credits_module.configure(saved[0], saved[1], saved[2], pg_pool=saved[3])
+
+        assert response.status_code == 200
+        assert response.json()["role_breakdown"] == [{"category": "mastering", "count": 4}]
+        postgres_call.assert_awaited_once()

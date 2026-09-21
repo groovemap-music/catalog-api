@@ -196,6 +196,29 @@ FROM (
 """  # noqa: S608 — as above: the composition is of module constants only
 
 
+# Degree comes from the loader-maintained counter bound into artist_vertex, not a
+# request-time traversal. Other centrality fields retain the Cypher's DISTINCT edge
+# semantics, including counting only releases shared with another artist.
+ARTIST_CENTRALITY_SQL = """
+SELECT a.artist_id, a.name AS artist_name, a.degree,
+       (SELECT count(DISTINCT peer.artist_id)::bigint
+        FROM graph.by_artist own JOIN graph.by_artist peer USING (release_id)
+        WHERE own.artist_id = a.artist_id AND peer.artist_id <> a.artist_id) AS collaborator_count,
+       (SELECT count(DISTINCT own.release_id)::bigint
+        FROM graph.by_artist own
+        WHERE own.artist_id = a.artist_id
+          AND EXISTS (SELECT 1 FROM graph.by_artist peer
+                      WHERE peer.release_id = own.release_id AND peer.artist_id <> a.artist_id)) AS collaboration_releases,
+       (SELECT count(DISTINCT group_artist_id)::bigint FROM graph.member_of
+        WHERE member_artist_id = a.artist_id) AS group_count,
+       (SELECT count(DISTINCT artist_id)::bigint FROM graph.alias_of
+        WHERE alias_artist_id = a.artist_id) AS alias_count
+FROM graph.artist_vertex a
+WHERE a.artist_id = %(artist_id)s
+LIMIT 1
+"""
+
+
 async def get_artist_identity(pool: Any, artist_id: str) -> dict[str, Any] | None:
     """Return the anchor artist's id and name, or ``None`` when no such artist exists.
 
@@ -252,3 +275,16 @@ async def count_multi_hop_collaborators(pool: Any, artist_id: str, depth: int = 
         row = await cursor.fetchone()
 
     return int(row[0]) if row else 0
+
+
+async def get_artist_centrality(pool: Any, artist_id: str) -> dict[str, Any] | None:
+    """Return centrality with the precomputed artist degree counter."""
+    async with pool.connection() as conn, conn.cursor() as cursor_cm:
+        cursor = cast("Any", cursor_cm)
+        await execute_sql(cursor, ARTIST_CENTRALITY_SQL, {"artist_id": artist_id})
+        row = await cursor.fetchone()
+    if row is None:
+        return None
+    return dict(
+        zip(("artist_id", "artist_name", "degree", "collaborator_count", "collaboration_releases", "group_count", "alias_count"), row, strict=True)
+    )

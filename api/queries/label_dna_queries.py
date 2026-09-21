@@ -40,7 +40,7 @@ async def get_label_genre_profile(driver: AsyncResilientNeo4jDriver, label_id: s
     MATCH (r:Release)-[:ON]->(l:Label {id: $label_id}), (r)-[:IS]->(g:Genre)
     WITH g.name AS name, count(DISTINCT r) AS count
     RETURN name, count
-    ORDER BY count DESC
+    ORDER BY count DESC, name
     """
     return await run_query(driver, cypher, label_id=label_id)
 
@@ -51,7 +51,7 @@ async def get_label_style_profile(driver: AsyncResilientNeo4jDriver, label_id: s
     MATCH (r:Release)-[:ON]->(l:Label {id: $label_id}), (r)-[:IS]->(s:Style)
     WITH s.name AS name, count(DISTINCT r) AS count
     RETURN name, count
-    ORDER BY count DESC
+    ORDER BY count DESC, name
     """
     return await run_query(driver, cypher, label_id=label_id)
 
@@ -88,7 +88,7 @@ async def get_label_format_profile(driver: AsyncResilientNeo4jDriver, label_id: 
     UNWIND r.formats AS fmt
     WITH fmt AS name, count(DISTINCT r) AS count
     RETURN name, count
-    ORDER BY count DESC
+    ORDER BY count DESC, name
     """
     return await run_query(driver, cypher, label_id=label_id)
 
@@ -105,7 +105,7 @@ async def get_label_media_family_counts(driver: AsyncResilientNeo4jDriver, label
     WITH DISTINCT r, f
     WITH f.name AS family, count(DISTINCT r) AS count
     RETURN family, count
-    ORDER BY count DESC
+    ORDER BY count DESC, family
     """
     return await run_query(driver, cypher, label_id=label_id)
 
@@ -121,7 +121,7 @@ async def get_label_medium_counts(driver: AsyncResilientNeo4jDriver, label_id: s
     WITH DISTINCT r, m, f
     WITH f.name AS family, m.id AS medium_id, m.label AS medium_label, count(DISTINCT r) AS count
     RETURN family, medium_id, medium_label, count
-    ORDER BY family, count DESC
+    ORDER BY family, count DESC, medium_id
     """
     return await run_query(driver, cypher, label_id=label_id)
 
@@ -139,7 +139,7 @@ async def get_label_media_families_fallback(driver: AsyncResilientNeo4jDriver, l
     UNWIND r.media_families AS family
     WITH family, count(DISTINCT r) AS count
     RETURN family, count
-    ORDER BY count DESC
+    ORDER BY count DESC, family
     """
     return await run_query(driver, cypher, label_id=label_id)
 
@@ -238,7 +238,7 @@ async def get_candidate_labels_genre_vectors(driver: AsyncResilientNeo4jDriver, 
     candidates_cypher = """
     MATCH (l:Label {id: $label_id})<-[:ON]-(r:Release)-[:IS]->(s:Style)
     WITH l, s, count(DISTINCT r) AS style_count
-    ORDER BY style_count DESC
+    ORDER BY style_count DESC, s.name
     LIMIT 5
     WITH l, collect(s) AS top_styles
     UNWIND top_styles AS s2
@@ -251,7 +251,7 @@ async def get_candidate_labels_genre_vectors(driver: AsyncResilientNeo4jDriver, 
     WITH l2, sum(shared_in_style) AS total_shared
     WHERE total_shared >= $min_releases
     RETURN l2.id AS label_id, l2.name AS label_name, total_shared
-    ORDER BY total_shared DESC
+    ORDER BY total_shared DESC, label_id
     LIMIT 100
     """
     candidates = await run_query(
@@ -276,16 +276,22 @@ async def get_candidate_labels_genre_vectors(driver: AsyncResilientNeo4jDriver, 
 
     async def _fetch_batch(batch_ids: list[str]) -> list[dict[str, Any]]:
         count_cypher = """
-        UNWIND $label_ids AS lid
+        UNWIND range(0, size($label_ids) - 1) AS position
+        WITH $label_ids[position] AS lid, position
         MATCH (l:Label {id: lid})<-[:ON]-(r:Release)
-        RETURN l.id AS label_id, l.name AS label_name, count(DISTINCT r) AS release_count
+        WITH position, l.id AS label_id, l.name AS label_name, count(DISTINCT r) AS release_count
+        ORDER BY position
+        RETURN label_id, label_name, release_count
         """
         genre_cypher = """
-        UNWIND $label_ids AS lid
+        UNWIND range(0, size($label_ids) - 1) AS position
+        WITH $label_ids[position] AS lid, position
         MATCH (l:Label {id: lid})<-[:ON]-(r:Release)-[:IS]->(g:Genre)
-        WITH l, g.name AS genre, count(DISTINCT r) AS genre_count
-        RETURN l.id AS label_id,
-               collect({name: genre, count: genre_count}) AS genres
+        WITH position, l, g.name AS genre, count(DISTINCT r) AS genre_count
+        ORDER BY position, genre_count DESC, genre
+        WITH position, l.id AS label_id, collect({name: genre, count: genre_count}) AS genres
+        ORDER BY position
+        RETURN label_id, genres
         """
         counts, genres = await asyncio.gather(
             run_query(driver, count_cypher, timeout=60, label_ids=batch_ids),
