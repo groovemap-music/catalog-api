@@ -280,6 +280,12 @@ RARITY_MASTER_NAME = "Grooved Master"
 RARITY_LONE_MASTER_ID = "722"
 RARITY_LONE_MASTER_NAME = "Only Press Master"
 
+# The insights family needs one real anniversary result, including its optional artist
+# credit.  Keeping it on the pre-existing fixture master makes the earlier metadata calls
+# observe the same entity while giving both engines a non-empty anniversary comparison.
+MASTER_YEARS: dict[str, int] = {MASTER_ID: 2000}
+MASTER_ARTISTS: dict[str, tuple[str, ...]] = {MASTER_ID: (ANCHOR_ARTIST_ID,)}
+
 RARITY_GENRE_NAME = "Spiritual Jazz"
 RARITY_STYLE_NAME = "Free Improvisation"
 
@@ -547,7 +553,7 @@ SET l.name = label.name, l.release_count = label.release_count
 _SEED_MASTER_NODES = """
 UNWIND $masters AS master
 MERGE (m:Master {id: master.id})
-SET m.title = master.title
+SET m.title = master.title, m.year = master.year
 """
 
 _SEED_GENRE_NODES = """
@@ -592,6 +598,13 @@ UNWIND $edges AS edge
 MATCH (r:Release {id: edge.release_id})
 MATCH (a:Artist {id: edge.artist_id})
 MERGE (r)-[:BY]->(a)
+"""
+
+_SEED_MASTER_BY_EDGES = """
+UNWIND $edges AS edge
+MATCH (m:Master {id: edge.master_id})
+MATCH (a:Artist {id: edge.artist_id})
+MERGE (m)-[:BY]->(a)
 """
 
 _SEED_ON_EDGES = """
@@ -702,6 +715,18 @@ def all_masters() -> dict[str, str]:
     return {MASTER_ID: MASTER_NAME, RARITY_MASTER_ID: RARITY_MASTER_NAME, RARITY_LONE_MASTER_ID: RARITY_LONE_MASTER_NAME}
 
 
+def master_documents() -> dict[str, dict[str, Any]]:
+    """Return the Discogs document for every master in the shared graph fixture."""
+    return {
+        master_id: {
+            "title": title,
+            **({"year": MASTER_YEARS[master_id]} if master_id in MASTER_YEARS else {}),
+            **({"artists": [{"id": int(artist_id)} for artist_id in MASTER_ARTISTS[master_id]]} if master_id in MASTER_ARTISTS else {}),
+        }
+        for master_id, title in all_masters().items()
+    }
+
+
 def _release_node(release_id: str, document: dict[str, Any], media: dict[str, Any] | None) -> dict[str, Any]:
     """Return the Neo4j properties `graph.release` projects for one document."""
     return {
@@ -745,7 +770,11 @@ async def seed_neo4j(driver: AsyncResilientNeo4jDriver) -> None:
         _SEED_LABEL_NODES,
         labels=[{"id": label_id, "name": name, "release_count": label_counts.get(label_id, 0)} for label_id, name in all_labels().items()],
     )
-    await consume(driver, _SEED_MASTER_NODES, masters=[{"id": master_id, "title": title} for master_id, title in all_masters().items()])
+    await consume(
+        driver,
+        _SEED_MASTER_NODES,
+        masters=[{"id": master_id, "title": document["title"], "year": document.get("year")} for master_id, document in master_documents().items()],
+    )
     await consume(driver, _SEED_GENRE_NODES, genres=[{"name": name, "release_count": count} for name, count in genre_counts.items()])
     await consume(driver, _SEED_STYLE_NODES, styles=[{"name": name, "release_count": count} for name, count in style_counts.items()])
     await consume(driver, _SEED_PERSON_NODES, people=list(AUTOCOMPLETE_PEOPLE))
@@ -763,6 +792,15 @@ async def seed_neo4j(driver: AsyncResilientNeo4jDriver) -> None:
         edges=[
             {"release_id": release_id, "artist_id": str(entry["id"])}
             for release_id, document in documents.items()
+            for entry in document.get("artists", ())
+        ],
+    )
+    await consume(
+        driver,
+        _SEED_MASTER_BY_EDGES,
+        edges=[
+            {"master_id": master_id, "artist_id": str(entry["id"])}
+            for master_id, document in master_documents().items()
             for entry in document.get("artists", ())
         ],
     )
@@ -846,8 +884,8 @@ async def seed_postgres(pool: AsyncPostgreSQLPool) -> None:
             await cursor.execute(_SEED_ARTIST, (artist_id, "parity-fixture", json.dumps({"name": name})))
         for label_id, name in all_labels().items():
             await cursor.execute(_SEED_LABEL, (label_id, "parity-fixture", json.dumps({"name": name})))
-        for master_id, title in all_masters().items():
-            await cursor.execute(_SEED_MASTER, (master_id, "parity-fixture", json.dumps({"title": title})))
+        for master_id, document in master_documents().items():
+            await cursor.execute(_SEED_MASTER, (master_id, "parity-fixture", json.dumps(document)))
         for release_id, document in documents.items():
             media = media_blocks.get(release_id)
             await cursor.execute(

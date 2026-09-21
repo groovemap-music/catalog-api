@@ -38,6 +38,8 @@ from api.queries import (
     collaborator_queries,
     gap_pg_queries,
     gap_queries,
+    insights_neo4j_queries,
+    insights_pg_queries,
     neo4j_pg_queries,
     neo4j_queries,
     network_pg_queries,
@@ -227,6 +229,31 @@ _POSTGRES_RARITY: RarityBackend = rarity_pg_queries
 # ── end rarity family ────────────────────────────────────────────────────────
 
 
+# ── The "insights" family (gm-catalog-api-wpku.2) ──────────────────────────
+class InsightsBackend(Protocol):
+    """The four graph-backed computations served by the internal insights API."""
+
+    async def query_artist_centrality(self, handle: Any, /, limit: int = 100) -> list[dict[str, Any]]: ...
+
+    async def query_genre_trends(self, handle: Any, /, genre: str | None = None) -> list[dict[str, Any]]: ...
+
+    async def query_label_longevity(self, handle: Any, /, limit: int = 50) -> list[dict[str, Any]]: ...
+
+    async def query_monthly_anniversaries(
+        self,
+        handle: Any,
+        /,
+        current_year: int,
+        current_month: int,
+        milestone_years: list[int] | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+
+_NEO4J_INSIGHTS: InsightsBackend = insights_neo4j_queries
+_POSTGRES_INSIGHTS: InsightsBackend = insights_pg_queries
+# ── end insights family ──────────────────────────────────────────────────────
+
+
 # family name -> backend name -> module implementing that family's query functions.
 _FAMILY_BACKENDS: dict[str, dict[str, ModuleType]] = {
     "collaborators": {
@@ -260,6 +287,10 @@ _FAMILY_BACKENDS: dict[str, dict[str, ModuleType]] = {
     "rarity": {
         "neo4j": rarity_queries,
         "postgres": rarity_pg_queries,
+    },
+    "insights": {
+        "neo4j": insights_neo4j_queries,
+        "postgres": insights_pg_queries,
     },
 }
 
@@ -344,6 +375,11 @@ def get_admin_storage_backend(backend: str) -> AdminStorageBackend:
 def get_rarity_backend(backend: str) -> RarityBackend:
     """Resolve the "rarity" family for *backend*, typed rather than as a module."""
     return cast("RarityBackend", get_backend("rarity", backend))
+
+
+def get_insights_backend(backend: str) -> InsightsBackend:
+    """Resolve the "insights" family for *backend*, typed rather than as a module."""
+    return cast("InsightsBackend", get_backend("insights", backend))
 
 
 def rarity_handles(backend: str, neo4j: Any, pg_pool: Any) -> RarityHandles:

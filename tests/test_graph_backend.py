@@ -24,11 +24,19 @@ from api.graph_backend import (
     get_autocomplete_backend,
     get_backend,
     get_collaborators_backend,
+    get_insights_backend,
     is_graph_backend_unavailable,
     is_graph_query_timeout,
     verify_postgres_graph_backend,
 )
-from api.queries import autocomplete_pg_queries, autocomplete_queries, network_pg_queries, network_queries
+from api.queries import (
+    autocomplete_pg_queries,
+    autocomplete_queries,
+    insights_neo4j_queries,
+    insights_pg_queries,
+    network_pg_queries,
+    network_queries,
+)
 from tests.fake_postgres import FakePool
 
 
@@ -84,6 +92,12 @@ class TestGetBackend:
         assert get_backend("autocomplete", "postgres") is autocomplete_pg_queries
         assert get_autocomplete_backend("neo4j") is autocomplete_queries
         assert get_autocomplete_backend("postgres") is autocomplete_pg_queries
+
+    def test_insights_family_resolves_to_both_implementations(self) -> None:
+        assert get_backend("insights", "neo4j") is insights_neo4j_queries
+        assert get_backend("insights", "postgres") is insights_pg_queries
+        assert get_insights_backend("neo4j") is insights_neo4j_queries
+        assert get_insights_backend("postgres") is insights_pg_queries
 
     @pytest.mark.asyncio
     async def test_the_neo4j_autocomplete_module_delegates_rather_than_re_exporting(self) -> None:

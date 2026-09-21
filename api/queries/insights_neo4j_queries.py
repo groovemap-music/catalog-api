@@ -23,7 +23,7 @@ async def query_artist_centrality(driver: Any, limit: int = 100) -> list[dict[st
     cypher = """
     MATCH (a:Artist)
     WITH a, size([(a)-[]-() | 1]) AS edge_count
-    ORDER BY edge_count DESC
+    ORDER BY edge_count DESC, a.id
     LIMIT $limit
     RETURN a.id AS artist_id, a.name AS artist_name, edge_count
     """
@@ -79,10 +79,10 @@ async def query_label_longevity(driver: Any, limit: int = 50) -> list[dict[str, 
     UNWIND years AS y
     WITH l, first_year, last_year, total_releases, years_active,
          (y / 10) * 10 AS decade, count(*) AS decade_count
-    ORDER BY decade_count DESC
+    ORDER BY decade_count DESC, decade ASC
     WITH l, first_year, last_year, total_releases, years_active,
          collect({decade: decade, count: decade_count})[0].decade AS peak_decade
-    ORDER BY years_active DESC
+    ORDER BY years_active DESC, l.id
     LIMIT $limit
     RETURN l.id AS label_id, l.name AS label_name,
            first_year, last_year, years_active,
@@ -115,10 +115,10 @@ async def query_monthly_anniversaries(
     UNWIND $target_years AS target_year
     MATCH (m:Master {year: target_year})
     OPTIONAL MATCH (m)-[:BY]->(a:Artist)
-    WITH m, collect(DISTINCT a.name)[0] AS artist_name
+    WITH m, min(a.name) AS artist_name
     RETURN m.id AS master_id, m.title AS title, artist_name,
            m.year AS release_year
-    ORDER BY m.year ASC
+    ORDER BY m.year ASC, m.id
     """
     results = await run_query(driver, cypher, database="neo4j", target_years=target_years)
     logger.info(

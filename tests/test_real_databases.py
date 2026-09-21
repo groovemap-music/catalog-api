@@ -32,6 +32,7 @@ from api.graph_backend import (
     CollaboratorIdentityBackend,
     CollaboratorsBackend,
     GapMetadataBackend,
+    InsightsBackend,
     OneHopCollaboratorsBackend,
     RarityBackend,
     get_backend,
@@ -633,6 +634,27 @@ FAMILY_PROTOCOLS["autocomplete"] = AutocompleteBackend
 # worth covering and is covered in `tests/test_autocomplete_pg_queries.py`, on one engine,
 # where agreeing is not a failure.
 EXPECTED_DIFFERENCES.update({("autocomplete", function): _LUCENE_SCORE_DIFFERENCE for function in PARITY_FAMILIES["autocomplete"].functions})
+
+
+# ── The insights family (gm-catalog-api-wpku.2) ─────────────────────────────
+# These are relational aggregates over the materialized graph relations rather than
+# GRAPH_TABLE traversals, so they run on both PostgreSQL tiers.  Every function gets a
+# non-empty call and the optional/filtering paths get their own calls as well.
+INSIGHTS_CALLS: tuple[ParityCall, ...] = (
+    ParityCall("query_artist_centrality", (), {"limit": 100}),
+    ParityCall("query_artist_centrality", (), {"limit": 3}),
+    ParityCall("query_genre_trends"),
+    ParityCall("query_genre_trends", (), {"genre": graph_fixture.RARITY_GENRE_NAME}),
+    ParityCall("query_genre_trends", (), {"genre": "does-not-exist"}),
+    ParityCall("query_label_longevity", (), {"limit": 50}),
+    ParityCall("query_label_longevity", (), {"limit": 1}),
+    ParityCall("query_monthly_anniversaries", (2025, 9, [25])),
+    ParityCall("query_monthly_anniversaries", (2025, 9, [10])),
+)
+
+register_parity_family("insights", INSIGHTS_CALLS, requires_property_graph=False)
+FAMILY_PROTOCOLS["insights"] = InsightsBackend
+# ── end insights family ──────────────────────────────────────────────────────
 
 
 # ── The rarity family (gm-catalog-api-wpku.1) ────────────────────────────────
