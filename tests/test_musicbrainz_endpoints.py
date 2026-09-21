@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from api.queries.musicbrainz_pipeline import MusicBrainzHandles
 from api.queries.musicbrainz_queries import (
     get_artist_external_links,
     get_artist_mb_relationships,
@@ -44,6 +45,10 @@ def _make_neo4j_driver(data_return: list | None = None) -> MagicMock:
     return driver
 
 
+def _handles(graph: Any, relational: Any | None = None) -> MusicBrainzHandles:
+    return MusicBrainzHandles(graph=graph, relational=relational if relational is not None else MagicMock())
+
+
 # ===========================================================================
 # Endpoint tests (via TestClient)
 # ===========================================================================
@@ -64,7 +69,9 @@ class TestArtistMusicbrainzEndpoint:
             "begin_area": "London",
             "disambiguation": "singer",
         }
-        with patch("api.routers.musicbrainz.get_artist_musicbrainz", new_callable=AsyncMock, return_value=mb_data):
+        backend = AsyncMock()
+        backend.get_artist_musicbrainz.return_value = mb_data
+        with patch("api.routers.musicbrainz.get_musicbrainz_backend", return_value=backend):
             resp = test_client.get("/api/artist/42/musicbrainz")
         assert resp.status_code == 200
         body = resp.json()
@@ -73,7 +80,9 @@ class TestArtistMusicbrainzEndpoint:
         assert body["type"] == "Person"
 
     def test_get_artist_musicbrainz_not_found(self, test_client: TestClient) -> None:
-        with patch("api.routers.musicbrainz.get_artist_musicbrainz", new_callable=AsyncMock, return_value=None):
+        backend = AsyncMock()
+        backend.get_artist_musicbrainz.return_value = None
+        with patch("api.routers.musicbrainz.get_musicbrainz_backend", return_value=backend):
             resp = test_client.get("/api/artist/999/musicbrainz")
         assert resp.status_code == 404
         assert "No MusicBrainz data" in resp.json()["detail"]
@@ -82,6 +91,27 @@ class TestArtistMusicbrainzEndpoint:
         with patch("api.routers.musicbrainz._neo4j_driver", None):
             resp = test_client.get("/api/artist/1/musicbrainz")
         assert resp.status_code == 503
+
+    def test_postgres_backend_does_not_require_neo4j(self, test_client: TestClient) -> None:
+        import api.routers.musicbrainz as router
+
+        backend = AsyncMock()
+        backend.get_artist_musicbrainz.return_value = {
+            "discogs_id": "1",
+            "mbid": "99999999-0000-0000-0000-000000000001",
+        }
+        original_backend = router._graph_backend
+        original_driver = router._neo4j_driver
+        router._graph_backend = "postgres"
+        router._neo4j_driver = None
+        try:
+            with patch("api.routers.musicbrainz.get_musicbrainz_backend", return_value=backend):
+                resp = test_client.get("/api/artist/1/musicbrainz")
+            assert resp.status_code == 200
+            backend.get_artist_musicbrainz.assert_awaited_once()
+        finally:
+            router._graph_backend = original_backend
+            router._neo4j_driver = original_driver
 
 
 class TestArtistRelationshipsEndpoint:
@@ -99,7 +129,9 @@ class TestArtistRelationshipsEndpoint:
                 "attributes": ["vocals"],
             }
         ]
-        with patch("api.routers.musicbrainz.get_artist_mb_relationships", new_callable=AsyncMock, return_value=rels):
+        backend = AsyncMock()
+        backend.get_artist_mb_relationships.return_value = rels
+        with patch("api.routers.musicbrainz.get_musicbrainz_backend", return_value=backend):
             resp = test_client.get("/api/artist/42/relationships")
         assert resp.status_code == 200
         body = resp.json()
@@ -108,7 +140,9 @@ class TestArtistRelationshipsEndpoint:
         assert body["relationships"][0]["type"] == "MEMBER_OF"
 
     def test_get_artist_relationships_empty(self, test_client: TestClient) -> None:
-        with patch("api.routers.musicbrainz.get_artist_mb_relationships", new_callable=AsyncMock, return_value=[]):
+        backend = AsyncMock()
+        backend.get_artist_mb_relationships.return_value = []
+        with patch("api.routers.musicbrainz.get_musicbrainz_backend", return_value=backend):
             resp = test_client.get("/api/artist/42/relationships")
         assert resp.status_code == 200
         assert resp.json()["relationships"] == []
@@ -127,7 +161,9 @@ class TestExternalLinksEndpoint:
             {"service": "wikipedia", "url": "https://en.wikipedia.org/wiki/Artist"},
             {"service": "wikidata", "url": "https://www.wikidata.org/wiki/Q123"},
         ]
-        with patch("api.routers.musicbrainz.get_artist_external_links", new_callable=AsyncMock, return_value=links):
+        backend = AsyncMock()
+        backend.get_artist_external_links.return_value = links
+        with patch("api.routers.musicbrainz.get_musicbrainz_backend", return_value=backend):
             resp = test_client.get("/api/artist/42/external-links")
         assert resp.status_code == 200
         body = resp.json()
@@ -136,7 +172,9 @@ class TestExternalLinksEndpoint:
         assert body["links"][0]["service"] == "wikipedia"
 
     def test_get_external_links_empty(self, test_client: TestClient) -> None:
-        with patch("api.routers.musicbrainz.get_artist_external_links", new_callable=AsyncMock, return_value=[]):
+        backend = AsyncMock()
+        backend.get_artist_external_links.return_value = []
+        with patch("api.routers.musicbrainz.get_musicbrainz_backend", return_value=backend):
             resp = test_client.get("/api/artist/42/external-links")
         assert resp.status_code == 200
         assert resp.json()["links"] == []
@@ -159,7 +197,9 @@ class TestEnrichmentStatusEndpoint:
                 "relationships": {"total_in_mb": 500, "created_in_neo4j": 450},
             }
         }
-        with patch("api.routers.musicbrainz.get_enrichment_status", new_callable=AsyncMock, return_value=stats):
+        backend = AsyncMock()
+        backend.get_enrichment_status.return_value = stats
+        with patch("api.routers.musicbrainz.get_musicbrainz_backend", return_value=backend):
             resp = test_client.get("/api/enrichment/status")
         assert resp.status_code == 200
         body = resp.json()
@@ -197,7 +237,7 @@ class TestGetArtistMusicbrainzQuery:
             "disambiguation": "",
         }
         driver = _make_neo4j_driver([row])
-        result = await get_artist_musicbrainz(driver, 42)
+        result = await get_artist_musicbrainz(_handles(driver), 42)
         assert result is not None
         assert result["discogs_id"] == 42
         assert result["mbid"] == "abc-123"
@@ -205,7 +245,7 @@ class TestGetArtistMusicbrainzQuery:
     @pytest.mark.anyio
     async def test_returns_none(self) -> None:
         driver = _make_neo4j_driver([])
-        result = await get_artist_musicbrainz(driver, 999)
+        result = await get_artist_musicbrainz(_handles(driver), 999)
         assert result is None
 
 
@@ -226,14 +266,14 @@ class TestGetArtistMbRelationshipsQuery:
             }
         ]
         driver = _make_neo4j_driver(rels)
-        result = await get_artist_mb_relationships(driver, 42)
+        result = await get_artist_mb_relationships(_handles(driver), 42)
         assert len(result) == 1
         assert result[0]["type"] == "MEMBER_OF"
 
     @pytest.mark.anyio
     async def test_returns_empty(self) -> None:
         driver = _make_neo4j_driver([])
-        result = await get_artist_mb_relationships(driver, 42)
+        result = await get_artist_mb_relationships(_handles(driver), 42)
         assert result == []
 
 
@@ -243,7 +283,7 @@ class TestGetArtistExternalLinksQuery:
     @pytest.mark.anyio
     async def test_returns_links(self) -> None:
         mock_cur = AsyncMock()
-        mock_cur.fetchall = AsyncMock(return_value=[{"service": "wikipedia", "url": "https://example.com"}])
+        mock_cur.fetchall = AsyncMock(return_value=[("wikipedia", "https://example.com")])
         mock_cur.execute = AsyncMock()
         cur_ctx = AsyncMock()
         cur_ctx.__aenter__ = AsyncMock(return_value=mock_cur)
@@ -256,7 +296,7 @@ class TestGetArtistExternalLinksQuery:
         pool = MagicMock()
         pool.connection = MagicMock(return_value=conn_ctx)
 
-        result = await get_artist_external_links(pool, 42)
+        result = await get_artist_external_links(_handles(object(), pool), 42)
         assert len(result) == 1
         assert result[0]["service"] == "wikipedia"
 
@@ -276,7 +316,7 @@ class TestGetArtistExternalLinksQuery:
         pool = MagicMock()
         pool.connection = MagicMock(return_value=conn_ctx)
 
-        result = await get_artist_external_links(pool, 999)
+        result = await get_artist_external_links(_handles(object(), pool), 999)
         assert result == []
 
 
@@ -287,13 +327,13 @@ class TestGetEnrichmentStatusQuery:
     async def test_returns_stats(self) -> None:
         # Mock PostgreSQL pool
         fetchone_values = [
-            {"total": 100},  # artists total
-            {"matched": 80},  # artists matched
-            {"total": 50},  # labels total
-            {"matched": 30},  # labels matched
-            {"total": 200},  # releases total
-            {"matched": 150},  # releases matched
-            {"total": 500},  # relationships total
+            (100,),  # artists total
+            (80,),  # artists matched
+            (50,),  # labels total
+            (30,),  # labels matched
+            (200,),  # releases total
+            (150,),  # releases matched
+            (500,),  # relationships total
         ]
         mock_cur = AsyncMock()
         mock_cur.fetchone = AsyncMock(side_effect=fetchone_values)
@@ -333,7 +373,7 @@ class TestGetEnrichmentStatusQuery:
         driver = MagicMock()
         driver.session = MagicMock(return_value=mock_session)
 
-        stats = await get_enrichment_status(pool, driver)
+        stats = await get_enrichment_status(_handles(driver, pool))
         assert stats["musicbrainz"]["artists"]["total_mb"] == 100
         assert stats["musicbrainz"]["artists"]["matched_to_discogs"] == 80
         assert stats["musicbrainz"]["artists"]["enriched_in_neo4j"] == 75
@@ -354,6 +394,7 @@ class TestConfigure:
 
         mock_pool = MagicMock()
         mock_driver = MagicMock()
-        mb_router.configure(mock_pool, mock_driver)
+        mb_router.configure(mock_pool, mock_driver, "postgres")
         assert mb_router._pool is mock_pool
         assert mb_router._neo4j_driver is mock_driver
+        assert mb_router._graph_backend == "postgres"

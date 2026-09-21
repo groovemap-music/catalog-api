@@ -257,6 +257,84 @@ AUTOCOMPLETE_PEOPLE: tuple[str, ...] = (
 )
 
 
+# ── MusicBrainz component (gm-catalog-api-wpku.3) ──────────────────────────
+# Reuses Discogs ids 1, 2, 501, and 101 deliberately: the feature is the mapping
+# between the two catalogs. Its MusicBrainz UUIDs occupy their own all-9 prefix so
+# they cannot overlap any other fixture identifier.
+MB_ARTIST_ONE = "99999999-0000-0000-0000-000000000001"
+MB_ARTIST_TWO = "99999999-0000-0000-0000-000000000002"
+MB_LABEL = "99999999-0000-0000-0000-000000000003"
+MB_RELEASE = "99999999-0000-0000-0000-000000000004"
+MB_LINK = ("wikidata", "https://www.wikidata.org/wiki/Q999999")
+
+MUSICBRAINZ_ARTISTS: tuple[dict[str, Any], ...] = (
+    {
+        "mbid": MB_ARTIST_ONE,
+        "discogs_id": 1,
+        "name": ARTISTS["1"],
+        "sort_name": "Anchor",
+        "type": "Person",
+        "gender": None,
+        "begin_date": "1970",
+        "end_date": None,
+        "area": "Fixture Area",
+        "begin_area": "Fixture Beginning",
+        "disambiguation": "fixture anchor",
+    },
+    {
+        "mbid": MB_ARTIST_TWO,
+        "discogs_id": 2,
+        "name": ARTISTS["2"],
+        "sort_name": "Shared, Three",
+        "type": "Group",
+        "gender": None,
+        "begin_date": "1980",
+        "end_date": None,
+        "area": "Fixture Area",
+        "begin_area": None,
+        "disambiguation": "fixture band",
+    },
+)
+
+MUSICBRAINZ_RELATIONSHIPS: tuple[dict[str, Any], ...] = (
+    {
+        "source_mbid": MB_ARTIST_ONE,
+        "target_mbid": MB_ARTIST_TWO,
+        "raw_type": "member of band",
+        "mapped_type": "MEMBER_OF",
+        "begin_date": "1990",
+        "end_date": None,
+        "attributes": ["vocals"],
+    },
+    # PostgreSQL preserves this as a second relationship instance. The Neo4j enricher's
+    # MERGE key is only (source, mapped type, target), so it collapses both instances into
+    # one edge. Keeping the dates equal makes ``attributes`` the required final ordering
+    # key on the PostgreSQL response.
+    {
+        "source_mbid": MB_ARTIST_ONE,
+        "target_mbid": MB_ARTIST_TWO,
+        "raw_type": "member of band",
+        "mapped_type": "MEMBER_OF",
+        "begin_date": "1990",
+        "end_date": None,
+        "attributes": ["guitar"],
+    },
+    # The loader retains unknown raw vocabulary, while graph.mb_relationship_type
+    # publishes NULL and the enricher writes no edge. Keeping it in the shared
+    # fixture proves the API reads the mapped column and filters it, without hiding
+    # the raw row from source-table status totals.
+    {
+        "source_mbid": MB_ARTIST_ONE,
+        "target_mbid": MB_ARTIST_TWO,
+        "raw_type": "producer",
+        "mapped_type": None,
+        "begin_date": None,
+        "end_date": None,
+        "attributes": [],
+    },
+)
+
+
 # ── The rarity component (gm-catalog-api-wpku.1) ────────────────────────────
 # Ids start at 701, clear of every range above. Names are chosen so none of them is reached by
 # an autocomplete parity query: a new row that matched "radio", "warp", "roc", "elec", "ambi",
@@ -484,6 +562,11 @@ def _label_release_counts() -> dict[str, int]:
 # Reconciled from the two branches' TRUNCATEs: family 1 needs `masters` truncated too, on
 # top of the autocomplete family's `artists, labels, releases`.
 _TRUNCATE_ENTITIES = "TRUNCATE artists, labels, releases, masters CASCADE"
+_TRUNCATE_MUSICBRAINZ = (
+    "TRUNCATE musicbrainz.relationships, musicbrainz.external_links, "
+    "musicbrainz.artists, musicbrainz.labels, musicbrainz.releases, "
+    "musicbrainz.release_groups CASCADE"
+)
 
 # What turns the seeded documents into graph rows. From the phase 2 schema revision the
 # `graph` relations a loader owns — every edge, and the `genre`, `style`, and `person`
@@ -501,6 +584,30 @@ _SEED_ARTIST = "INSERT INTO artists (data_id, hash, data) VALUES (%s, %s, %s::js
 _SEED_LABEL = "INSERT INTO labels (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
 _SEED_RELEASE = "INSERT INTO releases (data_id, hash, data, media) VALUES (%s, %s, %s::jsonb, %s::jsonb)"
 _SEED_MASTER = "INSERT INTO masters (data_id, hash, data) VALUES (%s, %s, %s::jsonb)"
+_SEED_MB_ARTIST = """
+INSERT INTO musicbrainz.artists (
+    mbid, name, sort_name, type, gender, begin_date, end_date,
+    area, begin_area, disambiguation, discogs_artist_id
+) VALUES (%s::uuid, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+"""
+_SEED_MB_LABEL = """
+INSERT INTO musicbrainz.labels (mbid, name, discogs_label_id)
+VALUES (%s::uuid, %s, %s)
+"""
+_SEED_MB_RELEASE = """
+INSERT INTO musicbrainz.releases (mbid, name, discogs_release_id)
+VALUES (%s::uuid, %s, %s)
+"""
+_SEED_MB_RELATIONSHIP_ROW = """
+INSERT INTO musicbrainz.relationships (
+    source_mbid, target_mbid, source_entity_type, target_entity_type,
+    relationship_type, begin_date, end_date, attributes
+) VALUES (%s::uuid, %s::uuid, 'artist', 'artist', %s, %s, %s, %s::jsonb)
+"""
+_SEED_MB_LINK = """
+INSERT INTO musicbrainz.external_links (mbid, entity_type, service_name, url)
+VALUES (%s::uuid, 'artist', %s, %s)
+"""
 
 # The account the collection and wantlist rows belong to. `users.hashed_password` is NOT NULL
 # and is never read by anything under test. The conflict target is left off so a re-seed
@@ -667,6 +774,40 @@ WITH u
 UNWIND $wanted AS release_id
 MATCH (r:Release {id: release_id})
 MERGE (u)-[:WANTS]->(r)
+"""
+
+_SEED_MB_ARTIST_PROPERTIES = """
+UNWIND $artists AS artist
+MATCH (a:Artist {id: artist.discogs_id})
+SET a.mbid = artist.mbid,
+    a.mb_type = artist.type,
+    a.mb_gender = artist.gender,
+    a.mb_begin_date = artist.begin_date,
+    a.mb_end_date = artist.end_date,
+    a.mb_area = artist.area,
+    a.mb_begin_area = artist.begin_area,
+    a.mb_disambiguation = artist.disambiguation
+"""
+
+_SEED_MB_ENTITY_PROPERTIES = """
+MATCH (label:Label {id: $label_id})
+SET label.mbid = $label_mbid
+WITH label
+MATCH (release:Release {id: $release_id})
+SET release.mbid = $release_mbid
+"""
+
+_SEED_DISCOGS_MEMBER_EDGE = """
+MATCH (member:Artist {id: $member_id})
+MATCH (group:Artist {id: $group_id})
+MERGE (member)-[:MEMBER_OF]->(group)
+"""
+
+_SEED_MB_EDGE = """
+MATCH (source:Artist {id: $source_id})
+MATCH (target:Artist {id: $target_id})
+MERGE (source)-[relationship:MEMBER_OF]->(target)
+SET relationship.source = 'musicbrainz'
 """
 
 # Lucene indexes are populated in the background, so a search issued the moment the seed
@@ -850,6 +991,26 @@ async def seed_neo4j(driver: AsyncResilientNeo4jDriver) -> None:
     )
     await consume(driver, _SEED_COLLECTION_EDGES, user_id=RARITY_USER_ID, collected=[RARITY_COLLECTED_RELEASE_ID])
     await consume(driver, _SEED_WANTLIST_EDGES, user_id=RARITY_USER_ID, wanted=[RARITY_COLLECTED_RELEASE_ID])
+    await consume(
+        driver,
+        _SEED_MB_ARTIST_PROPERTIES,
+        artists=[{**artist, "discogs_id": str(artist["discogs_id"])} for artist in MUSICBRAINZ_ARTISTS],
+    )
+    await consume(
+        driver,
+        _SEED_MB_ENTITY_PROPERTIES,
+        label_id=LABEL_ID,
+        label_mbid=MB_LABEL,
+        release_id="101",
+        release_mbid=MB_RELEASE,
+    )
+    await consume(driver, _SEED_DISCOGS_MEMBER_EDGE, member_id="1", group_id="2")
+    await consume(
+        driver,
+        _SEED_MB_EDGE,
+        source_id="1",
+        target_id="2",
+    )
 
     await consume(driver, _AWAIT_NEO4J_INDEXES)
 
@@ -880,8 +1041,15 @@ async def seed_postgres(pool: AsyncPostgreSQLPool) -> None:
 
     async with pool.connection() as conn, conn.cursor() as cursor:
         await cursor.execute(_TRUNCATE_ENTITIES)
+        await cursor.execute(_TRUNCATE_MUSICBRAINZ)
         for artist_id, name in all_artists().items():
-            await cursor.execute(_SEED_ARTIST, (artist_id, "parity-fixture", json.dumps({"name": name})))
+            document: dict[str, Any] = {"name": name}
+            if artist_id == "1":
+                # The MusicBrainz MEMBER_OF edge overlays this existing Discogs edge.
+                # Both stores therefore count one relationship in artist_degree before
+                # the enricher stamps it as MusicBrainz, rather than creating a second edge.
+                document["groups"] = [{"id": 2, "name": ARTISTS["2"]}]
+            await cursor.execute(_SEED_ARTIST, (artist_id, "parity-fixture", json.dumps(document)))
         for label_id, name in all_labels().items():
             await cursor.execute(_SEED_LABEL, (label_id, "parity-fixture", json.dumps({"name": name})))
         for master_id, document in master_documents().items():
@@ -892,6 +1060,39 @@ async def seed_postgres(pool: AsyncPostgreSQLPool) -> None:
                 _SEED_RELEASE,
                 (release_id, "parity-fixture", json.dumps(document), json.dumps(media) if media is not None else None),
             )
+
+        for artist in MUSICBRAINZ_ARTISTS:
+            await cursor.execute(
+                _SEED_MB_ARTIST,
+                (
+                    artist["mbid"],
+                    artist["name"],
+                    artist["sort_name"],
+                    artist["type"],
+                    artist["gender"],
+                    artist["begin_date"],
+                    artist["end_date"],
+                    artist["area"],
+                    artist["begin_area"],
+                    artist["disambiguation"],
+                    artist["discogs_id"],
+                ),
+            )
+        await cursor.execute(_SEED_MB_LABEL, (MB_LABEL, LABEL_NAME, int(LABEL_ID)))
+        await cursor.execute(_SEED_MB_RELEASE, (MB_RELEASE, "Release 101", 101))
+        for relationship in MUSICBRAINZ_RELATIONSHIPS:
+            await cursor.execute(
+                _SEED_MB_RELATIONSHIP_ROW,
+                (
+                    relationship["source_mbid"],
+                    relationship["target_mbid"],
+                    relationship["raw_type"],
+                    relationship["begin_date"],
+                    relationship["end_date"],
+                    json.dumps(relationship["attributes"]),
+                ),
+            )
+        await cursor.execute(_SEED_MB_LINK, (MB_ARTIST_ONE, *MB_LINK))
 
         await cursor.execute(_SEED_USER, (RARITY_USER_ID, RARITY_USER_EMAIL))
         await cursor.execute(_CLEAR_COLLECTION, (RARITY_USER_ID,))

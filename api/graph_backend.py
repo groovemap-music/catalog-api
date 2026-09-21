@@ -40,6 +40,8 @@ from api.queries import (
     gap_queries,
     insights_neo4j_queries,
     insights_pg_queries,
+    musicbrainz_pg_queries,
+    musicbrainz_queries,
     neo4j_pg_queries,
     neo4j_queries,
     network_pg_queries,
@@ -47,6 +49,7 @@ from api.queries import (
     rarity_pg_queries,
     rarity_queries,
 )
+from api.queries.musicbrainz_pipeline import MusicBrainzHandles
 from api.queries.rarity_pipeline import RARITY_PAGE_SIZE, RarityHandles
 
 
@@ -254,6 +257,24 @@ _POSTGRES_INSIGHTS: InsightsBackend = insights_pg_queries
 # ── end insights family ──────────────────────────────────────────────────────
 
 
+# ── The "musicbrainz" family (gm-catalog-api-wpku.3) ──────────────────────
+class MusicBrainzBackend(Protocol):
+    """The four MusicBrainz enrichment reads exposed by the API."""
+
+    async def get_artist_musicbrainz(self, handles: MusicBrainzHandles, discogs_id: int | str, /) -> dict[str, Any] | None: ...
+
+    async def get_artist_mb_relationships(self, handles: MusicBrainzHandles, discogs_id: int | str, /) -> list[dict[str, Any]]: ...
+
+    async def get_artist_external_links(self, handles: MusicBrainzHandles, discogs_id: int | str, /) -> list[dict[str, Any]]: ...
+
+    async def get_enrichment_status(self, handles: MusicBrainzHandles, /) -> dict[str, Any]: ...
+
+
+_NEO4J_MUSICBRAINZ: MusicBrainzBackend = musicbrainz_queries
+_POSTGRES_MUSICBRAINZ: MusicBrainzBackend = musicbrainz_pg_queries
+# ── end musicbrainz family ───────────────────────────────────────────────────
+
+
 # family name -> backend name -> module implementing that family's query functions.
 _FAMILY_BACKENDS: dict[str, dict[str, ModuleType]] = {
     "collaborators": {
@@ -291,6 +312,10 @@ _FAMILY_BACKENDS: dict[str, dict[str, ModuleType]] = {
     "insights": {
         "neo4j": insights_neo4j_queries,
         "postgres": insights_pg_queries,
+    },
+    "musicbrainz": {
+        "neo4j": musicbrainz_queries,
+        "postgres": musicbrainz_pg_queries,
     },
 }
 
@@ -380,6 +405,16 @@ def get_rarity_backend(backend: str) -> RarityBackend:
 def get_insights_backend(backend: str) -> InsightsBackend:
     """Resolve the "insights" family for *backend*, typed rather than as a module."""
     return cast("InsightsBackend", get_backend("insights", backend))
+
+
+def get_musicbrainz_backend(backend: str) -> MusicBrainzBackend:
+    """Resolve the "musicbrainz" family for *backend*, typed rather than as a module."""
+    return cast("MusicBrainzBackend", get_backend("musicbrainz", backend))
+
+
+def musicbrainz_handles(backend: str, neo4j: Any, pg_pool: Any) -> MusicBrainzHandles:
+    """Bundle the selected graph store with the always-relational MusicBrainz tables."""
+    return MusicBrainzHandles(graph=pg_pool if backend == "postgres" else neo4j, relational=pg_pool)
 
 
 def rarity_handles(backend: str, neo4j: Any, pg_pool: Any) -> RarityHandles:
