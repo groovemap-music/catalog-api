@@ -98,6 +98,7 @@ alter either producer's taxonomy or source records.
 | Method | Path | Responsibility |
 | --- | --- | --- |
 | `POST` | `/api/admin/identity/project` | Trigger a `gm_id` projection run as a tracked background task |
+| `POST` | `/api/admin/identity/reattach` | Census (default) or, with `?apply=true`, re-attach load-order-split catalog items |
 
 Returns `202` with a job id immediately; the projection itself pages the currently-valid
 Discogs aliases in `provider_aliases` and sets the additive `gm_id` property on the matching
@@ -107,6 +108,13 @@ the main README for the job's scope, the equivalent `catalog-identity-projection
 [Native identity and first-party activity](identity-and-activity.md) for the identity model
 this projects, per
 [ADR 0009](https://github.com/groovemap-music/design/blob/main/docs/adr/0009-native-identity-and-provider-aliases.md).
+
+The re-attachment route is a dry run unless `apply=true`: it returns `202` with a job id and
+logs the census. An applying run writes one `identity.reattach.apply` audit entry with its
+per-kind outcomes; run the projection above afterwards. See
+[Re-attaching Load-Order-Split Catalog Items](../api/README.md#re-attaching-load-order-split-catalog-items)
+for the rule, the guards, and the `catalog-identity-reattach` CLI, per
+[ADR 0014 section 8](https://github.com/groovemap-music/design/blob/main/docs/adr/0014-cross-catalog-edition-candidates.md).
 
 ## Dead-letter queue purge
 

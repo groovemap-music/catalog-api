@@ -73,6 +73,14 @@ it. See [Projecting `gm_id` onto Neo4j Nodes`](../api/README.md#projecting-gm_id
 in the main README for the job itself, its admin trigger (`POST /api/admin/identity/project`),
 and its CLI entry point (`catalog-identity-projection`).
 
+### Catalog re-attachment of load-order-split items
+
+`api/reattach.py` repairs MusicBrainz rows that name a Discogs counterpart but minted their own
+native id because they loaded first (ADR 0014 section 8). It is the only path outside ingestion
+that writes `source = 'catalog'`, and only to re-insert aliases the provider already asserted.
+See [Re-attaching Load-Order-Split Catalog Items](../api/README.md#re-attaching-load-order-split-catalog-items);
+run the `gm_id` projection after an applying run.
+
 ## The activity recorder (ADR 0010)
 
 `api/activity.py` is the one writer for every first-party event and recommendation impression,

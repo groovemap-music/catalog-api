@@ -209,6 +209,52 @@ Both entry points call the same `run_gm_id_projection`, so the API trigger and t
 behaviorally identical. Re-running is safe: nodes without a currently-valid alias are simply
 not matched, and a node whose `gm_id` is already correct is set to the same value again.
 
+### Re-attaching Load-Order-Split Catalog Items
+
+[ADR 0014 section 8](https://github.com/groovemap-music/design/blob/main/docs/adr/0014-cross-catalog-edition-candidates.md)
+repairs a split the loaders cannot heal. When a MusicBrainz release, release group, artist, or
+label loads before the Discogs row its `discogs_*_id` names, it mints its own native id; the
+Discogs row later mints a second one, and `attach_aliases` never overwrites. `api/reattach.py`
+finds every such row — its Discogs alias resolves to a different native id than its
+`musicbrainz` alias — and, per item in one transaction, closes every current alias on the split
+native id, re-inserts the same aliases against the Discogs native id as `source = 'catalog'`,
+and sets that MusicBrainz row's `gm_item_id`. The former native id is never deleted.
+
+It skips and reports, without modifying, any split native id that has a dependent in
+`artifacts`, `owned_copies`, `observations`, `user_collections`, or `user_wantlists` (those wait
+for the native-id merge decision), that holds a `discogs` or another row's alias (a real item,
+not an orphan), or that holds an alias whose source is not `catalog`. A barcode or catalogue
+number the MusicBrainz side won moves to the Discogs item; if the Discogs item already holds a
+current alias for the same value it is not duplicated, and the split row stays closed. The
+module docstring documents the lock order and why a concurrent loader attach converges.
+
+**Dry run is the default.** A dry run only runs the read-only census: per kind, split items,
+guarded items by reason, items with dependents by table, identifier aliases the split items
+hold (and how many of those the Discogs record also carries), and Discogs ids that resolve to
+nothing yet. Writing needs an explicit flag, and every applying run writes one
+`admin_audit_log` entry with its per-kind outcomes. Re-running is safe: a repaired item is no
+longer split, and a guarded item is skipped again.
+
+- **Admin API**: `POST /api/admin/identity/reattach` (admin JWT required) returns `202` with a
+  job id; add `?apply=true` to write. The census and per-item outcomes are logged.
+
+  ```bash
+  curl -X POST -H "Authorization: Bearer <admin-jwt>" \
+    "https://api.groovemap.music/api/admin/identity/reattach?apply=true"
+  # {"id": "...", "status": "running", "apply": true}
+  ```
+
+- **CLI**: `catalog-identity-reattach` prints the census; `--apply --admin-id <uuid>` writes,
+  auditing the run against that admin:
+
+  ```bash
+  docker exec <api-container> catalog-identity-reattach
+  docker exec <api-container> catalog-identity-reattach --apply --admin-id <admin-uuid>
+  ```
+
+**After an applying run, trigger the `gm_id` projection** (`POST /api/admin/identity/project` or
+`catalog-identity-projection`, above) so the graph follows the alias table.
+
 ## API Endpoints
 
 ### Authentication
