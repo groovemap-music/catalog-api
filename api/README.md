@@ -255,6 +255,36 @@ longer split, and a guarded item is skipped again.
 **After an applying run, trigger the `gm_id` projection** (`POST /api/admin/identity/project` or
 `catalog-identity-projection`, above) so the graph follows the alias table.
 
+### Running Both Automatically After Each Discogs Import
+
+Set `IDENTITY_AUTO_REATTACH_ENABLED=true` and the API runs the re-attachment (apply) and then
+the `gm_id` projection by itself, once per completed Discogs extraction. It is off by default;
+`IDENTITY_AUTO_REATTACH_INTERVAL` (seconds, default `300`) sets how often it polls.
+`api/reattach_trigger.py`'s module docstring has the full design.
+
+- **Trigger.** It reads `public.loader_extraction_latch` (declared by `database-schema`,
+  written by `discogs-sql-loader`) and writes nothing there. An extraction is complete when
+  its `loader = 'discogs'` row's `signals` holds `artists`, `labels`, `masters`, and
+  `releases`. Only the newest complete extraction is a candidate: both jobs cover the whole
+  catalog, so one run after the latest import covers earlier ones too, and enabling the
+  watcher on an already-imported deployment runs it once. Until the relation exists the
+  watcher idles.
+- **Exactly once, across restarts and replicas.** Each poll takes a PostgreSQL advisory lock
+  (`pg_try_advisory_lock`); a replica that cannot take it skips the poll. The holder checks
+  the handled marker again under the lock, runs both jobs, records the marker, and unlocks.
+  A failure, or a process that dies mid-run, records no marker, so the next poll by any
+  replica retries it. Both jobs are safe to re-run.
+- **Handled marker and audit.** A finished run writes one `admin_audit_log` entry with
+  `action = 'identity.reattach.auto'` and `target = 'discogs:<version>'`, with the per-kind
+  re-attachment outcomes and projection counts in `details`. That entry is the durable
+  handled marker, so no new table is needed.
+- **System actor.** The CLI requires `--admin-id` and the endpoint uses the caller's JWT
+  because there a person decides to write. Here nobody does, so automatic runs are recorded
+  against a reserved system user, `identity-maintenance@system.groovemap.invalid`, that the
+  watcher creates on first use with a fixed id. It is inactive, not an admin, and has a
+  password hash that matches no password, so it cannot log in or call admin routes. It is
+  also counted in the admin dashboard's `total_users`.
+
 ## API Endpoints
 
 ### Authentication
