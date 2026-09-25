@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from api.queries.recommend_queries import (
-    MIN_ARTIST_RELEASES,
     _batch_artist_profiles,
     compute_similar_artists,
     get_candidate_artists,
@@ -482,24 +481,6 @@ class TestGetCandidateArtists:
         assert len(result) == 1
         assert result[0]["genres"] == [{"name": "Electronic", "count": 8}]
         assert result[0]["styles"] == [{"name": "Trance", "count": 6}]
-
-    @pytest.mark.asyncio
-    async def test_limit_is_overridable_for_the_round_3_sweep(self) -> None:
-        """gm-catalog-api-tsmu.1 round 3: the profile/score cap is a query LIMIT, overridable."""
-        driver = _make_driver_with_side_effects(
-            [
-                _MockResult(records=[{"artist_id": "c1", "artist_name": "Candidate", "release_count": 5}]),
-                _MockResult(records=[]),
-                _MockResult(records=[]),
-                _MockResult(records=[]),
-                _MockResult(records=[]),
-            ]
-        )
-        await get_candidate_artists(driver, "target123", limit=7)
-        session = driver.session.return_value
-        params = session.run.call_args_list[0].args[1]
-        assert params == {"artist_id": "target123", "min_releases": MIN_ARTIST_RELEASES, "limit": 7}
-        assert "LIMIT $limit" in str(session.run.call_args_list[0].args[0])
 
 
 # ---------------------------------------------------------------------------

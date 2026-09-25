@@ -27,7 +27,6 @@ from api.evaluation.report import (
     write_similar_artist_expected_metrics,
 )
 from api.evaluation.split import SPLIT_CUT, observed_graph, split_golden_set
-from api.queries.recommend_queries import CANDIDATE_PROFILE_LIMIT
 
 
 @pytest.fixture(scope="module")
@@ -114,16 +113,18 @@ def test_recall_at_10_and_25_improve_overall_with_no_family_regression(report: d
 #
 # gm-catalog-api-tsmu.1's maintainer decision (round 3) asked for recall@10 overall and per
 # family at each swept N (50/100/200/500), against both heuristics-2026-09 (0.44507) and the
-# uncapped all-signal scope (0.53614). On this golden set the answer is the same at every N,
-# including CANDIDATE_PROFILE_LIMIT's proposed default: this fixture has only 36 artists in
-# total, so a cap of 50 or above never actually removes a candidate that the uncapped scope
-# would have kept. This is a real limit of the golden set, not evidence that capping is free
-# of recall risk at production scale -- see the endpoint latency fixture and
-# docs/query-performance-optimizations.md for that scale's numbers, which this fixture cannot
-# produce because it cannot hold enough artists to need a cap in the first place.
+# uncapped all-signal scope (0.53614). This sweep is evaluation-only, mirroring
+# ``tests/all_signal_recommend_sql.py``'s ``limit`` parameter, not a production constant --
+# round 5 (option (b)) kept the all-signal query out of production entirely (see
+# ``docs/query-performance-optimizations.md``). On this golden set the answer is the same at
+# every N: this fixture has only 36 artists in total, so a cap of 50 or above never actually
+# removes a candidate that the uncapped scope would have kept. This is a real limit of the
+# golden set, not evidence that capping is free of recall risk at production scale -- see the
+# endpoint latency fixture for that scale's numbers, which this fixture cannot produce because
+# it cannot hold enough artists to need a cap in the first place.
 
 
-@pytest.mark.parametrize("candidate_limit", [50, 100, 200, 500, CANDIDATE_PROFILE_LIMIT, None])
+@pytest.mark.parametrize("candidate_limit", [50, 100, 200, 500, None])
 def test_recall_at_10_is_unchanged_across_the_swept_n_on_this_golden_set(golden, candidate_limit: int | None) -> None:
     splits = split_golden_set(golden, SPLIT_CUT)
     graph = observed_graph(golden, SPLIT_CUT)

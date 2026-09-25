@@ -51,6 +51,7 @@ from api.queries import (
     fit_queries,
     gap_queries,
     label_dna_pg_queries,
+    recommend_pg_queries,
     recommend_queries,
     release_media_queries,
     taste_queries,
@@ -907,18 +908,10 @@ async def test_recommendation_fixture_has_real_candidates_and_fit_context(
     handle = parity_backends.postgres if backend == "postgres" else parity_backends.neo4j
     recommend = get_backend("recommendations", backend)
     fit = get_backend("fit", backend)
-    # gm-catalog-api-tsmu.1: the candidate scope is every artist sharing >=1 genre/style/
-    # label/collaborator signal, not just genre. "1302" now qualifies too -- every one of
-    # its four releases shares a style or label with one of "1301"'s, even though only one
-    # (1222, genre Rock) also shares a genre -- ranked before "1303" by the artist-id tiebreak
-    # since both share 4 releases. Ties are broken ascending by artist id (ORDER BY
-    # release_count DESC, artist_id).
     candidates = await recommend.get_candidate_artists(handle, "1301")
-    assert [candidate["artist_id"] for candidate in candidates] == ["1302", "1303"]
+    assert [candidate["artist_id"] for candidate in candidates] == ["1303"]
     assert candidates[0]["release_count"] == 4
-    assert candidates[0]["genres"] == [{"name": "Jazz", "count": 2}, {"name": "Electronic", "count": 1}, {"name": "Rock", "count": 1}]
-    assert candidates[1]["release_count"] == 4
-    assert candidates[1]["genres"] == [{"name": "Electronic", "count": 3}, {"name": "Rock", "count": 1}]
+    assert candidates[0]["genres"] == [{"name": "Electronic", "count": 3}, {"name": "Rock", "count": 1}]
 
     labels = await recommend.get_label_affinity_candidates(handle, graph_fixture.COLLECTION_USER_ID)
     assert {row["id"] for row in labels} == {"1205", "1206"}
@@ -943,10 +936,24 @@ async def test_recommendation_fixture_has_real_candidates_and_fit_context(
     assert await fit.get_release_context(handle, "does-not-exist") is None
 
 
-# A bare-SQL timing comparison on this 120-release parity fixture lived here in round 2. It
-# was superseded by tests/test_recommend_candidate_latency.py's endpoint-shaped, realistic-
-# fixture measurement (round 3), which is what the acceptance criteria actually asks for --
-# see docs/query-performance-optimizations.md for the numbers.
+async def test_candidate_sample_cap_preserves_fixture_results_and_records_timing(
+    parity_backends: graph_fixture.ParityBackends,
+) -> None:
+    """Measure the kept 100k bound against the uncapped shape on the parity fixture."""
+    capped = recommend_pg_queries.CANDIDATE_ARTISTS_SQL
+    uncapped = capped.replace("ORDER BY release_id LIMIT 100000", "ORDER BY release_id")
+    params = {"artist_id": "1301", "min_releases": 3}
+    pool = parity_backends.postgres
+    await recommend_pg_queries._rows(pool, capped, params)
+    await recommend_pg_queries._rows(pool, uncapped, params)
+    samples: dict[str, list[float]] = {"capped": [], "uncapped": []}
+    for _ in range(5):
+        for name, statement in (("capped", capped), ("uncapped", uncapped)):
+            before = perf_counter()
+            rows = await recommend_pg_queries._rows(pool, statement, params)
+            samples[name].append((perf_counter() - before) * 1000)
+            assert rows == [("1303", "Recommendation Test Artist", 4)]
+    print("candidate-sample-cap-ms " + " ".join(f"{name}={sum(values) / len(values):.3f}" for name, values in samples.items()))
 
 
 # Family 6 names five source modules. Three media reads were PostgreSQL-only before

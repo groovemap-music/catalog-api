@@ -1,23 +1,35 @@
-"""gm-catalog-api-tsmu.1 round 3: endpoint-shaped latency, cap sweep and concurrency gain.
+"""gm-catalog-api-tsmu.1: endpoint-shaped latency, legacy production path vs the all-signal
+candidate query, evaluation-side only.
 
-Round 1 measured against the small (120-release) parity fixture and found nothing (no genre
-is ever broad there). Round 2 built a catalog-shaped synthetic fixture and found the new
-all-signal candidate path regresses p95 by 178-369% over the old one -- the candidate SQL
-itself is cheap even uncapped, but profiling and scoring every matched candidate is not.
-Round 3, per the maintainer's decision (keep the all-signal scope, improve performance):
+**Round 5 (maintainer decision, option (b)):** the production similar-artist path stays on
+the legacy per-genre-capped candidate generator; the serving-side improvement moves to
+gm-catalog-api-2zsq (kNN retrieval). What this bead keeps is the *evaluation* side (see
+``api/evaluation``'s ``similar-artist-all-signals-2026-09`` baseline) and this benchmark,
+which measures the all-signal query's cost via ``tests/all_signal_recommend_sql.py`` -- a
+reproducible comparator, not production code. ``recommend_pg_queries.get_candidate_artists``
+below is what production actually runs.
 
-1. Caps the *profiled/scored* set to the top N by shared release_count (ties broken by
-   artist_id), pushed into the query itself (``LIMIT`` in both SQL and Cypher) so more than N
-   rows are never fetched into Python. Swept here for N in 50/100/200/500 against both
-   recall@10 (see ``tests/test_evaluation_similar_artist_candidates.py`` for the golden-set
-   side of this sweep) and endpoint p95.
-2. Runs the four profile-batch queries concurrently instead of sequentially
-   (``api/queries/recommend_pg_queries.py::_batch_artist_profiles``), measured here in
-   isolation from the cap (uncapped, sequential vs uncapped, concurrent).
-3. Adds a larger synthetic tier (see ``test_..._scales_with_catalog_size`` below) to see how
-   the candidate SQL and the endpoint scale between two sizes, since the round-2 fixture
-   (2,500 artists) put 74% of all artists in the mega target's candidate pool -- a shape a
-   real catalog would not have at that size, only at a much larger one.
+History, for why this comparator exists and what it found (all four rounds' full numbers are
+in ``docs/query-performance-optimizations.md``):
+
+- **Round 1** measured against the small (120-release) parity fixture and found nothing (no
+  genre is ever broad there).
+- **Round 2** built a catalog-shaped synthetic fixture (``scripts/generate_latency_fixture.py``)
+  and found the all-signal candidate path regresses p95 by 178-369% over the legacy one -- the
+  candidate SQL itself is cheap even uncapped, but profiling and scoring every matched
+  candidate is not.
+- **Round 3** tried an overall profile/score cap (top N by shared release count) and
+  concurrent profile-batch queries, and read N=50 as clearing a 20% p95 budget. That sweep ran
+  each variant in its own block (all reps of legacy, then all reps of each capped N), which
+  turned out to bias the reading.
+- **Round 4** re-measured with every variant interleaved per rep, >=50 reps/variant, spread
+  reported, 3 repeated trials. The round-3 reading did not hold up: N=50 straddled the budget
+  on the small fixture and missed it in every trial on a 12x larger one. The candidate SQL's
+  own ranking/aggregation cost (before `LIMIT`, not reduced by a smaller N) grows with catalog
+  size, and the profile cap alone does not address it.
+- **Round 5**: given rounds 2-4 together, the maintainer chose not to serve the all-signal
+  query from production at all. This module keeps measuring it for the evaluation side and for
+  whichever design ends up serving `gm-catalog-api-2zsq`.
 
 "Endpoint-shaped" means the same call sequence ``api/routers/recommend.py``'s
 ``similar_artists`` makes: ``get_artist_identity``, then ``get_artist_profile`` and
@@ -33,8 +45,7 @@ target. Run explicitly, e.g. on the PG19 tier the acceptance criteria names:
     PYTEST_ADDOPTS="-s" \\
     bash scripts/test-integration.sh
 
-No pass/fail latency gate is asserted here on purpose. Per review: a regression is documented
-and stopped for review, not silently fixed by picking a budget in this test.
+No pass/fail latency gate is asserted here on purpose.
 """
 
 from __future__ import annotations
@@ -53,6 +64,7 @@ from groovemap_schema.postgres import PROPERTY_GRAPH_MINIMUM_SERVER_VERSION, cre
 from api.queries import recommend_pg_queries
 from api.queries.recommend_queries import compute_similar_artists
 from scripts.generate_latency_fixture import LatencyFixture, build_fixture, percentile
+from tests import all_signal_recommend_sql
 from tests.graph_fixture import (
     _BOOTSTRAP_FILL,
     _SEED_ARTIST,
@@ -61,7 +73,6 @@ from tests.graph_fixture import (
     _TRUNCATE_ENTITIES,
     required_env,
 )
-from tests.legacy_recommend_sql import LEGACY_CANDIDATE_ARTISTS_SQL
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -134,57 +145,25 @@ async def _seed_latency_fixture(pool: Any, fixture: LatencyFixture) -> None:
         await cursor.fetchall()
 
 
-async def _sequential_batch_artist_profiles(pool: Any, candidate_ids: list[str]) -> dict[str, dict[str, Any]]:
-    """The pre-round-3 sequential profile fetch, kept here only to isolate the concurrency gain.
-
-    Production's ``recommend_pg_queries._batch_artist_profiles`` is now always concurrent
-    (round 3); this is a frozen copy of what it replaced, so ``legacy`` and the
-    ``*-sequential`` variants below stay comparable across rounds instead of silently
-    inheriting the round-3 speedup.
-    """
-    profiles: dict[str, dict[str, Any]] = {artist_id: {"genres": [], "styles": [], "labels": [], "collaborators": []} for artist_id in candidate_ids}
-    for dimension, sql in recommend_pg_queries._BATCH_PROFILE_SQL.items():
-        for artist_id, name, count in await recommend_pg_queries._rows(pool, sql, {"artist_ids": candidate_ids}):
-            profiles[artist_id][dimension].append({"name": name, "count": count})
-    return profiles
-
-
 async def _legacy_get_candidate_artists(pool: Any, artist_id: str) -> list[dict[str, Any]]:
-    """The candidate generator gm-catalog-api-tsmu.1 replaced, as a drop-in for comparison.
+    """Production, unchanged: the legacy per-genre-capped generator, profiled sequentially."""
+    return await recommend_pg_queries.get_candidate_artists(pool, artist_id)
 
-    Mirrors the pre-tsmu.1 ``recommend_pg_queries.get_candidate_artists`` exactly: the capped
-    query, then only the first 50 rows profiled, sequentially.
+
+def _new_uncapped_sequential(pool: Any, artist_id: str) -> Awaitable[list[dict[str, Any]]]:
+    """The all-signal query, uncapped, profiled sequentially -- isolates the concurrency gain
+    (compared against ``_new_capped(limit, concurrent=True)`` at the same, very large limit).
     """
-    rows = await recommend_pg_queries._rows(pool, LEGACY_CANDIDATE_ARTISTS_SQL, {"artist_id": artist_id, "min_releases": _MIN_RELEASES})
-    if not rows:
-        return []
-    profile_candidates = rows[:50]
-    profiles = await _sequential_batch_artist_profiles(pool, [row[0] for row in profile_candidates])
-    return [{"artist_id": aid, "artist_name": name, "release_count": count, **profiles[aid]} for aid, name, count in profile_candidates]
+    return all_signal_recommend_sql.get_candidate_artists(pool, artist_id, min_releases=_MIN_RELEASES, limit=1_000_000, concurrent_profiles=False)
 
 
-async def _new_uncapped_sequential_get_candidate_artists(pool: Any, artist_id: str) -> list[dict[str, Any]]:
-    """The round-2 shape: new all-signal query, uncapped, profiled sequentially.
-
-    Kept only to isolate the concurrency gain (item 2): compared against
-    ``recommend_pg_queries.get_candidate_artists(pool, artist_id, limit=<a very large number>)``,
-    which is the same query and cap but profiled concurrently, the only variable is
-    concurrency.
-    """
-    rows = await recommend_pg_queries._rows(
-        pool, recommend_pg_queries.CANDIDATE_ARTISTS_SQL, {"artist_id": artist_id, "min_releases": _MIN_RELEASES, "limit": 1_000_000}
-    )
-    if not rows:
-        return []
-    profiles = await _sequential_batch_artist_profiles(pool, [row[0] for row in rows])
-    return [{"artist_id": aid, "artist_name": name, "release_count": count, **profiles[aid]} for aid, name, count in rows]
-
-
-def _new_capped_concurrent(limit: int) -> Callable[[Any, str], Awaitable[list[dict[str, Any]]]]:
-    """The real shipped path (round 3): production's query and concurrent profiling, at ``limit``."""
+def _new_capped(limit: int, *, concurrent: bool = True) -> Callable[[Any, str], Awaitable[list[dict[str, Any]]]]:
+    """The all-signal query at ``limit``, evaluation-side only -- never called from production."""
 
     def _fn(pool: Any, artist_id: str) -> Awaitable[list[dict[str, Any]]]:
-        return recommend_pg_queries.get_candidate_artists(pool, artist_id, limit=limit)
+        return all_signal_recommend_sql.get_candidate_artists(
+            pool, artist_id, min_releases=_MIN_RELEASES, limit=limit, concurrent_profiles=concurrent
+        )
 
     return _fn
 
@@ -321,9 +300,9 @@ async def test_similar_artist_endpoint_latency_cap_and_concurrency_sweep() -> No
         sweep_limits = (50, 100, 200, 500)
         variants: list[tuple[str, Callable[[Any, str], Awaitable[list[dict[str, Any]]]]]] = [
             ("legacy", _legacy_get_candidate_artists),
-            ("new-uncapped-sequential", _new_uncapped_sequential_get_candidate_artists),
-            ("new-uncapped-concurrent", _new_capped_concurrent(1_000_000)),
-            *((f"new-capped-{n}-concurrent", _new_capped_concurrent(n)) for n in sweep_limits),
+            ("new-uncapped-sequential", _new_uncapped_sequential),
+            ("new-uncapped-concurrent", _new_capped(1_000_000)),
+            *((f"new-capped-{n}-concurrent", _new_capped(n)) for n in sweep_limits),
         ]
 
         results: dict[str, dict[str, tuple[list[float], int]]] = {}
@@ -367,7 +346,7 @@ async def test_similar_artist_endpoint_latency_cap_and_concurrency_sweep() -> No
         print("\n--- EXPLAIN (ANALYZE, BUFFERS) of the new candidate query, niche target ---")
         async with pool.connection() as conn, conn.cursor() as cursor:
             await cursor.execute(
-                f"EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) {recommend_pg_queries.CANDIDATE_ARTISTS_SQL}",
+                f"EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) {all_signal_recommend_sql.ALL_SIGNAL_CANDIDATE_ARTISTS_SQL}",
                 {"artist_id": fixture.niche_artist_id, "min_releases": _MIN_RELEASES, "limit": 500},
             )
             plan_rows = await cursor.fetchall()
@@ -402,14 +381,16 @@ async def test_similar_artist_endpoint_latency_scales_with_catalog_size() -> Non
             mega_id = fixture.mega_artist_id
 
             uncapped_rows = await recommend_pg_queries._rows(
-                pool, recommend_pg_queries.CANDIDATE_ARTISTS_SQL, {"artist_id": mega_id, "min_releases": _MIN_RELEASES, "limit": 1_000_000}
+                pool,
+                all_signal_recommend_sql.ALL_SIGNAL_CANDIDATE_ARTISTS_SQL,
+                {"artist_id": mega_id, "min_releases": _MIN_RELEASES, "limit": 1_000_000},
             )
             print(f"{fixture_name:<10}{len(fixture.artists):>10}{len(fixture.releases):>10}{len(uncapped_rows):>38}")
 
             rows[fixture_name] = {}
             for variant_name, candidate_fn in (
                 ("legacy", _legacy_get_candidate_artists),
-                ("new-capped-200-concurrent", _new_capped_concurrent(200)),
+                ("new-capped-200-concurrent", _new_capped(200)),
             ):
                 latencies, candidate_count = await _measure(pool, mega_id, candidate_fn, reps=8)
                 rows[fixture_name][variant_name] = (latencies, candidate_count)
@@ -457,10 +438,10 @@ async def test_similar_artist_endpoint_latency_interleaved_sweep_small_fixture()
         }
         variants: list[tuple[str, Callable[[Any, str], Awaitable[list[dict[str, Any]]]]]] = [
             ("legacy", _legacy_get_candidate_artists),
-            ("capped-50", _new_capped_concurrent(50)),
-            ("capped-100", _new_capped_concurrent(100)),
-            ("capped-200", _new_capped_concurrent(200)),
-            ("capped-500", _new_capped_concurrent(500)),
+            ("capped-50", _new_capped(50)),
+            ("capped-100", _new_capped(100)),
+            ("capped-200", _new_capped(200)),
+            ("capped-500", _new_capped(500)),
         ]
 
         print(f"\nfixture: {len(fixture.artists)} artists, {len(fixture.releases)} releases, {len(fixture.labels)} labels")
@@ -482,8 +463,8 @@ async def test_similar_artist_endpoint_latency_interleaved_sweep_large_fixture()
         mega_id = large.mega_artist_id
         variants: list[tuple[str, Callable[[Any, str], Awaitable[list[dict[str, Any]]]]]] = [
             ("legacy", _legacy_get_candidate_artists),
-            ("capped-50", _new_capped_concurrent(50)),
-            ("capped-200", _new_capped_concurrent(200)),
+            ("capped-50", _new_capped(50)),
+            ("capped-200", _new_capped(200)),
         ]
 
         print(f"\nfixture: {len(large.artists)} artists, {len(large.releases)} releases, {len(large.labels)} labels")

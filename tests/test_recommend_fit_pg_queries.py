@@ -20,17 +20,13 @@ pytestmark = pytest.mark.asyncio
 USER = "00000000-0000-0000-0000-000000000001"
 
 
-async def test_candidate_query_has_no_per_genre_cap_and_batches_profiles() -> None:
-    """gm-catalog-api-tsmu.1: every shared-signal artist qualifying past the min-releases floor."""
+async def test_candidate_query_keeps_all_four_cost_caps_and_batches_profiles() -> None:
     sql = recommend.CANDIDATE_ARTISTS_SQL
-    # No per-genre / per-dimension LIMIT anywhere in the expansion -- the only LIMIT in the
-    # whole statement is the single overall one on the final, already-ranked SELECT.
-    assert sql.count("LIMIT") == 1
-    assert "signal_hits" in sql
-    assert "UNION\n" in sql or "\n    UNION\n" in sql  # a set union, not UNION ALL, dedupes shared releases
-    assert "in_genre" in sql and "in_style" in sql and "on_label" in sql
+    assert "ORDER BY release_id LIMIT 100000" in sql
+    assert "rank_in_genre <= 500" in sql
+    assert "LIMIT 200" in sql and "LIMIT 50" in sql
+    assert "count(DISTINCT sample.release_id)" in sql
     assert "artist.name IS NOT NULL" in sql
-    assert "HAVING count(DISTINCT release_id) >= %(min_releases)s" in sql  # restored per review
     pool = FakePool(
         [
             [("1303", "Candidate", 3)],
@@ -52,39 +48,7 @@ async def test_candidate_query_has_no_per_genre_cap_and_batches_profiles() -> No
         }
     ]
     assert len(pool.calls) == 5  # one candidate scan plus four dimension batches
-    assert pool.calls[0].params == {"artist_id": "1301", "min_releases": 3, "limit": recommend.CANDIDATE_PROFILE_LIMIT}
     assert all(call.params == {"artist_ids": ["1303"]} for call in pool.calls[1:])
-
-
-async def test_candidate_query_limit_is_overridable_for_the_round_3_sweep() -> None:
-    """gm-catalog-api-tsmu.1 round 3: the profile/score cap is a query-pushed LIMIT, overridable."""
-    assert "ORDER BY ranked.release_count DESC, ranked.artist_id\nLIMIT %(limit)s" in recommend.CANDIDATE_ARTISTS_SQL
-    pool = FakePool([[("1303", "Candidate", 3)], [], [], [], []])
-    await recommend.get_candidate_artists(pool, "1301", limit=7)
-    assert pool.calls[0].params == {"artist_id": "1301", "min_releases": 3, "limit": 7}
-
-
-async def test_batch_profiles_run_the_four_dimension_queries_concurrently() -> None:
-    """gm-catalog-api-tsmu.1 round 3: profile batches are gathered, not awaited sequentially."""
-    pool = FakePool(
-        [
-            [("1303", "Electronic", 3)],
-            [("1303", "Shared Style", 3)],
-            [("1303", "Label", 3)],
-            [],
-        ]
-    )
-    profiles = await recommend._batch_artist_profiles(pool, ["1303"])
-    assert profiles == {
-        "1303": {
-            "genres": [{"name": "Electronic", "count": 3}],
-            "styles": [{"name": "Shared Style", "count": 3}],
-            "labels": [{"name": "Label", "count": 3}],
-            "collaborators": [],
-        }
-    }
-    assert len(pool.calls) == 4
-    assert all(call.params == {"artist_ids": ["1303"]} for call in pool.calls)
 
 
 async def test_recommendation_anti_joins_and_assembly() -> None:

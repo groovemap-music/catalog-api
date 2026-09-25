@@ -18,31 +18,6 @@ from api.queries.similarity import cosine_similarity, to_genre_vector
 # Minimum releases for an artist to have a meaningful fingerprint
 MIN_ARTIST_RELEASES = 3
 
-# Candidate profile/score cap for the similar-artist path (gm-catalog-api-tsmu.1 round 3):
-# after the set-based candidate query ranks every shared-signal artist by shared release
-# count (descending, ties broken by artist id ascending -- the query's own ORDER BY), only
-# the top CANDIDATE_PROFILE_LIMIT are profiled and scored. This is a single overall cap on
-# the *ranked* set, not a per-genre cap during expansion: the query still finds and ranks
-# every qualifying artist; only the profile-and-score work below that ranking is bounded.
-#
-# PROPOSED, under review -- not a final decision, and not yet a validated one. A round-3 sweep
-# (12-15 reps/variant, one block per variant) read 50 as the only value clearing the endpoint's
-# 20% p95 budget against the legacy path. A round-4 re-measurement -- every variant interleaved
-# per rep instead of run in blocks, >=50 reps/variant, spread reported, 3 repeated trials, per
-# review -- found that reading did not hold up: on the small fixture the mega-genre target's
-# per-trial delta at N=50 ranged +10% to +25% (straddling the budget, not inside it), and on a
-# 12x larger fixture N=50 measured +41% to +61% over legacy in every trial. The candidate SQL's
-# own ranking/aggregation cost (the UNION and GROUP BY, which run before LIMIT and are not
-# reduced by a smaller N) is a growing share of the cost as the catalog scales, which the
-# profile cap alone does not address. On the golden set, recall@10 is identical (0.53614) at
-# every swept N -- but that fixture has only 36 artists total, so it cannot show whether a cap
-# excludes a candidate that ranks low by shared release count but would have scored highly by
-# cosine similarity, which is the real risk of this cap and remains unmeasured. See
-# docs/query-performance-optimizations.md for the full round-3 and round-4 data and
-# tests/test_recommend_candidate_latency.py for how to reproduce them. 50 is left as the
-# current value pending the maintainer's read of round 4; it is not a recommendation.
-CANDIDATE_PROFILE_LIMIT = 50
-
 # Dimension weights for artist similarity
 _WEIGHTS = {
     "genre": 0.35,
@@ -176,61 +151,51 @@ async def _batch_artist_profiles(
     return profiles
 
 
-async def get_candidate_artists(driver: AsyncResilientNeo4jDriver, artist_id: str, *, limit: int = CANDIDATE_PROFILE_LIMIT) -> list[dict[str, Any]]:
-    """Get every candidate artist sharing at least one signal with the target, profiled.
+async def get_candidate_artists(driver: AsyncResilientNeo4jDriver, artist_id: str) -> list[dict[str, Any]]:
+    """Get candidate artists sharing genres with the target, with their full profiles.
 
     Returns each candidate with actual release counts per genre/style/label/collaborator
     (not just presence), so cosine similarity on the vectors is meaningful.
 
-    Candidate scope (gm-catalog-api-tsmu.1): a candidate qualifies by sharing at least one
-    genre, style, or label with any of the target's releases, or by appearing on the same
-    release as the target (collaborator), *and* clearing the MIN_ARTIST_RELEASES floor on
-    that shared release count -- restored per review; dropping it changed the acceptance
-    criterion from "no per-genre LIMIT" to "no floor at all", which was not requested. There
-    is no per-genre LIMIT and no top-5-genres cap -- the previous shape (top 5 genres, 500
-    artists per genre, 200 overall, 50 profiled) measurably starved recall (see the
-    gm-design-chw.2 spike: the same heuristic weights scored over every artist reach
-    recall@10 0.1799 against 0.0092 for the capped generator). The query still ranks every
-    qualifying artist by shared release count before ``limit`` (default
-    :data:`CANDIDATE_PROFILE_LIMIT`, proposed and under review) caps how many are profiled and
-    scored -- a single overall cap on the ranked set, not a per-genre one during expansion.
-    The four ``UNION``ed sub-queries below match the set-based shape of
-    ``recommend_pg_queries.CANDIDATE_ARTISTS_SQL`` so the two backends agree by construction,
-    not by coincidence.
-
-    Args:
-        limit: How many of the ranked candidates to profile and score. Overridable for the
-            round-3 N-sweep (see docs/query-performance-optimizations.md); production always
-            calls with the default.
+    Optimizations over the naive approach:
+    - Limits genre expansion to the artist's top 5 genres (avoids exploding
+      through mega-genres like "Rock" with 6M+ releases).
+    - Uses shared_count for ordering instead of re-traversing all releases
+      per candidate (eliminates an extra MATCH per candidate).
+    - Profiles only the top 50 candidates instead of 200 (since the final
+      result is limited to 20 after cosine scoring).
+    - Batch queries for profiles (4 queries total, not 200x4).
+    - CALL {} per-genre prevents cross-genre row explosion (157M → ~20-30M
+      DB hits for Johnny Cash; 1GB → ~300MB memory).
+    - Per-genre LIMIT 500 caps broad genres like Rock (7M+ releases).
+    - Inner release scan capped at 100K per genre to prevent full traversal
+      of mega-genres (Rock: 7M → 100K releases sampled).
     """
     candidates_cypher = """
-    MATCH (a:Artist {id: $artist_id})
+    MATCH (a:Artist {id: $artist_id})<-[:BY]-(r:Release)-[:IS]->(g:Genre)
+    WITH a, g, count(DISTINCT r) AS genre_count
+    ORDER BY genre_count DESC
+    LIMIT 5
+    WITH a, collect(g) AS top_genres
+    UNWIND top_genres AS g2
     CALL {
-        WITH a
-        MATCH (a)<-[:BY]-(:Release)-[:IS]->(:Genre)<-[:IS]-(cr:Release)-[:BY]->(c:Artist)
-        WHERE c <> a AND c.name IS NOT NULL
-        RETURN c AS candidate, cr AS candidate_release
-        UNION
-        WITH a
-        MATCH (a)<-[:BY]-(:Release)-[:IS]->(:Style)<-[:IS]-(cr:Release)-[:BY]->(c:Artist)
-        WHERE c <> a AND c.name IS NOT NULL
-        RETURN c AS candidate, cr AS candidate_release
-        UNION
-        WITH a
-        MATCH (a)<-[:BY]-(:Release)-[:ON]->(:Label)<-[:ON]-(cr:Release)-[:BY]->(c:Artist)
-        WHERE c <> a AND c.name IS NOT NULL
-        RETURN c AS candidate, cr AS candidate_release
-        UNION
-        WITH a
-        MATCH (a)<-[:BY]-(cr:Release)-[:BY]->(c:Artist)
-        WHERE c <> a AND c.name IS NOT NULL
-        RETURN c AS candidate, cr AS candidate_release
+        WITH g2, a
+        MATCH (g2)<-[:IS]-(r2:Release)
+        WITH r2, a
+        LIMIT 100000
+        MATCH (r2)-[:BY]->(a2:Artist)
+        WHERE a2 <> a AND a2.name IS NOT NULL
+        WITH a2, count(DISTINCT r2) AS shared_in_genre
+        ORDER BY shared_in_genre DESC
+        LIMIT 500
+        RETURN a2, shared_in_genre
     }
-    WITH candidate, count(DISTINCT candidate_release) AS release_count
-    WHERE release_count >= $min_releases
-    RETURN candidate.id AS artist_id, candidate.name AS artist_name, release_count
-    ORDER BY release_count DESC, artist_id
-    LIMIT $limit
+    WITH a2, sum(shared_in_genre) AS shared_count
+    WHERE shared_count >= $min_releases
+    RETURN a2.id AS artist_id, a2.name AS artist_name,
+           shared_count AS release_count
+    ORDER BY shared_count DESC
+    LIMIT 200
     """
     candidates = await run_query(
         driver,
@@ -238,17 +203,17 @@ async def get_candidate_artists(driver: AsyncResilientNeo4jDriver, artist_id: st
         timeout=60,
         artist_id=artist_id,
         min_releases=MIN_ARTIST_RELEASES,
-        limit=limit,
     )
 
     if not candidates:
         return []
 
-    # Every candidate the query ranked (up to `limit`) is profiled and scored.
-    candidate_ids = [c["artist_id"] for c in candidates]
+    # Profile only top 50 candidates (final result is limited to 20 after scoring)
+    profile_candidates = candidates[:50]
+    candidate_ids = [c["artist_id"] for c in profile_candidates]
     profiles = await _batch_artist_profiles(driver, candidate_ids)
 
-    return [{**cand, **profiles.get(cand["artist_id"], {})} for cand in candidates]
+    return [{**cand, **profiles.get(cand["artist_id"], {})} for cand in profile_candidates]
 
 
 def compute_similar_artists(

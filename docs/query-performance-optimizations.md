@@ -85,32 +85,49 @@ fails predictably instead of consuming the entire deployment budget.
 
 ## Similar-artist candidate latency (gm-catalog-api-tsmu.1)
 
-gm-catalog-api-tsmu.1 replaced the similar-artist candidate generator's per-genre caps (top 5
-genres, 500 artists per genre, 200 overall, 50 profiled) with a set-based query scoring every
-artist sharing at least one genre/style/label/collaborator signal, because the caps were
-measurably starving recall (see `docs/evaluation.md`). That is a direct departure from "Cap
-high-cardinality expansions" above. Round 2 measured the departure against a synthetic,
-catalog-shaped fixture (`scripts/generate_latency_fixture.py`) and found it cost 178-369% p95
-over the old path, far past the 20% budget. **Maintainer decision (round 3): keep the
-all-signal candidate scope, and improve performance rather than reintroduce a per-genre cap.**
-This section records what was measured and implemented, and what is still proposed rather than
-decided.
+gm-catalog-api-tsmu.1 set out to replace the similar-artist candidate generator's per-genre
+caps (top 5 genres, 500 artists per genre, 200 overall, 50 profiled) with a set-based query
+scoring every artist sharing at least one genre/style/label/collaborator signal, because the
+caps were measurably starving recall (see `docs/evaluation.md`). That is a direct departure
+from "Cap high-cardinality expansions" above, and across rounds 2-4 it was measured, tried with
+two mitigations, and re-measured more rigorously -- documented in full below, because the
+investigation and its numbers are the useful output even though the change did not ship.
 
-### What shipped
+**Maintainer decision (round 5, option (b)): the production similar-artist path stays on the
+legacy per-genre-capped generator.** The serving-side improvement moves to
+`gm-catalog-api-2zsq` (kNN retrieval over precomputed embeddings) instead of a rewritten SQL
+candidate query. What stays from this bead:
 
-- **`CANDIDATE_PROFILE_LIMIT`** (`api/queries/recommend_queries.py`): an overall cap on how
-  many of the query's already-ranked candidates (by shared release count, ties broken by
-  artist id) are profiled and scored, pushed into the query itself as a real `LIMIT` in both
-  the SQL and the Cypher -- the query still finds and ranks every qualifying artist; only the
-  profile-and-score work below that ranking is bounded. This is a single overall cap on the
-  ranked set, not a per-genre cap during expansion, and it is overridable per call for the
-  sweep below. **Value: 50, left in place pending review, not a validated recommendation** --
-  the round-3 sweep below read 50 as clearing the budget; the round-4 re-measurement further
-  down found that reading did not hold up under a more rigorous method, and is what should be
-  read as current rather than this section.
-- **Concurrent profile-batch queries** (`recommend_pg_queries._batch_artist_profiles`): the
-  four dimension queries (genres/styles/labels/collaborators) now run with `asyncio.gather`
-  instead of a sequential loop. Neo4j's side already did this; only PostgreSQL was sequential.
+- **`api/evaluation`'s registered baseline**, `similar-artist-all-signals-2026-09`
+  (`GoldenGraph.candidate_artists_all_signals`, its own committed snapshot,
+  `heuristics-2026-09` untouched) -- an offline comparison point, not a serving path.
+- **The latency fixture generator and benchmark**
+  (`scripts/generate_latency_fixture.py`, `tests/test_recommend_candidate_latency.py`), kept
+  reproducible for whichever design ends up serving `gm-catalog-api-2zsq`. The all-signal SQL
+  itself lives in `tests/all_signal_recommend_sql.py` -- evaluation/benchmark-only, mirroring
+  how `tests/graph_fixture.py` and other test-side modules hold query text that is not
+  production code.
+- **This document**, with all four rounds' numbers and the conclusion below.
+
+Nothing in `api/` outside `api/evaluation` references the all-signal query.
+`api/queries/recommend_queries.py` and `recommend_pg_queries.py` are back to the legacy
+candidate generator, byte-identical to before this bead.
+
+### What was tried and reverted
+
+- **An overall profile/score cap** (`CANDIDATE_PROFILE_LIMIT`, swept at N=50/100/200/500):
+  bounded how many of the query's already-ranked candidates (by shared release count, ties
+  broken by artist id) were profiled and scored, via a real `LIMIT` in both the SQL and the
+  Cypher. Round 3 read N=50 as clearing the endpoint's 20% p95 budget; round 4's more rigorous
+  re-measurement found that reading did not hold up (see below). Reverted along with the rest
+  of the candidate-query change.
+- **Concurrent profile-batch queries** (the four dimension queries run with `asyncio.gather`
+  instead of a sequential loop): a real, unconditional latency improvement on its own (see
+  "Concurrency gain" below) that was reverted along with the candidate query it was profiling,
+  since it was written specifically for `_batch_artist_profiles` at the shape the all-signal
+  query needed. **Recommended as a separate follow-up**, independent of this bead: it applies
+  equally well to the legacy candidate query's own profile-batch fetch and costs nothing in
+  recall or correctness. Measured gain is below ("Concurrency gain, isolated from the cap").
 
 ### Cap sweep: recall@10 and endpoint p95, N = 50/100/200/500
 
@@ -130,8 +147,6 @@ run on the same shared host (the validation slot is shared with other hives) mea
 N=50 in a +3.4% to +8.5% band and mid at N=50 consistently negative (faster than legacy) --
 absolute numbers vary run to run by tens of percent on a busy host, but N=50 clearing the
 budget and N>=100 not reliably clearing it for the mega target held across every run:
-
-
 
 | Target | Legacy p95 | N=50 | N=100 | N=200 | N=500 | Uncapped |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -284,37 +299,45 @@ ranking/aggregation step -- the `UNION` and `GROUP BY` over every matching row, 
 before the `LIMIT` and is not reduced by a smaller N -- is a growing share of the cost as the
 catalog grows, and capping the *profiled* set does not touch it.
 
-Revised implication for `CANDIDATE_PROFILE_LIMIT`: the round-3 default of 50 is not supported
-by this more rigorous measurement. Recommending **no default change yet** pending the
-maintainer's read of these numbers -- the honest picture is that this round found the earlier
-proposal did not hold up under scrutiny, not that it found a value that does.
+Round 4's finding -- that no swept N clears the 20% budget at realistic scale, because the
+candidate SQL's own ranking/aggregation cost grows with the catalog and the profile cap does
+not touch it -- is what led to the round-5 decision above: rather than chase a cap value or a
+precompute/cache layer for this query shape, the serving-side improvement moves to
+`gm-catalog-api-2zsq`'s kNN retrieval design instead.
 
-### Directions still open
+### Directions for whichever design serves gm-catalog-api-2zsq
 
-- **No swept N clears the budget at realistic scale.** The next step is very likely bounding
-  the candidate SQL's own cost (the aggregation before `LIMIT`), not the profile cap alone --
-  see the precompute/cache direction below, now the leading candidate rather than one option
-  among several.
+These are not decisions, just what this investigation learned that the next design should
+know:
+
+- **A profile-count cap alone is not sufficient at realistic scale**, at any of the values
+  swept here (50-500). Whatever replaces the legacy generator needs to bound the candidate
+  *search* itself, not just how many of its results get profiled and scored.
 - **Precomputing or caching the candidate pool for the handful of facets that are actually
-  broad** (mega genres/styles/labels are, by construction, few and stable) would let the
-  uncapped, full-recall path be used for the common case (where it is already cheap) and
-  reserve special handling for genuinely broad targets only. This is now the most promising
-  direction, since round 4 shows the cap alone does not close the gap once the candidate SQL's
-  own aggregation cost dominates.
-- **The `graph.artist` join plan** noted above, once real table sizes are available to check
-  against.
-- **Vectorizing `compute_similar_artists`** remains not pursued: at N<=500 candidates it did
-  not show up as the dominant cost in the EXPLAIN/timing breakdown (the SQL side did), so it
-  is not where the next unit of engineering effort would pay off first.
+  broad** (mega genres/styles/labels are, by construction, few and stable) was the most
+  promising direction this investigation identified for a search-side fix, if a search-based
+  design were pursued further. kNN retrieval over precomputed embeddings (the chosen path)
+  sidesteps the problem differently, by not doing a candidate search at request time at all.
+- **The `graph.artist` join plan** noted above is worth a look at real table sizes regardless
+  of which design serves this endpoint, since any candidate-style query will hit the same join.
+- **Vectorizing `compute_similar_artists`** was considered and not pursued here: at N<=500
+  candidates it did not show up as the dominant cost in the EXPLAIN/timing breakdown (the SQL
+  side did). Worth reconsidering only if a future design profiles/scores at a similar N.
+- **Concurrent profile-batch queries**, reverted from this bead's candidate query but
+  applicable to the legacy generator's own profile fetch regardless of what serves similarity
+  next -- see "What was tried and reverted" above.
 - **Production-scale recall validation (held, per the maintainer):** the gm-design-chw.2 spike
   harness (`../design/docs/spikes/gm-design-chw.2/`) could re-run its proxy recall@10
-  (0.0092 -> 0.1799 in the original spike) with the real candidate query at each swept N,
-  against the full Discogs-dump-derived subset instead of the 36-artist golden set. This needs
+  (0.0092 -> 0.1799 in the original spike) with the all-signal candidate query at each swept N,
+  against the full Discogs-dump-derived subset instead of the 36-artist golden set -- an
+  evaluation exercise regardless of whether the query ever serves production, since it answers
+  "how much of the recall gain would a cap have cost, at real scale" for the record. This needs
   the Discogs releases dump (~11GB, not cached) and the host is at ~15-16GB free, so it is on
   hold for a maintainer disk decision -- nothing has been downloaded. The plug-in point, read
   but not executed: `catalog.py`'s `Heuristic` class already builds per-artist genre/style/
   label/collaborator count matrices (`self.dims`) from the same release-level incidence
-  matrices (`catalog.by`, `.genres`, `.styles`, `.labels`) the production query reads from, so
+  matrices (`catalog.by`, `.genres`, `.styles`, `.labels`) the evaluation query
+  (`tests/all_signal_recommend_sql.py`) reads from, so
   a `candidate_artists_all_signals(artist, limit=None)` method can be added there mirroring
   `api/evaluation/graph.py`'s `GoldenGraph.candidate_artists_all_signals`: take the target's
   release rows from `catalog.by[:, artist]`, collect the genre/style/label column indices

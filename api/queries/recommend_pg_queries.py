@@ -6,12 +6,11 @@ store-touching functions have backend-specific implementations here.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any, cast
 
 from common.query_debug import execute_sql
 
-from api.queries.recommend_queries import CANDIDATE_PROFILE_LIMIT, MIN_ARTIST_RELEASES
+from api.queries.recommend_queries import MIN_ARTIST_RELEASES
 
 
 _YEAR = "CASE WHEN btrim(release.year) ~ '^[0-9]{1,9}$' THEN btrim(release.year)::integer END"
@@ -52,66 +51,41 @@ _BATCH_PROFILE_SQL = {
     for dimension, sql in _PROFILE_SQL.items()
 }
 
-# Set-based candidate scope (gm-catalog-api-tsmu.1): every artist sharing at least one
-# genre, style, label, or collaborator signal with the target, with no per-genre LIMIT
-# truncating the pool. This replaced a candidate generator that expanded only the target's
-# top 5 genres, capped each genre's expansion at 500 artists, and profiled only the top 200
-# overall -- a shape that measurably starved recall (see the gm-design-chw.2 spike: the same
-# heuristic weights scored over every artist reach recall@10 0.1799 against 0.0092 for the
-# capped generator). `signal_hits` is a plain UNION (not UNION ALL) of four
-# (candidate_artist_id, candidate_release_id) sets, one per signal:
-#   - genre / style / label: any of the candidate's own releases that shares that facet with
-#     any of the target's releases (the facet need not be on the *same* release).
-#   - collaborator: releases the candidate and the target both appear on directly.
-# `release_count` counts each qualifying release once even when it clears more than one
-# signal, so it does not inflate with the number of dimensions that happened to match.
-# The MIN_ARTIST_RELEASES floor is restored on the *shared* release count (not the
-# candidate's own total release count -- an artist with a hundred releases and one
-# incidental shared genre still needs >= min_releases shared before it is worth profiling):
-# per review, dropping it silently changed the acceptance criterion from "no per-genre LIMIT"
-# to "no floor at all", which was not requested.
+# A deterministic release-id order makes the 100,000-per-genre cost control
+# repeatable. It is deliberately applied *before* expanding BY edges, as in
+# the Cypher query, and 500 candidates per genre / 200 overall / 50 profiled
+# retain the original fan-out limits.
 CANDIDATE_ARTISTS_SQL = """
-WITH target_releases AS (
-    SELECT release_id FROM graph.by_artist WHERE artist_id = %(artist_id)s
-), target_genres AS (
-    SELECT DISTINCT genre_name FROM graph.in_genre
-    WHERE release_id IN (SELECT release_id FROM target_releases)
-), target_styles AS (
-    SELECT DISTINCT style_name FROM graph.in_style
-    WHERE release_id IN (SELECT release_id FROM target_releases)
-), target_labels AS (
-    SELECT DISTINCT label_id FROM graph.on_label
-    WHERE release_id IN (SELECT release_id FROM target_releases)
-), signal_hits AS (
-    SELECT candidate.artist_id, candidate.release_id
-    FROM graph.by_artist candidate
-    JOIN graph.in_genre genre USING (release_id)
-    WHERE candidate.artist_id <> %(artist_id)s AND genre.genre_name IN (SELECT genre_name FROM target_genres)
-    UNION
-    SELECT candidate.artist_id, candidate.release_id
-    FROM graph.by_artist candidate
-    JOIN graph.in_style style USING (release_id)
-    WHERE candidate.artist_id <> %(artist_id)s AND style.style_name IN (SELECT style_name FROM target_styles)
-    UNION
-    SELECT candidate.artist_id, candidate.release_id
-    FROM graph.by_artist candidate
-    JOIN graph.on_label edge USING (release_id)
-    WHERE candidate.artist_id <> %(artist_id)s AND edge.label_id IN (SELECT label_id FROM target_labels)
-    UNION
-    SELECT candidate.artist_id, candidate.release_id
-    FROM graph.by_artist candidate
-    WHERE candidate.artist_id <> %(artist_id)s AND candidate.release_id IN (SELECT release_id FROM target_releases)
+WITH target_genres AS (
+    SELECT genre.genre_name, count(DISTINCT own.release_id)::bigint AS genre_count
+    FROM graph.by_artist own JOIN graph.in_genre genre USING (release_id)
+    WHERE own.artist_id = %(artist_id)s
+    GROUP BY genre.genre_name ORDER BY genre_count DESC, genre.genre_name LIMIT 5
+), genre_counts AS (
+    SELECT target.genre_name, candidate.artist_id,
+           count(DISTINCT sample.release_id)::bigint AS shared_in_genre
+    FROM target_genres target
+    CROSS JOIN LATERAL (
+        SELECT release_id FROM graph.in_genre
+        WHERE genre_name = target.genre_name ORDER BY release_id LIMIT 100000
+    ) sample
+    JOIN graph.by_artist candidate ON candidate.release_id = sample.release_id
+    JOIN graph.artist artist ON artist.artist_id = candidate.artist_id
+    WHERE candidate.artist_id <> %(artist_id)s AND artist.name IS NOT NULL
+    GROUP BY target.genre_name, candidate.artist_id
+), per_genre AS (
+    SELECT *, row_number() OVER (
+        PARTITION BY genre_name ORDER BY shared_in_genre DESC, artist_id
+    ) AS rank_in_genre FROM genre_counts
 ), ranked AS (
-    SELECT artist_id, count(DISTINCT release_id)::bigint AS release_count
-    FROM signal_hits
-    GROUP BY artist_id
-    HAVING count(DISTINCT release_id) >= %(min_releases)s
+    SELECT artist_id, sum(shared_in_genre)::bigint AS release_count
+    FROM per_genre WHERE rank_in_genre <= 500 GROUP BY artist_id
+    HAVING sum(shared_in_genre) >= %(min_releases)s
+    ORDER BY release_count DESC, artist_id LIMIT 200
 )
 SELECT ranked.artist_id, artist.name, ranked.release_count
 FROM ranked JOIN graph.artist artist USING (artist_id)
-WHERE artist.name IS NOT NULL
-ORDER BY ranked.release_count DESC, ranked.artist_id
-LIMIT %(limit)s
+ORDER BY ranked.release_count DESC, ranked.artist_id LIMIT 50
 """
 
 COLLECTOR_COUNTS_SQL = """
@@ -215,30 +189,17 @@ async def get_artist_profile(pool: Any, artist_id: str) -> dict[str, Any]:
 
 
 async def _batch_artist_profiles(pool: Any, candidate_ids: list[str]) -> dict[str, dict[str, Any]]:
-    # Four batch queries regardless of candidate count, matching the Neo4j cost shape and
-    # avoiding a 50 x 4 N+1 fan-out on the ranked candidate page. Run concurrently
-    # (gm-catalog-api-tsmu.1 round 3): each opens its own pooled connection via `_rows`, and
-    # the four are independent reads over the same candidate id list, so there is no ordering
-    # dependency between them -- only the sequential round-trips were serializing them before.
+    # Four batch queries regardless of candidate count, matching the Neo4j cost
+    # shape and avoiding a 50 x 4 N+1 fan-out on the ranked candidate page.
     profiles: dict[str, dict[str, Any]] = {artist_id: {"genres": [], "styles": [], "labels": [], "collaborators": []} for artist_id in candidate_ids}
-    dimensions = list(_BATCH_PROFILE_SQL)
-    results = await asyncio.gather(*(_rows(pool, _BATCH_PROFILE_SQL[dimension], {"artist_ids": candidate_ids}) for dimension in dimensions))
-    for dimension, dimension_rows in zip(dimensions, results, strict=True):
-        for artist_id, name, count in dimension_rows:
+    for dimension, sql in _BATCH_PROFILE_SQL.items():
+        for artist_id, name, count in await _rows(pool, sql, {"artist_ids": candidate_ids}):
             profiles[artist_id][dimension].append({"name": name, "count": count})
     return profiles
 
 
-async def get_candidate_artists(pool: Any, artist_id: str, *, limit: int = CANDIDATE_PROFILE_LIMIT) -> list[dict[str, Any]]:
-    """Every artist sharing at least MIN_ARTIST_RELEASES shared releases, profiled.
-
-    The query ranks every qualifying artist by shared release count; ``limit`` (default
-    :data:`~api.queries.recommend_queries.CANDIDATE_PROFILE_LIMIT`, proposed and under
-    review -- see docs/query-performance-optimizations.md) caps how many of that ranked set
-    are profiled and scored by ``compute_similar_artists``. Overridable for the round-3
-    N-sweep; production always calls with the default.
-    """
-    rows = await _rows(pool, CANDIDATE_ARTISTS_SQL, {"artist_id": artist_id, "min_releases": MIN_ARTIST_RELEASES, "limit": limit})
+async def get_candidate_artists(pool: Any, artist_id: str) -> list[dict[str, Any]]:
+    rows = await _rows(pool, CANDIDATE_ARTISTS_SQL, {"artist_id": artist_id, "min_releases": MIN_ARTIST_RELEASES})
     if not rows:
         return []
     profiles = await _batch_artist_profiles(pool, [row[0] for row in rows])
