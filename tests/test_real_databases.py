@@ -908,10 +908,18 @@ async def test_recommendation_fixture_has_real_candidates_and_fit_context(
     handle = parity_backends.postgres if backend == "postgres" else parity_backends.neo4j
     recommend = get_backend("recommendations", backend)
     fit = get_backend("fit", backend)
+    # gm-catalog-api-tsmu.1: the candidate scope is every artist sharing >=1 genre/style/
+    # label/collaborator signal, not just genre. "1302" now qualifies too -- every one of
+    # its four releases shares a style or label with one of "1301"'s, even though only one
+    # (1222, genre Rock) also shares a genre -- ranked before "1303" by the artist-id tiebreak
+    # since both share 4 releases. Ties are broken ascending by artist id (ORDER BY
+    # release_count DESC, artist_id).
     candidates = await recommend.get_candidate_artists(handle, "1301")
-    assert [candidate["artist_id"] for candidate in candidates] == ["1303"]
+    assert [candidate["artist_id"] for candidate in candidates] == ["1302", "1303"]
     assert candidates[0]["release_count"] == 4
-    assert candidates[0]["genres"] == [{"name": "Electronic", "count": 3}, {"name": "Rock", "count": 1}]
+    assert candidates[0]["genres"] == [{"name": "Jazz", "count": 2}, {"name": "Electronic", "count": 1}, {"name": "Rock", "count": 1}]
+    assert candidates[1]["release_count"] == 4
+    assert candidates[1]["genres"] == [{"name": "Electronic", "count": 3}, {"name": "Rock", "count": 1}]
 
     labels = await recommend.get_label_affinity_candidates(handle, graph_fixture.COLLECTION_USER_ID)
     assert {row["id"] for row in labels} == {"1205", "1206"}
@@ -936,24 +944,75 @@ async def test_recommendation_fixture_has_real_candidates_and_fit_context(
     assert await fit.get_release_context(handle, "does-not-exist") is None
 
 
-async def test_candidate_sample_cap_preserves_fixture_results_and_records_timing(
+#: The candidate generator gm-catalog-api-tsmu.1 replaced: top 5 genres, 500 artists per
+#: genre, 200 overall, a per-genre release scan capped at 100k. Kept here, not in
+#: ``recommend_pg_queries``, purely so this test can measure the new set-based, uncapped
+#: query (``CANDIDATE_ARTISTS_SQL``) against the shape it replaced on identical data.
+_LEGACY_CANDIDATE_ARTISTS_SQL = """
+WITH target_genres AS (
+    SELECT genre.genre_name, count(DISTINCT own.release_id)::bigint AS genre_count
+    FROM graph.by_artist own JOIN graph.in_genre genre USING (release_id)
+    WHERE own.artist_id = %(artist_id)s
+    GROUP BY genre.genre_name ORDER BY genre_count DESC, genre.genre_name LIMIT 5
+), genre_counts AS (
+    SELECT target.genre_name, candidate.artist_id,
+           count(DISTINCT sample.release_id)::bigint AS shared_in_genre
+    FROM target_genres target
+    CROSS JOIN LATERAL (
+        SELECT release_id FROM graph.in_genre
+        WHERE genre_name = target.genre_name ORDER BY release_id LIMIT 100000
+    ) sample
+    JOIN graph.by_artist candidate ON candidate.release_id = sample.release_id
+    JOIN graph.artist artist ON artist.artist_id = candidate.artist_id
+    WHERE candidate.artist_id <> %(artist_id)s AND artist.name IS NOT NULL
+    GROUP BY target.genre_name, candidate.artist_id
+), per_genre AS (
+    SELECT *, row_number() OVER (
+        PARTITION BY genre_name ORDER BY shared_in_genre DESC, artist_id
+    ) AS rank_in_genre FROM genre_counts
+), ranked AS (
+    SELECT artist_id, sum(shared_in_genre)::bigint AS release_count
+    FROM per_genre WHERE rank_in_genre <= 500 GROUP BY artist_id
+    HAVING sum(shared_in_genre) >= %(min_releases)s
+    ORDER BY release_count DESC, artist_id LIMIT 200
+)
+SELECT ranked.artist_id, artist.name, ranked.release_count
+FROM ranked JOIN graph.artist artist USING (artist_id)
+ORDER BY ranked.release_count DESC, ranked.artist_id LIMIT 50
+"""
+
+
+async def test_all_signal_candidate_query_preserves_fixture_results_and_records_timing(
     parity_backends: graph_fixture.ParityBackends,
 ) -> None:
-    """Measure the kept 100k bound against the uncapped shape on the parity fixture."""
-    capped = recommend_pg_queries.CANDIDATE_ARTISTS_SQL
-    uncapped = capped.replace("ORDER BY release_id LIMIT 100000", "ORDER BY release_id")
-    params = {"artist_id": "1301", "min_releases": 3}
+    """gm-catalog-api-tsmu.1: measure the new set-based query against the generator it replaced.
+
+    Both queries are run on the identical parity fixture and identical PostgreSQL tier so the
+    only variable is the query shape: per-genre-capped (the old production path) versus
+    set-based over every shared genre/style/label/collaborator signal (the new one). This is
+    a lower bound on the production latency delta -- the fixture is 120 releases, not a
+    production-scale catalog -- recorded for the bead per its acceptance criteria; see
+    ``docs/evaluation.md`` and the bead report for the full picture, including a PG19-tier run.
+    """
+    legacy = _LEGACY_CANDIDATE_ARTISTS_SQL
+    all_signals = recommend_pg_queries.CANDIDATE_ARTISTS_SQL
+    legacy_params = {"artist_id": "1301", "min_releases": 3}
+    all_signals_params = {"artist_id": "1301"}
     pool = parity_backends.postgres
-    await recommend_pg_queries._rows(pool, capped, params)
-    await recommend_pg_queries._rows(pool, uncapped, params)
-    samples: dict[str, list[float]] = {"capped": [], "uncapped": []}
+    await recommend_pg_queries._rows(pool, legacy, legacy_params)
+    await recommend_pg_queries._rows(pool, all_signals, all_signals_params)
+    samples: dict[str, list[float]] = {"legacy": [], "all_signals": []}
     for _ in range(5):
-        for name, statement in (("capped", capped), ("uncapped", uncapped)):
-            before = perf_counter()
-            rows = await recommend_pg_queries._rows(pool, statement, params)
-            samples[name].append((perf_counter() - before) * 1000)
-            assert rows == [("1303", "Recommendation Test Artist", 4)]
-    print("candidate-sample-cap-ms " + " ".join(f"{name}={sum(values) / len(values):.3f}" for name, values in samples.items()))
+        before = perf_counter()
+        legacy_rows = await recommend_pg_queries._rows(pool, legacy, legacy_params)
+        samples["legacy"].append((perf_counter() - before) * 1000)
+        assert legacy_rows == [("1303", "Recommendation Test Artist", 4)]
+
+        before = perf_counter()
+        all_signal_rows = await recommend_pg_queries._rows(pool, all_signals, all_signals_params)
+        samples["all_signals"].append((perf_counter() - before) * 1000)
+        assert all_signal_rows == [("1302", "Label DNA Artist Two", 4), ("1303", "Recommendation Test Artist", 4)]
+    print("candidate-query-ms " + " ".join(f"{name}={sum(values) / len(values):.3f}" for name, values in samples.items()))
 
 
 # Family 6 names five source modules. Three media reads were PostgreSQL-only before

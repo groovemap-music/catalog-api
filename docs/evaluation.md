@@ -180,6 +180,41 @@ in the raw report and not in the snapshot, which is what makes the snapshot a re
 rather than a log. The tolerance is a floating-point allowance, not a noise budget: the harness
 is deterministic, so any real difference is a baseline change.
 
+## Registering a second baseline version: the similar-artist candidate scope
+
+`BASELINE_VERSION` ("heuristics-2026-09") stays frozen: it always replays the candidate
+generator that was in production before gm-catalog-api-tsmu.1
+(`GoldenGraph.candidate_artists`, top 5 genres, 500 candidates per genre, 200 overall, 50
+profiled), and its committed `expected-metrics.json` never moves for this change.
+
+gm-catalog-api-tsmu.1 replaced that candidate generator in production
+(`api/queries/recommend_queries.py` and `recommend_pg_queries.py`) with a set-based query that
+scores every artist sharing at least one genre, style, label, or collaborator signal -- no
+per-genre cap. Registering *that* as a baseline change without disturbing the frozen one means
+adding a second, narrower version rather than bumping `BASELINE_VERSION` in place:
+
+- `GoldenGraph.candidate_artists_all_signals` mirrors the new production query.
+- `run_baseline(graph, similar_artist_candidates="all_signals")` replays it for
+  `similar_artists` only -- `recommendations`, `discoveries`, and `rarity` are identical to the
+  legacy run, since only the candidate *scope* changed, not any weight -- and reports
+  `SIMILAR_ARTIST_CANDIDATES_VERSION` ("similar-artist-all-signals-2026-09").
+- `similar_artist_metrics(run, splits, golden)` scores a similar-artist ranking the same way
+  `recommendation_metrics` scores a recommendation ranking, adapted to artists: a held-out
+  (post-cut) release is a hit at `k` when any artist credited on it appears in the ranking's
+  top `k`. This fixture has no independent "who works with whom later" sample the way the
+  gm-design-chw.2 spike's dump-wide harness did -- every genre/style/label/artist edge is
+  always visible here, and only collector holdings are time-split -- so this is the closest
+  analogue the existing split protocol supports.
+- `evaluate_similar_artist_candidates()` runs both the new and legacy candidate scopes over
+  the same split and scores both, so the comparison is apples to apples. Its snapshot is
+  `tests/fixtures/golden/expected-similar-artist-metrics.json`, committed separately from
+  `expected-metrics.json` for the same reason the version is separate: touching one must never
+  touch the other.
+
+See `tests/test_evaluation_similar_artist_candidates.py` for the measured comparison,
+including where it does and does not clear the "equal to or better on recall@10" bar on this
+synthetic fixture.
+
 ## Comparing a model to the baseline
 
 The comparison is only meaningful if both sides are measured by identical code, so a model is

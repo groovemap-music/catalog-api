@@ -50,6 +50,14 @@ from api.rarity.families.grooved import PRESSING_FACT
 
 BASELINE_VERSION: Final[str] = "heuristics-2026-09"
 
+# gm-catalog-api-tsmu.1: same heuristics-2026-09 weights, but the similar-artist endpoint's
+# candidate scope is every artist sharing >=1 genre/style/label/collaborator signal (see
+# GoldenGraph.candidate_artists_all_signals), not the frozen top-500-per-genre generator.
+# Nothing else about the run changes -- recommendations, discoveries, and rarity are
+# identical to heuristics-2026-09 -- so this version is registered alongside it rather than
+# replacing it, and heuristics-2026-09's own committed expected-metrics.json stays untouched.
+SIMILAR_ARTIST_CANDIDATES_VERSION: Final[str] = "similar-artist-all-signals-2026-09"
+
 # The reference year temporal_scarcity is measured against. Frozen, not `datetime.now().year`.
 BASELINE_CURRENT_YEAR: Final[int] = 2026
 
@@ -241,13 +249,21 @@ def _discover(graph: GoldenGraph, collector_id: str) -> tuple[dict[str, Any], ..
     return tuple(score_discoveries(traversal, graph.taste_genre_vector(collector_id), graph.blind_spot_genres(collector_id), limit=DISCOVERY_LIMIT))
 
 
-def _similar_artists(graph: GoldenGraph, collector_id: str) -> tuple[dict[str, Any], ...]:
-    """Rank artists similar to the collector's most-collected artist."""
+def _similar_artists(graph: GoldenGraph, collector_id: str, *, all_signal_candidates: bool = False) -> tuple[dict[str, Any], ...]:
+    """Rank artists similar to the collector's most-collected artist.
+
+    Args:
+        all_signal_candidates: Use the gm-catalog-api-tsmu.1 candidate scope
+            (:meth:`~api.evaluation.graph.GoldenGraph.candidate_artists_all_signals`) instead
+            of the frozen ``heuristics-2026-09`` one. Only the candidate set differs; the
+            weights ``compute_similar_artists`` scores with are identical either way.
+    """
     top = graph._top_collected_artists(collector_id, 1)
     if not top:
         return ()
     artist_id = top[0][0]
-    return tuple(compute_similar_artists(graph.artist_profile(artist_id), graph.candidate_artists(artist_id), limit=SIMILAR_ARTIST_LIMIT))
+    candidates = graph.candidate_artists_all_signals(artist_id) if all_signal_candidates else graph.candidate_artists(artist_id)
+    return tuple(compute_similar_artists(graph.artist_profile(artist_id), candidates, limit=SIMILAR_ARTIST_LIMIT))
 
 
 def _score_rarity(graph: GoldenGraph, current_year: int) -> dict[str, RarityResult]:
@@ -337,6 +353,7 @@ def run_baseline(
     *,
     limit: int = RECOMMENDATION_LIMIT,
     current_year: int = BASELINE_CURRENT_YEAR,
+    similar_artist_candidates: str = "legacy",
 ) -> BaselineRun:
     """Score the whole fixture with today's frozen heuristics.
 
@@ -346,18 +363,31 @@ def run_baseline(
             pre-cut acquisitions.
         limit: How many recommendations to rank per collector.
         current_year: The reference year ``temporal_scarcity`` is measured against.
+        similar_artist_candidates: ``"legacy"`` (default) replays the frozen
+            ``heuristics-2026-09`` candidate scope and reports that version, unchanged from
+            before gm-catalog-api-tsmu.1. ``"all_signals"`` replays the new candidate scope
+            (:meth:`~api.evaluation.graph.GoldenGraph.candidate_artists_all_signals`) for
+            ``similar_artists`` only and reports :data:`SIMILAR_ARTIST_CANDIDATES_VERSION`;
+            ``recommendations``, ``discoveries``, and ``rarity`` are unaffected either way.
 
     Returns:
         The run: per-collector ranked recommendations, discoveries, and similar artists, plus
         per-release rarity. Two runs over the same graph are equal.
+
+    Raises:
+        ValueError: ``similar_artist_candidates`` is neither ``"legacy"`` nor ``"all_signals"``.
     """
+    if similar_artist_candidates not in ("legacy", "all_signals"):
+        raise ValueError(f"similar_artist_candidates must be 'legacy' or 'all_signals', got {similar_artist_candidates!r}")
+    all_signals = similar_artist_candidates == "all_signals"
+    version = SIMILAR_ARTIST_CANDIDATES_VERSION if all_signals else BASELINE_VERSION
     graph = source if isinstance(source, GoldenGraph) else GoldenGraph(source)
     collector_ids = sorted(graph.holdings)
     return BaselineRun(
-        version=BASELINE_VERSION,
+        version=version,
         current_year=current_year,
         recommendations={collector_id: _recommend(graph, collector_id, limit) for collector_id in collector_ids},
         discoveries={collector_id: _discover(graph, collector_id) for collector_id in collector_ids},
-        similar_artists={collector_id: _similar_artists(graph, collector_id) for collector_id in collector_ids},
+        similar_artists={collector_id: _similar_artists(graph, collector_id, all_signal_candidates=all_signals) for collector_id in collector_ids},
         rarity=_score_rarity(graph, current_year),
     )

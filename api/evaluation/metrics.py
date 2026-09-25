@@ -18,7 +18,7 @@ Two averaging conventions are used, and which one applies is stated per metric:
 from __future__ import annotations
 
 import math
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from typing import Any, Final
 
 from api.evaluation.baseline import BaselineRun
@@ -215,6 +215,75 @@ def recommendation_metrics(run: BaselineRun, splits: Mapping[str, TimeSplit], go
         },
         "by_format": by_format,
         "by_collector_size": {bucket: {"collectors": len(entries), **_ranking_block(entries)} for bucket, entries in sorted(by_size.items())},
+    }
+
+
+def similar_artist_metrics(run: BaselineRun, splits: Mapping[str, TimeSplit], golden: GoldenSet) -> dict[str, Any]:
+    """Score each collector's similar-artist ranking against who they later acquired from.
+
+    gm-catalog-api-tsmu.1 registers a new baseline version for the similar-artist candidate
+    generator (see ``api.evaluation.baseline.SIMILAR_ARTIST_CANDIDATES_VERSION``), and its
+    acceptance criteria calls for a recall@10 comparison against ``heuristics-2026-09`` on
+    this golden set. This fixture has no independent "who collaborates with whom later"
+    ground truth the way the gm-design-chw.2 spike's dump-wide sample did -- every release's
+    genre/style/label/artist edges are always visible here, and only collector holdings are
+    time-split -- so the ground truth adapted to this harness is: a held-out (post-cut)
+    release counts as a hit at ``k`` when any artist credited on it appears in the top ``k``
+    of the ranking seeded from the collector's most-collected pre-cut artist. That is the
+    same "did the ranking anticipate what the collector went on to add" question
+    ``recommendation_metrics`` asks of release ids, asked here of the artists credited on
+    those releases instead.
+
+    Args:
+        run: The baseline (or model) run to score. ``run.similar_artists`` is keyed by
+            collector id, one ranking per collector, seeded exactly as
+            ``api.evaluation.baseline._similar_artists`` seeds it.
+        splits: The time splits the run was produced under.
+        golden: The fixture, for release-to-artist credits and per-release families.
+
+    Returns:
+        The headline block (precision/recall/hit-rate) and the per-format breakdown.
+    """
+    collector_ids = sorted(collector_id for collector_id in splits if run.similar_artists.get(collector_id))
+    largest = max(K_VALUES)
+    families_of_release = {release_id: release.families for release_id, release in golden.releases.items()}
+
+    def _ranked_artists(collector_id: str, k: int) -> set[str]:
+        return {row["artist_id"] for row in run.similar_artists[collector_id][:k]}
+
+    def _hits(collector_id: str, k: int, held_out: Iterable[str] | None = None) -> int:
+        ranked_artists = _ranked_artists(collector_id, k)
+        releases = splits[collector_id].held_out if held_out is None else held_out
+        return sum(1 for release_id in releases if ranked_artists & set(golden.releases[release_id].artist_ids))
+
+    block: dict[str, float] = {}
+    for k in K_VALUES:
+        precisions = [_hits(collector_id, k) / k for collector_id in collector_ids]
+        recalls = [
+            _hits(collector_id, k) / len(splits[collector_id].held_out) if splits[collector_id].held_out else 0.0 for collector_id in collector_ids
+        ]
+        block[f"precision_at_{k}"] = _mean(precisions)
+        block[f"recall_at_{k}"] = _mean(recalls)
+    block["hit_rate"] = _mean([1.0 if _hits(collector_id, largest) else 0.0 for collector_id in collector_ids])
+
+    by_format: dict[str, dict[str, float]] = {}
+    for family in REPORTED_FAMILIES:
+        held_out_in_family = 0
+        hits_in_family = 0
+        for collector_id in collector_ids:
+            in_family_held_out = [release_id for release_id in splits[collector_id].held_out if family in families_of_release.get(release_id, ())]
+            held_out_in_family += len(in_family_held_out)
+            hits_in_family += _hits(collector_id, largest, held_out=in_family_held_out)
+        by_format[family] = {
+            "held_out": held_out_in_family,
+            f"hits_at_{largest}": hits_in_family,
+            f"recall_at_{largest}": hits_in_family / held_out_in_family if held_out_in_family else 0.0,
+        }
+
+    return {
+        "collectors": len(collector_ids),
+        "overall": block,
+        "by_format": by_format,
     }
 
 

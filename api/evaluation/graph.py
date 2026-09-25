@@ -210,14 +210,19 @@ class GoldenGraph:
         return {artist_id: self.artist_profile(artist_id) for artist_id in artist_ids}
 
     def candidate_artists(self, artist_id: str) -> list[dict[str, Any]]:
-        """Mirror ``get_candidate_artists``: genre-shared candidates, profiled, top first.
+        """Mirror the frozen ``heuristics-2026-09`` candidate generator, genre-shared, capped.
 
-        The production query expands only the target's top :data:`TOP_GENRES` genres, caps each
-        expansion at :data:`PER_GENRE_CANDIDATE_LIMIT` candidates, keeps the top
-        :data:`CANDIDATE_LIMIT`, and profiles only the first :data:`PROFILED_CANDIDATES` of
-        those. All four limits are reproduced; on a 120-release fixture none of them bites,
-        which is the point -- the shape is identical whether or not the data is large enough
-        to trigger them.
+        This is the *historical* shape: it reproduces the candidate generator
+        ``api.queries.recommend_queries.get_candidate_artists`` used before
+        gm-catalog-api-tsmu.1, which expanded only the target's top :data:`TOP_GENRES`
+        genres, capped each expansion at :data:`PER_GENRE_CANDIDATE_LIMIT` candidates, kept
+        the top :data:`CANDIDATE_LIMIT`, and profiled only the first
+        :data:`PROFILED_CANDIDATES` of those. It is kept exactly as it was -- unconnected to
+        the current production query -- because :data:`~api.evaluation.baseline.BASELINE_VERSION`
+        ``heuristics-2026-09`` replays it and its committed ``expected-metrics.json`` must stay
+        byte-identical. See :meth:`candidate_artists_all_signals` for the replacement shape.
+        On a 120-release fixture none of the four limits bites, which is the point -- the
+        shape is identical whether or not the data is large enough to trigger them.
         """
         profile = self.artist_profile(artist_id)
         top_genres = [entry["name"] for entry in profile["genres"][:TOP_GENRES]]
@@ -245,6 +250,57 @@ class GoldenGraph:
         return [
             {"artist_id": other, "artist_name": self.golden.artists[other].name, "release_count": count, **profiles[other]}
             for other, count in profiled
+        ]
+
+    def candidate_artists_all_signals(self, artist_id: str) -> list[dict[str, Any]]:
+        """Mirror the gm-catalog-api-tsmu.1 candidate generator: every shared-signal artist.
+
+        A candidate qualifies by sharing at least one genre, style, or label with any of the
+        target's releases, or by appearing on the same release as the target (collaborator).
+        There is no per-genre cap, no top-N truncation, and no minimum shared-release count --
+        every qualifying artist is profiled and scored. This is the shape
+        ``api.queries.recommend_queries.get_candidate_artists`` and
+        ``api.queries.recommend_pg_queries.get_candidate_artists`` were rewritten to; it backs
+        the new baseline version registered alongside the frozen ``heuristics-2026-09`` one
+        (see :data:`~api.evaluation.baseline.SIMILAR_ARTIST_CANDIDATES_VERSION`).
+        """
+        target_release_ids = self._by_artist.get(artist_id, [])
+        if not target_release_ids:
+            return []
+        target_genres = {genre for release_id in target_release_ids for genre in self._release(release_id).genres}
+        target_styles = {style for release_id in target_release_ids for style in self._release(release_id).styles}
+        target_labels = {self._release(release_id).label_id for release_id in target_release_ids}
+
+        hits: dict[str, set[str]] = {}
+
+        def _add(other: str, release_id: str) -> None:
+            if other == artist_id or other not in self.golden.artists:
+                return
+            hits.setdefault(other, set()).add(release_id)
+
+        for genre in target_genres:
+            for release_id in self._by_genre.get(genre, []):
+                for other in self._release(release_id).artist_ids:
+                    _add(other, release_id)
+        for style in target_styles:
+            for release_id in self._by_style.get(style, []):
+                for other in self._release(release_id).artist_ids:
+                    _add(other, release_id)
+        for label in target_labels:
+            for release_id in self._by_label.get(label, []):
+                for other in self._release(release_id).artist_ids:
+                    _add(other, release_id)
+        for release_id in target_release_ids:
+            for other in self._release(release_id).artist_ids:
+                _add(other, release_id)
+
+        ranked = sorted(((other, len(releases)) for other, releases in hits.items()), key=lambda item: (-item[1], item[0]))
+        if not ranked:
+            return []
+
+        profiles = self.batch_artist_profiles([other for other, _count in ranked])
+        return [
+            {"artist_id": other, "artist_name": self.golden.artists[other].name, "release_count": count, **profiles[other]} for other, count in ranked
         ]
 
     # ── Recommendation candidate shapes ─────────────────────────────

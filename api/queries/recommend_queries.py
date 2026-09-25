@@ -152,68 +152,63 @@ async def _batch_artist_profiles(
 
 
 async def get_candidate_artists(driver: AsyncResilientNeo4jDriver, artist_id: str) -> list[dict[str, Any]]:
-    """Get candidate artists sharing genres with the target, with their full profiles.
+    """Get every candidate artist sharing at least one signal with the target, profiled.
 
     Returns each candidate with actual release counts per genre/style/label/collaborator
     (not just presence), so cosine similarity on the vectors is meaningful.
 
-    Optimizations over the naive approach:
-    - Limits genre expansion to the artist's top 5 genres (avoids exploding
-      through mega-genres like "Rock" with 6M+ releases).
-    - Uses shared_count for ordering instead of re-traversing all releases
-      per candidate (eliminates an extra MATCH per candidate).
-    - Profiles only the top 50 candidates instead of 200 (since the final
-      result is limited to 20 after cosine scoring).
-    - Batch queries for profiles (4 queries total, not 200x4).
-    - CALL {} per-genre prevents cross-genre row explosion (157M → ~20-30M
-      DB hits for Johnny Cash; 1GB → ~300MB memory).
-    - Per-genre LIMIT 500 caps broad genres like Rock (7M+ releases).
-    - Inner release scan capped at 100K per genre to prevent full traversal
-      of mega-genres (Rock: 7M → 100K releases sampled).
+    Candidate scope (gm-catalog-api-tsmu.1): a candidate qualifies by sharing at least one
+    genre, style, or label with any of the target's releases, or by appearing on the same
+    release as the target (collaborator). There is no per-genre LIMIT, no top-5-genres cap,
+    and no truncation of the candidate set before profiling -- the previous shape (top 5
+    genres, 500 artists per genre, 200 overall, 50 profiled) measurably starved recall (see
+    the gm-design-chw.2 spike: the same heuristic weights scored over every artist reach
+    recall@10 0.1799 against 0.0092 for the capped generator). The four ``UNION``ed
+    sub-queries below match the set-based shape of ``recommend_pg_queries.CANDIDATE_ARTISTS_SQL``
+    so the two backends agree by construction, not by coincidence.
     """
     candidates_cypher = """
-    MATCH (a:Artist {id: $artist_id})<-[:BY]-(r:Release)-[:IS]->(g:Genre)
-    WITH a, g, count(DISTINCT r) AS genre_count
-    ORDER BY genre_count DESC
-    LIMIT 5
-    WITH a, collect(g) AS top_genres
-    UNWIND top_genres AS g2
+    MATCH (a:Artist {id: $artist_id})
     CALL {
-        WITH g2, a
-        MATCH (g2)<-[:IS]-(r2:Release)
-        WITH r2, a
-        LIMIT 100000
-        MATCH (r2)-[:BY]->(a2:Artist)
-        WHERE a2 <> a AND a2.name IS NOT NULL
-        WITH a2, count(DISTINCT r2) AS shared_in_genre
-        ORDER BY shared_in_genre DESC
-        LIMIT 500
-        RETURN a2, shared_in_genre
+        WITH a
+        MATCH (a)<-[:BY]-(:Release)-[:IS]->(:Genre)<-[:IS]-(cr:Release)-[:BY]->(c:Artist)
+        WHERE c <> a AND c.name IS NOT NULL
+        RETURN c AS candidate, cr AS candidate_release
+        UNION
+        WITH a
+        MATCH (a)<-[:BY]-(:Release)-[:IS]->(:Style)<-[:IS]-(cr:Release)-[:BY]->(c:Artist)
+        WHERE c <> a AND c.name IS NOT NULL
+        RETURN c AS candidate, cr AS candidate_release
+        UNION
+        WITH a
+        MATCH (a)<-[:BY]-(:Release)-[:ON]->(:Label)<-[:ON]-(cr:Release)-[:BY]->(c:Artist)
+        WHERE c <> a AND c.name IS NOT NULL
+        RETURN c AS candidate, cr AS candidate_release
+        UNION
+        WITH a
+        MATCH (a)<-[:BY]-(cr:Release)-[:BY]->(c:Artist)
+        WHERE c <> a AND c.name IS NOT NULL
+        RETURN c AS candidate, cr AS candidate_release
     }
-    WITH a2, sum(shared_in_genre) AS shared_count
-    WHERE shared_count >= $min_releases
-    RETURN a2.id AS artist_id, a2.name AS artist_name,
-           shared_count AS release_count
-    ORDER BY shared_count DESC
-    LIMIT 200
+    WITH candidate, count(DISTINCT candidate_release) AS release_count
+    RETURN candidate.id AS artist_id, candidate.name AS artist_name, release_count
+    ORDER BY release_count DESC, artist_id
     """
     candidates = await run_query(
         driver,
         candidates_cypher,
         timeout=60,
         artist_id=artist_id,
-        min_releases=MIN_ARTIST_RELEASES,
     )
 
     if not candidates:
         return []
 
-    # Profile only top 50 candidates (final result is limited to 20 after scoring)
-    profile_candidates = candidates[:50]
-    candidate_ids = [c["artist_id"] for c in profile_candidates]
+    # Every matched candidate is profiled and scored; nothing is sliced before ranking.
+    candidate_ids = [c["artist_id"] for c in candidates]
     profiles = await _batch_artist_profiles(driver, candidate_ids)
 
-    return [{**cand, **profiles.get(cand["artist_id"], {})} for cand in profile_candidates]
+    return [{**cand, **profiles.get(cand["artist_id"], {})} for cand in candidates]
 
 
 def compute_similar_artists(
