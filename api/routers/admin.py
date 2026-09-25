@@ -1,4 +1,4 @@
-"""Admin router — login, logout, extraction history, trigger, gm_id projection, and DLQ purge."""
+"""Admin router — login, logout, extraction history, trigger, gm_id projection, catalog re-attachment, and DLQ purge."""
 
 import asyncio
 import json
@@ -34,6 +34,7 @@ from api.models import (
     ExtractionListResponse,
     ExtractionTriggerResponse,
     ProjectionTriggerResponse,
+    ReattachTriggerResponse,
 )
 from api.projection import run_gm_id_projection
 from api.queries.admin_queries import (
@@ -46,6 +47,7 @@ from api.queries.admin_queries import (
 )
 from api.queries.media_coverage_queries import DEFAULT_LIMIT, MAX_LIMIT, get_unmapped_media, known_providers
 from api.queries.metrics_queries import get_health_history, get_queue_history
+from api.reattach import audit_details, run_reattachment
 
 
 logger = structlog.get_logger(__name__)
@@ -697,6 +699,63 @@ async def trigger_gm_id_projection(
 
     return JSONResponse(
         content=ProjectionTriggerResponse(id=UUID(job_id), status="running").model_dump(mode="json"),
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Catalog re-attachment of load-order-split items (ADR 0014 section 8)
+# ---------------------------------------------------------------------------
+
+_reattach_tasks: dict[str, asyncio.Task[Any]] = {}
+
+
+async def _run_reattach_job(job_id: str, admin_id: str, apply: bool) -> None:
+    """Background task: run the re-attachment once, log the report, and audit an applying run.
+
+    Never raises out of the task, mirroring _run_projection_job. A dry run only logs the
+    census; an applying run also writes one admin_audit_log entry with its per-kind outcomes.
+    """
+    if _pool is None:
+        return
+    try:
+        report = await run_reattachment(_pool, apply=apply)
+        logger.info("✅ Catalog re-attachment finished", job_id=job_id, apply=apply, census=report["census"], outcomes=report.get("outcomes"))
+        if apply:
+            await record_audit_entry(
+                pool=_pool, admin_id=admin_id, action="identity.reattach.apply", target=job_id, details=audit_details(report, job_id)
+            )
+    except Exception as exc:
+        logger.error("❌ Catalog re-attachment failed", job_id=job_id, apply=apply, error=describe_exception(exc), exc_info=True)
+    finally:
+        _reattach_tasks.pop(job_id, None)
+
+
+@router.post("/api/admin/identity/reattach", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_catalog_reattach(
+    current_admin: Annotated[dict[str, Any], Depends(require_admin)],
+    apply: Annotated[bool, Query(description="Write the re-attachment; the default is a read-only dry run (census only)")] = False,
+) -> JSONResponse:
+    """Trigger a catalog re-attachment run (see api/reattach.py) as a tracked background task.
+
+    Dry run unless `apply=true`: a dry run only computes and logs the census. Returns 202 with
+    a job id immediately. After an applying run, trigger POST /api/admin/identity/project so
+    the graph's gm_id follows the alias table.
+    """
+    if _pool is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
+
+    admin_id = str(current_admin.get("sub"))
+    job_id = str(uuid4())
+
+    task = asyncio.create_task(_run_reattach_job(job_id, admin_id, apply))
+    _reattach_tasks[job_id] = task
+
+    logger.info("🚀 Catalog re-attachment triggered", job_id=job_id, admin_id=admin_id, apply=apply)
+    await record_audit_entry(pool=_pool, admin_id=admin_id, action="identity.reattach.trigger", details={"job_id": job_id, "apply": apply})
+
+    return JSONResponse(
+        content=ReattachTriggerResponse(id=UUID(job_id), status="running", apply=apply).model_dump(mode="json"),
         status_code=status.HTTP_202_ACCEPTED,
     )
 

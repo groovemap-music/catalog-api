@@ -49,6 +49,25 @@ class FakeCursor:
         return list(self._rows)
 
 
+class FakeTransaction:
+    """`conn.transaction()` — records BEGIN, then COMMIT or ROLLBACK, among the statements."""
+
+    def __init__(self, calls: list[RecordedCall]) -> None:
+        self._calls = calls
+
+    async def __aenter__(self) -> Self:
+        self._calls.append(RecordedCall("BEGIN", None))
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        _exc: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        self._calls.append(RecordedCall("ROLLBACK" if exc_type else "COMMIT", None))
+
+
 class FakeConnection:
     def __init__(self, results: list[list[tuple[Any, ...]]], calls: list[RecordedCall]) -> None:
         self._results = results
@@ -67,6 +86,9 @@ class FakeConnection:
 
     def cursor(self) -> FakeCursor:
         return FakeCursor(self._results, self._calls)
+
+    def transaction(self) -> FakeTransaction:
+        return FakeTransaction(self._calls)
 
 
 class FakePool:

@@ -52,6 +52,7 @@ catalog-setup = "api.setup:main"
 catalog-admin-setup = "api.admin_setup:main"
 catalog-media-backfill = "api.media_backfill:main"
 catalog-identity-projection = "api.projection:main"
+catalog-identity-reattach = "api.reattach:main"
 
 [project.urls]
 Homepage = "https://groovemap.music"
@@ -125,6 +126,7 @@ lines-after-imports = 2
 "api/setup.py" = ["T201"]
 "api/media_backfill.py" = ["T201"]
 "api/projection.py" = ["T201"]
+"api/reattach.py" = ["T201"]
 "scripts/*.py" = ["S108", "T201"]
 # Seeded, reproducible fixture generation. The randomness is the point and is not a secret.
 "scripts/generate_golden_set.py" = ["S311"]
