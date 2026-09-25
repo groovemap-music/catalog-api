@@ -534,6 +534,14 @@ class ProjectionTriggerResponse(BaseModel):
     status: str
 
 
+class ReattachTriggerResponse(BaseModel):
+    """Response to POST /api/admin/identity/reattach — the re-attachment job's id and mode."""
+
+    id: UUID
+    status: str
+    apply: bool
+
+
 class DlqPurgeResponse(BaseModel):
     queue: str
     messages_purged: int
