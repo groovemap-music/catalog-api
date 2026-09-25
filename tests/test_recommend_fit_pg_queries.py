@@ -21,13 +21,14 @@ USER = "00000000-0000-0000-0000-000000000001"
 
 
 async def test_candidate_query_has_no_per_genre_cap_and_batches_profiles() -> None:
-    """gm-catalog-api-tsmu.1: every shared-signal artist qualifies, with no per-genre LIMIT."""
+    """gm-catalog-api-tsmu.1: every shared-signal artist qualifying past the min-releases floor."""
     sql = recommend.CANDIDATE_ARTISTS_SQL
     assert "LIMIT" not in sql  # no per-genre / top-N truncation of the candidate set
     assert "signal_hits" in sql
     assert "UNION\n" in sql or "\n    UNION\n" in sql  # a set union, not UNION ALL, dedupes shared releases
     assert "in_genre" in sql and "in_style" in sql and "on_label" in sql
     assert "artist.name IS NOT NULL" in sql
+    assert "HAVING count(DISTINCT release_id) >= %(min_releases)s" in sql  # restored per review
     pool = FakePool(
         [
             [("1303", "Candidate", 3)],
@@ -49,7 +50,7 @@ async def test_candidate_query_has_no_per_genre_cap_and_batches_profiles() -> No
         }
     ]
     assert len(pool.calls) == 5  # one candidate scan plus four dimension batches
-    assert pool.calls[0].params == {"artist_id": "1301"}
+    assert pool.calls[0].params == {"artist_id": "1301", "min_releases": 3}
     assert all(call.params == {"artist_ids": ["1303"]} for call in pool.calls[1:])
 
 

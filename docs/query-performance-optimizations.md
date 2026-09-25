@@ -83,6 +83,66 @@ Expensive Neo4j calls use `neo4j.Query(..., timeout=...)` through the shared que
 timeout must be comfortably below the server's transaction ceiling so a pathological request
 fails predictably instead of consuming the entire deployment budget.
 
+## Open investigation: similar-artist candidate latency (gm-catalog-api-tsmu.1)
+
+gm-catalog-api-tsmu.1 replaced the similar-artist candidate generator's per-genre caps (top 5
+genres, 500 artists per genre, 200 overall, 50 profiled) with a set-based query scoring every
+artist sharing at least one genre/style/label/collaborator signal, because the caps were
+measurably starving recall (see `docs/evaluation.md`). That is a direct departure from "Cap
+high-cardinality expansions" above, and measuring it against a synthetic, catalog-shaped
+fixture (mega genres/styles/labels, a long tail, a prolific artist at ~p99 release count --
+`scripts/generate_latency_fixture.py`, benchmarked in
+`tests/test_recommend_candidate_latency.py`) shows the departure costs more than the 20%
+budget the change was supposed to stay inside. This section records the finding rather than a
+retained decision, because there isn't one yet -- it needs a maintainer call.
+
+**Measured on the PG19 integration tier, endpoint-shaped (identity + profile + candidates +
+scoring, not bare SQL), p95 of 15 reps:**
+
+| Target | Candidates | Legacy p95 | New p95 | Delta |
+| --- | ---: | ---: | ---: | ---: |
+| Mega (p99 release count, all-mega facets) | 1854 | 91.08ms | 426.80ms | +368.6% |
+| Mid (median release count) | 1321 | 68.81ms | 225.43ms | +227.6% |
+| Niche (all-niche facets, few releases) | 13 | 24.34ms | 67.79ms | +178.5% |
+
+Two findings narrow where a fix would need to go:
+
+1. **The candidate SQL itself is not the dominant cost.** `EXPLAIN (ANALYZE, BUFFERS)` of the
+   uncapped query alone measured 70.86ms for the mega target and 38.31ms for mid -- real, but
+   a fraction of the endpoint totals above. The rest is profiling and scoring every matched
+   candidate: `_batch_artist_profiles` runs four sequential queries with `artist_id = ANY(...)`
+   over the full candidate id list, and `compute_similar_artists` scores every one of them in
+   Python before ranking. Neither existed as a cost center under the old generator because it
+   never profiled more than 50 candidates.
+2. **An overall post-hoc cap on the profiled set, not a per-genre one, recovers most but not
+   all of the regression.** Capping to the top 200 candidates by the query's own
+   `release_count DESC` order (which already reflects genuine multi-signal overlap, not just
+   genre) -- experimental only, not implemented in `recommend_pg_queries.py` -- measured:
+
+   | Target | Capped-200 p95 | Delta vs legacy |
+   | --- | ---: | ---: |
+   | Mega | 143.50ms | +57.6% |
+   | Mid | 113.64ms | +65.1% |
+   | Niche | 57.55ms | +136.4% |
+
+   Mega and mid drop from the 200-370% range to roughly 60%, still over budget. Niche barely
+   moves (it only had 13 candidates to begin with) and stays disproportionately regressed in
+   relative terms even though its absolute latency (57-68ms) is small -- something about the
+   new query's shape (the four-way `UNION` and its CTEs, versus the old query's single
+   `LATERAL` expansion) appears to carry fixed overhead independent of candidate count, which
+   this investigation has not isolated further.
+
+Directions worth a maintainer decision, none implemented here:
+
+- The overall cap above, sized to actually clear 20% (200 did not; a smaller cap, or batching
+  the four profile queries concurrently instead of sequentially, might).
+- Precomputing or caching the candidate pool for the handful of facets that are actually
+  broad (mega genres/styles/labels are, by construction, few and stable), leaving the
+  uncapped query only for the common case where it is already cheap.
+- Investigating the niche case's fixed overhead directly (a warm-connection or per-query
+  planning cost that a smaller candidate set does not amortize) before concluding a cap alone
+  is sufficient.
+
 ## Ownership of supporting data work
 
 Some effective optimizations require a change outside catalog-api. Those changes are promoted into

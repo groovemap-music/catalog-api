@@ -10,6 +10,8 @@ from typing import Any, cast
 
 from common.query_debug import execute_sql
 
+from api.queries.recommend_queries import MIN_ARTIST_RELEASES
+
 
 _YEAR = "CASE WHEN btrim(release.year) ~ '^[0-9]{1,9}$' THEN btrim(release.year)::integer END"
 
@@ -62,6 +64,11 @@ _BATCH_PROFILE_SQL = {
 #   - collaborator: releases the candidate and the target both appear on directly.
 # `release_count` counts each qualifying release once even when it clears more than one
 # signal, so it does not inflate with the number of dimensions that happened to match.
+# The MIN_ARTIST_RELEASES floor is restored on the *shared* release count (not the
+# candidate's own total release count -- an artist with a hundred releases and one
+# incidental shared genre still needs >= min_releases shared before it is worth profiling):
+# per review, dropping it silently changed the acceptance criterion from "no per-genre LIMIT"
+# to "no floor at all", which was not requested.
 CANDIDATE_ARTISTS_SQL = """
 WITH target_releases AS (
     SELECT release_id FROM graph.by_artist WHERE artist_id = %(artist_id)s
@@ -97,6 +104,7 @@ WITH target_releases AS (
     SELECT artist_id, count(DISTINCT release_id)::bigint AS release_count
     FROM signal_hits
     GROUP BY artist_id
+    HAVING count(DISTINCT release_id) >= %(min_releases)s
 )
 SELECT ranked.artist_id, artist.name, ranked.release_count
 FROM ranked JOIN graph.artist artist USING (artist_id)
@@ -215,13 +223,13 @@ async def _batch_artist_profiles(pool: Any, candidate_ids: list[str]) -> dict[st
 
 
 async def get_candidate_artists(pool: Any, artist_id: str) -> list[dict[str, Any]]:
-    """Every artist sharing at least one genre/style/label/collaborator signal, profiled.
+    """Every artist sharing at least MIN_ARTIST_RELEASES shared releases, profiled.
 
     No slice is taken before profiling: the whole matched set is scored by
     ``compute_similar_artists``, which is what makes the candidate scope this function
     returns comparable to the "same weights, all artists" reference in gm-design-chw.2.
     """
-    rows = await _rows(pool, CANDIDATE_ARTISTS_SQL, {"artist_id": artist_id})
+    rows = await _rows(pool, CANDIDATE_ARTISTS_SQL, {"artist_id": artist_id, "min_releases": MIN_ARTIST_RELEASES})
     if not rows:
         return []
     profiles = await _batch_artist_profiles(pool, [row[0] for row in rows])

@@ -128,6 +128,7 @@ lines-after-imports = 2
 "scripts/*.py" = ["S108", "T201"]
 # Seeded, reproducible fixture generation. The randomness is the point and is not a secret.
 "scripts/generate_golden_set.py" = ["S311"]
+"scripts/generate_latency_fixture.py" = ["S311"]
 # The evaluation report prints its summary; that is its whole command-line purpose.
 "api/evaluation/report.py" = ["T201"]
 "performance/*.py" = ["PLC0415", "T201"]

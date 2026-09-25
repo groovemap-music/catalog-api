@@ -61,6 +61,7 @@ from api.queries.credits_queries import get_person_connections
 from api.queries.helpers import run_count, run_query, run_single
 from api.syncer import DISCOGS_API_BASE, sync_collection
 from tests import graph_fixture
+from tests.legacy_recommend_sql import LEGACY_CANDIDATE_ARTISTS_SQL
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -944,44 +945,6 @@ async def test_recommendation_fixture_has_real_candidates_and_fit_context(
     assert await fit.get_release_context(handle, "does-not-exist") is None
 
 
-#: The candidate generator gm-catalog-api-tsmu.1 replaced: top 5 genres, 500 artists per
-#: genre, 200 overall, a per-genre release scan capped at 100k. Kept here, not in
-#: ``recommend_pg_queries``, purely so this test can measure the new set-based, uncapped
-#: query (``CANDIDATE_ARTISTS_SQL``) against the shape it replaced on identical data.
-_LEGACY_CANDIDATE_ARTISTS_SQL = """
-WITH target_genres AS (
-    SELECT genre.genre_name, count(DISTINCT own.release_id)::bigint AS genre_count
-    FROM graph.by_artist own JOIN graph.in_genre genre USING (release_id)
-    WHERE own.artist_id = %(artist_id)s
-    GROUP BY genre.genre_name ORDER BY genre_count DESC, genre.genre_name LIMIT 5
-), genre_counts AS (
-    SELECT target.genre_name, candidate.artist_id,
-           count(DISTINCT sample.release_id)::bigint AS shared_in_genre
-    FROM target_genres target
-    CROSS JOIN LATERAL (
-        SELECT release_id FROM graph.in_genre
-        WHERE genre_name = target.genre_name ORDER BY release_id LIMIT 100000
-    ) sample
-    JOIN graph.by_artist candidate ON candidate.release_id = sample.release_id
-    JOIN graph.artist artist ON artist.artist_id = candidate.artist_id
-    WHERE candidate.artist_id <> %(artist_id)s AND artist.name IS NOT NULL
-    GROUP BY target.genre_name, candidate.artist_id
-), per_genre AS (
-    SELECT *, row_number() OVER (
-        PARTITION BY genre_name ORDER BY shared_in_genre DESC, artist_id
-    ) AS rank_in_genre FROM genre_counts
-), ranked AS (
-    SELECT artist_id, sum(shared_in_genre)::bigint AS release_count
-    FROM per_genre WHERE rank_in_genre <= 500 GROUP BY artist_id
-    HAVING sum(shared_in_genre) >= %(min_releases)s
-    ORDER BY release_count DESC, artist_id LIMIT 200
-)
-SELECT ranked.artist_id, artist.name, ranked.release_count
-FROM ranked JOIN graph.artist artist USING (artist_id)
-ORDER BY ranked.release_count DESC, ranked.artist_id LIMIT 50
-"""
-
-
 async def test_all_signal_candidate_query_preserves_fixture_results_and_records_timing(
     parity_backends: graph_fixture.ParityBackends,
 ) -> None:
@@ -994,10 +957,10 @@ async def test_all_signal_candidate_query_preserves_fixture_results_and_records_
     production-scale catalog -- recorded for the bead per its acceptance criteria; see
     ``docs/evaluation.md`` and the bead report for the full picture, including a PG19-tier run.
     """
-    legacy = _LEGACY_CANDIDATE_ARTISTS_SQL
+    legacy = LEGACY_CANDIDATE_ARTISTS_SQL
     all_signals = recommend_pg_queries.CANDIDATE_ARTISTS_SQL
     legacy_params = {"artist_id": "1301", "min_releases": 3}
-    all_signals_params = {"artist_id": "1301"}
+    all_signals_params = {"artist_id": "1301", "min_releases": 3}
     pool = parity_backends.postgres
     await recommend_pg_queries._rows(pool, legacy, legacy_params)
     await recommend_pg_queries._rows(pool, all_signals, all_signals_params)

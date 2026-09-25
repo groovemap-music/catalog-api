@@ -211,9 +211,13 @@ adding a second, narrower version rather than bumping `BASELINE_VERSION` in plac
   `expected-metrics.json` for the same reason the version is separate: touching one must never
   touch the other.
 
-See `tests/test_evaluation_similar_artist_candidates.py` for the measured comparison,
-including where it does and does not clear the "equal to or better on recall@10" bar on this
-synthetic fixture.
+See `tests/test_evaluation_similar_artist_candidates.py` for the measured comparison. The
+candidate scope also restores the `MIN_ARTIST_RELEASES` floor on the shared-signal count
+(a single incidental shared release is not enough to qualify); dropping it in an earlier
+round of this work actually cost recall@10 rather than only cost, since low-signal
+candidates diluted the top-10 with weak matches. With the floor restored, recall@10 rises
+from 0.44507 (legacy) to 0.53614 (new), and every reported media family improves at k=10 and
+k=25, on this synthetic fixture.
 
 ## Comparing a model to the baseline
 

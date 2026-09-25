@@ -242,7 +242,10 @@ def similar_artist_metrics(run: BaselineRun, splits: Mapping[str, TimeSplit], go
         golden: The fixture, for release-to-artist credits and per-release families.
 
     Returns:
-        The headline block (precision/recall/hit-rate) and the per-format breakdown.
+        The headline block (precision/recall/hit-rate) and the per-format breakdown, the
+        latter reporting recall at every :data:`K_VALUES` cut (including 10, not just the
+        largest) so a family regression at the acceptance criterion's own k is visible, not
+        only at 25.
     """
     collector_ids = sorted(collector_id for collector_id in splits if run.similar_artists.get(collector_id))
     largest = max(K_VALUES)
@@ -268,17 +271,17 @@ def similar_artist_metrics(run: BaselineRun, splits: Mapping[str, TimeSplit], go
 
     by_format: dict[str, dict[str, float]] = {}
     for family in REPORTED_FAMILIES:
-        held_out_in_family = 0
-        hits_in_family = 0
-        for collector_id in collector_ids:
-            in_family_held_out = [release_id for release_id in splits[collector_id].held_out if family in families_of_release.get(release_id, ())]
-            held_out_in_family += len(in_family_held_out)
-            hits_in_family += _hits(collector_id, largest, held_out=in_family_held_out)
-        by_format[family] = {
-            "held_out": held_out_in_family,
-            f"hits_at_{largest}": hits_in_family,
-            f"recall_at_{largest}": hits_in_family / held_out_in_family if held_out_in_family else 0.0,
+        family_held_out: dict[str, list[str]] = {
+            collector_id: [release_id for release_id in splits[collector_id].held_out if family in families_of_release.get(release_id, ())]
+            for collector_id in collector_ids
         }
+        held_out_in_family = sum(len(releases) for releases in family_held_out.values())
+        entry: dict[str, float] = {"held_out": held_out_in_family}
+        for k in K_VALUES:
+            hits_at_k = sum(_hits(collector_id, k, held_out=releases) for collector_id, releases in family_held_out.items())
+            entry[f"hits_at_{k}"] = hits_at_k
+            entry[f"recall_at_{k}"] = hits_at_k / held_out_in_family if held_out_in_family else 0.0
+        by_format[family] = entry
 
     return {
         "collectors": len(collector_ids),

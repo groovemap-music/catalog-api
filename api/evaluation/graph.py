@@ -256,9 +256,10 @@ class GoldenGraph:
         """Mirror the gm-catalog-api-tsmu.1 candidate generator: every shared-signal artist.
 
         A candidate qualifies by sharing at least one genre, style, or label with any of the
-        target's releases, or by appearing on the same release as the target (collaborator).
-        There is no per-genre cap, no top-N truncation, and no minimum shared-release count --
-        every qualifying artist is profiled and scored. This is the shape
+        target's releases, or by appearing on the same release as the target (collaborator),
+        and by clearing the :data:`MIN_ARTIST_RELEASES` floor on that shared release count.
+        There is no per-genre cap and no top-N truncation -- every qualifying artist is
+        profiled and scored. This is the shape
         ``api.queries.recommend_queries.get_candidate_artists`` and
         ``api.queries.recommend_pg_queries.get_candidate_artists`` were rewritten to; it backs
         the new baseline version registered alongside the frozen ``heuristics-2026-09`` one
@@ -294,7 +295,10 @@ class GoldenGraph:
             for other in self._release(release_id).artist_ids:
                 _add(other, release_id)
 
-        ranked = sorted(((other, len(releases)) for other, releases in hits.items()), key=lambda item: (-item[1], item[0]))
+        ranked = sorted(
+            ((other, len(releases)) for other, releases in hits.items() if len(releases) >= MIN_ARTIST_RELEASES),
+            key=lambda item: (-item[1], item[0]),
+        )
         if not ranked:
             return []
 

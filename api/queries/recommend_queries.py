@@ -159,13 +159,16 @@ async def get_candidate_artists(driver: AsyncResilientNeo4jDriver, artist_id: st
 
     Candidate scope (gm-catalog-api-tsmu.1): a candidate qualifies by sharing at least one
     genre, style, or label with any of the target's releases, or by appearing on the same
-    release as the target (collaborator). There is no per-genre LIMIT, no top-5-genres cap,
-    and no truncation of the candidate set before profiling -- the previous shape (top 5
-    genres, 500 artists per genre, 200 overall, 50 profiled) measurably starved recall (see
-    the gm-design-chw.2 spike: the same heuristic weights scored over every artist reach
-    recall@10 0.1799 against 0.0092 for the capped generator). The four ``UNION``ed
-    sub-queries below match the set-based shape of ``recommend_pg_queries.CANDIDATE_ARTISTS_SQL``
-    so the two backends agree by construction, not by coincidence.
+    release as the target (collaborator), *and* clearing the MIN_ARTIST_RELEASES floor on
+    that shared release count -- restored per review; dropping it changed the acceptance
+    criterion from "no per-genre LIMIT" to "no floor at all", which was not requested. There
+    is no per-genre LIMIT, no top-5-genres cap, and no truncation of the candidate set before
+    profiling -- the previous shape (top 5 genres, 500 artists per genre, 200 overall, 50
+    profiled) measurably starved recall (see the gm-design-chw.2 spike: the same heuristic
+    weights scored over every artist reach recall@10 0.1799 against 0.0092 for the capped
+    generator). The four ``UNION``ed sub-queries below match the set-based shape of
+    ``recommend_pg_queries.CANDIDATE_ARTISTS_SQL`` so the two backends agree by construction,
+    not by coincidence.
     """
     candidates_cypher = """
     MATCH (a:Artist {id: $artist_id})
@@ -191,6 +194,7 @@ async def get_candidate_artists(driver: AsyncResilientNeo4jDriver, artist_id: st
         RETURN c AS candidate, cr AS candidate_release
     }
     WITH candidate, count(DISTINCT candidate_release) AS release_count
+    WHERE release_count >= $min_releases
     RETURN candidate.id AS artist_id, candidate.name AS artist_name, release_count
     ORDER BY release_count DESC, artist_id
     """
@@ -199,6 +203,7 @@ async def get_candidate_artists(driver: AsyncResilientNeo4jDriver, artist_id: st
         candidates_cypher,
         timeout=60,
         artist_id=artist_id,
+        min_releases=MIN_ARTIST_RELEASES,
     )
 
     if not candidates:
