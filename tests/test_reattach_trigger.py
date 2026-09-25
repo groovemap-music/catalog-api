@@ -12,6 +12,7 @@ import os
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
 
 import pytest
 
@@ -21,6 +22,7 @@ from api.config import ApiConfig
 from api.reattach_trigger import (
     AUDIT_ACTION,
     DISCOGS_DATA_TYPES,
+    FAILED_ACTION,
     SYSTEM_ACTOR_EMAIL,
     SYSTEM_ACTOR_ID,
     extraction_target,
@@ -108,7 +110,10 @@ async def test_runs_apply_then_projection_then_marks_and_unlocks(jobs: MagicMock
     assert await run_pending(pool, driver) == VERSION
 
     assert [name for name, _args, _kwargs in jobs.mock_calls] == ["reattach", "project"]
-    jobs.reattach.assert_awaited_once_with(pool, apply=True)
+    jobs.reattach.assert_awaited_once()
+    assert jobs.reattach.await_args.args == (pool,)
+    assert jobs.reattach.await_args.kwargs["apply"] is True
+    decision_ref = jobs.reattach.await_args.kwargs["decision_ref"]
     jobs.project.assert_awaited_once_with(pool, driver)
 
     sql = _sql(pool)
@@ -119,24 +124,31 @@ async def test_runs_apply_then_projection_then_marks_and_unlocks(jobs: MagicMock
     assert "pg_advisory_unlock(hashtext(%s))" in sql[10]
     assert pool.calls[3].params == pool.calls[10].params
 
-    actor, action, target, details = pool.calls[9].params
+    entry_id, actor, action, target, details = pool.calls[9].params
+    # The marker's row id is the run's decision_ref, which every supersession it opened names.
+    assert UUID(entry_id) == decision_ref
     assert (actor, action, target) == (str(SYSTEM_ACTOR_ID), AUDIT_ACTION, extraction_target(VERSION))
     assert details.obj["extraction"] == VERSION
     assert details.obj["apply"] is True
     assert details.obj["outcomes"] == _REPORT["outcomes"]
     assert details.obj["projection"] == _PROJECTION
-    assert details.obj["job_id"]
+    assert details.obj["job_id"] == entry_id
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failing", ["reattach", "project"])
 async def test_a_failed_job_writes_no_marker_and_still_unlocks(jobs: MagicMock, failing: str) -> None:
     getattr(jobs, failing).side_effect = RuntimeError("boom")
-    pool = FakePool([*_PENDING, [(True,)], *_PENDING, *_ACTOR, [(True,)]])
+    pool = FakePool([*_PENDING, [(True,)], *_PENDING, *_ACTOR, [], [(True,)]])
     with pytest.raises(RuntimeError, match="boom"):
         await run_pending(pool, object())
     sql = _sql(pool)
-    assert not any(statement.startswith("INSERT INTO admin_audit_log") for statement in sql)
+    # The failure is recorded under the run's decision_ref, as a different action: not the marker.
+    [failure] = [call for call in pool.calls if call.sql.startswith("INSERT INTO admin_audit_log")]
+    entry_id, actor, action, target, details = failure.params
+    assert UUID(entry_id) == jobs.reattach.await_args.kwargs["decision_ref"]
+    assert (actor, action, target) == (str(SYSTEM_ACTOR_ID), FAILED_ACTION, extraction_target(VERSION))
+    assert '"error": "RuntimeError"' in details
     assert "pg_advisory_unlock" in sql[-1]
 
 

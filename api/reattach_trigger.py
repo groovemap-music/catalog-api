@@ -28,7 +28,10 @@ latest extraction.
 **Where "handled" lives.** An automatic run that finishes records one ``admin_audit_log`` row
 with ``action = 'identity.reattach.auto'``, ``target = 'discogs:<version>'`` and the system
 actor below as ``admin_id``. That row is both the audit record and the durable handled marker,
-so the two cannot disagree and no new table is needed. The alternatives do not fit:
+so the two cannot disagree and no new table is needed. Its row id is the run's job id, which
+every supersession the run opens records as its ``decision_ref`` (ADR 0009's native-id merge);
+a run that fails is recorded under the same id as ``identity.reattach.auto.failed``, which is
+not the marker. The alternatives do not fit:
 ``loader_extraction_latch`` belongs to the loader, ``extraction_history`` is keyed on an
 admin-*triggered* run, and ``app_config`` holds the encrypted Discogs credentials.
 
@@ -62,13 +65,16 @@ from uuid import UUID, uuid4
 import structlog
 from psycopg.types.json import Jsonb
 
+from api.audit_log import record_audit_entry
 from api.projection import run_gm_id_projection
-from api.reattach import audit_details, run_reattachment
+from api.reattach import audit_details, failure_details, run_reattachment
 
 
 logger = structlog.get_logger(__name__)
 
 AUDIT_ACTION: Final = "identity.reattach.auto"
+# A run that ended on an error. It is not the handled marker, so the next poll still retries.
+FAILED_ACTION: Final = "identity.reattach.auto.failed"
 
 # The four data types whose `extraction_complete` a Discogs extraction collects.
 DISCOGS_DATA_TYPES: Final[tuple[str, ...]] = ("artists", "labels", "masters", "releases")
@@ -102,7 +108,7 @@ _ENSURE_ACTOR: Final = """
 """
 _SELECT_ACTOR: Final = "SELECT email, is_active, is_admin FROM users WHERE id = %s::uuid"
 
-_RECORD: Final = "INSERT INTO admin_audit_log (admin_id, action, target, details) VALUES (%s::uuid, %s, %s, %s)"
+_RECORD: Final = "INSERT INTO admin_audit_log (id, admin_id, action, target, details) VALUES (%s::uuid, %s::uuid, %s, %s, %s)"
 
 
 def extraction_target(version: str) -> str:
@@ -163,10 +169,22 @@ async def run_pending(pool: Any, driver: Any) -> str | None:
             await _ensure_system_actor(cur)
             job_id = str(uuid4())
             logger.info("🚀 Automatic identity maintenance started", extraction=version, job_id=job_id)
-            report = await run_reattachment(pool, apply=True)
-            projection = await run_gm_id_projection(pool, driver)
+            try:
+                report = await run_reattachment(pool, apply=True, decision_ref=UUID(job_id))
+                projection = await run_gm_id_projection(pool, driver)
+            except Exception as exc:
+                # On its own connection: this one's transaction is about to roll back.
+                await record_audit_entry(
+                    pool=pool,
+                    admin_id=str(SYSTEM_ACTOR_ID),
+                    action=FAILED_ACTION,
+                    target=extraction_target(version),
+                    details={**failure_details(job_id, exc), "extraction": version},
+                    entry_id=job_id,
+                )
+                raise
             details = {**audit_details(report, job_id), "extraction": version, "projection": projection}
-            await cur.execute(_RECORD, (str(SYSTEM_ACTOR_ID), AUDIT_ACTION, extraction_target(version), Jsonb(details)))
+            await cur.execute(_RECORD, (job_id, str(SYSTEM_ACTOR_ID), AUDIT_ACTION, extraction_target(version), Jsonb(details)))
             logger.info(
                 "✅ Automatic identity maintenance finished",
                 extraction=version,
