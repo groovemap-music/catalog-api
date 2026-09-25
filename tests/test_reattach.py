@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from api.catalog_merge import CACHE_TABLE_NAMES, MergeConflictError
 from api.reattach import (
     DEPENDENT_TABLES,
     GUARD_REASONS,
@@ -25,6 +26,7 @@ from api.reattach import (
     audit_details,
     candidate_page_sql,
     census_sql,
+    failure_details,
     identifier_sql,
     reattach_item,
     run_census,
@@ -43,12 +45,21 @@ DISCOGS_ID = "4828001"
 SPLIT_ID = UUID("00000000-0000-7000-8000-00000000000a")
 DISCOGS_NATIVE_ID = UUID("00000000-0000-7000-8000-00000000000d")
 OTHER_ID = UUID("00000000-0000-7000-8000-00000000000f")
+SUPERSESSION_ID = UUID("00000000-0000-7000-8000-0000000000aa")
+DECISION_REF = UUID("00000000-0000-4000-8000-0000000000dd")
 
 RELEASE = KINDS["release"]
 
 _WRITE = re.compile(r"\b(INSERT|UPDATE|DELETE|TRUNCATE|MERGE|ALTER|CREATE|DROP)\b")
 
-NO_GUARDS: list[tuple[Any, ...]] = [(False,) * (len(DEPENDENT_TABLES) + 2)]
+NO_GUARDS: list[tuple[Any, ...]] = [(False,) * len(GUARD_REASONS)]
+
+# The rows merge step 4 reads back: both items locked, in id order (the split id sorts first).
+LOCKED_ITEMS: list[list[tuple[Any, ...]]] = [[("release",)], [("release",)]]
+
+# Merge steps 5-7 for a release with nothing to compress: open, close-survived, one re-point
+# count per moved table, one recompute count per release cache table.
+MERGE_STEPS: list[list[tuple[Any, ...]]] = [[(SUPERSESSION_ID,)], [], [(0,)], [(0,)], [(0,)], [(0,)], [(0,)], [(0,)]]
 
 
 def _statements(pool: FakePool) -> list[str]:
@@ -60,13 +71,13 @@ def _is_read(sql: str) -> bool:
     stripped = sql.strip()
     if stripped in ("BEGIN", "COMMIT", "ROLLBACK") or stripped.startswith("SET TRANSACTION"):
         return True
-    return stripped.startswith("SELECT") and not _WRITE.search(stripped.replace("FOR UPDATE", ""))
+    return stripped.startswith("SELECT") and not _WRITE.search(stripped.replace("FOR NO KEY UPDATE", "").replace("FOR UPDATE", ""))
 
 
 async def _run_item(results: list[list[tuple[Any, ...]]]) -> tuple[ItemOutcome, FakePool]:
     pool = FakePool(results)
     async with pool.connection() as conn:
-        outcome = await reattach_item(conn.cursor(), RELEASE, MBID)
+        outcome = await reattach_item(conn.cursor(), RELEASE, MBID, decision_ref=DECISION_REF)
     return outcome, pool
 
 
@@ -112,10 +123,12 @@ def _census_row(**overrides: int) -> tuple[int, ...]:
         "split",
         "stale_gm_item_id",
         *DEPENDENT_TABLES,
-        "dependents",
         "shared_native_id",
         "non_catalog_alias",
         "guarded",
+        "will_move_items",
+        "will_move_artifacts",
+        "will_move_owned_copies",
     ]
     return tuple(overrides.get(column, 0) for column in columns)
 
@@ -147,9 +160,10 @@ class TestRunCensus:
             stale_gm_item_id=1,
             artifacts=1,
             user_collections=1,
-            dependents=2,
             shared_native_id=1,
-            guarded=3,
+            guarded=1,
+            will_move_items=1,
+            will_move_artifacts=2,
         )
         pool = FakePool(
             [
@@ -167,10 +181,11 @@ class TestRunCensus:
             "unresolved": 3,
             "split": 4,
             "stale_gm_item_id": 1,
-            "eligible": 2,
-            "guarded": 3,
-            "guard_reasons": {"dependents": 2, "shared_native_id": 1, "non_catalog_alias": 0},
+            "eligible": 4,
+            "guarded": 1,
+            "guard_reasons": {"shared_native_id": 1, "non_catalog_alias": 0},
             "dependents": {"artifacts": 1, "owned_copies": 0, "observations": 0, "user_collections": 1, "user_wantlists": 0},
+            "will_move": {"items": 1, "artifacts": 2, "owned_copies": 0},
             "identifier_aliases": {
                 "barcode": {"held": 2, "contested": 1},
                 "catalog_number": {"held": 0, "contested": 0},
@@ -184,18 +199,27 @@ class TestRunCensus:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("table", DEPENDENT_TABLES)
-    async def test_each_dependent_table_is_reported_under_its_own_name(self, table: str) -> None:
-        pool = FakePool([[], [_census_row(split=1, dependents=1, guarded=1, **{table: 1})]])
+    async def test_a_dependent_is_reported_as_will_move_and_never_guards(self, table: str) -> None:
+        pool = FakePool([[], [_census_row(split=1, will_move_items=1, will_move_owned_copies=1, **{table: 1})]])
 
         census = await run_census(pool)
 
         assert census["release"]["dependents"] == {name: int(name == table) for name in DEPENDENT_TABLES}
-        assert census["release"]["guard_reasons"]["dependents"] == 1
-        assert census["release"]["eligible"] == 0
+        assert census["release"]["will_move"] == {"items": 1, "artifacts": 0, "owned_copies": 1}
+        assert census["release"]["guarded"] == 0
+        assert census["release"]["eligible"] == 1
+
+    def test_census_no_longer_guards_on_dependents(self) -> None:
+        sql = census_sql(RELEASE)
+        guarded = sql.split("AS non_catalog_alias,", 1)[1].split("AS guarded", 1)[0]
+        assert "flags.artifacts" not in guarded
+        assert "flags.shared_native_id OR flags.non_catalog_alias" in guarded
+        # The rows the merge would re-point are counted only among items that are not guarded.
+        assert "sum(flags.artifact_rows) FILTER (WHERE NOT (flags.shared_native_id OR flags.non_catalog_alias))" in sql
 
 
 class TestReattachItem:
-    """reattach_item: re-verify under lock, guard, close, re-insert, repoint the cache."""
+    """reattach_item: re-verify under lock, guard, close, re-insert, repoint the cache, merge."""
 
     @pytest.mark.asyncio
     async def test_missing_row_is_unchanged(self) -> None:
@@ -226,29 +250,68 @@ class TestReattachItem:
         assert all(_is_read(sql) for sql in _statements(pool))
 
     @pytest.mark.asyncio
-    async def test_split_is_reattached_in_lock_order(self) -> None:
+    async def test_split_is_reattached_and_merged_in_lock_order(self) -> None:
         outcome, pool = await _run_item(
             [
                 [(DISCOGS_ID, SPLIT_ID)],
                 [("musicbrainz", SPLIT_ID), ("discogs", DISCOGS_NATIVE_ID)],
-                [(SPLIT_ID,)],
+                *LOCKED_ITEMS,
                 NO_GUARDS,
+                [],  # neither item is superseded
                 [("musicbrainz", "release", MBID, 1.0), ("barcode", "release", "5012345678900", 1.0)],
                 [("musicbrainz", "release", MBID), ("barcode", "release", "5012345678900")],
                 [],
+                [(SUPERSESSION_ID,)],
+                [],  # nothing to compress
+                [(1,)],  # artifacts
+                [(2,)],  # owned copies
+                [(1,)],
+                [(0,)],
+                [(3,)],
+                [(0,)],
             ]
         )
 
-        assert outcome == ItemOutcome("reattached", (), SPLIT_ID, DISCOGS_NATIVE_ID, aliases_moved=2, identifier_collisions=0)
-        lock_row, lock_aliases, lock_item, guard, close, reinsert, set_cache = pool.calls
+        assert outcome.status == "reattached"
+        assert (outcome.split_id, outcome.discogs_native_id, outcome.aliases_moved, outcome.identifier_collisions) == (
+            SPLIT_ID,
+            DISCOGS_NATIVE_ID,
+            2,
+            0,
+        )
+        assert outcome.supersession_opened is True
+        assert outcome.moved == {"artifacts": 1, "owned_copies": 2}
+        assert outcome.caches_recomputed == {"public.releases": 1, "musicbrainz.releases": 0, "user_collections": 3, "user_wantlists": 0}
+        (
+            lock_row,
+            lock_aliases,
+            lock_split,
+            lock_discogs,
+            guard,
+            survivors,
+            close,
+            reinsert,
+            set_cache,
+            open_row,
+            close_survived,
+            repoint_artifacts,
+            repoint_copies,
+            *recomputes,
+        ) = pool.calls
         assert lock_row.sql == "SELECT discogs_release_id::text, gm_item_id FROM musicbrainz.releases WHERE mbid = %s::uuid FOR UPDATE"
         assert lock_row.params == (MBID,)
         assert lock_aliases.sql.rstrip().endswith("FOR UPDATE")
         assert lock_aliases.params == ("release", MBID, DISCOGS_ID)
-        assert lock_item.sql == "SELECT id FROM catalog_items WHERE id = %s FOR UPDATE"
-        assert lock_item.params == (SPLIT_ID,)
+        # Merge step 4 comes before any write: the split item blocks foreign-key inserts, the
+        # survivor only other merges and reverts.
+        assert lock_split.sql == "SELECT kind FROM catalog_items WHERE id = %s FOR UPDATE"
+        assert lock_split.params == (SPLIT_ID,)
+        assert lock_discogs.sql == "SELECT kind FROM catalog_items WHERE id = %s FOR NO KEY UPDATE"
+        assert lock_discogs.params == (DISCOGS_NATIVE_ID,)
         assert guard.params == {"split_id": SPLIT_ID, "mbid": MBID}
         assert "held.entity_kind = 'release'" in guard.sql
+        assert "artifacts" not in guard.sql, "the dependents guard is gone"
+        assert survivors.params == ([SPLIT_ID, DISCOGS_NATIVE_ID],)
         assert "SET valid_to = now()" in close.sql
         assert close.params == (SPLIT_ID,)
         assert "'catalog'" in reinsert.sql
@@ -262,6 +325,13 @@ class TestReattachItem:
         )
         assert set_cache.sql == "UPDATE musicbrainz.releases SET gm_item_id = %s WHERE mbid = %s::uuid"
         assert set_cache.params == (DISCOGS_NATIVE_ID, MBID)
+        assert "INSERT INTO catalog_item_supersessions" in open_row.sql
+        assert open_row.params == (SPLIT_ID, DISCOGS_NATIVE_ID, "catalog_reattachment", DECISION_REF)
+        assert close_survived.params == (SPLIT_ID,)
+        assert "UPDATE artifacts SET item_id" in repoint_artifacts.sql
+        assert "UPDATE owned_copies SET item_id" in repoint_copies.sql
+        assert repoint_copies.params == {"survivor": DISCOGS_NATIVE_ID, "superseded": SPLIT_ID, "supersession": SUPERSESSION_ID}
+        assert [call.params for call in recomputes] == [([SPLIT_ID, DISCOGS_NATIVE_ID],)] * 4
         # The former native id is never deleted.
         assert not any("DELETE" in sql for sql in _statements(pool))
 
@@ -271,34 +341,83 @@ class TestReattachItem:
             [
                 [(DISCOGS_ID, SPLIT_ID)],
                 [("musicbrainz", DISCOGS_NATIVE_ID), ("discogs", DISCOGS_NATIVE_ID)],
-                [(SPLIT_ID,)],
+                *LOCKED_ITEMS,
                 NO_GUARDS,
+                [],
                 [],  # nothing left on the orphan
                 [],
+                *MERGE_STEPS,
             ]
         )
 
         assert outcome.status == "reattached"
         assert outcome.split_id == SPLIT_ID
         assert outcome.aliases_moved == 0
-        # No re-insert when nothing was closed; the cache still follows the alias.
-        assert not any(sql.lstrip().startswith("INSERT") for sql in _statements(pool))
-        assert pool.calls[-1].params == (DISCOGS_NATIVE_ID, MBID)
+        # No alias re-insert when nothing was closed; the cache still follows the alias.
+        assert not any(sql.lstrip().startswith("INSERT INTO provider_aliases") for sql in _statements(pool))
+        assert pool.calls[7].params == (DISCOGS_NATIVE_ID, MBID)
+
+    @pytest.mark.asyncio
+    async def test_an_item_already_superseded_into_the_discogs_item_reuses_its_supersession(self) -> None:
+        """The loader race's residue: the re-run moves what is left under the open row, opening none."""
+        outcome, pool = await _run_item(
+            [
+                [(DISCOGS_ID, SPLIT_ID)],
+                [("musicbrainz", DISCOGS_NATIVE_ID), ("discogs", DISCOGS_NATIVE_ID)],
+                *LOCKED_ITEMS,
+                NO_GUARDS,
+                [(SPLIT_ID, SUPERSESSION_ID, DISCOGS_NATIVE_ID)],
+                [],
+                [],
+                [(0,)],
+                [(1,)],
+                *[[(0,)]] * 4,
+            ]
+        )
+
+        assert outcome.status == "reattached"
+        assert outcome.supersession_opened is False
+        assert outcome.moved == {"artifacts": 0, "owned_copies": 1}
+        assert not any("INSERT INTO catalog_item_supersessions" in sql for sql in _statements(pool))
+        assert pool.calls[9].params["supersession"] == SUPERSESSION_ID
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("flag", "reason"),
-        [(table, "dependents") for table in DEPENDENT_TABLES]
-        + [("shared_native_id", "shared_native_id"), ("non_catalog_alias", "non_catalog_alias")],
+        ("survivors", "match"),
+        [
+            ([(DISCOGS_NATIVE_ID, SUPERSESSION_ID, OTHER_ID)], "itself superseded"),
+            ([(SPLIT_ID, SUPERSESSION_ID, OTHER_ID)], "already superseded"),
+        ],
     )
-    async def test_guarded_item_is_skipped_before_any_write(self, flag: str, reason: str) -> None:
-        names = [*DEPENDENT_TABLES, "shared_native_id", "non_catalog_alias"]
-        flags = tuple(name == flag for name in names)
+    async def test_a_merge_that_cannot_happen_raises_before_any_write(self, survivors: list[tuple[Any, ...]], match: str) -> None:
+        pool = FakePool([[(DISCOGS_ID, SPLIT_ID)], [("musicbrainz", SPLIT_ID), ("discogs", DISCOGS_NATIVE_ID)], *LOCKED_ITEMS, NO_GUARDS, survivors])
+
+        with pytest.raises(MergeConflictError, match=match):
+            async with pool.connection() as conn, conn.transaction():
+                await reattach_item(conn.cursor(), RELEASE, MBID, decision_ref=DECISION_REF)
+
+        assert all(_is_read(sql) for sql in _statements(pool))
+        assert pool.calls[-1].sql == "ROLLBACK"
+
+    @pytest.mark.asyncio
+    async def test_items_of_different_kinds_never_merge(self) -> None:
+        pool = FakePool([[(DISCOGS_ID, SPLIT_ID)], [("musicbrainz", SPLIT_ID), ("discogs", DISCOGS_NATIVE_ID)], [("release",)], [("master",)]])
+
+        with pytest.raises(MergeConflictError, match="kinds differ"):
+            async with pool.connection() as conn:
+                await reattach_item(conn.cursor(), RELEASE, MBID, decision_ref=DECISION_REF)
+
+        assert all(_is_read(sql) for sql in _statements(pool))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("reason", GUARD_REASONS)
+    async def test_guarded_item_is_skipped_before_any_write(self, reason: str) -> None:
+        flags = tuple(name == reason for name in GUARD_REASONS)
         outcome, pool = await _run_item(
             [
                 [(DISCOGS_ID, SPLIT_ID)],
                 [("musicbrainz", SPLIT_ID), ("discogs", DISCOGS_NATIVE_ID)],
-                [(SPLIT_ID,)],
+                *LOCKED_ITEMS,
                 [flags],
             ]
         )
@@ -308,25 +427,30 @@ class TestReattachItem:
         assert outcome.split_id == SPLIT_ID
         assert all(_is_read(sql) for sql in _statements(pool))
 
+    def test_only_the_two_alias_guards_remain(self) -> None:
+        assert GUARD_REASONS == ("shared_native_id", "non_catalog_alias")
+
     @pytest.mark.asyncio
     async def test_identifier_already_on_the_discogs_item_is_not_duplicated(self) -> None:
         outcome, pool = await _run_item(
             [
                 [(DISCOGS_ID, SPLIT_ID)],
                 [("musicbrainz", SPLIT_ID), ("discogs", DISCOGS_NATIVE_ID)],
-                [(SPLIT_ID,)],
+                *LOCKED_ITEMS,
                 NO_GUARDS,
+                [],
                 [("musicbrainz", "release", MBID, 1.0), ("barcode", "release", "5012345678900", 1.0)],
                 [("musicbrainz", "release", MBID)],
                 [("barcode", "release", "5012345678900", DISCOGS_NATIVE_ID)],
                 [],
+                *MERGE_STEPS,
             ]
         )
 
         assert outcome.status == "reattached"
         assert outcome.aliases_moved == 1
         assert outcome.identifier_collisions == 1
-        holders = pool.calls[6]
+        holders = pool.calls[8]
         assert holders.params == (["barcode"], ["release"], ["5012345678900"])
 
     @pytest.mark.asyncio
@@ -335,8 +459,9 @@ class TestReattachItem:
             [
                 [(DISCOGS_ID, SPLIT_ID)],
                 [("musicbrainz", SPLIT_ID), ("discogs", DISCOGS_NATIVE_ID)],
-                [(SPLIT_ID,)],
+                *LOCKED_ITEMS,
                 NO_GUARDS,
+                [],
                 [("barcode", "release", "5012345678900", 1.0)],
                 [],
                 [("barcode", "release", "5012345678900", OTHER_ID)],
@@ -345,9 +470,10 @@ class TestReattachItem:
 
         with pytest.raises(ReattachConflictError):
             async with pool.connection() as conn, conn.transaction():
-                await reattach_item(conn.cursor(), RELEASE, MBID)
+                await reattach_item(conn.cursor(), RELEASE, MBID, decision_ref=DECISION_REF)
 
         assert pool.calls[-1].sql == "ROLLBACK"
+        assert not any("catalog_item_supersessions (" in sql for sql in _statements(pool))
 
 
 class TestRunReattachment:
@@ -377,31 +503,59 @@ class TestRunReattachment:
         # release: one page then the empty page; every other kind: one empty page.
         pool = FakePool([release_page, [], [], [], []])
         outcomes = [
-            ItemOutcome("reattached", (), SPLIT_ID, DISCOGS_NATIVE_ID, aliases_moved=2, identifier_collisions=1),
-            ItemOutcome("guarded", ("dependents", "non_catalog_alias"), SPLIT_ID, DISCOGS_NATIVE_ID),
+            ItemOutcome(
+                "reattached",
+                (),
+                SPLIT_ID,
+                DISCOGS_NATIVE_ID,
+                aliases_moved=2,
+                identifier_collisions=1,
+                supersession_opened=True,
+                moved={"artifacts": 0, "owned_copies": 2},
+                caches_recomputed={"musicbrainz.releases": 1, "user_collections": 2},
+            ),
+            ItemOutcome("guarded", ("shared_native_id", "non_catalog_alias"), SPLIT_ID, DISCOGS_NATIVE_ID),
             ReattachConflictError("aliases held by another item"),
+            MergeConflictError("kinds differ"),
         ]
+        release_page.append(("3f2a8c4e-1111-4222-8333-444455556666", "4", "3f2a8c4e-1111-4222-8333-444455556666"))
         reattach_one = AsyncMock(side_effect=outcomes)
         monkeypatch.setattr(reattach_module, "_reattach_one", reattach_one)
 
-        report = await run_reattachment(pool, apply=True, batch_size=3)
+        report = await run_reattachment(pool, apply=True, batch_size=4, decision_ref=DECISION_REF)
 
         assert report["apply"] is True
         assert report["outcomes"]["release"] == {
             "reattached": 1,
             "guarded": 1,
             "unchanged": 0,
-            "failed": 1,
+            "failed": 2,
             "aliases_moved": 2,
             "identifier_collisions": 1,
-            "guard_reasons": {"dependents": 1, "shared_native_id": 0, "non_catalog_alias": 1},
+            "guard_reasons": {"shared_native_id": 1, "non_catalog_alias": 1},
+            "supersessions_opened": 1,
+            "chains_compressed": 0,
+            "merged_with_dependents": 1,
+            "moved": {"artifacts": 0, "owned_copies": 2},
+            "caches_recomputed": dict.fromkeys(CACHE_TABLE_NAMES, 0) | {"musicbrainz.releases": 1, "user_collections": 2},
         }
         for name in ("release_group", "artist", "label"):
             assert report["outcomes"][name]["reattached"] == 0
         # The cursor advances past the last key of the page, guarded or not.
-        assert pool.calls[0].params == ("00000000-0000-0000-0000-000000000000", 3)
-        assert pool.calls[1].params == ("2f2a8c4e-1111-4222-8333-444455556666", 3)
+        assert pool.calls[0].params == ("00000000-0000-0000-0000-000000000000", 4)
+        assert pool.calls[1].params == ("3f2a8c4e-1111-4222-8333-444455556666", 4)
         assert [call.args[2] for call in reattach_one.await_args_list] == [row[0] for row in release_page]
+        # Every item's supersession names the run's audit entry.
+        assert {call.args[3] for call in reattach_one.await_args_list} == {DECISION_REF}
+
+    @pytest.mark.asyncio
+    async def test_apply_without_a_decision_ref_is_refused_before_anything_runs(self) -> None:
+        pool = FakePool()
+
+        with pytest.raises(ValueError, match="decision_ref"):
+            await run_reattachment(pool, apply=True)
+
+        assert pool.calls == []
 
     @pytest.mark.asyncio
     async def test_each_item_runs_in_its_own_transaction(self) -> None:
@@ -409,7 +563,7 @@ class TestRunReattachment:
 
         pool = FakePool([[]])
 
-        outcome = await _reattach_one(pool, RELEASE, MBID)
+        outcome = await _reattach_one(pool, RELEASE, MBID, DECISION_REF)
 
         assert outcome.status == "unchanged"
         assert _statements(pool)[0] == "BEGIN"
@@ -422,20 +576,40 @@ class TestTallyAndAudit:
         tally.add(ItemOutcome("unchanged"))
         tally.add(ItemOutcome("guarded", ("shared_native_id",)))
 
+        tally.add(ItemOutcome("reattached", chains_compressed=2, moved={"artifacts": 1, "owned_copies": 0}))
+        tally.add(ItemOutcome("reattached", supersession_opened=True))
+
         assert tally.as_dict() == {
-            "reattached": 0,
+            "reattached": 2,
             "guarded": 1,
             "unchanged": 1,
             "failed": 0,
             "aliases_moved": 0,
             "identifier_collisions": 0,
             "guard_reasons": dict.fromkeys(GUARD_REASONS, 0) | {"shared_native_id": 1},
+            "supersessions_opened": 1,
+            "chains_compressed": 2,
+            "merged_with_dependents": 1,
+            "moved": {"artifacts": 1, "owned_copies": 0},
+            "caches_recomputed": dict.fromkeys(CACHE_TABLE_NAMES, 0),
         }
+
+    def test_the_tally_carries_no_ids(self) -> None:
+        """What reaches admin_audit_log, which outlives erasure, is counts keyed by name only."""
+        tally = KindTally()
+        tally.add(ItemOutcome("reattached", (), SPLIT_ID, DISCOGS_NATIVE_ID, moved={"artifacts": 1, "owned_copies": 1}))
+
+        rendered = repr(tally.as_dict())
+        assert str(SPLIT_ID) not in rendered
+        assert "UUID" not in rendered
 
     def test_audit_details_carry_job_id_and_outcomes(self) -> None:
         report = {"apply": True, "census": {}, "outcomes": {"release": {"reattached": 1}}}
 
         assert audit_details(report, "job-1") == {"job_id": "job-1", "apply": True, "outcomes": {"release": {"reattached": 1}}}
+
+    def test_failure_details_name_the_error_class_only(self) -> None:
+        assert failure_details("job-1", RuntimeError("password=secret")) == {"job_id": "job-1", "apply": True, "error": "RuntimeError"}
 
     def test_identifier_providers_are_the_alias_namespaces(self) -> None:
         assert IDENTIFIER_PROVIDERS == ("barcode", "catalog_number", "isrc", "matrix")
@@ -489,6 +663,7 @@ class TestCli:
             "guarded": 1,
             "guard_reasons": {},
             "dependents": {},
+            "will_move": {"items": 1, "artifacts": 0, "owned_copies": 2},
             "unresolved": 5,
             "identifier_aliases": {},
         }
@@ -510,10 +685,12 @@ class TestCli:
 
         out = capsys.readouterr().out
         assert "release: 2 split, 0 stale, 1 eligible, 1 guarded" in out
+        assert "will move {'items': 1, 'artifacts': 0, 'owned_copies': 2}" in out
         assert seen["frame"]["apply"] is apply
         if apply:
             assert seen["frame"]["admin_id"] == admin
             assert "release: 1 re-attached, 1 guarded" in out
+            assert "0 merged with dependents" in out
             assert "catalog-identity-projection" in out
         else:
             assert seen["frame"]["admin_id"] is None
@@ -559,7 +736,7 @@ class TestRunOnce:
         report = await reattach_module._run_once(apply=False, admin_id=None, batch_size=10, job_id="job")
 
         assert report == {"apply": False, "census": {}}
-        run.assert_awaited_once_with(pool, apply=False, batch_size=10)
+        run.assert_awaited_once_with(pool, apply=False, batch_size=10, decision_ref=None)
         audit.assert_not_awaited()
         pool.initialize.assert_awaited_once()
         pool.close.assert_awaited_once()
@@ -574,12 +751,43 @@ class TestRunOnce:
         audit = AsyncMock()
         monkeypatch.setattr(reattach_module, "record_audit_entry", audit)
         admin = str(uuid4())
+        job_id = str(uuid4())
 
-        assert await reattach_module._run_once(apply=True, admin_id=admin, batch_size=10, job_id="job") == report
+        assert await reattach_module._run_once(apply=True, admin_id=admin, batch_size=10, job_id=job_id) == report
+
+        reattach_module.run_reattachment.assert_awaited_once_with(pool, apply=True, batch_size=10, decision_ref=UUID(job_id))
+        audit.assert_awaited_once_with(
+            pool=pool,
+            admin_id=admin,
+            action="identity.reattach.apply",
+            target=job_id,
+            details=audit_details(report, job_id),
+            entry_id=job_id,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_failed_apply_is_audited_under_its_decision_ref_and_reraised(self, pool: AsyncMock, monkeypatch: pytest.MonkeyPatch) -> None:
+        import api.reattach as reattach_module
+
+        monkeypatch.setattr(reattach_module, "_is_admin", AsyncMock(return_value=True))
+        monkeypatch.setattr(reattach_module, "run_reattachment", AsyncMock(side_effect=RuntimeError("connection lost")))
+        audit = AsyncMock()
+        monkeypatch.setattr(reattach_module, "record_audit_entry", audit)
+        admin = str(uuid4())
+        job_id = str(uuid4())
+
+        with pytest.raises(RuntimeError, match="connection lost"):
+            await reattach_module._run_once(apply=True, admin_id=admin, batch_size=10, job_id=job_id)
 
         audit.assert_awaited_once_with(
-            pool=pool, admin_id=admin, action="identity.reattach.apply", target="job", details=audit_details(report, "job")
+            pool=pool,
+            admin_id=admin,
+            action="identity.reattach.failed",
+            target=job_id,
+            details=failure_details(job_id, RuntimeError()),
+            entry_id=job_id,
         )
+        pool.close.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_apply_by_a_non_admin_changes_nothing(self, pool: AsyncMock, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -680,7 +888,7 @@ class TestRunReattachJob:
         finally:
             admin_mod._pool = original_pool
 
-        mock_run.assert_awaited_once_with(fake_pool, apply=apply)
+        mock_run.assert_awaited_once_with(fake_pool, apply=apply, decision_ref=UUID(job_id) if apply else None)
         if apply:
             mock_audit.assert_awaited_once_with(
                 pool=fake_pool,
@@ -688,19 +896,22 @@ class TestRunReattachJob:
                 action="identity.reattach.apply",
                 target=job_id,
                 details={"job_id": job_id, "apply": True, "outcomes": {"release": {"reattached": 2}}},
+                entry_id=job_id,
             )
         else:
             mock_audit.assert_not_awaited()
         assert job_id not in admin_mod._reattach_tasks
 
     @pytest.mark.asyncio
+    @patch("api.routers.admin.record_audit_entry", new_callable=AsyncMock)
     @patch("api.routers.admin.run_reattachment", new_callable=AsyncMock)
-    async def test_failure_is_swallowed_and_untracked(self, mock_run: AsyncMock) -> None:
+    async def test_failure_is_swallowed_untracked_and_audited_under_its_decision_ref(self, mock_run: AsyncMock, mock_audit: AsyncMock) -> None:
         import api.routers.admin as admin_mod
 
         mock_run.side_effect = RuntimeError("postgres unreachable")
         original_pool = admin_mod._pool
-        admin_mod._pool = MagicMock()
+        fake_pool = MagicMock()
+        admin_mod._pool = fake_pool
         job_id = str(uuid4())
         admin_mod._reattach_tasks[job_id] = MagicMock()
         try:
@@ -709,6 +920,14 @@ class TestRunReattachJob:
             admin_mod._pool = original_pool
 
         assert job_id not in admin_mod._reattach_tasks
+        mock_audit.assert_awaited_once_with(
+            pool=fake_pool,
+            admin_id="admin",
+            action="identity.reattach.failed",
+            target=job_id,
+            details={"job_id": job_id, "apply": True, "error": "RuntimeError"},
+            entry_id=job_id,
+        )
 
     @pytest.mark.asyncio
     async def test_noop_when_pool_missing(self) -> None:

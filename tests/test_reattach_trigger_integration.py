@@ -5,11 +5,8 @@ provides, so the advisory lock, the `users` foreign key on `admin_audit_log`, an
 query are the server's own. Nothing here touches a shared database: `just test-integration`
 starts throwaway containers.
 
-`public.loader_extraction_latch` is declared by `database-schema` at a revision newer than the
-one this repository pins for its test fixture, so the fixture below declares it with the
-producer's DDL (`groovemap_schema/postgres.py`, "loader_extraction_latch table" plus its
-`generation` column). That is test scaffolding for a relation this service only reads; the
-production relation always comes from `database-schema`.
+`public.loader_extraction_latch` comes from the pinned `database-schema` DDL the
+`postgres_pool` fixture applies, exactly as in production; this service only reads it.
 """
 
 from __future__ import annotations
@@ -35,21 +32,10 @@ __all__ = ["neo4j_driver", "postgres_pool"]
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
-_LATCH_DDL = """
-    CREATE TABLE IF NOT EXISTS loader_extraction_latch (
-        loader       TEXT NOT NULL,
-        version      TEXT NOT NULL,
-        signals      TEXT[] NOT NULL DEFAULT '{}',
-        created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        refreshed_at TIMESTAMPTZ,
-        generation   BIGINT,
-        CONSTRAINT loader_extraction_latch_pkey PRIMARY KEY (loader, version)
-    )
-"""
-
+# The loader's refresh-job table references the latch, so it is emptied with it.
 _RESET = (
-    "TRUNCATE musicbrainz.releases, musicbrainz.release_groups, musicbrainz.artists, musicbrainz.labels, public.releases, loader_extraction_latch"
+    "TRUNCATE musicbrainz.releases, musicbrainz.release_groups, musicbrainz.artists, musicbrainz.labels, public.releases, "
+    "loader_extraction_latch, loader_derived_refresh_job"
 )
 
 _ALL = ["artists", "labels", "masters", "releases"]
@@ -57,13 +43,12 @@ _ALL = ["artists", "labels", "masters", "releases"]
 
 @pytest_asyncio.fixture
 async def pool(postgres_pool: AsyncPostgreSQLPool) -> AsyncPostgreSQLPool:
-    await _execute(postgres_pool, _LATCH_DDL)
     await _execute(postgres_pool, _RESET)
     return postgres_pool
 
 
 @pytest_asyncio.fixture
-async def second_pool(pool: AsyncPostgreSQLPool) -> AsyncIterator[AsyncPostgreSQLPool]:  # noqa: ARG001 - after `pool` has declared the latch
+async def second_pool(pool: AsyncPostgreSQLPool) -> AsyncIterator[AsyncPostgreSQLPool]:  # noqa: ARG001 - after `pool` has reset the tables
     """A second replica: its own pool, so its own PostgreSQL sessions and advisory locks."""
     host, port = parse_postgres_host_port(os.environ["POSTGRES_HOST"])
     replica = AsyncPostgreSQLPool(
@@ -136,11 +121,13 @@ async def test_incomplete_or_foreign_latch_rows_do_not_trigger(pool: AsyncPostgr
 
 
 async def test_missing_latch_relation_is_not_an_error(pool: AsyncPostgreSQLPool, neo4j_driver: AsyncResilientNeo4jDriver) -> None:
-    await _execute(pool, "DROP TABLE loader_extraction_latch")
+    # Hidden by a rename rather than dropped: the loader's refresh-job table holds a foreign key
+    # to it, and a rename keeps that constraint for the rename back.
+    await _execute(pool, "ALTER TABLE loader_extraction_latch RENAME TO loader_extraction_latch_hidden")
     try:
         assert await run_pending(pool, neo4j_driver) is None
     finally:
-        await _execute(pool, _LATCH_DDL)
+        await _execute(pool, "ALTER TABLE loader_extraction_latch_hidden RENAME TO loader_extraction_latch")
 
 
 async def test_a_newer_extraction_runs_again_and_an_older_straggler_does_not(

@@ -15,15 +15,19 @@ catalog-api. It has two halves:
 - :func:`run_census` is read-only. It runs in a `READ ONLY` transaction, so the server
   rejects any write it might ever issue, and it counts per kind what an applying run would
   touch. It is also the whole of a dry run.
-- :func:`run_reattachment` with ``apply=True`` repairs each item in its own transaction:
-  close every currently valid alias on the split native id, re-insert the same aliases
-  against the Discogs native id as `source = 'catalog'`, and point that one MusicBrainz
-  row's `gm_item_id` at the Discogs native id. The former native id is never deleted
-  (ADR 0009 defines no merge).
+- :func:`run_reattachment` with ``apply=True`` repairs each item in its own transaction.
+  ADR 0014's three alias steps close every currently valid alias on the split native id,
+  re-insert the same aliases against the Discogs native id as `source = 'catalog'`, and
+  point that one MusicBrainz row's `gm_item_id` at the Discogs native id. ADR 0009's
+  2026-09-25 amendment then appends the native-id merge (`api/catalog_merge.py`) to the same
+  transaction: the split item is superseded into the Discogs item (chains compressed), its
+  artifacts and owned copies are re-pointed to the survivor with every move ledgered in
+  `catalog_item_moves`, and the `gm_item_id` caches are recomputed. The former native id is
+  kept, never deleted, and resolves to the survivor through `public.resolve_catalog_item`.
 
 `source = 'catalog'` is correct because every re-inserted alias is one the provider already
 asserted — the value the loader would have written had the Discogs row arrived first. This
-module is the only writer of `catalog` outside ingestion, and it writes nothing else.
+module is the only writer of `catalog` outside ingestion, and it writes no other alias source.
 
 **Population.** A MusicBrainz row whose Discogs id resolves (a currently valid `discogs`
 alias, native id *D*) and which is attached to some other native id *X*:
@@ -38,14 +42,26 @@ left to the Discogs loader.
 
 **Guards.** An item is skipped, reported, and never modified when its split native id:
 
-- has a dependent in `artifacts`, `owned_copies`, `observations`, `user_collections`, or
-  `user_wantlists` (ADR 0014 section 3's guard; it waits for the native-id merge decision);
 - holds a current alias that is not this row's to move — a `discogs` alias, another
   MusicBrainz row's alias, or any namespace outside the identifier set below. That is a real
   item of its own, not a load-order orphan (for instance a MusicBrainz row whose Discogs link
   was edited), and moving its aliases would split it instead;
 - holds a current alias whose `source` is not `catalog`. Re-inserting it as `catalog` would
   rewrite a person's or a heuristic's assertion as the provider's.
+
+ADR 0014's dependents guard is gone: it was removed in the same change that added the merge,
+as that ADR's 2026-09-25 amendment requires. A dependent (an artifact or owned copy, and the
+observations hanging off them, or a collection or wantlist row caching the item) no longer
+stops a re-attachment; the merge moves it. A skip wrote nothing, so every item an earlier run
+skipped for dependents is still in the population and the next run merges it: no separate
+release list is needed. Compare that run's ``merged_with_dependents`` count against the
+earlier runs' ``guard_reasons.dependents``.
+
+A merge that cannot happen as the rows stand — the two items differ in kind, the Discogs item
+is itself superseded, or the split item already resolves to a third item — rolls the whole
+item back, alias steps included, and is counted as failed. A split item already superseded
+into this Discogs item (a re-run after the loader race below) is not an error: its open
+supersession is reused and anything left on the split item moves under it.
 
 **Identifier-alias rule.** The partial unique index on `(provider, entity_kind, external_id)
 WHERE valid_to IS NULL` means a barcode or catalogue number held by the split item cannot at
@@ -60,15 +76,26 @@ alias rather than move it.
 **Concurrency.** Each item's transaction locks, in order: the MusicBrainz row (`FOR UPDATE`,
 so a loader mid-upsert of the same row finishes first and is re-read), the two alias rows
 that define the split (`FOR UPDATE`, then re-verified, so a second job run or an item already
-repaired is a no-op), and the split `catalog_items` row (`FOR UPDATE`, which conflicts with
-the `FOR KEY SHARE` a foreign-key insert into `artifacts` or `owned_copies` takes, so the
-dependents guard cannot be raced by one). The closing `UPDATE` then makes any concurrent
+repaired is a no-op), and both `catalog_items` rows in id order — the split item `FOR UPDATE`
+and the Discogs item `FOR NO KEY UPDATE` (merge step 4, taken before any write). The split
+item's lock conflicts with the `FOR KEY SHARE` a foreign-key insert into `artifacts` or
+`owned_copies` takes, so no copy or artifact can be created against it while its dependents
+move and be left behind; the Discogs item's lock serializes any concurrent merge or revert of
+it without blocking a loader attaching an alias to it. The closing `UPDATE` then makes any concurrent
 loader `attach_aliases` of the same key wait on this transaction, after which its `ON
 CONFLICT DO NOTHING` + re-select converges on *D*. The remaining window is a loader whose
 attach resolved *X* before this transaction started and whose row upsert lands after it
 commits: that loader writes `gm_item_id = X` back and may attach new identifier aliases to
-*X*. The row then falls into the *stale* population, and the next run moves it; the loader's
-own next message for that row converges on *D* as well.
+*X*. The row then falls into the *stale* population, and the next run moves it under the
+supersession already open for *X*; the loader's own next message for that row converges on *D*
+as well. The same window exists for a writer that resolved *X* before the merge and inserts a
+copy or artifact against it after the merge commits: that row lands on a superseded item, and
+no later run finds it, because the MusicBrainz row is no longer a candidate. No such writer
+exists today (a copy follows its collection row's Discogs item). One added later must resolve
+through `public.resolve_catalog_item`.
+
+Every supersession an applying run opens names the run's `admin_audit_log` entry as its
+`decision_ref`: callers pass the id they then write that entry under (the job id).
 
 After an applying run, trigger the `gm_id` projection (`POST /api/admin/identity/project` or
 `catalog-identity-projection`) so the graph follows the alias table.
@@ -88,6 +115,7 @@ import structlog
 from common.config import get_secret, parse_postgres_host_port
 
 from api.audit_log import record_audit_entry
+from api.catalog_merge import CACHE_TABLE_NAMES, MOVED_TABLES, MergeConflictError, current_supersession, lock_items, merge_items
 
 
 logger = structlog.get_logger(__name__)
@@ -119,7 +147,7 @@ DEPENDENT_TABLES: Final[tuple[str, ...]] = ("artifacts", "owned_copies", "observ
 # These, and the row's own `musicbrainz` alias, are the only aliases the job moves.
 IDENTIFIER_PROVIDERS: Final[tuple[str, ...]] = ("barcode", "catalog_number", "isrc", "matrix")
 
-GUARD_REASONS: Final[tuple[str, ...]] = ("dependents", "shared_native_id", "non_catalog_alias")
+GUARD_REASONS: Final[tuple[str, ...]] = ("shared_native_id", "non_catalog_alias")
 
 OUTCOMES: Final[tuple[str, ...]] = ("reattached", "guarded", "unchanged", "failed")
 
@@ -161,19 +189,27 @@ _CANDIDATE: Final = """(
 
 _SPLIT_ID: Final = "CASE WHEN linked.musicbrainz_native_id <> linked.discogs_native_id THEN linked.musicbrainz_native_id ELSE linked.gm_item_id END"
 
+# What a merge of one split native id would touch, for the census only: whether each dependent
+# table references it, and how many artifact and owned-copy rows would be re-pointed. An
+# observation always hangs off an artifact or an owned copy, so it is reached through both;
+# it follows its subject and is not itself moved.
+_DEPENDENTS: Final = """
+EXISTS (SELECT 1 FROM artifacts AS dep WHERE dep.item_id = {split_id}) AS artifacts,
+EXISTS (SELECT 1 FROM owned_copies AS dep WHERE dep.item_id = {split_id}) AS owned_copies,
+(EXISTS (SELECT 1 FROM observations AS dep JOIN artifacts AS subject ON subject.id = dep.artifact_id
+         WHERE subject.item_id = {split_id})
+ OR EXISTS (SELECT 1 FROM observations AS dep JOIN owned_copies AS subject ON subject.id = dep.owned_copy_id
+            WHERE subject.item_id = {split_id})) AS observations,
+EXISTS (SELECT 1 FROM user_collections AS dep WHERE dep.gm_item_id = {split_id}) AS user_collections,
+EXISTS (SELECT 1 FROM user_wantlists AS dep WHERE dep.gm_item_id = {split_id}) AS user_wantlists,
+(SELECT count(*) FROM artifacts AS dep WHERE dep.item_id = {split_id}) AS artifact_rows,
+(SELECT count(*) FROM owned_copies AS dep WHERE dep.item_id = {split_id}) AS owned_copy_rows,
+"""
+
 # The guard flags for one split native id, shared by the census (correlated to a candidate
 # row) and the per-item transaction (bound to parameters), so the two cannot disagree about
-# what is guarded. An observation always hangs off an artifact or an owned copy, so it is
-# reached through both.
+# what is guarded.
 _GUARDS: Final = f"""
-EXISTS (SELECT 1 FROM artifacts AS dep WHERE dep.item_id = {{split_id}}) AS artifacts,
-EXISTS (SELECT 1 FROM owned_copies AS dep WHERE dep.item_id = {{split_id}}) AS owned_copies,
-(EXISTS (SELECT 1 FROM observations AS dep JOIN artifacts AS subject ON subject.id = dep.artifact_id
-         WHERE subject.item_id = {{split_id}})
- OR EXISTS (SELECT 1 FROM observations AS dep JOIN owned_copies AS subject ON subject.id = dep.owned_copy_id
-            WHERE subject.item_id = {{split_id}})) AS observations,
-EXISTS (SELECT 1 FROM user_collections AS dep WHERE dep.gm_item_id = {{split_id}}) AS user_collections,
-EXISTS (SELECT 1 FROM user_wantlists AS dep WHERE dep.gm_item_id = {{split_id}}) AS user_wantlists,
 EXISTS (SELECT 1 FROM provider_aliases AS held
         WHERE held.native_id = {{split_id}} AND held.valid_to IS NULL
           AND NOT (held.provider IN ({_IDENTIFIER_LIST})
@@ -183,7 +219,9 @@ EXISTS (SELECT 1 FROM provider_aliases AS held
         WHERE held.native_id = {{split_id}} AND held.valid_to IS NULL AND held.source <> 'catalog') AS non_catalog_alias
 """  # noqa: S608 — composed of module constants only
 
-_DEPENDENT_FLAGS: Final = " OR ".join(f"flags.{table}" for table in DEPENDENT_TABLES)
+_GUARDED: Final = "(flags.shared_native_id OR flags.non_catalog_alias)"
+
+_MOVES: Final = f"(NOT {_GUARDED} AND (flags.artifact_rows > 0 OR flags.owned_copy_rows > 0))"
 
 # One pass over the linked rows per kind. The LATERAL subquery yields a row only for a
 # candidate, so the guard EXISTS probes run for candidates alone.
@@ -193,13 +231,16 @@ SELECT count(*) AS linked,
        count(*) FILTER (WHERE flags.split) AS split,
        count(*) FILTER (WHERE NOT flags.split) AS stale_gm_item_id,
        {", ".join(f"count(*) FILTER (WHERE flags.{table}) AS {table}" for table in DEPENDENT_TABLES)},
-       count(*) FILTER (WHERE {_DEPENDENT_FLAGS}) AS dependents,
        count(*) FILTER (WHERE flags.shared_native_id) AS shared_native_id,
        count(*) FILTER (WHERE flags.non_catalog_alias) AS non_catalog_alias,
-       count(*) FILTER (WHERE {_DEPENDENT_FLAGS} OR flags.shared_native_id OR flags.non_catalog_alias) AS guarded
+       count(*) FILTER (WHERE {_GUARDED}) AS guarded,
+       count(*) FILTER (WHERE {_MOVES}) AS will_move_items,
+       coalesce(sum(flags.artifact_rows) FILTER (WHERE NOT {_GUARDED}), 0) AS will_move_artifacts,
+       coalesce(sum(flags.owned_copy_rows) FILTER (WHERE NOT {_GUARDED}), 0) AS will_move_owned_copies
 FROM ({{linked}}) AS linked
 LEFT JOIN LATERAL (
     SELECT linked.musicbrainz_native_id <> linked.discogs_native_id AS split,
+           {_DEPENDENTS.format(split_id=_SPLIT_ID)}
            {_GUARDS.format(split_id=_SPLIT_ID, mbid="linked.mbid", entity_kind="{entity_kind}")}
     WHERE {_CANDIDATE}
 ) AS flags ON TRUE
@@ -211,10 +252,12 @@ _CENSUS_COLUMNS: Final[tuple[str, ...]] = (
     "split",
     "stale_gm_item_id",
     *DEPENDENT_TABLES,
-    "dependents",
     "shared_native_id",
     "non_catalog_alias",
     "guarded",
+    "will_move_items",
+    "will_move_artifacts",
+    "will_move_owned_copies",
 )
 
 # The Discogs release document carries its identifier aliases already normalized (ADR 0011's
@@ -262,8 +305,6 @@ WHERE valid_to IS NULL
   AND ((provider = 'musicbrainz' AND external_id = %s) OR (provider = 'discogs' AND external_id = %s))
 FOR UPDATE
 """
-
-_LOCK_ITEM: Final = "SELECT id FROM catalog_items WHERE id = %s FOR UPDATE"
 
 _GUARD_ITEM: Final = "SELECT " + _GUARDS.format(split_id="%(split_id)s", mbid="%(mbid)s", entity_kind="{entity_kind}")
 
@@ -321,7 +362,7 @@ class ReattachConflictError(RuntimeError):
 
 @dataclass(slots=True)
 class ItemOutcome:
-    """What one item's transaction did."""
+    """What one item's transaction did. Counts only: no row or user id is carried."""
 
     status: str
     reasons: tuple[str, ...] = ()
@@ -329,11 +370,15 @@ class ItemOutcome:
     discogs_native_id: UUID | None = None
     aliases_moved: int = 0
     identifier_collisions: int = 0
+    supersession_opened: bool = False
+    chains_compressed: int = 0
+    moved: dict[str, int] = field(default_factory=lambda: dict.fromkeys(MOVED_TABLES, 0))
+    caches_recomputed: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
 class KindTally:
-    """Per-kind counts of an applying run."""
+    """Per-kind counts of an applying run: what `admin_audit_log` records, per table only."""
 
     reattached: int = 0
     guarded: int = 0
@@ -342,6 +387,11 @@ class KindTally:
     aliases_moved: int = 0
     identifier_collisions: int = 0
     guard_reasons: dict[str, int] = field(default_factory=lambda: dict.fromkeys(GUARD_REASONS, 0))
+    supersessions_opened: int = 0
+    chains_compressed: int = 0
+    merged_with_dependents: int = 0
+    moved: dict[str, int] = field(default_factory=lambda: dict.fromkeys(MOVED_TABLES, 0))
+    caches_recomputed: dict[str, int] = field(default_factory=lambda: dict.fromkeys(CACHE_TABLE_NAMES, 0))
 
     def add(self, outcome: ItemOutcome) -> None:
         setattr(self, outcome.status, getattr(self, outcome.status) + 1)
@@ -349,6 +399,13 @@ class KindTally:
         self.identifier_collisions += outcome.identifier_collisions
         for reason in outcome.reasons:
             self.guard_reasons[reason] += 1
+        self.supersessions_opened += outcome.supersession_opened
+        self.chains_compressed += outcome.chains_compressed
+        self.merged_with_dependents += any(outcome.moved.values())
+        for table, count in outcome.moved.items():
+            self.moved[table] += count
+        for table, count in outcome.caches_recomputed.items():
+            self.caches_recomputed[table] += count
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -356,21 +413,17 @@ class KindTally:
             "aliases_moved": self.aliases_moved,
             "identifier_collisions": self.identifier_collisions,
             "guard_reasons": dict(self.guard_reasons),
+            "supersessions_opened": self.supersessions_opened,
+            "chains_compressed": self.chains_compressed,
+            "merged_with_dependents": self.merged_with_dependents,
+            "moved": dict(self.moved),
+            "caches_recomputed": dict(self.caches_recomputed),
         }
 
 
 def _guard_reasons(flags: tuple[Any, ...]) -> tuple[str, ...]:
-    """Map one row of `_GUARDS` flags (dependents..., shared, non_catalog) to reason names."""
-    dependents = flags[: len(DEPENDENT_TABLES)]
-    shared, non_catalog = flags[len(DEPENDENT_TABLES) :]
-    reasons: list[str] = []
-    if any(dependents):
-        reasons.append("dependents")
-    if shared:
-        reasons.append("shared_native_id")
-    if non_catalog:
-        reasons.append("non_catalog_alias")
-    return tuple(reasons)
+    """Map one row of `_GUARDS` flags (shared, non_catalog) to reason names."""
+    return tuple(reason for reason, flag in zip(GUARD_REASONS, flags, strict=True) if flag)
 
 
 async def run_census(pool: Any) -> dict[str, dict[str, Any]]:
@@ -384,10 +437,12 @@ async def run_census(pool: Any) -> dict[str, dict[str, Any]]:
         ``{kind: {...}}`` for ``release``, ``release_group``, ``artist``, and ``label``, each
         with ``linked`` (rows carrying a Discogs id), ``unresolved`` (Discogs id with no
         current alias), ``split``, ``stale_gm_item_id``, ``eligible``, ``guarded``,
-        ``guard_reasons`` (per reason; an item may carry several), ``dependents`` (items with
-        a dependent, per table), and ``identifier_aliases`` (per identifier provider: ``held``
-        by candidate split items, and ``contested`` — held for a value the Discogs item's own
-        record also carries).
+        ``guard_reasons`` (per reason; an item may carry several), ``dependents`` (candidate
+        items with a dependent, per table — informational, never a reason to skip),
+        ``will_move`` (among eligible items: how many ``items`` have dependents the merge will
+        re-point, and how many ``artifacts`` and ``owned_copies`` rows that is), and
+        ``identifier_aliases`` (per identifier provider: ``held`` by candidate split items,
+        and ``contested`` — held for a value the Discogs item's own record also carries).
     """
     census: dict[str, dict[str, Any]] = {}
     async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
@@ -407,19 +462,32 @@ async def run_census(pool: Any) -> dict[str, dict[str, Any]]:
                 "guarded": counts["guarded"],
                 "guard_reasons": {reason: counts[reason] for reason in GUARD_REASONS},
                 "dependents": {table: counts[table] for table in DEPENDENT_TABLES},
+                "will_move": {
+                    "items": counts["will_move_items"],
+                    "artifacts": int(counts["will_move_artifacts"]),
+                    "owned_copies": int(counts["will_move_owned_copies"]),
+                },
                 "identifier_aliases": {provider: identifiers.get(provider, {"held": 0, "contested": 0}) for provider in IDENTIFIER_PROVIDERS},
             }
             logger.info("📊 Re-attachment census", kind=name, **{key: value for key, value in census[name].items() if isinstance(value, int)})
     return census
 
 
-async def reattach_item(cur: Any, kind: SplitKind, mbid: str) -> ItemOutcome:
-    """Re-attach one MusicBrainz row inside the caller's open transaction.
+async def reattach_item(cur: Any, kind: SplitKind, mbid: str, *, decision_ref: UUID) -> ItemOutcome:
+    """Re-attach and merge one MusicBrainz row inside the caller's open transaction.
 
     Every decision is re-made under lock from the rows as they are now, not as the candidate
     page saw them, so a stale page, a concurrent run, or an already-repaired item is a no-op.
     A guarded item returns before any write. See the module docstring for the lock order and
     the identifier-alias rule.
+
+    Args:
+        decision_ref: The id of the run's `admin_audit_log` entry, recorded on the supersession.
+
+    Raises:
+        ReattachConflictError: A re-inserted alias is held by a third item.
+        MergeConflictError: The merge cannot happen as the rows stand. Either way the caller's
+            transaction must roll back.
     """
     await cur.execute(_LOCK_ROW.format(table=kind.table, column=kind.discogs_column), (mbid,))
     row = await cur.fetchone()
@@ -440,11 +508,12 @@ async def reattach_item(cur: Any, kind: SplitKind, mbid: str) -> ItemOutcome:
     else:
         return ItemOutcome("unchanged")
 
-    await cur.execute(_LOCK_ITEM, (split_id,))
+    item_kind = await lock_items(cur, split_id, discogs_native_id)
     await cur.execute(_GUARD_ITEM.format(entity_kind=kind.entity_kind), {"split_id": split_id, "mbid": mbid})
     reasons = _guard_reasons(tuple(await cur.fetchone() or ()))
     if reasons:
         return ItemOutcome("guarded", reasons, split_id, discogs_native_id)
+    existing = await current_supersession(cur, split_id, discogs_native_id)
 
     await cur.execute(_CLOSE_ALIASES, (split_id,))
     closed = await cur.fetchall()
@@ -463,29 +532,55 @@ async def reattach_item(cur: Any, kind: SplitKind, mbid: str) -> ItemOutcome:
             collisions = len(missing)
 
     await cur.execute(_SET_GM_ITEM_ID.format(table=kind.table), (discogs_native_id, mbid))
-    return ItemOutcome("reattached", (), split_id, discogs_native_id, len(closed) - collisions, collisions)
+    merge = await merge_items(
+        cur, split_id, discogs_native_id, kind=item_kind, cause="catalog_reattachment", decision_ref=decision_ref, existing=existing
+    )
+    return ItemOutcome(
+        "reattached",
+        (),
+        split_id,
+        discogs_native_id,
+        len(closed) - collisions,
+        collisions,
+        supersession_opened=merge.opened,
+        chains_compressed=merge.chains_compressed,
+        moved=merge.moved,
+        caches_recomputed=merge.caches_recomputed,
+    )
 
 
-async def _reattach_one(pool: Any, kind: SplitKind, mbid: str) -> ItemOutcome:
+async def _reattach_one(pool: Any, kind: SplitKind, mbid: str, decision_ref: UUID) -> ItemOutcome:
     async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
-        return await reattach_item(cur, kind, mbid)
+        return await reattach_item(cur, kind, mbid, decision_ref=decision_ref)
 
 
-async def run_reattachment(pool: Any, *, apply: bool = False, batch_size: int = DEFAULT_BATCH_SIZE) -> dict[str, Any]:
-    """Run the census and, only when ``apply`` is true, re-attach every eligible item.
+async def run_reattachment(
+    pool: Any, *, apply: bool = False, batch_size: int = DEFAULT_BATCH_SIZE, decision_ref: UUID | None = None
+) -> dict[str, Any]:
+    """Run the census and, only when ``apply`` is true, re-attach and merge every eligible item.
 
     Dry run is the default. An applying run pages candidates per kind with a keyset cursor and
     repairs each in its own transaction; a guarded item is logged and skipped, an identifier
-    conflict rolls that item back and is counted as failed, and any other database error ends
-    the run with every committed item still committed.
+    or merge conflict rolls that item back and is counted as failed, and any other database
+    error ends the run with every committed item still committed.
+
+    Args:
+        decision_ref: Required with ``apply``: the id the caller writes this run's
+            `admin_audit_log` entry under, recorded on every supersession the run opens.
 
     Returns:
         ``{"apply": bool, "census": {...}}`` plus, for an applying run, ``"outcomes"``: per
         kind, ``reattached``, ``guarded``, ``unchanged``, ``failed``, ``aliases_moved``,
-        ``identifier_collisions``, and ``guard_reasons``.
+        ``identifier_collisions``, ``guard_reasons``, ``supersessions_opened``,
+        ``chains_compressed``, ``merged_with_dependents`` (re-attached items whose artifacts or
+        owned copies moved), ``moved`` (rows re-pointed, per table), and ``caches_recomputed``
+        (``gm_item_id`` rows, per table). Counts only, so the report can go to
+        `admin_audit_log`, which outlives erasure.
     """
+    if apply and decision_ref is None:
+        raise ValueError("an applying run needs the decision_ref its audit entry is written under")
     report: dict[str, Any] = {"apply": apply, "census": await run_census(pool)}
-    if not apply:
+    if not apply or decision_ref is None:
         return report
 
     outcomes: dict[str, dict[str, Any]] = {}
@@ -501,8 +596,8 @@ async def run_reattachment(pool: Any, *, apply: bool = False, batch_size: int = 
                 break
             for mbid, discogs_id, key in page:
                 try:
-                    outcome = await _reattach_one(pool, kind, mbid)
-                except ReattachConflictError as exc:
+                    outcome = await _reattach_one(pool, kind, mbid, decision_ref)
+                except (ReattachConflictError, MergeConflictError) as exc:
                     outcome = ItemOutcome("failed")
                     logger.error("❌ Re-attachment rolled back", kind=name, mbid=mbid, discogs_id=discogs_id, error=str(exc))
                 else:
@@ -517,6 +612,9 @@ async def run_reattachment(pool: Any, *, apply: bool = False, batch_size: int = 
                         discogs_native_id=str(outcome.discogs_native_id) if outcome.discogs_native_id else None,
                         aliases_moved=outcome.aliases_moved,
                         identifier_collisions=outcome.identifier_collisions,
+                        supersession_opened=outcome.supersession_opened,
+                        chains_compressed=outcome.chains_compressed,
+                        moved=outcome.moved,
                     )
                 tally.add(outcome)
                 cursor_key = key
@@ -531,8 +629,21 @@ async def run_reattachment(pool: Any, *, apply: bool = False, batch_size: int = 
 
 
 def audit_details(report: dict[str, Any], job_id: str) -> dict[str, Any]:
-    """The `admin_audit_log` details for an applying run: the job id and per-kind outcomes."""
+    """The `admin_audit_log` details for an applying run: the job id and per-kind outcomes.
+
+    Per-table counts only, never a user id or a user-owned row id: the audit log outlives
+    erasure by ADR 0010's design, while the ledger rows that name users do not.
+    """
     return {"job_id": job_id, "apply": report["apply"], "outcomes": report.get("outcomes", {})}
+
+
+def failure_details(job_id: str, exc: BaseException) -> dict[str, Any]:
+    """The `admin_audit_log` details for an applying run that ended on an error.
+
+    Items committed before the error carry the run's id as their supersession's
+    `decision_ref`, so the run is recorded under that id even when it did not finish.
+    """
+    return {"job_id": job_id, "apply": True, "error": type(exc).__name__}
 
 
 def _connection_params() -> dict[str, Any]:
@@ -583,10 +694,27 @@ async def _run_once(*, apply: bool, admin_id: str | None, batch_size: int, job_i
         if apply and not await _is_admin(pool, str(admin_id)):
             print(f"❌ --admin-id {admin_id} is not an active admin; nothing was changed.", file=sys.stderr)
             return None
-        report = await run_reattachment(pool, apply=apply, batch_size=batch_size)
+        try:
+            report = await run_reattachment(pool, apply=apply, batch_size=batch_size, decision_ref=UUID(job_id) if apply else None)
+        except Exception as exc:
+            if apply:
+                await record_audit_entry(
+                    pool=pool,
+                    admin_id=str(admin_id),
+                    action="identity.reattach.failed",
+                    target=job_id,
+                    details=failure_details(job_id, exc),
+                    entry_id=job_id,
+                )
+            raise
         if apply:
             await record_audit_entry(
-                pool=pool, admin_id=str(admin_id), action="identity.reattach.apply", target=job_id, details=audit_details(report, job_id)
+                pool=pool,
+                admin_id=str(admin_id),
+                action="identity.reattach.apply",
+                target=job_id,
+                details=audit_details(report, job_id),
+                entry_id=job_id,
             )
         return report
     finally:
@@ -597,13 +725,15 @@ def _print_report(report: dict[str, Any]) -> None:
     for name, counts in report["census"].items():
         print(
             f"  {name}: {counts['split']} split, {counts['stale_gm_item_id']} stale, {counts['eligible']} eligible, "
-            f"{counts['guarded']} guarded {counts['guard_reasons']}, dependents {counts['dependents']}, "
+            f"{counts['guarded']} guarded {counts['guard_reasons']}, dependents {counts['dependents']}, will move {counts['will_move']}, "
             f"{counts['unresolved']} unresolved, identifiers {counts['identifier_aliases']}"
         )
     for name, tally in report.get("outcomes", {}).items():
         print(
             f"  {name}: {tally['reattached']} re-attached, {tally['guarded']} guarded, {tally['unchanged']} unchanged, "
-            f"{tally['failed']} failed, {tally['aliases_moved']} alias(es) moved, {tally['identifier_collisions']} identifier collision(s)"
+            f"{tally['failed']} failed, {tally['aliases_moved']} alias(es) moved, {tally['identifier_collisions']} identifier collision(s), "
+            f"{tally['supersessions_opened']} supersession(s) opened, {tally['chains_compressed']} chain(s) compressed, "
+            f"{tally['merged_with_dependents']} merged with dependents, moved {tally['moved']}"
         )
 
 
@@ -615,7 +745,8 @@ def main() -> None:
             "Catalog re-attachment of load-order-split items (ADR 0014 section 8). Without "
             "--apply it only prints the read-only census. With --apply it re-attaches each "
             "eligible MusicBrainz release, release group, artist, and label to its Discogs "
-            "native id and records one admin audit entry."
+            "native id, merges the split item into it (ADR 0009's native-id merge: its "
+            "artifacts and owned copies move, ledgered), and records one admin audit entry."
         ),
         epilog="Reads DB connection from environment variables: POSTGRES_HOST, POSTGRES_USERNAME, POSTGRES_PASSWORD, POSTGRES_DATABASE",
     )
