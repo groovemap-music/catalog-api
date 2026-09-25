@@ -25,6 +25,14 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Read a boolean environment variable; only the usual truthy spellings enable it."""
+    value = getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass(frozen=True)
 class ApiConfig:
     """Configuration for the catalog API."""
@@ -62,6 +70,8 @@ class ApiConfig:
     rabbitmq_password: str = field(default="groovemap", repr=False)
     metrics_retention_days: int = 366
     metrics_collection_interval: int = 300
+    identity_auto_reattach_enabled: bool = False
+    identity_auto_reattach_interval: int = 300
 
     @classmethod
     def from_env(cls) -> ApiConfig:
@@ -132,4 +142,6 @@ class ApiConfig:
             rabbitmq_password=get_secret("RABBITMQ_PASSWORD", "groovemap"),
             metrics_retention_days=_env_int("METRICS_RETENTION_DAYS", 366),
             metrics_collection_interval=_env_int("METRICS_COLLECTION_INTERVAL", 300),
+            identity_auto_reattach_enabled=_env_bool("IDENTITY_AUTO_REATTACH_ENABLED"),
+            identity_auto_reattach_interval=max(1, _env_int("IDENTITY_AUTO_REATTACH_INTERVAL", 300)),
         )
