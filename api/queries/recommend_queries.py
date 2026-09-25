@@ -18,6 +18,26 @@ from api.queries.similarity import cosine_similarity, to_genre_vector
 # Minimum releases for an artist to have a meaningful fingerprint
 MIN_ARTIST_RELEASES = 3
 
+# Candidate profile/score cap for the similar-artist path (gm-catalog-api-tsmu.1 round 3):
+# after the set-based candidate query ranks every shared-signal artist by shared release
+# count (descending, ties broken by artist id ascending -- the query's own ORDER BY), only
+# the top CANDIDATE_PROFILE_LIMIT are profiled and scored. This is a single overall cap on
+# the *ranked* set, not a per-genre cap during expansion: the query still finds and ranks
+# every qualifying artist; only the profile-and-score work below that ranking is bounded.
+#
+# PROPOSED, under review -- not a final decision. 50 is the smallest value swept and the only
+# one that clears the endpoint's 20% p95 budget against the legacy path on the realistic
+# synthetic fixture: mega-genre target +3.4%, median target -14.8% (faster than legacy). 100
+# and 200 both clear it for the median target but not the mega one (+27.6%, +36.3%); 500 does
+# not clear it for either (+160.2%, +33.4%). On the golden set, recall@10 is identical
+# (0.53614) at every swept N -- but that fixture has only 36 artists total, so it cannot show
+# whether N=50 excludes a candidate that ranks low by shared release count but would have
+# scored highly by cosine similarity, which is the real risk of this cap and is not measured
+# here. See docs/query-performance-optimizations.md for the full N-sweep, the concurrency-gain
+# and catalog-size-scaling measurements, and tests/test_recommend_candidate_latency.py for how
+# to reproduce them.
+CANDIDATE_PROFILE_LIMIT = 50
+
 # Dimension weights for artist similarity
 _WEIGHTS = {
     "genre": 0.35,
@@ -151,7 +171,7 @@ async def _batch_artist_profiles(
     return profiles
 
 
-async def get_candidate_artists(driver: AsyncResilientNeo4jDriver, artist_id: str) -> list[dict[str, Any]]:
+async def get_candidate_artists(driver: AsyncResilientNeo4jDriver, artist_id: str, *, limit: int = CANDIDATE_PROFILE_LIMIT) -> list[dict[str, Any]]:
     """Get every candidate artist sharing at least one signal with the target, profiled.
 
     Returns each candidate with actual release counts per genre/style/label/collaborator
@@ -162,13 +182,21 @@ async def get_candidate_artists(driver: AsyncResilientNeo4jDriver, artist_id: st
     release as the target (collaborator), *and* clearing the MIN_ARTIST_RELEASES floor on
     that shared release count -- restored per review; dropping it changed the acceptance
     criterion from "no per-genre LIMIT" to "no floor at all", which was not requested. There
-    is no per-genre LIMIT, no top-5-genres cap, and no truncation of the candidate set before
-    profiling -- the previous shape (top 5 genres, 500 artists per genre, 200 overall, 50
-    profiled) measurably starved recall (see the gm-design-chw.2 spike: the same heuristic
-    weights scored over every artist reach recall@10 0.1799 against 0.0092 for the capped
-    generator). The four ``UNION``ed sub-queries below match the set-based shape of
+    is no per-genre LIMIT and no top-5-genres cap -- the previous shape (top 5 genres, 500
+    artists per genre, 200 overall, 50 profiled) measurably starved recall (see the
+    gm-design-chw.2 spike: the same heuristic weights scored over every artist reach
+    recall@10 0.1799 against 0.0092 for the capped generator). The query still ranks every
+    qualifying artist by shared release count before ``limit`` (default
+    :data:`CANDIDATE_PROFILE_LIMIT`, proposed and under review) caps how many are profiled and
+    scored -- a single overall cap on the ranked set, not a per-genre one during expansion.
+    The four ``UNION``ed sub-queries below match the set-based shape of
     ``recommend_pg_queries.CANDIDATE_ARTISTS_SQL`` so the two backends agree by construction,
     not by coincidence.
+
+    Args:
+        limit: How many of the ranked candidates to profile and score. Overridable for the
+            round-3 N-sweep (see docs/query-performance-optimizations.md); production always
+            calls with the default.
     """
     candidates_cypher = """
     MATCH (a:Artist {id: $artist_id})
@@ -197,6 +225,7 @@ async def get_candidate_artists(driver: AsyncResilientNeo4jDriver, artist_id: st
     WHERE release_count >= $min_releases
     RETURN candidate.id AS artist_id, candidate.name AS artist_name, release_count
     ORDER BY release_count DESC, artist_id
+    LIMIT $limit
     """
     candidates = await run_query(
         driver,
@@ -204,12 +233,13 @@ async def get_candidate_artists(driver: AsyncResilientNeo4jDriver, artist_id: st
         timeout=60,
         artist_id=artist_id,
         min_releases=MIN_ARTIST_RELEASES,
+        limit=limit,
     )
 
     if not candidates:
         return []
 
-    # Every matched candidate is profiled and scored; nothing is sliced before ranking.
+    # Every candidate the query ranked (up to `limit`) is profiled and scored.
     candidate_ids = [c["artist_id"] for c in candidates]
     profiles = await _batch_artist_profiles(driver, candidate_ids)
 

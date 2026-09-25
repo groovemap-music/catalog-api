@@ -219,6 +219,15 @@ candidates diluted the top-10 with weak matches. With the floor restored, recall
 from 0.44507 (legacy) to 0.53614 (new), and every reported media family improves at k=10 and
 k=25, on this synthetic fixture.
 
+Round 3 added `CANDIDATE_PROFILE_LIMIT` (`api/queries/recommend_queries.py`), an overall cap
+on how many ranked candidates are profiled and scored, to bring endpoint latency back within
+budget (see `docs/query-performance-optimizations.md`). `run_baseline`'s
+`similar_artist_candidate_limit` parameter replays that cap on the golden set; recall@10 is
+identical (0.53614) at every swept N because this fixture has only 36 artists in total, so no
+cap ever excludes a candidate the uncapped scope would have kept. That is a limit of the golden
+set as a recall-risk check for the cap, not evidence the cap is free of one at production
+scale -- see `tests/test_evaluation_similar_artist_candidates.py`'s round-3 section.
+
 ## Comparing a model to the baseline
 
 The comparison is only meaningful if both sides are measured by identical code, so a model is

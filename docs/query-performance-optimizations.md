@@ -83,65 +83,173 @@ Expensive Neo4j calls use `neo4j.Query(..., timeout=...)` through the shared que
 timeout must be comfortably below the server's transaction ceiling so a pathological request
 fails predictably instead of consuming the entire deployment budget.
 
-## Open investigation: similar-artist candidate latency (gm-catalog-api-tsmu.1)
+## Similar-artist candidate latency (gm-catalog-api-tsmu.1)
 
 gm-catalog-api-tsmu.1 replaced the similar-artist candidate generator's per-genre caps (top 5
 genres, 500 artists per genre, 200 overall, 50 profiled) with a set-based query scoring every
 artist sharing at least one genre/style/label/collaborator signal, because the caps were
 measurably starving recall (see `docs/evaluation.md`). That is a direct departure from "Cap
-high-cardinality expansions" above, and measuring it against a synthetic, catalog-shaped
-fixture (mega genres/styles/labels, a long tail, a prolific artist at ~p99 release count --
-`scripts/generate_latency_fixture.py`, benchmarked in
-`tests/test_recommend_candidate_latency.py`) shows the departure costs more than the 20%
-budget the change was supposed to stay inside. This section records the finding rather than a
-retained decision, because there isn't one yet -- it needs a maintainer call.
+high-cardinality expansions" above. Round 2 measured the departure against a synthetic,
+catalog-shaped fixture (`scripts/generate_latency_fixture.py`) and found it cost 178-369% p95
+over the old path, far past the 20% budget. **Maintainer decision (round 3): keep the
+all-signal candidate scope, and improve performance rather than reintroduce a per-genre cap.**
+This section records what was measured and implemented, and what is still proposed rather than
+decided.
 
-**Measured on the PG19 integration tier, endpoint-shaped (identity + profile + candidates +
-scoring, not bare SQL), p95 of 15 reps:**
+### What shipped
 
-| Target | Candidates | Legacy p95 | New p95 | Delta |
+- **`CANDIDATE_PROFILE_LIMIT`** (`api/queries/recommend_queries.py`): an overall cap on how
+  many of the query's already-ranked candidates (by shared release count, ties broken by
+  artist id) are profiled and scored, pushed into the query itself as a real `LIMIT` in both
+  the SQL and the Cypher -- the query still finds and ranks every qualifying artist; only the
+  profile-and-score work below that ranking is bounded. This is a single overall cap on the
+  ranked set, not a per-genre cap during expansion, and it is overridable per call for the
+  sweep below. **Proposed value: 50. Still under review** -- see the sweep for why, and for
+  the recall-risk caveat a cap of this shape carries that this investigation could not measure.
+- **Concurrent profile-batch queries** (`recommend_pg_queries._batch_artist_profiles`): the
+  four dimension queries (genres/styles/labels/collaborators) now run with `asyncio.gather`
+  instead of a sequential loop. Neo4j's side already did this; only PostgreSQL was sequential.
+
+### Cap sweep: recall@10 and endpoint p95, N = 50/100/200/500
+
+**Recall@10, golden set, vs heuristics-2026-09 (0.44507) and the uncapped all-signal scope
+(0.53614):** identical (0.53614) at every swept N, including no-cap. The golden set has only
+36 artists in total, so no swept N ever excludes a candidate the uncapped scope would have
+kept -- this shows capping is recall-neutral *on this fixture*, not that it is recall-neutral
+at production scale. A cap orders candidates by shared release count, which is a proxy for
+final cosine rank, not identical to it; a real catalog could have a candidate that ranks low
+by shared count but would have scored highly by cosine similarity on styles/labels, and this
+investigation has no fixture large enough to exercise that risk. See
+`tests/test_evaluation_similar_artist_candidates.py`.
+
+**Endpoint p95, PG19 integration tier, realistic synthetic fixture (2,500 artists, ~8,000
+releases), concurrent profiling throughout, 12 reps.** One representative run below; a repeat
+run on the same shared host (the validation slot is shared with other hives) measured mega at
+N=50 in a +3.4% to +8.5% band and mid at N=50 consistently negative (faster than legacy) --
+absolute numbers vary run to run by tens of percent on a busy host, but N=50 clearing the
+budget and N>=100 not reliably clearing it for the mega target held across every run:
+
+
+
+| Target | Legacy p95 | N=50 | N=100 | N=200 | N=500 | Uncapped |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Mega (p99 release count, all-mega facets) | 103.31ms | 106.78ms | 131.85ms | 140.80ms | 268.85ms | 435.09ms |
+| Mid (median release count) | 104.75ms | 89.28ms | 93.83ms | 113.68ms | 139.79ms | 212.10ms |
+| Niche (all-niche facets, few releases) | 22.61ms | 44.33ms | 61.90ms | 53.41ms | 49.73ms | 48.99ms |
+
+**Delta vs legacy p95:**
+
+| Target | N=50 | N=100 | N=200 | N=500 | Uncapped |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Mega | **+3.4%** | +27.6% | +36.3% | +160.2% | +321.1% |
+| Mid | **-14.8%** | -10.4% | +8.5% | +33.4% | +102.5% |
+| Niche | +96.1% | +173.7% | +136.2% | +119.9% | +116.7% |
+
+N=50 is the only value that clears the 20% budget for the mega target (+3.4%); mid clears it
+at every swept N. Niche's deltas are noise, not signal: its candidate count is 13 at every N
+from 50 upward (the query never finds more than 13 candidates for this target regardless of
+cap), so "capped-100" and "capped-500" are the *same query* as uncapped for this target, and
+the swing between them (44ms to 62ms) is measurement variance on an endpoint that costs
+20-70ms in absolute terms. The niche row should be read as "roughly 45-60ms, cap-independent,"
+not as a real per-N trend.
+
+### Concurrency gain, isolated from the cap
+
+Measured on the uncapped query (so the only variable is sequential vs concurrent profiling):
+
+| Target | Sequential p95 | Concurrent p95 | Gain |
+| --- | ---: | ---: | ---: |
+| Mega | 468.72ms | 435.09ms | -7.2% |
+| Mid | 264.48ms | 212.10ms | -19.8% |
+| Niche | 68.63ms | 48.99ms | -28.6% |
+
+Concurrency helps more, in relative terms, the smaller the candidate list: at mega scale the
+`ANY(huge_array)` cost of each of the four profile queries dominates regardless of whether they
+run one after another or together, so overlapping them saves less. It is a real, unconditional
+improvement (implemented for all paths, not just the capped one) but on its own does not close
+the gap at mega scale.
+
+### Cap gain, isolated from concurrency
+
+Measured with concurrent profiling throughout (so the only variable is the cap), uncapped vs
+each N:
+
+| Target | N=50 | N=100 | N=200 | N=500 |
 | --- | ---: | ---: | ---: | ---: |
-| Mega (p99 release count, all-mega facets) | 1854 | 91.08ms | 426.80ms | +368.6% |
-| Mid (median release count) | 1321 | 68.81ms | 225.43ms | +227.6% |
-| Niche (all-niche facets, few releases) | 13 | 24.34ms | 67.79ms | +178.5% |
+| Mega | -75.5% | -69.7% | -67.6% | -38.2% |
+| Mid | -57.9% | -55.8% | -46.4% | -34.1% |
+| Niche | -9.5% | (noise) | (noise) | (noise) |
 
-Two findings narrow where a fix would need to go:
+The cap is where nearly all of the recovery comes from; concurrency is a smaller, unconditional
+addition on top of it.
 
-1. **The candidate SQL itself is not the dominant cost.** `EXPLAIN (ANALYZE, BUFFERS)` of the
-   uncapped query alone measured 70.86ms for the mega target and 38.31ms for mid -- real, but
-   a fraction of the endpoint totals above. The rest is profiling and scoring every matched
-   candidate: `_batch_artist_profiles` runs four sequential queries with `artist_id = ANY(...)`
-   over the full candidate id list, and `compute_similar_artists` scores every one of them in
-   Python before ranking. Neither existed as a cost center under the old generator because it
-   never profiled more than 50 candidates.
-2. **An overall post-hoc cap on the profiled set, not a per-genre one, recovers most but not
-   all of the regression.** Capping to the top 200 candidates by the query's own
-   `release_count DESC` order (which already reflects genuine multi-signal overlap, not just
-   genre) -- experimental only, not implemented in `recommend_pg_queries.py` -- measured:
+### Where the cost goes (`EXPLAIN (ANALYZE, BUFFERS)`)
 
-   | Target | Capped-200 p95 | Delta vs legacy |
-   | --- | ---: | ---: |
-   | Mega | 143.50ms | +57.6% |
-   | Mid | 113.64ms | +65.1% |
-   | Niche | 57.55ms | +136.4% |
+The candidate SQL itself is not the dominant cost even uncapped: 70.86ms for mega, 38.31ms for
+mid, 1.7-2.2ms for niche (round 2 and round 3 EXPLAIN runs agree). The rest is profiling and
+scoring every matched candidate in Python. One planner detail worth watching, not a confirmed
+problem: the final join from the ranked candidate set to `graph.artist` (for the name and the
+`name IS NOT NULL` filter) chose a hash join with a full `Seq Scan on artists` as the build
+side on the 2,500-row fixture, rather than an index nested loop from the (much smaller) ranked
+set. That is the right plan at this table size; whether it stays the right plan, or the planner
+switches to a nested loop once `artists` holds millions of rows and the ranked set is
+comparatively tiny, is a real-scale question this fixture cannot answer. **No index change is
+proposed here** -- indexes live in `database-schema`, and it may not need one if the planner's
+own cost model already switches plans at scale, in which case this note is closed with no
+action; if it does not, the candidate fix is `graph.artist`'s existing primary-key index, which
+already exists, just needs the planner steered onto it (e.g. `analyze`, or a targeted
+`enable_hashjoin=off` check to confirm the nested loop is actually cheaper before asking for
+any schema change).
 
-   Mega and mid drop from the 200-370% range to roughly 60%, still over budget. Niche barely
-   moves (it only had 13 candidates to begin with) and stays disproportionately regressed in
-   relative terms even though its absolute latency (57-68ms) is small -- something about the
-   new query's shape (the four-way `UNION` and its CTEs, versus the old query's single
-   `LATERAL` expansion) appears to carry fixed overhead independent of candidate count, which
-   this investigation has not isolated further.
+### Scaling: 2,500 artists vs 30,000 artists, same shape
 
-Directions worth a maintainer decision, none implemented here:
+The round-2/3 fixture is roughly three orders of magnitude below a production catalog, and it
+shows: at 2,500 artists the mega target's candidate pool is 1,854 -- 74% of every artist in the
+fixture, not a shape a real catalog has at any size. A ~12x larger fixture (30,000 artists,
+100,000 releases, same generator, same shape) was seeded and measured on the mega target:
 
-- The overall cap above, sized to actually clear 20% (200 did not; a smaller cap, or batching
-  the four profile queries concurrently instead of sequentially, might).
-- Precomputing or caching the candidate pool for the handful of facets that are actually
-  broad (mega genres/styles/labels are, by construction, few and stable), leaving the
-  uncapped query only for the common case where it is already cheap.
-- Investigating the niche case's fixed overhead directly (a warm-connection or per-query
-  planning cost that a smaller candidate set does not amortize) before concluding a cap alone
-  is sufficient.
+| Fixture | Artists | Releases | Mega candidates (uncapped, bare SQL) |
+| --- | ---: | ---: | ---: |
+| Small | 2,500 | 8,005 | 1,854 |
+| Large | 30,000 | 100,005 | 25,521 |
+
+| Variant | Small p95 | Large p95 | Scale factor |
+| --- | ---: | ---: | ---: |
+| Legacy | 97.02ms | 890.31ms | 9.18x |
+| New, capped at 200, concurrent | 124.36ms | 1436.01ms | 11.55x |
+
+Two findings:
+
+1. **The legacy path is not immune to catalog growth either.** Its inner per-genre scan
+   (`ORDER BY release_id LIMIT 100000`) costs work proportional to genre size up to that
+   100k-release ceiling, and neither fixture's mega genres (2,022 and ~25,000 releases) reach
+   it -- so this comparison has not yet found the point where legacy's own cap plateaus its
+   cost, only confirmed that below it, legacy also scales with the catalog.
+2. **The capped-200 path's overhead over legacy is roughly stable as the catalog grows.** At
+   small scale it was +36.3% over legacy for the mega target (per the sweep above); at 12x the
+   scale it is +61.3% (1436.01 / 890.31). Worse, but not exploding -- the relative cost of this
+   design does not appear to compound with catalog size within the range measured, though two
+   points is a trend line, not a proof.
+3. The uncapped path was not measured end-to-end at the large size: an early run of this test
+   timed out inside `compute_similar_artists` doing exactly that. Profiling and scoring every
+   match against a mega-genre target is not just slower at this scale, it is impractical --
+   which is itself evidence for capping rather than an oversight in the test.
+
+### Directions still open
+
+- **The proposed N=50 default clears the measured budget but is the smallest value swept,**
+  and this investigation has no fixture that can validate its recall risk at production scale
+  (see the sweep section above). A maintainer familiar with the real catalog's genre
+  distribution is better placed to judge whether 50 is too aggressive.
+- **Precomputing or caching the candidate pool for the handful of facets that are actually
+  broad** (mega genres/styles/labels are, by construction, few and stable) would let the
+  uncapped, full-recall path be used for the common case (where it is already cheap) and
+  reserve the cap for genuinely broad targets only.
+- **The `graph.artist` join plan** noted above, once real table sizes are available to check
+  against.
+- **Vectorizing `compute_similar_artists`** was considered but not pursued: at N<=500 candidates
+  it did not show up as the dominant cost in the EXPLAIN/timing breakdown (the SQL profile
+  batches did), so it is not where the next unit of engineering effort would pay off first.
 
 ## Ownership of supporting data work
 

@@ -252,18 +252,26 @@ class GoldenGraph:
             for other, count in profiled
         ]
 
-    def candidate_artists_all_signals(self, artist_id: str) -> list[dict[str, Any]]:
+    def candidate_artists_all_signals(self, artist_id: str, *, limit: int | None = None) -> list[dict[str, Any]]:
         """Mirror the gm-catalog-api-tsmu.1 candidate generator: every shared-signal artist.
 
         A candidate qualifies by sharing at least one genre, style, or label with any of the
         target's releases, or by appearing on the same release as the target (collaborator),
         and by clearing the :data:`MIN_ARTIST_RELEASES` floor on that shared release count.
-        There is no per-genre cap and no top-N truncation -- every qualifying artist is
-        profiled and scored. This is the shape
+        There is no per-genre cap during expansion -- every qualifying artist is found and
+        ranked by shared release count (descending, ties broken by artist id ascending), the
+        same order the production query returns. This is the shape
         ``api.queries.recommend_queries.get_candidate_artists`` and
         ``api.queries.recommend_pg_queries.get_candidate_artists`` were rewritten to; it backs
         the new baseline version registered alongside the frozen ``heuristics-2026-09`` one
         (see :data:`~api.evaluation.baseline.SIMILAR_ARTIST_CANDIDATES_VERSION`).
+
+        Args:
+            limit: How many of the ranked candidates to profile and score, mirroring
+                production's ``CANDIDATE_PROFILE_LIMIT`` (round 3). ``None`` (default) profiles
+                every qualifying candidate, which is what this method did before the cap
+                existed in production; passing a value replays the round-3 N-sweep on the
+                golden set (see ``tests/test_evaluation_similar_artist_candidates.py``).
         """
         target_release_ids = self._by_artist.get(artist_id, [])
         if not target_release_ids:
@@ -299,6 +307,8 @@ class GoldenGraph:
             ((other, len(releases)) for other, releases in hits.items() if len(releases) >= MIN_ARTIST_RELEASES),
             key=lambda item: (-item[1], item[0]),
         )
+        if limit is not None:
+            ranked = ranked[:limit]
         if not ranked:
             return []
 

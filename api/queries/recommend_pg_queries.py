@@ -6,11 +6,12 @@ store-touching functions have backend-specific implementations here.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, cast
 
 from common.query_debug import execute_sql
 
-from api.queries.recommend_queries import MIN_ARTIST_RELEASES
+from api.queries.recommend_queries import CANDIDATE_PROFILE_LIMIT, MIN_ARTIST_RELEASES
 
 
 _YEAR = "CASE WHEN btrim(release.year) ~ '^[0-9]{1,9}$' THEN btrim(release.year)::integer END"
@@ -110,6 +111,7 @@ SELECT ranked.artist_id, artist.name, ranked.release_count
 FROM ranked JOIN graph.artist artist USING (artist_id)
 WHERE artist.name IS NOT NULL
 ORDER BY ranked.release_count DESC, ranked.artist_id
+LIMIT %(limit)s
 """
 
 COLLECTOR_COUNTS_SQL = """
@@ -213,23 +215,30 @@ async def get_artist_profile(pool: Any, artist_id: str) -> dict[str, Any]:
 
 
 async def _batch_artist_profiles(pool: Any, candidate_ids: list[str]) -> dict[str, dict[str, Any]]:
-    # Four batch queries regardless of candidate count, matching the Neo4j cost
-    # shape and avoiding a 50 x 4 N+1 fan-out on the ranked candidate page.
+    # Four batch queries regardless of candidate count, matching the Neo4j cost shape and
+    # avoiding a 50 x 4 N+1 fan-out on the ranked candidate page. Run concurrently
+    # (gm-catalog-api-tsmu.1 round 3): each opens its own pooled connection via `_rows`, and
+    # the four are independent reads over the same candidate id list, so there is no ordering
+    # dependency between them -- only the sequential round-trips were serializing them before.
     profiles: dict[str, dict[str, Any]] = {artist_id: {"genres": [], "styles": [], "labels": [], "collaborators": []} for artist_id in candidate_ids}
-    for dimension, sql in _BATCH_PROFILE_SQL.items():
-        for artist_id, name, count in await _rows(pool, sql, {"artist_ids": candidate_ids}):
+    dimensions = list(_BATCH_PROFILE_SQL)
+    results = await asyncio.gather(*(_rows(pool, _BATCH_PROFILE_SQL[dimension], {"artist_ids": candidate_ids}) for dimension in dimensions))
+    for dimension, dimension_rows in zip(dimensions, results, strict=True):
+        for artist_id, name, count in dimension_rows:
             profiles[artist_id][dimension].append({"name": name, "count": count})
     return profiles
 
 
-async def get_candidate_artists(pool: Any, artist_id: str) -> list[dict[str, Any]]:
+async def get_candidate_artists(pool: Any, artist_id: str, *, limit: int = CANDIDATE_PROFILE_LIMIT) -> list[dict[str, Any]]:
     """Every artist sharing at least MIN_ARTIST_RELEASES shared releases, profiled.
 
-    No slice is taken before profiling: the whole matched set is scored by
-    ``compute_similar_artists``, which is what makes the candidate scope this function
-    returns comparable to the "same weights, all artists" reference in gm-design-chw.2.
+    The query ranks every qualifying artist by shared release count; ``limit`` (default
+    :data:`~api.queries.recommend_queries.CANDIDATE_PROFILE_LIMIT`, proposed and under
+    review -- see docs/query-performance-optimizations.md) caps how many of that ranked set
+    are profiled and scored by ``compute_similar_artists``. Overridable for the round-3
+    N-sweep; production always calls with the default.
     """
-    rows = await _rows(pool, CANDIDATE_ARTISTS_SQL, {"artist_id": artist_id, "min_releases": MIN_ARTIST_RELEASES})
+    rows = await _rows(pool, CANDIDATE_ARTISTS_SQL, {"artist_id": artist_id, "min_releases": MIN_ARTIST_RELEASES, "limit": limit})
     if not rows:
         return []
     profiles = await _batch_artist_profiles(pool, [row[0] for row in rows])

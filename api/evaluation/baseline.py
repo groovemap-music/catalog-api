@@ -249,7 +249,13 @@ def _discover(graph: GoldenGraph, collector_id: str) -> tuple[dict[str, Any], ..
     return tuple(score_discoveries(traversal, graph.taste_genre_vector(collector_id), graph.blind_spot_genres(collector_id), limit=DISCOVERY_LIMIT))
 
 
-def _similar_artists(graph: GoldenGraph, collector_id: str, *, all_signal_candidates: bool = False) -> tuple[dict[str, Any], ...]:
+def _similar_artists(
+    graph: GoldenGraph,
+    collector_id: str,
+    *,
+    all_signal_candidates: bool = False,
+    candidate_limit: int | None = None,
+) -> tuple[dict[str, Any], ...]:
     """Rank artists similar to the collector's most-collected artist.
 
     Args:
@@ -257,12 +263,17 @@ def _similar_artists(graph: GoldenGraph, collector_id: str, *, all_signal_candid
             (:meth:`~api.evaluation.graph.GoldenGraph.candidate_artists_all_signals`) instead
             of the frozen ``heuristics-2026-09`` one. Only the candidate set differs; the
             weights ``compute_similar_artists`` scores with are identical either way.
+        candidate_limit: The round-3 profile/score cap, forwarded to
+            ``candidate_artists_all_signals`` when ``all_signal_candidates`` is set. Ignored
+            for the legacy path, which has its own fixed limits.
     """
     top = graph._top_collected_artists(collector_id, 1)
     if not top:
         return ()
     artist_id = top[0][0]
-    candidates = graph.candidate_artists_all_signals(artist_id) if all_signal_candidates else graph.candidate_artists(artist_id)
+    candidates = (
+        graph.candidate_artists_all_signals(artist_id, limit=candidate_limit) if all_signal_candidates else graph.candidate_artists(artist_id)
+    )
     return tuple(compute_similar_artists(graph.artist_profile(artist_id), candidates, limit=SIMILAR_ARTIST_LIMIT))
 
 
@@ -354,6 +365,7 @@ def run_baseline(
     limit: int = RECOMMENDATION_LIMIT,
     current_year: int = BASELINE_CURRENT_YEAR,
     similar_artist_candidates: str = "legacy",
+    similar_artist_candidate_limit: int | None = None,
 ) -> BaselineRun:
     """Score the whole fixture with today's frozen heuristics.
 
@@ -369,6 +381,9 @@ def run_baseline(
             (:meth:`~api.evaluation.graph.GoldenGraph.candidate_artists_all_signals`) for
             ``similar_artists`` only and reports :data:`SIMILAR_ARTIST_CANDIDATES_VERSION`;
             ``recommendations``, ``discoveries``, and ``rarity`` are unaffected either way.
+        similar_artist_candidate_limit: The round-3 profile/score cap (``None`` profiles every
+            qualifying candidate). Only meaningful with ``similar_artist_candidates="all_signals"``;
+            replays the N-sweep in ``tests/test_evaluation_similar_artist_candidates.py``.
 
     Returns:
         The run: per-collector ranked recommendations, discoveries, and similar artists, plus
@@ -388,6 +403,9 @@ def run_baseline(
         current_year=current_year,
         recommendations={collector_id: _recommend(graph, collector_id, limit) for collector_id in collector_ids},
         discoveries={collector_id: _discover(graph, collector_id) for collector_id in collector_ids},
-        similar_artists={collector_id: _similar_artists(graph, collector_id, all_signal_candidates=all_signals) for collector_id in collector_ids},
+        similar_artists={
+            collector_id: _similar_artists(graph, collector_id, all_signal_candidates=all_signals, candidate_limit=similar_artist_candidate_limit)
+            for collector_id in collector_ids
+        },
         rarity=_score_rarity(graph, current_year),
     )

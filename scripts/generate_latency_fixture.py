@@ -114,6 +114,9 @@ def _below(rng: random.Random, bound: int) -> int:
 
 
 def _weighted_index(rng: random.Random, weights: list[int]) -> int:
+    """O(len(weights)) per draw -- fine for the small genre/style/label pools (tens of items),
+    not for the artist pool, which can run into the tens of thousands (see `_pick_pool_artist`).
+    """
     total = sum(weights)
     cut = _below(rng, total)
     seen = 0
@@ -122,6 +125,22 @@ def _weighted_index(rng: random.Random, weights: list[int]) -> int:
         if cut < seen:
             return index
     return len(weights) - 1
+
+
+def _pick_pool_artist(rng: random.Random, hub_ids: list[str], tail_ids: list[str]) -> str:
+    """O(1) two-tier weighted draw: every hub shares HUB_ARTIST_WEIGHT, every tail artist
+    shares TAIL_ARTIST_WEIGHT. `_weighted_index`'s linear scan is the wrong tool once the
+    artist pool -- unlike the facet pools -- runs into the tens of thousands: at
+    `n_artists=30_000, n_releases=100_000` it turned three artist draws per release into a
+    ~9 billion-operation generation step, well past the point of being a synthetic-data
+    generator rather than the thing it is benchmarking.
+    """
+    hub_total = HUB_ARTIST_WEIGHT * len(hub_ids)
+    tail_total = TAIL_ARTIST_WEIGHT * len(tail_ids)
+    cut = _below(rng, hub_total + tail_total)
+    if cut < hub_total:
+        return hub_ids[cut // HUB_ARTIST_WEIGHT]
+    return tail_ids[(cut - hub_total) // TAIL_ARTIST_WEIGHT]
 
 
 def _weighted_count(rng: random.Random, low: int, high: int) -> int:
@@ -172,8 +191,7 @@ def build_fixture(
 
     # The niche control artist is reserved out of the general draw entirely -- see its
     # constant's docstring above.
-    pool_ids = hub_ids + artist_ids[HUB_ARTIST_COUNT + 1 :]
-    pool_weights = [HUB_ARTIST_WEIGHT] * HUB_ARTIST_COUNT + [TAIL_ARTIST_WEIGHT] * (len(pool_ids) - HUB_ARTIST_COUNT)
+    tail_ids = artist_ids[HUB_ARTIST_COUNT + 1 :]
 
     releases: list[LatencyRelease] = []
     for i in range(n_releases):
@@ -183,10 +201,10 @@ def build_fixture(
         # The mega artist is forced onto ~15% of releases so its own release count, and the
         # size of the candidate pool a query against it produces, both land at the
         # distribution's high end without depending on the weighted draw alone.
-        main_artist = mega_artist_id if rng.random() < 0.15 else pool_ids[_weighted_index(rng, pool_weights)]
+        main_artist = mega_artist_id if rng.random() < 0.15 else _pick_pool_artist(rng, hub_ids, tail_ids)
         credited = [main_artist]
         for _ in range(_weighted_count(rng, 0, 2)):
-            other = pool_ids[_weighted_index(rng, pool_weights)]
+            other = _pick_pool_artist(rng, hub_ids, tail_ids)
             if other not in credited:
                 credited.append(other)
 

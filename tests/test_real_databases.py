@@ -51,7 +51,6 @@ from api.queries import (
     fit_queries,
     gap_queries,
     label_dna_pg_queries,
-    recommend_pg_queries,
     recommend_queries,
     release_media_queries,
     taste_queries,
@@ -61,7 +60,6 @@ from api.queries.credits_queries import get_person_connections
 from api.queries.helpers import run_count, run_query, run_single
 from api.syncer import DISCOGS_API_BASE, sync_collection
 from tests import graph_fixture
-from tests.legacy_recommend_sql import LEGACY_CANDIDATE_ARTISTS_SQL
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -945,37 +943,10 @@ async def test_recommendation_fixture_has_real_candidates_and_fit_context(
     assert await fit.get_release_context(handle, "does-not-exist") is None
 
 
-async def test_all_signal_candidate_query_preserves_fixture_results_and_records_timing(
-    parity_backends: graph_fixture.ParityBackends,
-) -> None:
-    """gm-catalog-api-tsmu.1: measure the new set-based query against the generator it replaced.
-
-    Both queries are run on the identical parity fixture and identical PostgreSQL tier so the
-    only variable is the query shape: per-genre-capped (the old production path) versus
-    set-based over every shared genre/style/label/collaborator signal (the new one). This is
-    a lower bound on the production latency delta -- the fixture is 120 releases, not a
-    production-scale catalog -- recorded for the bead per its acceptance criteria; see
-    ``docs/evaluation.md`` and the bead report for the full picture, including a PG19-tier run.
-    """
-    legacy = LEGACY_CANDIDATE_ARTISTS_SQL
-    all_signals = recommend_pg_queries.CANDIDATE_ARTISTS_SQL
-    legacy_params = {"artist_id": "1301", "min_releases": 3}
-    all_signals_params = {"artist_id": "1301", "min_releases": 3}
-    pool = parity_backends.postgres
-    await recommend_pg_queries._rows(pool, legacy, legacy_params)
-    await recommend_pg_queries._rows(pool, all_signals, all_signals_params)
-    samples: dict[str, list[float]] = {"legacy": [], "all_signals": []}
-    for _ in range(5):
-        before = perf_counter()
-        legacy_rows = await recommend_pg_queries._rows(pool, legacy, legacy_params)
-        samples["legacy"].append((perf_counter() - before) * 1000)
-        assert legacy_rows == [("1303", "Recommendation Test Artist", 4)]
-
-        before = perf_counter()
-        all_signal_rows = await recommend_pg_queries._rows(pool, all_signals, all_signals_params)
-        samples["all_signals"].append((perf_counter() - before) * 1000)
-        assert all_signal_rows == [("1302", "Label DNA Artist Two", 4), ("1303", "Recommendation Test Artist", 4)]
-    print("candidate-query-ms " + " ".join(f"{name}={sum(values) / len(values):.3f}" for name, values in samples.items()))
+# A bare-SQL timing comparison on this 120-release parity fixture lived here in round 2. It
+# was superseded by tests/test_recommend_candidate_latency.py's endpoint-shaped, realistic-
+# fixture measurement (round 3), which is what the acceptance criteria actually asks for --
+# see docs/query-performance-optimizations.md for the numbers.
 
 
 # Family 6 names five source modules. Three media reads were PostgreSQL-only before
