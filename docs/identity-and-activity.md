@@ -78,7 +78,11 @@ and its CLI entry point (`catalog-identity-projection`).
 `api/reattach.py` repairs MusicBrainz rows that name a Discogs counterpart but minted their own
 native id because they loaded first (ADR 0014 section 8). It is the only path outside ingestion
 that writes `source = 'catalog'`, and only to re-insert aliases the provider already asserted.
-See [Re-attaching Load-Order-Split Catalog Items](../api/README.md#re-attaching-load-order-split-catalog-items);
+In the same transaction it merges the split item into the Discogs item (ADR 0009's 2026-09-25
+amendment, `api/catalog_merge.py`). The split item is kept and resolves to the survivor through
+`public.resolve_catalog_item`. Its artifacts and owned copies are re-pointed, with each move
+ledgered in `catalog_item_moves`, and the `gm_item_id` caches are recomputed. Activity rows
+are never rewritten: readers resolve their `item_id` at read time. See [Re-attaching Load-Order-Split Catalog Items](../api/README.md#re-attaching-load-order-split-catalog-items);
 run the `gm_id` projection after an applying run.
 
 ## The activity recorder (ADR 0010)
@@ -238,9 +242,10 @@ caller, across every store, in this order:
      even if a row survived somewhere else.
    - Insert one `activity.erasures` row (`model_versions_before = []` until a model registry
      exists — deleting rows does not retrain a model already trained on them).
-   - Delete `observations`, `collection_snapshots`, `owned_copies`, `user_collections`,
-     `user_wantlists`, `sync_history`, `app_tokens`, and OAuth tokens, in that dependency order
-     (leaves before the rows they reference).
+   - Delete `catalog_item_moves` (the native-id merge's ledger of the user's re-pointed copies
+     and artifacts), `observations`, `collection_snapshots`, `owned_copies`,
+     `user_collections`, `user_wantlists`, `sync_history`, `app_tokens`, and OAuth tokens, in
+     that dependency order (leaves before the rows they reference).
    - Soft-erase the `users` row in place: `email` becomes `erased+<id>@invalid.groovemap`,
      `hashed_password` a fresh unusable random hash, `is_active = false`, every TOTP column
      cleared. The row is not deleted — two foreign keys to `users` carry no cascade rule, and
@@ -287,10 +292,12 @@ order over one PostgreSQL connection, so two exports of unchanged data are byte-
 4. `wantlist_item` — `user_wantlists` rows
 5. `owned_copy` — `owned_copies` rows
 6. `observation` — `observations` rows
-7. `collection_snapshot` — snapshot ids and shape only (`id`, `taken_at`, `item_count`) — the
+7. `catalog_item_move` — the user's `catalog_item_moves` rows: each owned copy or artifact a
+   native-id merge re-pointed, with the supersession, and the from and to item ids as recorded
+8. `collection_snapshot` — snapshot ids and shape only (`id`, `taken_at`, `item_count`) — the
    `copy_ids` array is not repeated here since the owned copies it names are already exported in
    full in section 5
-8. `consent_grant` — `activity.consent_grants` rows
+9. `consent_grant` — `activity.consent_grants` rows
 
 `account.export_requested` is emitted before streaming begins. The response carries
 `Content-Disposition: attachment; filename="groovemap-export.ndjson"`.

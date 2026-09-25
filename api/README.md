@@ -218,22 +218,61 @@ Discogs row later mints a second one, and `attach_aliases` never overwrites. `ap
 finds every such row — its Discogs alias resolves to a different native id than its
 `musicbrainz` alias — and, per item in one transaction, closes every current alias on the split
 native id, re-inserts the same aliases against the Discogs native id as `source = 'catalog'`,
-and sets that MusicBrainz row's `gm_item_id`. The former native id is never deleted.
+and sets that MusicBrainz row's `gm_item_id`.
 
-It skips and reports, without modifying, any split native id that has a dependent in
-`artifacts`, `owned_copies`, `observations`, `user_collections`, or `user_wantlists` (those wait
-for the native-id merge decision), that holds a `discogs` or another row's alias (a real item,
-not an orphan), or that holds an alias whose source is not `catalog`. A barcode or catalogue
+The same transaction then merges the split item into the Discogs item, per
+[ADR 0009's 2026-09-25 amendment](https://github.com/groovemap-music/design/blob/main/docs/adr/0009-native-identity-and-provider-aliases.md#2026-09-25-superseded-catalog-items-and-native-id-merge)
+(`api/catalog_merge.py`):
+
+1. It locks both `catalog_items` rows, in id order. The split item is locked `FOR UPDATE`, so
+   no copy or artifact can be created against it mid-move. The Discogs item is locked
+   `FOR NO KEY UPDATE`.
+2. It opens a `catalog_item_supersessions` row (`cause = 'catalog_reattachment'`, and
+   `decision_ref` is the run's `admin_audit_log` entry). It also compresses chains, so
+   resolution stays one hop.
+3. It re-points `artifacts.item_id` and `owned_copies.item_id` from the split item to the
+   survivor, and writes every moved row to `catalog_item_moves` with its owner.
+4. It recomputes the `gm_item_id` caches (the entity tables, `user_collections`, and
+   `user_wantlists`) from the moved aliases.
+
+The former native id is kept, never deleted, and `public.resolve_catalog_item` resolves it to
+the survivor. A merge changes only a user-owned row's item reference: no user-authored value,
+id, or owner. It emits no event. Observations and snapshots are not touched, because copies
+and artifacts keep their ids. `revert_supersession` reverses a merge exactly, for the future
+promotion revert: it moves back only the ledgered rows still on the survivor.
+
+The dependents guard is gone: it was removed in the same change that added the merge. A split
+item with dependents is now merged, not skipped. A skip wrote nothing, so the first run after
+this change merges every item earlier runs skipped for dependents. Compare its
+`merged_with_dependents` count against those runs' `guard_reasons.dependents`.
+
+It still skips and reports, without modifying, any split native id that holds a `discogs` or
+another row's alias (a real item, not an orphan), or that holds an alias whose source is not
+`catalog`. A merge that cannot happen rolls the whole item back and is counted as failed: the
+kinds differ, the Discogs item is itself superseded, or the split item already resolves
+elsewhere. A barcode or catalogue
 number the MusicBrainz side won moves to the Discogs item; if the Discogs item already holds a
 current alias for the same value it is not duplicated, and the split row stays closed. The
 module docstring documents the lock order and why a concurrent loader attach converges.
 
-**Dry run is the default.** A dry run only runs the read-only census: per kind, split items,
-guarded items by reason, items with dependents by table, identifier aliases the split items
-hold (and how many of those the Discogs record also carries), and Discogs ids that resolve to
-nothing yet. Writing needs an explicit flag, and every applying run writes one
-`admin_audit_log` entry with its per-kind outcomes. Re-running is safe: a repaired item is no
-longer split, and a guarded item is skipped again.
+**Dry run is the default.** A dry run only runs the read-only census. Per kind, it reports:
+
+- split items;
+- guarded items, by reason;
+- items with dependents, by table;
+- `will_move`: among eligible items, how many have dependents and how many artifact and
+  owned-copy rows the merge will re-point;
+- identifier aliases the split items hold, and how many of those the Discogs record also
+  carries;
+- Discogs ids that resolve to nothing yet.
+
+Writing needs an explicit flag. Every applying run writes one `admin_audit_log` entry under
+its job id, the id its supersessions name. The entry holds per-kind outcomes: supersessions
+opened, chains compressed, rows moved and caches recomputed per table, and
+`merged_with_dependents`. It holds counts only, never a user id or a user-owned row id,
+because that table outlives erasure. A run that fails is recorded under the same id as
+`identity.reattach.failed`. Re-running is safe: a repaired item is no longer split, and a
+guarded item is skipped again.
 
 - **Admin API**: `POST /api/admin/identity/reattach` (admin JWT required) returns `202` with a
   job id; add `?apply=true` to write. The census and per-item outcomes are logged.
@@ -277,7 +316,9 @@ the `gm_id` projection by itself, once per completed Discogs extraction. It is o
 - **Handled marker and audit.** A finished run writes one `admin_audit_log` entry with
   `action = 'identity.reattach.auto'` and `target = 'discogs:<version>'`, with the per-kind
   re-attachment outcomes and projection counts in `details`. That entry is the durable
-  handled marker, so no new table is needed.
+  handled marker, so no new table is needed. Its row id is the run's job id, which the run's
+  supersessions name as `decision_ref`. A failed run is recorded under the same id as
+  `identity.reattach.auto.failed`. That entry is not the marker, so the run is still retried.
 - **System actor.** The CLI requires `--admin-id` and the endpoint uses the caller's JWT
   because there a person decides to write. Here nobody does, so automatic runs are recorded
   against a reserved system user, `identity-maintenance@system.groovemap.invalid`, that the

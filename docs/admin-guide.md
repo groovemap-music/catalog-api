@@ -98,7 +98,7 @@ alter either producer's taxonomy or source records.
 | Method | Path | Responsibility |
 | --- | --- | --- |
 | `POST` | `/api/admin/identity/project` | Trigger a `gm_id` projection run as a tracked background task |
-| `POST` | `/api/admin/identity/reattach` | Census (default) or, with `?apply=true`, re-attach load-order-split catalog items |
+| `POST` | `/api/admin/identity/reattach` | Census (default) or, with `?apply=true`, re-attach and merge load-order-split catalog items |
 
 Returns `202` with a job id immediately; the projection itself pages the currently-valid
 Discogs aliases in `provider_aliases` and sets the additive `gm_id` property on the matching
@@ -110,11 +110,24 @@ this projects, per
 [ADR 0009](https://github.com/groovemap-music/design/blob/main/docs/adr/0009-native-identity-and-provider-aliases.md).
 
 The re-attachment route is a dry run unless `apply=true`: it returns `202` with a job id and
-logs the census. An applying run writes one `identity.reattach.apply` audit entry with its
-per-kind outcomes; run the projection above afterwards. See
+logs the census. The census reports, per kind, what an applying run would merge, including the
+artifact and owned-copy rows that `will_move`.
+
+An applying run also merges each split item into its Discogs item, per ADR 0009's native-id
+merge. The split item is kept as a supersession. Its artifacts and owned copies move to the
+survivor, and each move is ledgered in `catalog_item_moves`. Items with dependents are no
+longer skipped: the first run after the dependents guard's removal merges every item earlier
+runs skipped. Compare its `merged_with_dependents` count against their
+`guard_reasons.dependents`.
+
+The run writes one `identity.reattach.apply` audit entry, with the job id as its row id. Every
+supersession the run opens names that row as its `decision_ref`. The entry holds per-kind,
+per-table counts only, with no user or row ids. A run that fails is recorded under the same id
+as `identity.reattach.failed`. Run the projection above afterwards. See
 [Re-attaching Load-Order-Split Catalog Items](../api/README.md#re-attaching-load-order-split-catalog-items)
-for the rule, the guards, and the `catalog-identity-reattach` CLI, per
-[ADR 0014 section 8](https://github.com/groovemap-music/design/blob/main/docs/adr/0014-cross-catalog-edition-candidates.md).
+for the rule, the merge, the guards, and the `catalog-identity-reattach` CLI, per
+[ADR 0014 section 8](https://github.com/groovemap-music/design/blob/main/docs/adr/0014-cross-catalog-edition-candidates.md)
+and its 2026-09-25 amendment.
 
 ## Dead-letter queue purge
 
