@@ -25,17 +25,22 @@ MIN_ARTIST_RELEASES = 3
 # the *ranked* set, not a per-genre cap during expansion: the query still finds and ranks
 # every qualifying artist; only the profile-and-score work below that ranking is bounded.
 #
-# PROPOSED, under review -- not a final decision. 50 is the smallest value swept and the only
-# one that clears the endpoint's 20% p95 budget against the legacy path on the realistic
-# synthetic fixture: mega-genre target +3.4%, median target -14.8% (faster than legacy). 100
-# and 200 both clear it for the median target but not the mega one (+27.6%, +36.3%); 500 does
-# not clear it for either (+160.2%, +33.4%). On the golden set, recall@10 is identical
-# (0.53614) at every swept N -- but that fixture has only 36 artists total, so it cannot show
-# whether N=50 excludes a candidate that ranks low by shared release count but would have
-# scored highly by cosine similarity, which is the real risk of this cap and is not measured
-# here. See docs/query-performance-optimizations.md for the full N-sweep, the concurrency-gain
-# and catalog-size-scaling measurements, and tests/test_recommend_candidate_latency.py for how
-# to reproduce them.
+# PROPOSED, under review -- not a final decision, and not yet a validated one. A round-3 sweep
+# (12-15 reps/variant, one block per variant) read 50 as the only value clearing the endpoint's
+# 20% p95 budget against the legacy path. A round-4 re-measurement -- every variant interleaved
+# per rep instead of run in blocks, >=50 reps/variant, spread reported, 3 repeated trials, per
+# review -- found that reading did not hold up: on the small fixture the mega-genre target's
+# per-trial delta at N=50 ranged +10% to +25% (straddling the budget, not inside it), and on a
+# 12x larger fixture N=50 measured +41% to +61% over legacy in every trial. The candidate SQL's
+# own ranking/aggregation cost (the UNION and GROUP BY, which run before LIMIT and are not
+# reduced by a smaller N) is a growing share of the cost as the catalog scales, which the
+# profile cap alone does not address. On the golden set, recall@10 is identical (0.53614) at
+# every swept N -- but that fixture has only 36 artists total, so it cannot show whether a cap
+# excludes a candidate that ranks low by shared release count but would have scored highly by
+# cosine similarity, which is the real risk of this cap and remains unmeasured. See
+# docs/query-performance-optimizations.md for the full round-3 and round-4 data and
+# tests/test_recommend_candidate_latency.py for how to reproduce them. 50 is left as the
+# current value pending the maintainer's read of round 4; it is not a recommendation.
 CANDIDATE_PROFILE_LIMIT = 50
 
 # Dimension weights for artist similarity

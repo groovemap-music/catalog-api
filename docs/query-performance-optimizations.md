@@ -104,8 +104,10 @@ decided.
   the SQL and the Cypher -- the query still finds and ranks every qualifying artist; only the
   profile-and-score work below that ranking is bounded. This is a single overall cap on the
   ranked set, not a per-genre cap during expansion, and it is overridable per call for the
-  sweep below. **Proposed value: 50. Still under review** -- see the sweep for why, and for
-  the recall-risk caveat a cap of this shape carries that this investigation could not measure.
+  sweep below. **Value: 50, left in place pending review, not a validated recommendation** --
+  the round-3 sweep below read 50 as clearing the budget; the round-4 re-measurement further
+  down found that reading did not hold up under a more rigorous method, and is what should be
+  read as current rather than this section.
 - **Concurrent profile-batch queries** (`recommend_pg_queries._batch_artist_profiles`): the
   four dimension queries (genres/styles/labels/collaborators) now run with `asyncio.gather`
   instead of a sequential loop. Neo4j's side already did this; only PostgreSQL was sequential.
@@ -235,21 +237,99 @@ Two findings:
    match against a mega-genre target is not just slower at this scale, it is impractical --
    which is itself evidence for capping rather than an oversight in the test.
 
+### Round 4: interleaved re-measurement reverses the N=50 reading
+
+Round 3's sweep ran each variant in its own block (all reps of "legacy", then all reps of
+each capped N, in order). On a host whose load drifts over the measurement window -- true
+here, the validation slot is shared with other hives -- that biases whichever variant happens
+to run during a quiet or busy stretch, and the sweep order (legacy first, capped-500 last)
+matches exactly the direction that bias would need to run to make N=50 look artificially
+close to legacy and N=500 look artificially far from it. Per review, round 4 re-measured with
+every variant **interleaved per rep** (alternating legacy, N=50, N=100, N=200, N=500 on every
+single rep, not in blocks), **>=50 reps per variant per target** (up from 12-15), reporting
+**p50/p95 plus spread** (min/max, IQR), over **3 repeated interleaved trials** in the same live
+session. `tests/test_recommend_candidate_latency.py`'s two `*_interleaved_sweep_*` tests.
+
+**Small fixture (2,500 artists), PG19, one representative trial of three (p95, ms):**
+
+| Target | Legacy | N=50 | N=100 | N=200 | N=500 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Mega | 152-155 | 143-190 | 161-197 | 192-243 | 301-353 |
+| Mid | 99-129 | 101-114 | 104-126 | 124-141 | 169-194 |
+| Niche | 20-24 | 65-73 | 66-79 | 64-78 | 68-83 |
+
+(Ranges are across the 3 trials, same variant, same target -- i.e. this is the round-to-round
+variation, not a per-rep spread.) Reading this honestly: **for the mega target, N=50 is no
+longer clearly inside the 20% budget.** Per-trial deltas vs legacy were +10.4%, -6.4%, and
++24.7% -- straddling the budget rather than sitting inside it. Mid stays comfortably under
+budget at every N up to 200. Niche's absolute jump (a stable ~45-50ms) is now visibly a real,
+reproducible fixed cost of the new query's shape (four-way `UNION` plus CTEs vs. the old
+query's single `LATERAL` expansion), not noise -- it shows up consistently across all 3 trials
+with tight spread at 50 reps, where round 3's 12-15 reps could not distinguish it from noise.
+
+**30,000-artist fixture, mega target, PG19, all 3 trials (p95, ms):**
+
+| Trial | Legacy | N=50 | N=200 |
+| --- | ---: | ---: | ---: |
+| 0 | 952.38 | 1346.39 (+41.4%) | 1648.12 (+73.1%) |
+| 1 | 879.32 | 1414.14 (+60.8%) | 1717.42 (+95.3%) |
+| 2 | 1218.83 | 1853.55 (+52.1%) | 2246.43 (+84.3%) |
+
+**At the scale this fixture reaches, N=50 does not clear the 20% budget in any of the 3
+trials** -- the earlier "N=50 clears it" reading came from a fixture 12x smaller and a
+measurement methodology now shown to have biased the sweep in exactly the direction that made
+N=50 look best. This is the central finding of round 4: **the profile-count cap alone,
+at any of the swept values, is not sufficient at realistic scale.** The candidate SQL's own
+ranking/aggregation step -- the `UNION` and `GROUP BY` over every matching row, which runs
+before the `LIMIT` and is not reduced by a smaller N -- is a growing share of the cost as the
+catalog grows, and capping the *profiled* set does not touch it.
+
+Revised implication for `CANDIDATE_PROFILE_LIMIT`: the round-3 default of 50 is not supported
+by this more rigorous measurement. Recommending **no default change yet** pending the
+maintainer's read of these numbers -- the honest picture is that this round found the earlier
+proposal did not hold up under scrutiny, not that it found a value that does.
+
 ### Directions still open
 
-- **The proposed N=50 default clears the measured budget but is the smallest value swept,**
-  and this investigation has no fixture that can validate its recall risk at production scale
-  (see the sweep section above). A maintainer familiar with the real catalog's genre
-  distribution is better placed to judge whether 50 is too aggressive.
+- **No swept N clears the budget at realistic scale.** The next step is very likely bounding
+  the candidate SQL's own cost (the aggregation before `LIMIT`), not the profile cap alone --
+  see the precompute/cache direction below, now the leading candidate rather than one option
+  among several.
 - **Precomputing or caching the candidate pool for the handful of facets that are actually
   broad** (mega genres/styles/labels are, by construction, few and stable) would let the
   uncapped, full-recall path be used for the common case (where it is already cheap) and
-  reserve the cap for genuinely broad targets only.
+  reserve special handling for genuinely broad targets only. This is now the most promising
+  direction, since round 4 shows the cap alone does not close the gap once the candidate SQL's
+  own aggregation cost dominates.
 - **The `graph.artist` join plan** noted above, once real table sizes are available to check
   against.
-- **Vectorizing `compute_similar_artists`** was considered but not pursued: at N<=500 candidates
-  it did not show up as the dominant cost in the EXPLAIN/timing breakdown (the SQL profile
-  batches did), so it is not where the next unit of engineering effort would pay off first.
+- **Vectorizing `compute_similar_artists`** remains not pursued: at N<=500 candidates it did
+  not show up as the dominant cost in the EXPLAIN/timing breakdown (the SQL side did), so it
+  is not where the next unit of engineering effort would pay off first.
+- **Production-scale recall validation (held, per the maintainer):** the gm-design-chw.2 spike
+  harness (`../design/docs/spikes/gm-design-chw.2/`) could re-run its proxy recall@10
+  (0.0092 -> 0.1799 in the original spike) with the real candidate query at each swept N,
+  against the full Discogs-dump-derived subset instead of the 36-artist golden set. This needs
+  the Discogs releases dump (~11GB, not cached) and the host is at ~15-16GB free, so it is on
+  hold for a maintainer disk decision -- nothing has been downloaded. The plug-in point, read
+  but not executed: `catalog.py`'s `Heuristic` class already builds per-artist genre/style/
+  label/collaborator count matrices (`self.dims`) from the same release-level incidence
+  matrices (`catalog.by`, `.genres`, `.styles`, `.labels`) the production query reads from, so
+  a `candidate_artists_all_signals(artist, limit=None)` method can be added there mirroring
+  `api/evaluation/graph.py`'s `GoldenGraph.candidate_artists_all_signals`: take the target's
+  release rows from `catalog.by[:, artist]`, collect the genre/style/label column indices
+  those releases touch, build a boolean release mask over the whole catalog (any release
+  touching one of those columns, OR one of the target's own release rows for the collaborator
+  signal), sum `catalog.by` restricted to that release mask to get each candidate's distinct
+  qualifying release count, filter by `MIN_ARTIST_RELEASES`, sort by (`-count`, the harness's
+  existing deterministic tiebreak key), and slice to `limit`. A `similar_all_signals(artist,
+  limit)` wrapper then calls `bp.compute_similar_artists` exactly as `similar()` does. In
+  `evaluate.py`, the insertion point is right after the existing production-path loop (~line
+  170-175, which fills `rankings["heuristic"]`): the same loop shape, swapped to call
+  `heur.similar_all_signals(int(a), limit=N)` for each swept N, filling
+  `rankings[f"heuristic_all_signals_{N}"]`. Nothing else in `evaluate.py` needs to change --
+  the bootstrap, per-family breakdown, and stability checks already operate generically over
+  named entries in `rankings`.
 
 ## Ownership of supporting data work
 

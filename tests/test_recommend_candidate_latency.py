@@ -224,6 +224,77 @@ def _print_row(target: str, variant: str, candidates: int, latencies: list[float
     print(f"{target:<45}{variant:<28}{candidates:>11}{statistics.median(latencies):>10.2f}{_p95(latencies):>10.2f}")
 
 
+def _stats(values: list[float]) -> dict[str, float]:
+    """p50/p95 plus spread: min/max and IQR (Q1-Q3), for round-4's interleaved sweep."""
+    if len(values) < 4:
+        q1, q3 = min(values), max(values)
+    else:
+        q1, q3 = statistics.quantiles(values, n=4, method="inclusive")[0], statistics.quantiles(values, n=4, method="inclusive")[2]
+    return {
+        "p50": statistics.median(values),
+        "p95": _p95(values),
+        "min": min(values),
+        "max": max(values),
+        "iqr": q3 - q1,
+    }
+
+
+async def _interleaved_measure(
+    pool: Any,
+    artist_id: str,
+    variants: list[tuple[str, Callable[[Any, str], Awaitable[list[dict[str, Any]]]]]],
+    *,
+    reps: int,
+    trials: int,
+) -> tuple[dict[str, int], list[dict[str, list[float]]]]:
+    """Alternate every variant per rep (round-4, per review): rather than running all reps of
+    one variant before moving to the next, each rep calls every variant in turn, so any drift
+    in host load over the measurement window (the validation slot is shared with other hives)
+    lands on every variant roughly equally instead of biasing whichever ran in which block.
+
+    One warm-up call per variant precedes the timed loop (warm cache/plan, per review), not
+    counted. ``trials`` independent interleaved passes are run back to back in the same live
+    session, to show run-to-run variation without paying container-startup cost per trial.
+
+    Returns:
+        (candidate_count per variant, one ``{variant: latencies_ms}`` dict per trial).
+    """
+    candidate_counts: dict[str, int] = {}
+    for name, fn in variants:
+        candidate_counts[name] = len(await fn(pool, artist_id))
+
+    all_trials: list[dict[str, list[float]]] = []
+    for _trial in range(trials):
+        trial_latencies: dict[str, list[float]] = {name: [] for name, _fn in variants}
+        for _rep in range(reps):
+            for name, fn in variants:
+                before = perf_counter()
+                await _similar_artists_endpoint(pool, artist_id, fn)
+                trial_latencies[name].append((perf_counter() - before) * 1000)
+        all_trials.append(trial_latencies)
+    return candidate_counts, all_trials
+
+
+def _print_interleaved_report(
+    target: str, variants: list[tuple[str, Any]], candidate_counts: dict[str, int], trials: list[dict[str, list[float]]]
+) -> None:
+    header = f"{'target':<20}{'variant':<14}{'trial':>6}{'candidates':>11}{'n':>5}{'p50 ms':>9}{'p95 ms':>9}{'min ms':>9}{'max ms':>9}{'iqr ms':>9}"
+    print(header)
+    print("-" * len(header))
+    for trial_index, trial_latencies in enumerate(trials):
+        for name, _fn in variants:
+            values = trial_latencies[name]
+            s = _stats(values)
+            print(
+                f"{target:<20}{name:<14}{trial_index:>6}{candidate_counts[name]:>11}{len(values):>5}"
+                f"{s['p50']:>9.2f}{s['p95']:>9.2f}{s['min']:>9.2f}{s['max']:>9.2f}{s['iqr']:>9.2f}"
+            )
+    print(f"\n--- run-to-run variation across {len(trials)} trials ({target}) ---")
+    for name, _fn in variants:
+        p95_per_trial = [_p95(trial_latencies[name]) for trial_latencies in trials]
+        print(f"{name:<14} p95 per trial: {[round(v, 2) for v in p95_per_trial]}  range: {max(p95_per_trial) - min(p95_per_trial):.2f}ms")
+
+
 async def test_similar_artist_endpoint_latency_cap_and_concurrency_sweep() -> None:
     """Cap sweep (N=50/100/200/500) and the concurrency gain, isolated from the cap."""
     fixture = build_fixture()
@@ -351,5 +422,72 @@ async def test_similar_artist_endpoint_latency_scales_with_catalog_size() -> Non
             print(f"{variant_name:<28}{small_p95:>12.2f}{large_p95:>12.2f}{factor:>14.2f}x")
 
         assert rows["large"]["new-capped-200-concurrent"][1] > 0
+    finally:
+        await pool.close()
+
+
+# ── Round 4: interleaved sweep, per review ──────────────────────────────
+#
+# The round-3 sweep above ran each variant in its own block (all reps of "legacy", then all
+# reps of "new-uncapped-sequential", and so on). On a host whose load drifts over the
+# measurement window -- true here, since the validation slot is shared with other hives --
+# that biases whichever variant happens to run during a quiet or busy stretch. This section
+# alternates every variant per rep instead, reports spread (not just p50/p95), and repeats the
+# whole interleaved pass 3 times in the same live session to show run-to-run variation. Both
+# tests override the suite's default 60s per-test timeout (`pyproject.toml`), since >=50 reps
+# per variant per target, times several variants and 3 trials, legitimately takes minutes.
+
+
+@pytest.mark.timeout(1200)
+async def test_similar_artist_endpoint_latency_interleaved_sweep_small_fixture() -> None:
+    """N=50/100/200/500 vs legacy, interleaved, >=50 reps/variant/target, 3 trials."""
+    fixture = build_fixture()
+    pool = await _open_pool()
+    try:
+        await _seed_latency_fixture(pool, fixture)
+        counts = fixture.release_counts()
+        mid_target = min(
+            (artist_id for artist_id, count in counts.items() if count >= _MIN_RELEASES and artist_id != fixture.mega_artist_id),
+            key=lambda artist_id: abs(counts[artist_id] - percentile(list(counts.values()), 50)),
+        )
+        targets = {
+            "mega": fixture.mega_artist_id,
+            "mid": mid_target,
+            "niche": fixture.niche_artist_id,
+        }
+        variants: list[tuple[str, Callable[[Any, str], Awaitable[list[dict[str, Any]]]]]] = [
+            ("legacy", _legacy_get_candidate_artists),
+            ("capped-50", _new_capped_concurrent(50)),
+            ("capped-100", _new_capped_concurrent(100)),
+            ("capped-200", _new_capped_concurrent(200)),
+            ("capped-500", _new_capped_concurrent(500)),
+        ]
+
+        print(f"\nfixture: {len(fixture.artists)} artists, {len(fixture.releases)} releases, {len(fixture.labels)} labels")
+        for label, artist_id in targets.items():
+            candidate_counts, trials = await _interleaved_measure(pool, artist_id, variants, reps=50, trials=3)
+            _print_interleaved_report(label, variants, candidate_counts, trials)
+            print()
+    finally:
+        await pool.close()
+
+
+@pytest.mark.timeout(1200)
+async def test_similar_artist_endpoint_latency_interleaved_sweep_large_fixture() -> None:
+    """N=50 and N=200 vs legacy on the mega target, 30,000-artist fixture, interleaved, 3 trials."""
+    large = build_fixture(seed=20260925, n_artists=30_000, n_releases=100_000)
+    pool = await _open_pool()
+    try:
+        await _seed_latency_fixture(pool, large)
+        mega_id = large.mega_artist_id
+        variants: list[tuple[str, Callable[[Any, str], Awaitable[list[dict[str, Any]]]]]] = [
+            ("legacy", _legacy_get_candidate_artists),
+            ("capped-50", _new_capped_concurrent(50)),
+            ("capped-200", _new_capped_concurrent(200)),
+        ]
+
+        print(f"\nfixture: {len(large.artists)} artists, {len(large.releases)} releases, {len(large.labels)} labels")
+        candidate_counts, trials = await _interleaved_measure(pool, mega_id, variants, reps=50, trials=3)
+        _print_interleaved_report("mega (30k)", variants, candidate_counts, trials)
     finally:
         await pool.close()
