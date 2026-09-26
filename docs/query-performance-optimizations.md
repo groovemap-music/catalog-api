@@ -326,33 +326,120 @@ know:
 - **Concurrent profile-batch queries**, reverted from this bead's candidate query but
   applicable to the legacy generator's own profile fetch regardless of what serves similarity
   next -- see "What was tried and reverted" above.
-- **Production-scale recall validation (held, per the maintainer):** the gm-design-chw.2 spike
-  harness (`../design/docs/spikes/gm-design-chw.2/`) could re-run its proxy recall@10
-  (0.0092 -> 0.1799 in the original spike) with the all-signal candidate query at each swept N,
-  against the full Discogs-dump-derived subset instead of the 36-artist golden set -- an
-  evaluation exercise regardless of whether the query ever serves production, since it answers
-  "how much of the recall gain would a cap have cost, at real scale" for the record. This needs
-  the Discogs releases dump (~11GB, not cached) and the host is at ~15-16GB free, so it is on
-  hold for a maintainer disk decision -- nothing has been downloaded. The plug-in point, read
-  but not executed: `catalog.py`'s `Heuristic` class already builds per-artist genre/style/
-  label/collaborator count matrices (`self.dims`) from the same release-level incidence
-  matrices (`catalog.by`, `.genres`, `.styles`, `.labels`) the evaluation query
-  (`tests/all_signal_recommend_sql.py`) reads from, so
-  a `candidate_artists_all_signals(artist, limit=None)` method can be added there mirroring
-  `api/evaluation/graph.py`'s `GoldenGraph.candidate_artists_all_signals`: take the target's
-  release rows from `catalog.by[:, artist]`, collect the genre/style/label column indices
-  those releases touch, build a boolean release mask over the whole catalog (any release
-  touching one of those columns, OR one of the target's own release rows for the collaborator
-  signal), sum `catalog.by` restricted to that release mask to get each candidate's distinct
-  qualifying release count, filter by `MIN_ARTIST_RELEASES`, sort by (`-count`, the harness's
-  existing deterministic tiebreak key), and slice to `limit`. A `similar_all_signals(artist,
-  limit)` wrapper then calls `bp.compute_similar_artists` exactly as `similar()` does. In
-  `evaluate.py`, the insertion point is right after the existing production-path loop (~line
-  170-175, which fills `rankings["heuristic"]`): the same loop shape, swapped to call
-  `heur.similar_all_signals(int(a), limit=N)` for each swept N, filling
-  `rankings[f"heuristic_all_signals_{N}"]`. Nothing else in `evaluate.py` needs to change --
-  the bootstrap, per-family breakdown, and stability checks already operate generically over
-  named entries in `rankings`.
+
+### Part B: production-scale recall, gm-design-chw.2 harness (round 5)
+
+The maintainer cleared disk and approved running the gm-design-chw.2 spike harness's proxy
+recall@10 methodology (relevant(A) = artists A works with on a post-cut release; see that
+spike's own doc for the full protocol) with the all-signal candidate query at each swept N,
+against the real Discogs-dump-derived subset the original spike used -- not the 36-artist
+golden set, which is too small to show a cap's recall risk at all (every swept N was identical
+there). This closes the "held" item from earlier rounds.
+
+**Harness change.** A copy of `gm-design-chw.2` was made outside any repo
+(`~/.cache/groovemap-spikes/graphemb/harness/`, per the spike's own README pattern) --
+the design repo itself was never modified. Two additions, both evaluation/harness-only:
+
+- `catalog.py`: `Heuristic.candidate_artists_all_signals(artist, profile=None, *, limit=None)`,
+  mirroring `api/evaluation/graph.py`'s `GoldenGraph.candidate_artists_all_signals` /
+  `tests/all_signal_recommend_sql.py`'s SQL over the harness's sparse release-facet matrices
+  (`catalog.by`, `.genres`, `.styles`, `.labels`): every release touching a genre/style/label
+  the target's own releases touch, plus the target's own releases (collaborator), reduced to a
+  per-candidate distinct-release count, filtered by `MIN_ARTIST_RELEASES`, ranked by
+  (`-count`, the harness's tiebreak key), sliced to `limit`. `similar_all_signals(artist,
+  limit=N)` wraps it with the identical `bp.compute_similar_artists` call `similar()`
+  (the production-path replay) uses -- only the candidate scope differs.
+- `evaluate.py`: a loop after the existing production-path replay, calling
+  `heur.similar_all_signals(int(a), limit=N)` for N in 50/100/200/500 (not `uncapped` -- see
+  below) for every query, filling `rankings[f"heuristic_all_signals_{N}"]` and its novel-view
+  counterpart exactly as the production path fills `rankings["heuristic"]`. Everything else
+  (bootstrap CIs, per-family breakdown, stability checks) already operates generically over
+  named `rankings` entries, so nothing else needed to change.
+- `uncapped: None` was deliberately **not** added to that loop. `evaluate.py` only writes its
+  results to disk at the very end of `main()`, after every swept N and the full bootstrap/gate
+  pipeline; an unbounded step inside that loop would risk losing every already-computed N if it
+  had to be killed for running too long. A separate script, `uncapped_sweep.py`, measures
+  uncapped instead: a fixed, deterministic, **hash-ordered** (not sorted-by-id, which would
+  skew toward older/more-prolific low-id artists) subset of test queries, scoring all five
+  variants per query so uncapped is compared against the capped ones on identical queries, and
+  writing its JSON output after every single query so a time-box kill leaves an honestly
+  labelled partial result. It includes a toy-case check (a tiny synthetic catalog where a
+  high-shared-count/low-cosine candidate and a low-shared-count/high-cosine candidate diverge
+  under the two possible capping strategies) proving the cap is applied to the candidate list
+  before scoring, not to the cosine-ranked output afterward, plus a cross-check against
+  `Heuristic.similar_all_signals` on real queries.
+
+**Sanity check.** Reproduced on the identical dump, sample rate (10%), and time-split cut as
+the original spike, confirming the harness copy and its environment are faithful:
+
+| Metric | This run | Original spike |
+| --- | ---: | ---: |
+| Production heuristic recall@10 | 0.009164 | 0.0092 |
+| All-artist dense recall@10 | 0.179883 | 0.1799 |
+
+6,730 total queries, 4,721 test / 2,009 dev -- identical counts to the original spike.
+
+**Main sweep, N=50/100/200/500, full test split (4,721 queries), vs the production heuristic,
+with paired bootstrap 95% CIs (1,000 draws):**
+
+| N | recall@10 | vs production | 95% CI | Significant? |
+| --- | ---: | ---: | ---: | --- |
+| 50 | 0.008702 | -5.0% | [-9.0%, -1.8%] | Yes -- **worse** |
+| 100 | 0.009923 | +8.3% | [-2.9%, +22.7%] | No (CI crosses zero) |
+| 200 | 0.011503 | +25.5% | [+5.0%, +52.6%] | Yes -- better |
+| 500 | 0.017596 | +92.0% | [+52.9%, +142.9%] | Yes -- better |
+
+Every capped N remains 90-95% below the all-artist dense reference (0.179883); N=500 is
+closest at -90.2%. Per-family recall@10 (production -> N=50, the value round 3/4 had proposed):
+vinyl 0.00856 -> 0.00765 (worse), digital 0.00310 -> 0.00274 (worse), optical roughly flat
+(0.01408 -> 0.01390); at N=500 every family improves over production. On the novel-collaborator
+view (post-cut artists the query had no pre-cut link to), N=500 vs production is +42.0%
+[-2.4%, +103.2%] -- directionally consistent but not significant at this sample size; the
+other capped N's show no significant novel-view effect either way.
+
+**This is an independent confirmation of the round-5 decision, from the recall side rather
+than the latency side.** Round 4 showed N=50 does not clear the latency budget at realistic
+scale; this shows N=50 does not even help recall at that scale -- it is measurably *worse*
+than the legacy path (CI excludes zero). N=200 and N=500 do help recall significantly, but
+round 4 already showed N=500's latency cost is far worse than N=50's, and even N=500's real
+gain leaves recall at roughly a tenth of the all-artist ceiling. No swept N is both a latency
+win and a clear recall win at real scale.
+
+**Uncapped, on a fixed, deterministic, hash-ordered subset of 300 test queries** (all five
+variants scored on the identical queries; `uncapped_sweep.py`, wall time 1,654s, well inside
+the 60-minute time-box):
+
+| Variant | recall@10 | Candidates (mean) | Candidates (max) | Query time (mean) |
+| --- | ---: | ---: | ---: | ---: |
+| N=50 | 0.009455 | 50 | 50 | 0.025s |
+| N=100 | 0.013474 | 100 | 100 | 0.040s |
+| N=200 | 0.012392 | 200 | 200 | 0.054s |
+| N=500 | 0.025945 | 500 | 500 | 0.089s |
+| Uncapped | **0.114959** | **46,285** | **108,927** | **5.115s** |
+
+Only the mean per-query time was retained; the per-query raw JSON this table was built from
+lived in the harness work dir and was deleted (along with the `s10` subset it depends on) as
+part of this bead's cleanup step before a max-per-query-time figure was pulled out of it.
+Re-deriving it would mean re-provisioning the harness copy and re-running the 300-query sweep
+from scratch (~28 minutes), not a cheap re-read, so it is left out here; the mean and the
+candidate-pool max already carry the qualitative point below.
+
+These absolute numbers are **not** a substitute for the full-4,721-query sweep above, which
+remains the authoritative capped-vs-legacy comparison; this subset is noisier by construction
+(300 queries vs 4,721) and its capped column shows it: N=200's recall@10 (0.012392) is *below*
+N=100's (0.013474) here, the reverse of the full sweep's monotonically-increasing 0.009923 (100)
+&lt; 0.011503 (200) &lt; 0.017596 (500). That inversion is sampling noise from the smaller subset,
+not a real effect -- don't read the subset's capped numbers as contradicting the full sweep.
+What this subset is for, and the only thing it should be used to conclude, is the uncapped vs.
+capped comparison on identical queries, which the full sweep can't do (evaluate.py deliberately
+excludes uncapped from its loop; see below). On that comparison, two things stand out: uncapped's
+recall (0.115) is far above every capped value here and approaches the all-artist reference's
+order of magnitude, confirming the cap really is discarding a large share of the true recall
+gain -- and its cost is exactly what round 4 predicted, worse: a mean candidate pool of 46,285
+(max 108,927) and a mean 5.1 seconds *per query* for the candidate search and profiling alone,
+three to four orders of magnitude above any capped variant's cost, on a fixed sample
+specifically chosen to be unbiased rather than adversarial. This is not a shape a request-time
+endpoint can serve.
 
 ## Ownership of supporting data work
 

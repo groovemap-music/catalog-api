@@ -230,6 +230,14 @@ scope would have kept. That is a limit of the golden
 set as a recall-risk check for the cap, not evidence the cap is free of one at production
 scale -- see `tests/test_evaluation_similar_artist_candidates.py`'s round-3 section.
 
+Round 5 part B closed that gap on real data: the gm-design-chw.2 spike harness's proxy
+recall@10 methodology, re-run with the all-signal query at each swept N against the real
+Discogs-dump-derived subset (not the golden set), confirmed the golden set's blind spot was
+real -- N=50 recall@10 is significantly *worse* than the legacy path at that scale (95% CI
+excludes zero), and even N=500's real, significant gain leaves recall at roughly a tenth of
+the all-artist reference. See `docs/query-performance-optimizations.md`'s "Part B" section for
+the full numbers.
+
 ## Comparing a model to the baseline
 
 The comparison is only meaningful if both sides are measured by identical code, so a model is
