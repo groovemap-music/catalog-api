@@ -1161,6 +1161,21 @@ class LookupRelease(BaseModel):
     media_families: list[str] = Field(default_factory=list)
 
 
+class LookupMatch(BaseModel):
+    """One row a barcode's equivalent GTIN-12/13/14 forms resolved to.
+
+    ADR 0011's amendment treats a shorter GTIN as the same GTIN zero-padded to 14 digits, at
+    lookup only — no stored alias is re-keyed. It does not merge rows: a native item reached
+    through two of its equivalent forms is not deduplicated into one entry, and two different
+    native items sharing a GTIN are not treated as a split — both are genuine records and
+    this surface names each row rather than picking one.
+    """
+
+    gm_id: str
+    external_id: str = Field(description="The stored provider_aliases external_id that resolved this row")
+    releases: list[LookupRelease] = Field(default_factory=list)
+
+
 class LookupResponse(BaseModel):
     """Response for GET /api/lookup/{provider}/{value} (ADR 0011)."""
 
@@ -1168,6 +1183,13 @@ class LookupResponse(BaseModel):
     value: str = Field(description="The value exactly as the caller supplied it")
     normalized: str = Field(description="The value under the namespace's declared normalization")
     # ADR 0009: the identity the alias resolved to. Always present — a response is only
-    # returned once a valid alias row named a native id.
+    # returned once a valid alias row named a native id. When a barcode's equivalent forms
+    # resolve to more than one native item, this is the first entry's — see `matches`.
     gm_id: str
     releases: list[LookupRelease] = Field(default_factory=list)
+    # Additive: empty unless a barcode's equivalent GTIN-12/13/14 forms resolved to more than
+    # one distinct native item, in which case every resolved row appears here — this
+    # response's own `gm_id`/`releases` included — ordered exact match first, then shortest
+    # stored value, then native id. A single-form or single-item response is unchanged by
+    # this field's existence.
+    matches: list[LookupMatch] = Field(default_factory=list)
