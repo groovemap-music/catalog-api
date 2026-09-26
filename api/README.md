@@ -542,6 +542,47 @@ detail, including how the `types` filter is represented in the recorded payload.
 - `limit` — Results per page (1–100, default: 20)
 - `offset` — Pagination offset (default: 0)
 
+### Identifier Lookup
+
+Resolve one catalogue identifier — printed on the record itself — to the release or releases
+that carry it ([ADR 0011](https://github.com/groovemap-music/design/blob/main/docs/adr/0011-catalog-identifiers-and-manufacturing-credits.md)).
+Public and rate limited like search, since the caller is standing in a shop with the record
+in hand rather than signed in.
+
+| Method | Path                             | Auth Required | Rate Limit | Description                                    |
+| ------ | -------------------------------- | ------------- | ---------- | ----------------------------------------------- |
+| GET    | `/api/lookup/{provider}/{value}` | No            | 30/min     | Resolve a barcode, catalogue number, or matrix  |
+
+`provider` is one of `barcode`, `catalog_number`, or `matrix` — the alias namespaces ADR 0011
+mints. `value` is normalized with that namespace's declared rule before it is looked up (a
+barcode's grouping spaces or dashes, for instance, don't matter). An unminted namespace is
+`400`; a value no alias carries, or whose alias points at no loaded release row, is `404`.
+
+**Barcode equivalence ([ADR 0011's "UPC-A and EAN-13 are one GTIN at lookup" amendment](https://github.com/groovemap-music/design/blob/main/docs/adr/0011-catalog-identifiers-and-manufacturing-credits.md#2026-09-25-upc-a-and-ean-13-are-one-gtin-at-lookup-no-alias-is-re-keyed)):**
+GS1 treats GTIN-12, GTIN-13, and GTIN-14 as one number space — a shorter GTIN is the same GTIN
+zero-padded to 14 digits — and this surface applies that at lookup, without re-keying any
+stored alias:
+
+- A 12-digit value `D` is equivalent to `0D` and `00D`.
+- A 13-digit value is equivalent to its own 14-digit zero-padded form, and additionally to the
+  bare 12-digit form when it itself already starts with `0`.
+- A 14-digit value starting with `0` is equivalent to the same value with one or two leading
+  zeros removed, as far as that stays 12 or 13 digits.
+- A 14-digit value starting with a nonzero indicator digit (`1`-`9`, GS1's marker for a
+  different trade item such as a case), an 8-digit EAN-8/UPC-E, and every other length are
+  equivalent only to themselves. The check digit is never validated.
+
+A request for any one form probes every equivalent form in the same batched query, so a
+sleeve read as `036000291452` also finds an item minted as `0036000291452` or `00036000291452`.
+When the resolved rows name two or more native items, the lookup returns every one of them —
+it does not pick a winner, merge them, or treat it as a split. The additive `matches` array
+carries one entry per resolved row (a native id reached through two forms is not deduplicated
+into one entry), each with its own `gm_id`, the stored `external_id` that resolved it, and its
+`releases`; entries are ordered by an exact match to the typed value first, then by the stored
+value's own length (shortest first), then by native id. The top-level `gm_id`/`releases` name
+the first entry, so a single-item client keeps working unchanged. `matches` is empty for the
+ordinary case where every resolved row names the same item.
+
 ### Path Finder
 
 Find the shortest path between any two entities in the knowledge graph.
