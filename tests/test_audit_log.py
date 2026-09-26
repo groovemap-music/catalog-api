@@ -49,6 +49,21 @@ class TestRecordAuditEntry:
         assert '"extraction_id"' in params[3]  # details JSON string
 
     @pytest.mark.asyncio
+    async def test_a_given_entry_id_becomes_the_row_id(self) -> None:
+        pool, mock_cur = _make_mock_pool()
+        await record_audit_entry(
+            pool=pool,
+            admin_id="admin-uuid-123",
+            action="identity.reattach.apply",
+            target="job",
+            details={"job_id": "job"},
+            entry_id="00000000-0000-4000-8000-000000000001",
+        )
+        sql, params = mock_cur.execute.call_args[0]
+        assert sql.startswith("INSERT INTO admin_audit_log (id, admin_id,")
+        assert params[:3] == ("00000000-0000-4000-8000-000000000001", "admin-uuid-123", "identity.reattach.apply")
+
+    @pytest.mark.asyncio
     async def test_records_action_with_target(self) -> None:
         pool, mock_cur = _make_mock_pool()
         await record_audit_entry(

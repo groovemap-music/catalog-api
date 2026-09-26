@@ -290,8 +290,12 @@ RETURNING id
 
 # Every table keyed to the user, in dependency order: observations reference owned copies,
 # owned copies reference collection rows, so the leaves go first and no statement is left
-# deleting a row another one still points at.
+# deleting a row another one still points at. `catalog_item_moves` is the native-id merge's
+# ledger (ADR 0009's 2026-09-25 amendment): it records which of the user's copies and
+# artifacts a merge re-pointed, so it is personal data and joins the closure. It names rows
+# rather than referencing them, so its place in the order is free; it goes first as a leaf.
 _USER_OWNED_DELETES: tuple[str, ...] = (
+    "DELETE FROM catalog_item_moves WHERE user_id = %s::uuid",
     "DELETE FROM observations WHERE user_id = %s::uuid",
     "DELETE FROM collection_snapshots WHERE user_id = %s::uuid",
     "DELETE FROM owned_copies WHERE user_id = %s::uuid",
@@ -373,6 +377,16 @@ WHERE user_id = %s::uuid
 ORDER BY id
 """
 
+# The merge ledger: each row a catalog repair re-pointed from one catalog item to another,
+# with the supersession that moved it. Item ids are exported as recorded, like the
+# impressions' (ADR 0009's 2026-09-25 amendment, section 4).
+_EXPORT_CATALOG_ITEM_MOVES = """
+SELECT id, supersession_id, table_name, row_id, from_item_id, to_item_id, moved_at
+FROM catalog_item_moves
+WHERE user_id = %s::uuid
+ORDER BY moved_at, id
+"""
+
 # Snapshot ids only. A snapshot's `copy_ids` array repeats copies exported in full one
 # line above, so the id and its shape are what the export owes and the array is not.
 _EXPORT_SNAPSHOTS = """
@@ -397,6 +411,7 @@ _EXPORT_SECTIONS: tuple[tuple[str, str, bool], ...] = (
     ("wantlist_item", _EXPORT_WANTLIST, False),
     ("owned_copy", _EXPORT_OWNED_COPIES, False),
     ("observation", _EXPORT_OBSERVATIONS, False),
+    ("catalog_item_move", _EXPORT_CATALOG_ITEM_MOVES, False),
     ("collection_snapshot", _EXPORT_SNAPSHOTS, False),
     ("consent_grant", _EXPORT_CONSENT, False),
 )
@@ -646,7 +661,7 @@ async def _export_lines(user_id: str, subject_id: UUID | None) -> AsyncIterator[
 
     JSON Lines because the natural unit is a row: the result streams without being
     materialised, and the same file is readable by a person and by a tool. One connection
-    spans the whole export so the eight sections are read from one consistent point.
+    spans the whole export so the nine sections are read from one consistent point.
     """
     pool = _require_pool()
     async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -663,9 +678,11 @@ async def export_account(current_user: Annotated[dict[str, Any], Depends(require
     """Stream everything keyed to the caller as application/x-ndjson.
 
     Sections come in a stable order — events, impressions, collection rows, wantlist rows,
-    owned copies, observations, snapshot ids, consent grants — so two exports of unchanged
-    data are the same file. Snapshots carry their ids and shape only, because a snapshot's
-    copy id array repeats copies the previous section already exported in full.
+    owned copies, observations, catalog-item moves, snapshot ids, consent grants — so two
+    exports of unchanged data are the same file. Snapshots carry their ids and shape only,
+    because a snapshot's copy id array repeats copies an earlier section exported in full.
+    Catalog-item moves are the native-id merge's ledger rows for the caller's copies and
+    artifacts, with item ids as recorded.
 
     JWT-only for the same reason erasure is: an export is the whole account in one file,
     which is the account holder's right to take and not a delegate's to read. An app token
