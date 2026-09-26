@@ -13,7 +13,7 @@ password="${CATALOG_INTEGRATION_PASSWORD:-integration-test-password}"
 # graph, where the parity harness's property-graph families skip themselves. `just
 # test-integration-pg19` overrides all three of image, targets, and switch together,
 # because the SQL/PGQ suites need every one of them.
-read -r -a integration_targets <<< "${INTEGRATION_TEST_TARGET:-tests/test_real_databases.py tests/test_reattach_integration.py tests/test_reattach_trigger_integration.py}"
+read -r -a integration_targets <<< "${INTEGRATION_TEST_TARGET:-tests/test_real_databases.py tests/test_reattach_integration.py tests/test_reattach_trigger_integration.py tests/test_lookup_integration.py}"
 property_graph="${SCHEMA_PROPERTY_GRAPH:-}"
 
 cleanup() {
