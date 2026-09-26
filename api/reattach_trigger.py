@@ -25,13 +25,17 @@ and a straggler signal completing an older, superseded extraction does not trigg
 Enabling the task on a deployment that has already imported therefore runs once, for the
 latest extraction.
 
-**Where "handled" lives.** An automatic run that finishes records one ``admin_audit_log`` row
-with ``action = 'identity.reattach.auto'``, ``target = 'discogs:<version>'`` and the system
-actor below as ``admin_id``. That row is both the audit record and the durable handled marker,
-so the two cannot disagree and no new table is needed. Its row id is the run's job id, which
-every supersession the run opens records as its ``decision_ref`` (ADR 0009's native-id merge);
-a run that fails is recorded under the same id as ``identity.reattach.auto.failed``, which is
-not the marker. The alternatives do not fit:
+**Where "handled" lives.** Every automatic run records one ``admin_audit_log`` row with
+``target = 'discogs:<version>'`` and the system actor below as ``admin_id``. Its row id is the
+run's job id, which every supersession the run opens records as its ``decision_ref`` (ADR
+0009's native-id merge), so the row is written *before* the re-attachment, as
+``identity.reattach.auto.started``; if that insert fails the run does not start. A run that
+finishes updates it to ``action = 'identity.reattach.auto'``, and that row is both the audit
+record and the durable handled marker, so the two cannot disagree and no new table is needed.
+A run that fails updates it to ``identity.reattach.auto.failed``. Neither the started nor the
+failed action is the marker, so a run that failed, or died between its started row and its
+marker, is retried; the retry has a new job id and its own started row, and the earlier row
+stays, so the earlier run's ``decision_ref`` still resolves. The alternatives do not fit:
 ``loader_extraction_latch`` belongs to the loader, ``extraction_history`` is keyed on an
 admin-*triggered* run, and ``app_config`` holds the encrypted Discogs credentials.
 
@@ -39,9 +43,10 @@ admin-*triggered* run, and ``app_config`` holds the encrypted Discogs credential
 ``pg_try_advisory_lock(hashtext('groovemap:identity-auto-reattach:discogs'))`` before doing
 anything. A replica that cannot take it skips this poll. The holder then re-checks the marker
 *under the lock* — so a replica that saw "not handled" just before another one finished cannot
-run it again — runs both jobs, writes the marker on the lock's own connection, and unlocks.
+run it again — writes the started row, runs both jobs, turns the row into the marker on the lock's own
+connection, and unlocks.
 A restart is covered by the marker being in PostgreSQL. A failure anywhere (including a
-process that dies mid-run, which drops its session and so its lock) writes no marker, so the
+process that dies mid-run, which drops its session and so its lock) leaves no marker, so the
 next poll by any replica retries it; both jobs are safe to re-run, which is what makes that
 retry harmless. "Exactly once" is therefore exactly one *completed* run per extraction.
 
@@ -63,16 +68,17 @@ from typing import Any, Final
 from uuid import UUID, uuid4
 
 import structlog
-from psycopg.types.json import Jsonb
 
-from api.audit_log import record_audit_entry
+from api.audit_log import insert_audit_entry, update_audit_entry
 from api.projection import run_gm_id_projection
-from api.reattach import audit_details, failure_details, run_reattachment
+from api.reattach import audit_details, failure_details, finalize_audit_entry, run_reattachment
 
 
 logger = structlog.get_logger(__name__)
 
 AUDIT_ACTION: Final = "identity.reattach.auto"
+# Written before the run starts, so its decision_ref resolves. Not the handled marker either.
+STARTED_ACTION: Final = "identity.reattach.auto.started"
 # A run that ended on an error. It is not the handled marker, so the next poll still retries.
 FAILED_ACTION: Final = "identity.reattach.auto.failed"
 
@@ -107,8 +113,6 @@ _ENSURE_ACTOR: Final = """
     ON CONFLICT (id) DO NOTHING
 """
 _SELECT_ACTOR: Final = "SELECT email, is_active, is_admin FROM users WHERE id = %s::uuid"
-
-_RECORD: Final = "INSERT INTO admin_audit_log (id, admin_id, action, target, details) VALUES (%s::uuid, %s::uuid, %s, %s, %s)"
 
 
 def extraction_target(version: str) -> str:
@@ -168,23 +172,32 @@ async def run_pending(pool: Any, driver: Any) -> str | None:
                 return None
             await _ensure_system_actor(cur)
             job_id = str(uuid4())
+            target = extraction_target(version)
+            # Before any identity write, and raising: a run whose entry is missing writes nothing.
+            await insert_audit_entry(
+                cur,
+                entry_id=job_id,
+                admin_id=str(SYSTEM_ACTOR_ID),
+                action=STARTED_ACTION,
+                target=target,
+                details={"job_id": job_id, "apply": True, "extraction": version},
+            )
             logger.info("🚀 Automatic identity maintenance started", extraction=version, job_id=job_id)
             try:
                 report = await run_reattachment(pool, apply=True, decision_ref=UUID(job_id))
                 projection = await run_gm_id_projection(pool, driver)
             except Exception as exc:
-                # On its own connection: this one's transaction is about to roll back.
-                await record_audit_entry(
-                    pool=pool,
-                    admin_id=str(SYSTEM_ACTOR_ID),
-                    action=FAILED_ACTION,
-                    target=extraction_target(version),
-                    details={**failure_details(job_id, exc), "extraction": version},
-                    entry_id=job_id,
+                # On its own connection: this one may be what failed.
+                await finalize_audit_entry(
+                    pool, entry_id=job_id, action=FAILED_ACTION, details={**failure_details(job_id, exc), "extraction": version}
                 )
                 raise
             details = {**audit_details(report, job_id), "extraction": version, "projection": projection}
-            await cur.execute(_RECORD, (job_id, str(SYSTEM_ACTOR_ID), AUDIT_ACTION, extraction_target(version), Jsonb(details)))
+            try:
+                await update_audit_entry(cur, entry_id=job_id, action=AUDIT_ACTION, details=details)
+            except Exception:
+                logger.error("❌ Could not write the handled marker; the run's entry stays as started and the next poll retries", job_id=job_id)
+                raise
             logger.info(
                 "✅ Automatic identity maintenance finished",
                 extraction=version,

@@ -23,9 +23,9 @@ from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver
 from common.config import parse_postgres_host_port
 
 from api import reattach_trigger
-from api.reattach_trigger import AUDIT_ACTION, SYSTEM_ACTOR_EMAIL, SYSTEM_ACTOR_ID, run_pending
+from api.reattach_trigger import AUDIT_ACTION, FAILED_ACTION, STARTED_ACTION, SYSTEM_ACTOR_EMAIL, SYSTEM_ACTOR_ID, run_pending
 from tests.test_real_databases import _consume, neo4j_driver, postgres_pool
-from tests.test_reattach_integration import _current, _execute, _split_release
+from tests.test_reattach_integration import _DANGLING, _current, _execute, _split_release
 
 
 __all__ = ["neo4j_driver", "postgres_pool"]
@@ -175,7 +175,64 @@ async def test_a_failed_run_leaves_no_marker_releases_the_lock_and_is_retried(
     with patch.object(reattach_trigger, "run_gm_id_projection", side_effect=RuntimeError("neo4j down")), pytest.raises(RuntimeError):
         await run_pending(pool, neo4j_driver)
     assert await _markers(pool) == []
+    # Recorded under the failed action, which is not the marker.
+    [(failed_target,)] = await _execute(pool, "SELECT target FROM admin_audit_log WHERE action = %s", (FAILED_ACTION,))
+    assert failed_target == "discogs:20260901"
 
     # The lock was released, so the other replica's next poll takes it and completes the run.
     assert await run_pending(second_pool, neo4j_driver) == "20260901"
     assert len(await _markers(pool)) == 1
+
+
+async def _raise_audit_unavailable(*_args: Any, **_kwargs: Any) -> None:
+    raise RuntimeError("audit table unavailable")
+
+
+@pytest.mark.parametrize("stop", ["marker_write_fails", "cancelled_after_the_writes"])
+async def test_a_run_stopped_after_its_started_row_is_retried_and_every_decision_ref_resolves(
+    pool: AsyncPostgreSQLPool, second_pool: AsyncPostgreSQLPool, neo4j_driver: AsyncResilientNeo4jDriver, stop: str
+) -> None:
+    await _split_release(pool, 7003)
+    await _latch(pool, "20260901", _ALL)
+    real = reattach_trigger.run_reattachment
+
+    async def cancelled_after_the_writes(target: Any, **kwargs: Any) -> dict[str, Any]:
+        await real(target, **kwargs)
+        raise asyncio.CancelledError  # a shutdown mid-run: not an Exception, so no failed update
+
+    if stop == "marker_write_fails":
+        stopped = patch.object(reattach_trigger, "update_audit_entry", _raise_audit_unavailable)
+        expected: type[BaseException] = RuntimeError
+    else:
+        stopped = patch.object(reattach_trigger, "run_reattachment", cancelled_after_the_writes)
+        expected = asyncio.CancelledError
+    with stopped, pytest.raises(expected):
+        await run_pending(pool, neo4j_driver)
+
+    # The identity writes committed under a row that exists but is not the handled marker.
+    assert await _markers(pool) == []
+    [(first_id, first_target)] = await _execute(pool, "SELECT id, target FROM admin_audit_log WHERE action = %s", (STARTED_ACTION,))
+    assert first_target == "discogs:20260901"
+    assert await _execute(pool, "SELECT decision_ref FROM catalog_item_supersessions") == [(first_id,)]
+    assert await _execute(pool, _DANGLING) == [(0,)]
+
+    # Not handled, and the lock was released: the next poll retries under its own job id.
+    assert await run_pending(second_pool, neo4j_driver) == "20260901"
+    [marker_id] = [row[0] for row in await _execute(pool, "SELECT id FROM admin_audit_log WHERE action = %s", (AUDIT_ACTION,))]
+    assert marker_id != first_id
+    assert await _execute(pool, "SELECT id FROM admin_audit_log WHERE action = %s", (STARTED_ACTION,)) == [(first_id,)]
+    assert await _execute(pool, _DANGLING) == [(0,)]
+    assert await run_pending(pool, neo4j_driver) is None
+
+
+async def test_a_started_row_that_cannot_be_written_stops_the_run(pool: AsyncPostgreSQLPool, neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    mbid, split, _discogs_native = await _split_release(pool, 7004)
+    await _latch(pool, "20260901", _ALL)
+    with patch.object(reattach_trigger, "insert_audit_entry", _raise_audit_unavailable), pytest.raises(RuntimeError):
+        await run_pending(pool, neo4j_driver)
+
+    assert await _current(pool, "musicbrainz", "release", mbid) == [(split, "catalog")]
+    assert await _execute(pool, "SELECT count(*) FROM catalog_item_supersessions") == [(0,)]
+    assert await _execute(pool, "SELECT count(*) FROM admin_audit_log") == [(0,)]
+    # The lock was released: the next poll runs it.
+    assert await run_pending(pool, neo4j_driver) == "20260901"

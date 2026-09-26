@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -20,7 +21,7 @@ from common import AsyncPostgreSQLPool
 from common.identity import AliasRef, attach_aliases
 
 from api.catalog_merge import MergeConflictError, current_supersession, lock_items, merge_items, revert_supersession
-from api.reattach import KINDS, _reattach_one, reattach_item, run_census, run_reattachment
+from api.reattach import KINDS, AuditEntryError, _reattach_one, apply_with_audit, reattach_item, run_census, run_reattachment
 from api.routers.activity import _EXPORT_SECTIONS, _USER_OWNED_DELETES
 from tests.test_real_databases import TEST_USER_ID, postgres_pool
 
@@ -423,6 +424,92 @@ async def test_cli_apply_writes_one_audit_entry(pool: AsyncPostgreSQLPool) -> No
     assert str(entry_id) == job_id
     # Per-table counts only: no user id or user-owned row id reaches the audit log.
     assert str(TEST_USER_ID) not in json.dumps(details)
+
+
+# Supersessions whose decision_ref names no audit entry: the run's record would be missing.
+_DANGLING = (
+    "SELECT count(*) FROM catalog_item_supersessions s WHERE s.decision_ref IS NOT NULL "
+    "AND NOT EXISTS (SELECT 1 FROM admin_audit_log a WHERE a.id = s.decision_ref)"
+)
+
+
+@pytest.mark.parametrize("ending", ["applied", "failed", "finalize_failed"])
+async def test_every_decision_ref_resolves_however_the_run_ends(pool: AsyncPostgreSQLPool, ending: str) -> None:
+    import api.reattach as reattach_module
+
+    await _split_release(pool, 8101)
+    await _split_release(pool, 8102)
+    job_id = str(uuid4())
+    real_one = reattach_module._reattach_one
+    calls = 0
+
+    async def second_item_fails(*args: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("connection lost")
+        return await real_one(*args)
+
+    async def update_fails(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("audit table unavailable")
+
+    with (
+        patch.object(reattach_module, "_reattach_one", second_item_fails if ending == "failed" else real_one),
+        patch.object(reattach_module, "update_audit_entry", update_fails if ending == "finalize_failed" else reattach_module.update_audit_entry),
+    ):
+        if ending == "failed":
+            with pytest.raises(RuntimeError, match="connection lost"):
+                await apply_with_audit(pool, admin_id=str(TEST_USER_ID), job_id=job_id, batch_size=1)
+        else:
+            await apply_with_audit(pool, admin_id=str(TEST_USER_ID), job_id=job_id, batch_size=1)
+
+    expected = {"applied": "identity.reattach.apply", "failed": "identity.reattach.failed", "finalize_failed": "identity.reattach.started"}
+    [(entry_id, action)] = await _execute(pool, "SELECT id, action FROM admin_audit_log")
+    assert (str(entry_id), action) == (job_id, expected[ending])
+    decision_refs = await _execute(pool, "SELECT decision_ref FROM catalog_item_supersessions")
+    # The failed run committed its first item before the error; the others committed both.
+    assert decision_refs == [(entry_id,)] * (1 if ending == "failed" else 2)
+    assert await _execute(pool, _DANGLING) == [(0,)]
+
+
+async def test_a_run_whose_entry_cannot_be_written_changes_nothing(pool: AsyncPostgreSQLPool) -> None:
+    import api.routers.admin as admin_mod
+
+    await _split_release(pool, 8201)
+    before = await _snapshot(pool)
+
+    # No such user: the entry's foreign key refuses the insert, as any failed insert would.
+    with pytest.raises(AuditEntryError):
+        await apply_with_audit(pool, admin_id=str(uuid4()), job_id=str(uuid4()))
+    assert await _snapshot(pool) == before
+
+    # The route's background job: logged, never raised, and still nothing written.
+    original_pool = admin_mod._pool
+    admin_mod._pool = pool
+    try:
+        await admin_mod._run_reattach_job(str(uuid4()), str(uuid4()), True)
+    finally:
+        admin_mod._pool = original_pool
+    assert await _snapshot(pool) == before
+    assert await _execute(pool, "SELECT count(*) FROM admin_audit_log") == [(0,)]
+
+
+async def test_route_job_apply_is_recorded_under_its_decision_ref(pool: AsyncPostgreSQLPool) -> None:
+    import api.routers.admin as admin_mod
+
+    await _split_release(pool, 8301)
+    job_id = str(uuid4())
+    original_pool = admin_mod._pool
+    admin_mod._pool = pool
+    try:
+        await admin_mod._run_reattach_job(job_id, str(TEST_USER_ID), True)
+    finally:
+        admin_mod._pool = original_pool
+
+    [(entry_id, admin_id, action, target, details)] = await _execute(pool, "SELECT id, admin_id, action, target, details FROM admin_audit_log")
+    assert (str(entry_id), admin_id, action, target) == (job_id, TEST_USER_ID, "identity.reattach.apply", job_id)
+    assert details["outcomes"]["release"]["reattached"] == 1
+    assert await _execute(pool, "SELECT decision_ref FROM catalog_item_supersessions") == [(entry_id,)]
 
 
 async def test_an_item_an_earlier_run_guarded_for_dependents_is_merged_by_the_next_run(pool: AsyncPostgreSQLPool) -> None:

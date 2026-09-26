@@ -23,6 +23,7 @@ from api.reattach_trigger import (
     AUDIT_ACTION,
     DISCOGS_DATA_TYPES,
     FAILED_ACTION,
+    STARTED_ACTION,
     SYSTEM_ACTOR_EMAIL,
     SYSTEM_ACTOR_ID,
     extraction_target,
@@ -103,10 +104,25 @@ async def test_marker_written_by_another_replica_is_rechecked_under_the_lock(job
     jobs.reattach.assert_not_called()
 
 
+# Everything up to and including the system actor check, on the lock's own connection.
+_UP_TO_ACTOR = [*_PENDING, [(True,)], *_PENDING, *_ACTOR]
+
+
+def _audit(pool: FakePool) -> list[tuple[str, tuple[Any, ...]]]:
+    """The run's admin_audit_log statements, as (verb, params) with a Jsonb's payload unwrapped."""
+    return [
+        (call.sql.split()[0], tuple(getattr(param, "obj", param) for param in call.params))
+        for call in pool.calls
+        if "admin_audit_log (id" in call.sql or call.sql.startswith("UPDATE admin_audit_log")
+    ]
+
+
 @pytest.mark.asyncio
 async def test_runs_apply_then_projection_then_marks_and_unlocks(jobs: MagicMock) -> None:
-    pool = FakePool([*_PENDING, [(True,)], *_PENDING, *_ACTOR, [], [(True,)]])
+    pool = FakePool([*_UP_TO_ACTOR, [], [], [(True,)]])
     driver = object()
+    audited_before_run: list[Any] = []
+    jobs.reattach.side_effect = lambda *_args, **_kwargs: audited_before_run.append(_audit(pool)) or _REPORT
     assert await run_pending(pool, driver) == VERSION
 
     assert [name for name, _args, _kwargs in jobs.mock_calls] == ["reattach", "project"]
@@ -121,35 +137,79 @@ async def test_runs_apply_then_projection_then_marks_and_unlocks(jobs: MagicMock
     assert sql[7].startswith("INSERT INTO users") and "ON CONFLICT (id) DO NOTHING" in sql[7]
     assert pool.calls[7].params[:2] == (str(SYSTEM_ACTOR_ID), SYSTEM_ACTOR_EMAIL)
     assert sql[9].startswith("INSERT INTO admin_audit_log")
-    assert "pg_advisory_unlock(hashtext(%s))" in sql[10]
-    assert pool.calls[3].params == pool.calls[10].params
+    assert sql[10].startswith("UPDATE admin_audit_log")
+    assert "pg_advisory_unlock(hashtext(%s))" in sql[11]
+    assert pool.calls[3].params == pool.calls[11].params
 
-    entry_id, actor, action, target, details = pool.calls[9].params
-    # The marker's row id is the run's decision_ref, which every supersession it opened names.
+    # The started row existed before the re-attachment wrote anything, under the run's decision_ref.
+    [[(verb, (entry_id, actor, action, target, started))]] = audited_before_run
+    assert verb == "INSERT"
     assert UUID(entry_id) == decision_ref
-    assert (actor, action, target) == (str(SYSTEM_ACTOR_ID), AUDIT_ACTION, extraction_target(VERSION))
-    assert details.obj["extraction"] == VERSION
-    assert details.obj["apply"] is True
-    assert details.obj["outcomes"] == _REPORT["outcomes"]
-    assert details.obj["projection"] == _PROJECTION
-    assert details.obj["job_id"] == entry_id
+    assert (actor, action, target) == (str(SYSTEM_ACTOR_ID), STARTED_ACTION, extraction_target(VERSION))
+    assert started == {"job_id": entry_id, "apply": True, "extraction": VERSION}
+
+    # It then becomes the marker: same row, the handled action and the outcomes.
+    [_insert, (verb, (marker_action, details, marker_id))] = _audit(pool)
+    assert (verb, marker_action, marker_id) == ("UPDATE", AUDIT_ACTION, entry_id)
+    assert details["extraction"] == VERSION
+    assert details["apply"] is True
+    assert details["outcomes"] == _REPORT["outcomes"]
+    assert details["projection"] == _PROJECTION
+    assert details["job_id"] == entry_id
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failing", ["reattach", "project"])
 async def test_a_failed_job_writes_no_marker_and_still_unlocks(jobs: MagicMock, failing: str) -> None:
     getattr(jobs, failing).side_effect = RuntimeError("boom")
-    pool = FakePool([*_PENDING, [(True,)], *_PENDING, *_ACTOR, [], [(True,)]])
+    pool = FakePool([*_UP_TO_ACTOR, [], [], [(True,)]])
     with pytest.raises(RuntimeError, match="boom"):
         await run_pending(pool, object())
     sql = _sql(pool)
-    # The failure is recorded under the run's decision_ref, as a different action: not the marker.
-    [failure] = [call for call in pool.calls if call.sql.startswith("INSERT INTO admin_audit_log")]
-    entry_id, actor, action, target, details = failure.params
+    # The started row is updated to the failed action, under the run's decision_ref: not the marker.
+    [(inserted, (entry_id, *_rest)), (updated, (action, details, updated_id))] = _audit(pool)
     assert UUID(entry_id) == jobs.reattach.await_args.kwargs["decision_ref"]
-    assert (actor, action, target) == (str(SYSTEM_ACTOR_ID), FAILED_ACTION, extraction_target(VERSION))
-    assert '"error": "RuntimeError"' in details
+    assert (inserted, updated, action, updated_id) == ("INSERT", "UPDATE", FAILED_ACTION, entry_id)
+    assert details == {"job_id": entry_id, "apply": True, "error": "RuntimeError", "extraction": VERSION}
     assert "pg_advisory_unlock" in sql[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_started_row_that_cannot_be_written_stops_the_run_and_unlocks(jobs: MagicMock) -> None:
+    pool = FakePool([*_UP_TO_ACTOR, [(True,)]], raise_on={"INSERT INTO admin_audit_log": RuntimeError("audit table unavailable")})
+    with pytest.raises(RuntimeError, match="audit table unavailable"):
+        await run_pending(pool, object())
+    jobs.reattach.assert_not_called()
+    jobs.project.assert_not_called()
+    assert [verb for verb, _params in _audit(pool)] == ["INSERT"]
+    assert "pg_advisory_unlock" in _sql(pool)[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_marker_that_cannot_be_written_leaves_the_started_row_and_unlocks(jobs: MagicMock) -> None:
+    pool = FakePool([*_UP_TO_ACTOR, [], [(True,)]], raise_on={"UPDATE admin_audit_log": RuntimeError("audit table unavailable")})
+    with pytest.raises(RuntimeError, match="audit table unavailable"):
+        await run_pending(pool, object())
+    jobs.project.assert_awaited_once()
+    # Not handled, so the next poll retries: the row stays at the started action, which is not the marker.
+    assert [(verb, params[2] if verb == "INSERT" else params[0]) for verb, params in _audit(pool)] == [
+        ("INSERT", STARTED_ACTION),
+        ("UPDATE", AUDIT_ACTION),
+    ]
+    assert "pg_advisory_unlock" in _sql(pool)[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_finalize_after_a_failed_job_reraises_the_job_error(jobs: MagicMock) -> None:
+    jobs.reattach.side_effect = RuntimeError("boom")
+    pool = FakePool([*_UP_TO_ACTOR, [], [(True,)]], raise_on={"UPDATE admin_audit_log": RuntimeError("audit table unavailable")})
+    with pytest.raises(RuntimeError, match="boom"):
+        await run_pending(pool, object())
+    assert "pg_advisory_unlock" in _sql(pool)[-1]
+
+
+def test_neither_the_started_nor_the_failed_action_is_the_marker() -> None:
+    assert len({AUDIT_ACTION, STARTED_ACTION, FAILED_ACTION}) == 3
 
 
 @pytest.mark.asyncio
