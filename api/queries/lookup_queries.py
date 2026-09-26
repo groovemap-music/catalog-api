@@ -1,14 +1,17 @@
 """PostgreSQL reads behind ``GET /api/lookup/{provider}/{value}``.
 
-Two statements, both index-answered. The first resolves a normalized identifier through
+Three statements, all index-answered. The first two resolve a normalized identifier through
 ``provider_aliases`` — the table ADR 0009 built and ADR 0011 finally mints release rows
 into — using the partial unique index on ``(provider, entity_kind, external_id) WHERE
-valid_to IS NULL``, so a barcode resolves to at most one native id. The second walks that
-native id back out to the release rows that point at it, through the additive
-``gm_item_id`` column both the Discogs ``releases`` table and ``musicbrainz.releases``
-carry.
+valid_to IS NULL``, so any one form resolves to at most one native id. ``resolve_alias_native_id``
+probes exactly one form; ``resolve_alias_native_ids`` probes several equivalent forms of the
+same value in the one query, which is what a barcode's UPC-A and EAN-13 spellings need
+(ADR 0011's amendment: same GTIN, applied at lookup, nothing re-keyed) without paying for a
+query per form. The third walks a native id back out to the release rows that point at it,
+through the additive ``gm_item_id`` column both the Discogs ``releases`` table and
+``musicbrainz.releases`` carry.
 
-The second statement is a union across both catalogs on purpose: one barcode is one
+The releases statement is a union across both catalogs on purpose: one barcode is one
 pressing, and both catalogs describe it. A caller holding the record wants every row that
 names it, labelled with which catalog said so, rather than whichever one happens to be
 loaded.
@@ -16,6 +19,7 @@ loaded.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 from uuid import UUID
 
@@ -23,7 +27,7 @@ from common.query_debug import execute_sql
 from psycopg.rows import dict_row
 
 
-__all__ = ["releases_for_native_id", "resolve_alias_native_id"]
+__all__ = ["releases_for_native_id", "resolve_alias_native_id", "resolve_alias_native_ids"]
 
 # ADR 0009 keys a release alias under this entity kind; the lookup surface addresses
 # releases only, so it is a constant rather than a parameter.
@@ -35,6 +39,15 @@ FROM provider_aliases
 WHERE provider = %s
   AND entity_kind = %s
   AND external_id = %s
+  AND valid_to IS NULL
+"""
+
+_SELECT_ALIAS_NATIVE_IDS = """
+SELECT external_id, native_id
+FROM provider_aliases
+WHERE provider = %s
+  AND entity_kind = %s
+  AND external_id = ANY(%s)
   AND valid_to IS NULL
 """
 
@@ -105,6 +118,29 @@ async def resolve_alias_native_id(pool: Any, provider: str, external_id: str) ->
         return None
     native_id: UUID | None = row["native_id"]
     return native_id
+
+
+async def resolve_alias_native_ids(pool: Any, provider: str, external_ids: Sequence[str]) -> dict[str, UUID]:
+    """Return the native id each of several equivalent forms resolves to, in one query.
+
+    One batched read over the same partial unique index ``resolve_alias_native_id`` probes,
+    so a value's equivalent forms — a barcode's UPC-A and EAN-13 spellings — cost one indexed
+    query together rather than one per form. A form with no valid alias is simply absent
+    from the result rather than mapped to ``None``, so a distinct-native-id count is a plain
+    ``len(set(result.values()))``.
+
+    Args:
+        pool: The async PostgreSQL pool.
+        provider: An ADR 0009 alias namespace — ``barcode``, ``catalog_number``, or ``matrix``.
+        external_ids: The forms to probe, each already under the namespace's normalization.
+
+    Returns:
+        A mapping from each form a valid alias carries to the native id it names.
+    """
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await execute_sql(cur, _SELECT_ALIAS_NATIVE_IDS, (provider, _RELEASE_KIND, list(external_ids)))
+        rows: list[dict[str, Any]] = await cur.fetchall()
+    return {row["external_id"]: row["native_id"] for row in rows}
 
 
 async def releases_for_native_id(pool: Any, native_id: UUID) -> list[dict[str, Any]]:
