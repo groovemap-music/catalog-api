@@ -43,6 +43,16 @@ def test_python_project_and_tooling_share_one_minor_line() -> None:
     assert "docs/superpowers" in tools["ruff"]["extend-exclude"]
 
 
+def test_ruff_per_file_ignores_is_a_single_complete_table() -> None:
+    # Regression guard: landing two branches that each add a per-file-ignore entry
+    # can silently reintroduce a second [tool.ruff.lint.per-file-ignores] table,
+    # which is invalid TOML and drops whichever entry lands in the shadowed table.
+    per_file_ignores = _toml("pyproject.toml")["tool"]["ruff"]["lint"]["per-file-ignores"]
+    assert isinstance(per_file_ignores, dict)
+    assert "api/reattach.py" in per_file_ignores
+    assert "scripts/generate_latency_fixture.py" in per_file_ignores
+
+
 def test_managed_runtime_uses_the_approved_patch() -> None:
     mise = _toml(".mise.toml")
     lock = _toml("uv.lock")
