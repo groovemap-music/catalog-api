@@ -120,10 +120,13 @@ longer skipped: the first run after the dependents guard's removal merges every 
 runs skipped. Compare its `merged_with_dependents` count against their
 `guard_reasons.dependents`.
 
-The run writes one `identity.reattach.apply` audit entry, with the job id as its row id. Every
-supersession the run opens names that row as its `decision_ref`. The entry holds per-kind,
-per-table counts only, with no user or row ids. A run that fails is recorded under the same id
-as `identity.reattach.failed`. Run the projection above afterwards. See
+The run writes one audit entry, with the job id as its row id. Every supersession the run
+opens names that row as its `decision_ref`, so the entry is written first, as
+`identity.reattach.started`; a run whose entry cannot be written does not start. It becomes
+`identity.reattach.apply` when the run finishes, holding per-kind, per-table counts only, with
+no user or row ids, or `identity.reattach.failed` when it fails. An entry left at
+`identity.reattach.started` means the run's last update failed (the API logs an error), or the
+process stopped mid-run. Run the projection above afterwards. See
 [Re-attaching Load-Order-Split Catalog Items](../api/README.md#re-attaching-load-order-split-catalog-items)
 for the rule, the merge, the guards, and the `catalog-identity-reattach` CLI, per
 [ADR 0014 section 8](https://github.com/groovemap-music/design/blob/main/docs/adr/0014-cross-catalog-edition-candidates.md)
