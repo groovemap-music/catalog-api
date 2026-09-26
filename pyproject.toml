@@ -136,6 +136,22 @@ lines-after-imports = 2
 "tests/**/*.py" = ["PLC", "S105", "T201"]
 "api/queries/search_queries.py" = ["S608"]
 "api/queries/metrics_queries.py" = ["S608"]
+[tool.ruff.lint.per-file-ignores]
+"api/api.py" = ["T201"]
+"api/admin_setup.py" = ["T201"]
+"api/setup.py" = ["T201"]
+"api/media_backfill.py" = ["T201"]
+"api/projection.py" = ["T201"]
+"scripts/*.py" = ["S108", "T201"]
+# Seeded, reproducible fixture generation. The randomness is the point and is not a secret.
+"scripts/generate_golden_set.py" = ["S311"]
+"scripts/generate_latency_fixture.py" = ["S311"]
+# The evaluation report prints its summary; that is its whole command-line purpose.
+"api/evaluation/report.py" = ["T201"]
+"performance/*.py" = ["PLC0415", "T201"]
+"tests/**/*.py" = ["PLC", "S105", "T201"]
+"api/queries/search_queries.py" = ["S608"]
+"api/queries/metrics_queries.py" = ["S608"]
 
 [tool.mypy]
 python_version = "3.14"
