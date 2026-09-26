@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from api.audit_log import record_audit_entry
+from api.audit_log import insert_audit_entry, record_audit_entry, update_audit_entry
+from tests.fake_postgres import FakePool
 
 
 def _make_mock_pool(mock_cur: AsyncMock | None = None) -> tuple[MagicMock, AsyncMock]:
@@ -47,21 +48,6 @@ class TestRecordAuditEntry:
         assert params[1] == "extraction.trigger"
         assert params[2] is None  # target
         assert '"extraction_id"' in params[3]  # details JSON string
-
-    @pytest.mark.asyncio
-    async def test_a_given_entry_id_becomes_the_row_id(self) -> None:
-        pool, mock_cur = _make_mock_pool()
-        await record_audit_entry(
-            pool=pool,
-            admin_id="admin-uuid-123",
-            action="identity.reattach.apply",
-            target="job",
-            details={"job_id": "job"},
-            entry_id="00000000-0000-4000-8000-000000000001",
-        )
-        sql, params = mock_cur.execute.call_args[0]
-        assert sql.startswith("INSERT INTO admin_audit_log (id, admin_id,")
-        assert params[:3] == ("00000000-0000-4000-8000-000000000001", "admin-uuid-123", "identity.reattach.apply")
 
     @pytest.mark.asyncio
     async def test_records_action_with_target(self) -> None:
@@ -110,3 +96,42 @@ class TestRecordAuditEntry:
             action="admin.login",
             target="admin@test.com",
         )
+
+
+ENTRY_ID = "00000000-0000-4000-8000-000000000001"
+
+
+class TestInsertAndUpdateAuditEntry:
+    """The raising pair a re-attachment run writes its entry through, before and after its writes."""
+
+    @pytest.mark.asyncio
+    async def test_insert_fixes_the_row_id(self) -> None:
+        pool = FakePool()
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await insert_audit_entry(
+                cur, entry_id=ENTRY_ID, admin_id="admin-uuid-123", action="identity.reattach.started", target="job", details={"job_id": "job"}
+            )
+        assert pool.sql.startswith("INSERT INTO admin_audit_log (id, admin_id, action, target, details)")
+        entry_id, admin_id, action, target, details = pool.params
+        assert (entry_id, admin_id, action, target) == (ENTRY_ID, "admin-uuid-123", "identity.reattach.started", "job")
+        assert details.obj == {"job_id": "job"}
+
+    @pytest.mark.asyncio
+    async def test_update_replaces_action_and_details_by_id(self) -> None:
+        pool = FakePool()
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await update_audit_entry(cur, entry_id=ENTRY_ID, action="identity.reattach.apply", details={"outcomes": {}})
+        assert pool.sql.startswith("UPDATE admin_audit_log SET action = %s, details = %s WHERE id = %s::uuid")
+        action, details, entry_id = pool.params
+        assert (action, details.obj, entry_id) == ("identity.reattach.apply", {"outcomes": {}}, ENTRY_ID)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("prefix", ["INSERT", "UPDATE"])
+    async def test_both_raise_on_db_error(self, prefix: str) -> None:
+        pool = FakePool(raise_on={prefix: RuntimeError("DB connection lost")})
+        async with pool.connection() as conn, conn.cursor() as cur:
+            with pytest.raises(RuntimeError, match="DB connection lost"):
+                if prefix == "INSERT":
+                    await insert_audit_entry(cur, entry_id=ENTRY_ID, admin_id="admin", action="a", target=None, details={})
+                else:
+                    await update_audit_entry(cur, entry_id=ENTRY_ID, action="a", details={})

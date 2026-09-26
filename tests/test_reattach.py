@@ -16,6 +16,7 @@ import pytest
 
 from api.catalog_merge import CACHE_TABLE_NAMES, MergeConflictError
 from api.reattach import (
+    DEFAULT_BATCH_SIZE,
     DEPENDENT_TABLES,
     GUARD_REASONS,
     IDENTIFIER_PROVIDERS,
@@ -711,88 +712,187 @@ class TestCli:
         assert exc_info.value.code == 1
 
 
-class TestRunOnce:
-    """_run_once: the real pool wiring, the admin check, and the one audit entry."""
+JOB_ID = "00000000-0000-4000-8000-0000000000cc"
+ADMIN_ID = "00000000-0000-0000-0000-000000000099"
+_APPLIED = {"apply": True, "census": {}, "outcomes": {"release": {"reattached": 2}}}
+
+
+def _audit_calls(pool: FakePool) -> list[tuple[str, Any]]:
+    """The run's audit statements, as (verb, params) with a Jsonb's payload unwrapped."""
+    calls = []
+    for call in pool.calls:
+        verb = call.sql.split()[0]
+        if "admin_audit_log" in call.sql:
+            calls.append((verb, tuple(getattr(param, "obj", param) for param in call.params)))
+    return calls
+
+
+class TestApplyWithAudit:
+    """apply_with_audit: the entry exists before any identity write, then is finalized."""
 
     @pytest.fixture
-    def pool(self, monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    def run(self, monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+        import api.reattach as reattach_module
+
+        run = AsyncMock(return_value=_APPLIED)
+        monkeypatch.setattr(reattach_module, "run_reattachment", run)
+        return run
+
+    @pytest.mark.asyncio
+    async def test_started_before_the_run_then_finalized_as_applied(self, run: AsyncMock) -> None:
+        from api.reattach import apply_with_audit
+
+        pool = FakePool()
+        started: list[Any] = []
+        run.side_effect = lambda *_args, **_kwargs: started.append(_audit_calls(pool)) or _APPLIED
+
+        assert await apply_with_audit(pool, admin_id=ADMIN_ID, job_id=JOB_ID, batch_size=10) == _APPLIED
+
+        run.assert_awaited_once_with(pool, apply=True, batch_size=10, decision_ref=UUID(JOB_ID))
+        # The run started only once the entry its supersessions name had been written.
+        assert started == [[("INSERT", (JOB_ID, ADMIN_ID, "identity.reattach.started", JOB_ID, {"job_id": JOB_ID, "apply": True}))]]
+        assert _audit_calls(pool)[1:] == [("UPDATE", ("identity.reattach.apply", audit_details(_APPLIED, JOB_ID), JOB_ID))]
+
+    @pytest.mark.asyncio
+    async def test_an_entry_that_cannot_be_written_stops_the_run(self, run: AsyncMock) -> None:
+        from api.reattach import AuditEntryError, apply_with_audit
+
+        pool = FakePool(raise_on={"INSERT": RuntimeError("audit table unavailable")})
+
+        with pytest.raises(AuditEntryError):
+            await apply_with_audit(pool, admin_id=ADMIN_ID, job_id=JOB_ID)
+
+        run.assert_not_awaited()
+        assert [verb for verb, _params in _audit_calls(pool)] == ["INSERT"]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_run_is_finalized_as_failed_and_reraised(self, run: AsyncMock) -> None:
+        from api.reattach import apply_with_audit
+
+        run.side_effect = RuntimeError("connection lost")
+        pool = FakePool()
+
+        with pytest.raises(RuntimeError, match="connection lost"):
+            await apply_with_audit(pool, admin_id=ADMIN_ID, job_id=JOB_ID)
+
+        assert _audit_calls(pool)[1:] == [("UPDATE", ("identity.reattach.failed", failure_details(JOB_ID, RuntimeError()), JOB_ID))]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("fails", [False, True])
+    async def test_a_failed_finalize_leaves_the_started_entry(self, run: AsyncMock, fails: bool) -> None:
+        from api.reattach import apply_with_audit
+
+        if fails:
+            run.side_effect = RuntimeError("connection lost")
+        pool = FakePool(raise_on={"UPDATE": RuntimeError("audit table unavailable")})
+
+        if fails:
+            # The run's own error surfaces, not the finalize's.
+            with pytest.raises(RuntimeError, match="connection lost"):
+                await apply_with_audit(pool, admin_id=ADMIN_ID, job_id=JOB_ID)
+        else:
+            assert await apply_with_audit(pool, admin_id=ADMIN_ID, job_id=JOB_ID) == _APPLIED
+
+        assert [verb for verb, _params in _audit_calls(pool)] == ["INSERT", "UPDATE"]
+
+
+class _CliPool(FakePool):
+    """A FakePool with the lifecycle `_run_once` drives."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.initialize = AsyncMock()
+        self.close = AsyncMock()
+
+
+class TestRunOnce:
+    """_run_once: the real pool wiring, the admin check, and the run's one audit entry."""
+
+    @pytest.fixture
+    def env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("POSTGRES_HOST", "db")
         monkeypatch.setenv("POSTGRES_USERNAME", "user")
         monkeypatch.setenv("POSTGRES_PASSWORD", "pass")
         monkeypatch.setenv("POSTGRES_DATABASE", "mydb")
-        pool = AsyncMock()
+
+    def _pool(self, monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> _CliPool:
+        pool = _CliPool(**kwargs)
         monkeypatch.setattr("common.AsyncPostgreSQLPool", MagicMock(return_value=pool))
         return pool
 
     @pytest.mark.asyncio
-    async def test_dry_run_is_not_audited(self, pool: AsyncMock, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.usefixtures("env")
+    async def test_dry_run_is_not_audited(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import api.reattach as reattach_module
 
+        pool = self._pool(monkeypatch)
         run = AsyncMock(return_value={"apply": False, "census": {}})
-        audit = AsyncMock()
         monkeypatch.setattr(reattach_module, "run_reattachment", run)
-        monkeypatch.setattr(reattach_module, "record_audit_entry", audit)
 
         report = await reattach_module._run_once(apply=False, admin_id=None, batch_size=10, job_id="job")
 
         assert report == {"apply": False, "census": {}}
-        run.assert_awaited_once_with(pool, apply=False, batch_size=10, decision_ref=None)
-        audit.assert_not_awaited()
+        run.assert_awaited_once_with(pool, apply=False, batch_size=10)
+        assert pool.calls == []
         pool.initialize.assert_awaited_once()
         pool.close.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_apply_by_an_admin_is_audited_once(self, pool: AsyncMock, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.usefixtures("env")
+    async def test_apply_by_an_admin_is_audited_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import api.reattach as reattach_module
 
-        report = {"apply": True, "census": {}, "outcomes": {"release": {"reattached": 3}}}
+        pool = self._pool(monkeypatch)
         monkeypatch.setattr(reattach_module, "_is_admin", AsyncMock(return_value=True))
-        monkeypatch.setattr(reattach_module, "run_reattachment", AsyncMock(return_value=report))
-        audit = AsyncMock()
-        monkeypatch.setattr(reattach_module, "record_audit_entry", audit)
-        admin = str(uuid4())
-        job_id = str(uuid4())
+        run = AsyncMock(return_value=_APPLIED)
+        monkeypatch.setattr(reattach_module, "run_reattachment", run)
 
-        assert await reattach_module._run_once(apply=True, admin_id=admin, batch_size=10, job_id=job_id) == report
+        assert await reattach_module._run_once(apply=True, admin_id=ADMIN_ID, batch_size=10, job_id=JOB_ID) == _APPLIED
 
-        reattach_module.run_reattachment.assert_awaited_once_with(pool, apply=True, batch_size=10, decision_ref=UUID(job_id))
-        audit.assert_awaited_once_with(
-            pool=pool,
-            admin_id=admin,
-            action="identity.reattach.apply",
-            target=job_id,
-            details=audit_details(report, job_id),
-            entry_id=job_id,
-        )
-
-    @pytest.mark.asyncio
-    async def test_a_failed_apply_is_audited_under_its_decision_ref_and_reraised(self, pool: AsyncMock, monkeypatch: pytest.MonkeyPatch) -> None:
-        import api.reattach as reattach_module
-
-        monkeypatch.setattr(reattach_module, "_is_admin", AsyncMock(return_value=True))
-        monkeypatch.setattr(reattach_module, "run_reattachment", AsyncMock(side_effect=RuntimeError("connection lost")))
-        audit = AsyncMock()
-        monkeypatch.setattr(reattach_module, "record_audit_entry", audit)
-        admin = str(uuid4())
-        job_id = str(uuid4())
-
-        with pytest.raises(RuntimeError, match="connection lost"):
-            await reattach_module._run_once(apply=True, admin_id=admin, batch_size=10, job_id=job_id)
-
-        audit.assert_awaited_once_with(
-            pool=pool,
-            admin_id=admin,
-            action="identity.reattach.failed",
-            target=job_id,
-            details=failure_details(job_id, RuntimeError()),
-            entry_id=job_id,
-        )
+        run.assert_awaited_once_with(pool, apply=True, batch_size=10, decision_ref=UUID(JOB_ID))
+        assert [(verb, params[0] if verb == "INSERT" else params[:1]) for verb, params in _audit_calls(pool)] == [
+            ("INSERT", JOB_ID),
+            ("UPDATE", ("identity.reattach.apply",)),
+        ]
         pool.close.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_apply_by_a_non_admin_changes_nothing(self, pool: AsyncMock, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.usefixtures("env")
+    async def test_a_failed_apply_is_audited_under_its_decision_ref_and_reraised(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import api.reattach as reattach_module
 
+        pool = self._pool(monkeypatch)
+        monkeypatch.setattr(reattach_module, "_is_admin", AsyncMock(return_value=True))
+        monkeypatch.setattr(reattach_module, "run_reattachment", AsyncMock(side_effect=RuntimeError("connection lost")))
+
+        with pytest.raises(RuntimeError, match="connection lost"):
+            await reattach_module._run_once(apply=True, admin_id=ADMIN_ID, batch_size=10, job_id=JOB_ID)
+
+        assert _audit_calls(pool)[-1] == ("UPDATE", ("identity.reattach.failed", failure_details(JOB_ID, RuntimeError()), JOB_ID))
+        pool.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("env")
+    async def test_an_entry_that_cannot_be_written_changes_nothing(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+        import api.reattach as reattach_module
+
+        pool = self._pool(monkeypatch, raise_on={"INSERT": RuntimeError("audit table unavailable")})
+        monkeypatch.setattr(reattach_module, "_is_admin", AsyncMock(return_value=True))
+        run = AsyncMock()
+        monkeypatch.setattr(reattach_module, "run_reattachment", run)
+
+        assert await reattach_module._run_once(apply=True, admin_id=ADMIN_ID, batch_size=10, job_id=JOB_ID) is None
+
+        run.assert_not_awaited()
+        assert "nothing was changed" in capsys.readouterr().err
+        pool.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("env")
+    async def test_apply_by_a_non_admin_changes_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import api.reattach as reattach_module
+
+        pool = self._pool(monkeypatch)
         run = AsyncMock()
         monkeypatch.setattr(reattach_module, "_is_admin", AsyncMock(return_value=False))
         monkeypatch.setattr(reattach_module, "run_reattachment", run)
@@ -800,6 +900,7 @@ class TestRunOnce:
         assert await reattach_module._run_once(apply=True, admin_id=str(uuid4()), batch_size=10, job_id="job") is None
 
         run.assert_not_awaited()
+        assert pool.calls == []
         pool.close.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -869,65 +970,75 @@ class TestReattachRoute:
 class TestRunReattachJob:
     """_run_reattach_job: the background task behind the route."""
 
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("apply", [False, True])
-    @patch("api.routers.admin.record_audit_entry", new_callable=AsyncMock)
-    @patch("api.routers.admin.run_reattachment", new_callable=AsyncMock)
-    async def test_only_an_applying_run_writes_the_counts_entry(self, mock_run: AsyncMock, mock_audit: AsyncMock, apply: bool) -> None:
+    async def _run(self, pool: FakePool, job_id: str, apply: bool) -> None:
         import api.routers.admin as admin_mod
 
-        report = {"apply": apply, "census": {}, **({"outcomes": {"release": {"reattached": 2}}} if apply else {})}
-        mock_run.return_value = report
         original_pool = admin_mod._pool
-        fake_pool = MagicMock()
-        admin_mod._pool = fake_pool
-        job_id = str(uuid4())
+        admin_mod._pool = pool
         admin_mod._reattach_tasks[job_id] = MagicMock()
         try:
-            await admin_mod._run_reattach_job(job_id, "00000000-0000-0000-0000-000000000099", apply)
+            await admin_mod._run_reattach_job(job_id, ADMIN_ID, apply)  # must not raise
         finally:
             admin_mod._pool = original_pool
-
-        mock_run.assert_awaited_once_with(fake_pool, apply=apply, decision_ref=UUID(job_id) if apply else None)
-        if apply:
-            mock_audit.assert_awaited_once_with(
-                pool=fake_pool,
-                admin_id="00000000-0000-0000-0000-000000000099",
-                action="identity.reattach.apply",
-                target=job_id,
-                details={"job_id": job_id, "apply": True, "outcomes": {"release": {"reattached": 2}}},
-                entry_id=job_id,
-            )
-        else:
-            mock_audit.assert_not_awaited()
         assert job_id not in admin_mod._reattach_tasks
 
     @pytest.mark.asyncio
-    @patch("api.routers.admin.record_audit_entry", new_callable=AsyncMock)
     @patch("api.routers.admin.run_reattachment", new_callable=AsyncMock)
-    async def test_failure_is_swallowed_untracked_and_audited_under_its_decision_ref(self, mock_run: AsyncMock, mock_audit: AsyncMock) -> None:
-        import api.routers.admin as admin_mod
+    async def test_a_dry_run_writes_no_entry(self, mock_run: AsyncMock) -> None:
+        mock_run.return_value = {"apply": False, "census": {}}
+        pool = FakePool()
 
+        await self._run(pool, JOB_ID, False)
+
+        mock_run.assert_awaited_once_with(pool, apply=False)
+        assert pool.calls == []
+
+    @pytest.mark.asyncio
+    @patch("api.reattach.run_reattachment", new_callable=AsyncMock)
+    async def test_an_applying_run_is_started_then_finalized_under_its_decision_ref(self, mock_run: AsyncMock) -> None:
+        pool = FakePool()
+        mock_run.side_effect = lambda *_args, **_kwargs: _APPLIED if _audit_calls(pool) else pytest.fail("ran before its audit entry")
+
+        await self._run(pool, JOB_ID, True)
+
+        mock_run.assert_awaited_once_with(pool, apply=True, batch_size=DEFAULT_BATCH_SIZE, decision_ref=UUID(JOB_ID))
+        assert _audit_calls(pool) == [
+            ("INSERT", (JOB_ID, ADMIN_ID, "identity.reattach.started", JOB_ID, {"job_id": JOB_ID, "apply": True})),
+            ("UPDATE", ("identity.reattach.apply", {"job_id": JOB_ID, "apply": True, "outcomes": {"release": {"reattached": 2}}}, JOB_ID)),
+        ]
+
+    @pytest.mark.asyncio
+    @patch("api.reattach.run_reattachment", new_callable=AsyncMock)
+    async def test_failure_is_swallowed_untracked_and_audited_under_its_decision_ref(self, mock_run: AsyncMock) -> None:
         mock_run.side_effect = RuntimeError("postgres unreachable")
-        original_pool = admin_mod._pool
-        fake_pool = MagicMock()
-        admin_mod._pool = fake_pool
-        job_id = str(uuid4())
-        admin_mod._reattach_tasks[job_id] = MagicMock()
-        try:
-            await admin_mod._run_reattach_job(job_id, "admin", True)  # must not raise
-        finally:
-            admin_mod._pool = original_pool
+        pool = FakePool()
 
-        assert job_id not in admin_mod._reattach_tasks
-        mock_audit.assert_awaited_once_with(
-            pool=fake_pool,
-            admin_id="admin",
-            action="identity.reattach.failed",
-            target=job_id,
-            details={"job_id": job_id, "apply": True, "error": "RuntimeError"},
-            entry_id=job_id,
-        )
+        await self._run(pool, JOB_ID, True)
+
+        assert _audit_calls(pool)[1:] == [
+            ("UPDATE", ("identity.reattach.failed", {"job_id": JOB_ID, "apply": True, "error": "RuntimeError"}, JOB_ID))
+        ]
+
+    @pytest.mark.asyncio
+    @patch("api.reattach.run_reattachment", new_callable=AsyncMock)
+    async def test_an_entry_that_cannot_be_written_stops_the_run(self, mock_run: AsyncMock) -> None:
+        pool = FakePool(raise_on={"INSERT": RuntimeError("audit table unavailable")})
+
+        await self._run(pool, JOB_ID, True)
+
+        mock_run.assert_not_awaited()
+        assert [verb for verb, _params in _audit_calls(pool)] == ["INSERT"]
+
+    @pytest.mark.asyncio
+    @patch("api.reattach.run_reattachment", new_callable=AsyncMock)
+    async def test_a_failed_finalize_leaves_the_started_entry(self, mock_run: AsyncMock) -> None:
+        mock_run.return_value = _APPLIED
+        pool = FakePool(raise_on={"UPDATE": RuntimeError("audit table unavailable")})
+
+        await self._run(pool, JOB_ID, True)
+
+        mock_run.assert_awaited_once()
+        assert [verb for verb, _params in _audit_calls(pool)] == ["INSERT", "UPDATE"]
 
     @pytest.mark.asyncio
     async def test_noop_when_pool_missing(self) -> None:

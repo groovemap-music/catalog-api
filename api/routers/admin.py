@@ -47,7 +47,7 @@ from api.queries.admin_queries import (
 )
 from api.queries.media_coverage_queries import DEFAULT_LIMIT, MAX_LIMIT, get_unmapped_media, known_providers
 from api.queries.metrics_queries import get_health_history, get_queue_history
-from api.reattach import audit_details, failure_details, run_reattachment
+from api.reattach import apply_with_audit, run_reattachment
 
 
 logger = structlog.get_logger(__name__)
@@ -714,35 +714,21 @@ async def _run_reattach_job(job_id: str, admin_id: str, apply: bool) -> None:
     """Background task: run the re-attachment once, log the report, and audit an applying run.
 
     Never raises out of the task, mirroring _run_projection_job. A dry run only logs the
-    census; an applying run also writes one admin_audit_log entry with its per-kind outcomes,
-    under the job id as its row id, because every supersession the run opens names that entry
-    as its decision_ref. A failed applying run is recorded under the same id.
+    census. An applying run goes through `apply_with_audit`: its admin_audit_log entry, under
+    the job id as its row id, is created before any identity write (every supersession the run
+    opens names it as its decision_ref) and finalized with the per-kind outcomes, or as failed.
+    If the entry cannot be created, the run does not start.
     """
     if _pool is None:
         return
     try:
-        report = await run_reattachment(_pool, apply=apply, decision_ref=UUID(job_id) if apply else None)
-        logger.info("✅ Catalog re-attachment finished", job_id=job_id, apply=apply, census=report["census"], outcomes=report.get("outcomes"))
         if apply:
-            await record_audit_entry(
-                pool=_pool,
-                admin_id=admin_id,
-                action="identity.reattach.apply",
-                target=job_id,
-                details=audit_details(report, job_id),
-                entry_id=job_id,
-            )
+            report = await apply_with_audit(_pool, admin_id=admin_id, job_id=job_id)
+        else:
+            report = await run_reattachment(_pool, apply=False)
+        logger.info("✅ Catalog re-attachment finished", job_id=job_id, apply=apply, census=report["census"], outcomes=report.get("outcomes"))
     except Exception as exc:
         logger.error("❌ Catalog re-attachment failed", job_id=job_id, apply=apply, error=describe_exception(exc), exc_info=True)
-        if apply:
-            await record_audit_entry(
-                pool=_pool,
-                admin_id=admin_id,
-                action="identity.reattach.failed",
-                target=job_id,
-                details=failure_details(job_id, exc),
-                entry_id=job_id,
-            )
     finally:
         _reattach_tasks.pop(job_id, None)
 

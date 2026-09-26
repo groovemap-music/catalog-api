@@ -95,7 +95,11 @@ exists today (a copy follows its collection row's Discogs item). One added later
 through `public.resolve_catalog_item`.
 
 Every supersession an applying run opens names the run's `admin_audit_log` entry as its
-`decision_ref`: callers pass the id they then write that entry under (the job id).
+`decision_ref`: callers pass the id that entry is written under (the job id). The entry is
+written *before* the run, as ``identity.reattach.started``, on a path that raises, so a run
+whose entry could not be created writes nothing; :func:`apply_with_audit` then finalizes it
+as ``identity.reattach.apply`` or ``identity.reattach.failed``. A finalize that fails leaves
+the started entry, so a ``decision_ref`` always resolves to a row.
 
 After an applying run, trigger the `gm_id` projection (`POST /api/admin/identity/project` or
 `catalog-identity-projection`) so the graph follows the alias table.
@@ -114,7 +118,7 @@ from uuid import UUID, uuid4
 import structlog
 from common.config import get_secret, parse_postgres_host_port
 
-from api.audit_log import record_audit_entry
+from api.audit_log import insert_audit_entry, update_audit_entry
 from api.catalog_merge import CACHE_TABLE_NAMES, MOVED_TABLES, MergeConflictError, current_supersession, lock_items, merge_items
 
 
@@ -646,6 +650,57 @@ def failure_details(job_id: str, exc: BaseException) -> dict[str, Any]:
     return {"job_id": job_id, "apply": True, "error": type(exc).__name__}
 
 
+# An applying run's entry: written as STARTED before any identity write, then finalized.
+STARTED_ACTION: Final = "identity.reattach.started"
+APPLY_ACTION: Final = "identity.reattach.apply"
+FAILED_ACTION: Final = "identity.reattach.failed"
+
+
+class AuditEntryError(RuntimeError):
+    """The run's audit entry could not be created, so the run did not start and wrote nothing."""
+
+
+async def _start_audit_entry(pool: Any, *, entry_id: str, admin_id: str, action: str, target: str | None, details: dict[str, Any]) -> None:
+    """Write an applying run's interim entry, raising :class:`AuditEntryError` when it cannot."""
+    try:
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await insert_audit_entry(cur, entry_id=entry_id, admin_id=admin_id, action=action, target=target, details=details)
+    except Exception as exc:
+        logger.error("❌ Could not record the re-attachment run's audit entry; nothing was changed", job_id=entry_id, exc_info=True)
+        raise AuditEntryError(f"audit entry {entry_id} could not be created") from exc
+
+
+async def finalize_audit_entry(pool: Any, *, entry_id: str, action: str, details: dict[str, Any]) -> None:
+    """Finalize a started entry. Never raises: a failure leaves the started entry and logs an error."""
+    try:
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await update_audit_entry(cur, entry_id=entry_id, action=action, details=details)
+    except Exception:
+        logger.error("❌ Could not finalize the re-attachment run's audit entry; it stays as started", job_id=entry_id, action=action, exc_info=True)
+
+
+async def apply_with_audit(pool: Any, *, admin_id: str, job_id: str, batch_size: int = DEFAULT_BATCH_SIZE) -> dict[str, Any]:
+    """Run an applying re-attachment under its audit entry (row id and target: the job id).
+
+    The entry is created as :data:`STARTED_ACTION` before :func:`run_reattachment` writes
+    anything, and finalized as :data:`APPLY_ACTION` with the outcomes or as
+    :data:`FAILED_ACTION` with the error, which is then re-raised.
+
+    Raises:
+        AuditEntryError: The entry could not be created; the run did not start.
+    """
+    await _start_audit_entry(
+        pool, entry_id=job_id, admin_id=admin_id, action=STARTED_ACTION, target=job_id, details={"job_id": job_id, "apply": True}
+    )
+    try:
+        report = await run_reattachment(pool, apply=True, batch_size=batch_size, decision_ref=UUID(job_id))
+    except Exception as exc:
+        await finalize_audit_entry(pool, entry_id=job_id, action=FAILED_ACTION, details=failure_details(job_id, exc))
+        raise
+    await finalize_audit_entry(pool, entry_id=job_id, action=APPLY_ACTION, details=audit_details(report, job_id))
+    return report
+
+
 def _connection_params() -> dict[str, Any]:
     """Read connection parameters from the environment, exiting on anything missing.
 
@@ -694,29 +749,13 @@ async def _run_once(*, apply: bool, admin_id: str | None, batch_size: int, job_i
         if apply and not await _is_admin(pool, str(admin_id)):
             print(f"❌ --admin-id {admin_id} is not an active admin; nothing was changed.", file=sys.stderr)
             return None
+        if not apply:
+            return await run_reattachment(pool, apply=False, batch_size=batch_size)
         try:
-            report = await run_reattachment(pool, apply=apply, batch_size=batch_size, decision_ref=UUID(job_id) if apply else None)
-        except Exception as exc:
-            if apply:
-                await record_audit_entry(
-                    pool=pool,
-                    admin_id=str(admin_id),
-                    action="identity.reattach.failed",
-                    target=job_id,
-                    details=failure_details(job_id, exc),
-                    entry_id=job_id,
-                )
-            raise
-        if apply:
-            await record_audit_entry(
-                pool=pool,
-                admin_id=str(admin_id),
-                action="identity.reattach.apply",
-                target=job_id,
-                details=audit_details(report, job_id),
-                entry_id=job_id,
-            )
-        return report
+            return await apply_with_audit(pool, admin_id=str(admin_id), job_id=job_id, batch_size=batch_size)
+        except AuditEntryError:
+            print(f"❌ Could not record the run's audit entry {job_id}; nothing was changed.", file=sys.stderr)
+            return None
     finally:
         await pool.close()
 
