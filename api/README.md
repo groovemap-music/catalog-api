@@ -267,11 +267,15 @@ module docstring documents the lock order and why a concurrent loader attach con
 - Discogs ids that resolve to nothing yet.
 
 Writing needs an explicit flag. Every applying run writes one `admin_audit_log` entry under
-its job id, the id its supersessions name. The entry holds per-kind outcomes: supersessions
-opened, chains compressed, rows moved and caches recomputed per table, and
-`merged_with_dependents`. It holds counts only, never a user id or a user-owned row id,
-because that table outlives erasure. A run that fails is recorded under the same id as
-`identity.reattach.failed`. Re-running is safe: a repaired item is no longer split, and a
+its job id, the id its supersessions name. The entry is written first, as
+`identity.reattach.started`, before any identity write; if it cannot be written, the run does
+not start and changes nothing. When the run finishes, the entry becomes
+`identity.reattach.apply` with per-kind outcomes: supersessions opened, chains compressed, rows
+moved and caches recomputed per table, and `merged_with_dependents`. It holds counts only,
+never a user id or a user-owned row id, because that table outlives erasure. A run that fails
+becomes `identity.reattach.failed`. If that last update itself fails, the entry stays
+`identity.reattach.started` and an error is logged, so a supersession's `decision_ref` always
+names a real entry. Re-running is safe: a repaired item is no longer split, and a
 guarded item is skipped again.
 
 - **Admin API**: `POST /api/admin/identity/reattach` (admin JWT required) returns `202` with a
@@ -310,15 +314,20 @@ the `gm_id` projection by itself, once per completed Discogs extraction. It is o
   watcher idles.
 - **Exactly once, across restarts and replicas.** Each poll takes a PostgreSQL advisory lock
   (`pg_try_advisory_lock`); a replica that cannot take it skips the poll. The holder checks
-  the handled marker again under the lock, runs both jobs, records the marker, and unlocks.
-  A failure, or a process that dies mid-run, records no marker, so the next poll by any
+  the handled marker again under the lock, writes the run's entry, runs both jobs, turns the
+  entry into the marker, and unlocks. A failure, or a process that dies mid-run, leaves no
+  marker, so the next poll by any
   replica retries it. Both jobs are safe to re-run.
-- **Handled marker and audit.** A finished run writes one `admin_audit_log` entry with
-  `action = 'identity.reattach.auto'` and `target = 'discogs:<version>'`, with the per-kind
+- **Handled marker and audit.** Each run writes one `admin_audit_log` entry with
+  `target = 'discogs:<version>'`. Its row id is the run's job id, which the run's
+  supersessions name as `decision_ref`, so it is written before the re-attachment as
+  `identity.reattach.auto.started`; if it cannot be written, the run does not start. A
+  finished run updates it to `action = 'identity.reattach.auto'`, with the per-kind
   re-attachment outcomes and projection counts in `details`. That entry is the durable
-  handled marker, so no new table is needed. Its row id is the run's job id, which the run's
-  supersessions name as `decision_ref`. A failed run is recorded under the same id as
-  `identity.reattach.auto.failed`. That entry is not the marker, so the run is still retried.
+  handled marker, so no new table is needed. A failed run updates it to
+  `identity.reattach.auto.failed`. Neither the started nor the failed entry is the marker, so
+  such a run is retried, under a new job id and entry; the earlier entry stays, and its
+  supersessions' `decision_ref` still resolves.
 - **System actor.** The CLI requires `--admin-id` and the endpoint uses the caller's JWT
   because there a person decides to write. Here nobody does, so automatic runs are recorded
   against a reserved system user, `identity-maintenance@system.groovemap.invalid`, that the
