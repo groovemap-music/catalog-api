@@ -28,6 +28,22 @@ The application initializes the shared runtime with `setup_logging("api",
 log_file=Path("/logs/api.log"))`. Repository code should obtain module loggers through the
 existing logging conventions and must never call `logging.basicConfig()` at import time.
 
+### File rotation
+
+`/logs/api.log` is a size-capped `RotatingFileHandler`, not an unbounded file, built by
+`groovemap-runtime`'s `common.log_rotation.build_rotating_file_handler` (see
+`setup_logging`'s `log_file` parameter). Two environment variables tune it, both read at
+handler-construction time so a deployment adjusts them without a rebuild:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LOG_FILE_MAX_BYTES` | `104857600` (100 MiB) | Size at which the active log file rolls over |
+| `LOG_FILE_BACKUP_COUNT` | `5` | Number of rotated backups retained alongside the active file |
+
+A non-numeric or non-positive override falls back to the default rather than disabling the
+bound. See `tests/test_logging_rotation.py` for a check that this service's own
+`setup_logging` call produces a bounded handler.
+
 ## Event conventions
 
 Log messages use the catalog API's emoji vocabulary so lifecycle, success, failure, and data
