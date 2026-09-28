@@ -96,6 +96,7 @@ class TestErasureProcedure:
             "DELETE FROM activity.impressions",
             "DELETE FROM activity.user_subjects",
             "INSERT INTO activity.erasures",
+            "DELETE FROM catalog_item_moves",
             "DELETE FROM observations",
             "DELETE FROM collection_snapshots",
             "DELETE FROM owned_copies",
@@ -108,6 +109,12 @@ class TestErasureProcedure:
         ]
         positions = [index_of(executed, fragment) for fragment in ordered]
         assert positions == sorted(positions), "the procedure runs in the decided order"
+
+    def test_the_merge_ledger_is_erased_by_user(self, test_client: TestClient, auth_headers: dict[str, str], mock_cur: MagicMock) -> None:
+        test_client.post("/api/user/erasure", json={"password": PASSWORD}, headers=auth_headers)
+
+        [parameters] = [call.args[1] for call in mock_cur.execute.await_args_list if "DELETE FROM catalog_item_moves" in str(call.args[0])]
+        assert parameters == (TEST_USER_ID,)
 
     def test_the_users_row_is_updated_and_never_deleted(self, test_client: TestClient, auth_headers: dict[str, str], mock_cur: MagicMock) -> None:
         test_client.post("/api/user/erasure", json={"password": PASSWORD}, headers=auth_headers)
@@ -366,6 +373,7 @@ class TestExport:
             [{"id": UUID(int=4), "release_id": 11, "title": "W"}],
             [{"id": UUID(int=5), "item_id": UUID(int=6)}],
             [{"id": UUID(int=7), "kind": "matrix", "value": "ABC", "confidence": None}],
+            [{"id": UUID(int=10), "table_name": "owned_copies", "row_id": UUID(int=5), "from_item_id": UUID(int=11), "to_item_id": UUID(int=6)}],
             [{"id": UUID(int=8), "taken_at": datetime(2026, 2, 1, tzinfo=UTC), "item_count": 3}],
             [{"id": UUID(int=9), "purpose": "product_analytics", "granted_at": datetime(2026, 3, 1, tzinfo=UTC), "revoked_at": None}],
         ]
@@ -391,6 +399,7 @@ class TestExport:
             "wantlist_item",
             "owned_copy",
             "observation",
+            "catalog_item_move",
             "collection_snapshot",
             "consent_grant",
         ]
@@ -421,6 +430,22 @@ class TestExport:
             elif "FROM user_collections" in sql or "consent_grants" in sql:
                 assert parameters == (TEST_USER_ID,)
 
+    def test_the_merge_ledger_is_exported_by_user_with_item_ids_as_recorded(
+        self, test_client: TestClient, auth_headers: dict[str, str], mock_cur: MagicMock
+    ) -> None:
+        lines = self.read(test_client, auth_headers)
+
+        move = next(line for line in lines if line["kind"] == "catalog_item_move")
+        assert move["record"] == {
+            "id": str(UUID(int=10)),
+            "table_name": "owned_copies",
+            "row_id": str(UUID(int=5)),
+            "from_item_id": str(UUID(int=11)),
+            "to_item_id": str(UUID(int=6)),
+        }
+        [parameters] = [call.args[1] for call in mock_cur.execute.await_args_list if "FROM catalog_item_moves" in str(call.args[0])]
+        assert parameters == (TEST_USER_ID,)
+
     def test_the_export_event_is_recorded_with_its_published_payload(
         self, test_client: TestClient, auth_headers: dict[str, str], sections: Any
     ) -> None:
@@ -437,6 +462,7 @@ class TestExport:
     ) -> None:
         mock_cur.fetchall.side_effect = [
             [{"id": UUID(int=3), "release_id": 10}],
+            [],
             [],
             [],
             [],
@@ -460,6 +486,7 @@ class TestExport:
             [],
             [],
             [{"id": UUID(int=7), "confidence": Decimal("0.75"), "observed_at": "2026-04-01T00:00:00+00:00"}],
+            [],
             [],
             [],
         ]

@@ -209,6 +209,132 @@ Both entry points call the same `run_gm_id_projection`, so the API trigger and t
 behaviorally identical. Re-running is safe: nodes without a currently-valid alias are simply
 not matched, and a node whose `gm_id` is already correct is set to the same value again.
 
+### Re-attaching Load-Order-Split Catalog Items
+
+[ADR 0014 section 8](https://github.com/groovemap-music/design/blob/main/docs/adr/0014-cross-catalog-edition-candidates.md)
+repairs a split the loaders cannot heal. When a MusicBrainz release, release group, artist, or
+label loads before the Discogs row its `discogs_*_id` names, it mints its own native id; the
+Discogs row later mints a second one, and `attach_aliases` never overwrites. `api/reattach.py`
+finds every such row — its Discogs alias resolves to a different native id than its
+`musicbrainz` alias — and, per item in one transaction, closes every current alias on the split
+native id, re-inserts the same aliases against the Discogs native id as `source = 'catalog'`,
+and sets that MusicBrainz row's `gm_item_id`.
+
+The same transaction then merges the split item into the Discogs item, per
+[ADR 0009's 2026-09-25 amendment](https://github.com/groovemap-music/design/blob/main/docs/adr/0009-native-identity-and-provider-aliases.md#2026-09-25-superseded-catalog-items-and-native-id-merge)
+(`api/catalog_merge.py`):
+
+1. It locks both `catalog_items` rows, in id order. The split item is locked `FOR UPDATE`, so
+   no copy or artifact can be created against it mid-move. The Discogs item is locked
+   `FOR NO KEY UPDATE`.
+2. It opens a `catalog_item_supersessions` row (`cause = 'catalog_reattachment'`, and
+   `decision_ref` is the run's `admin_audit_log` entry). It also compresses chains, so
+   resolution stays one hop.
+3. It re-points `artifacts.item_id` and `owned_copies.item_id` from the split item to the
+   survivor, and writes every moved row to `catalog_item_moves` with its owner.
+4. It recomputes the `gm_item_id` caches (the entity tables, `user_collections`, and
+   `user_wantlists`) from the moved aliases.
+
+The former native id is kept, never deleted, and `public.resolve_catalog_item` resolves it to
+the survivor. A merge changes only a user-owned row's item reference: no user-authored value,
+id, or owner. It emits no event. Observations and snapshots are not touched, because copies
+and artifacts keep their ids. `revert_supersession` reverses a merge exactly, for the future
+promotion revert: it moves back only the ledgered rows still on the survivor.
+
+The dependents guard is gone: it was removed in the same change that added the merge. A split
+item with dependents is now merged, not skipped. A skip wrote nothing, so the first run after
+this change merges every item earlier runs skipped for dependents. Compare its
+`merged_with_dependents` count against those runs' `guard_reasons.dependents`.
+
+It still skips and reports, without modifying, any split native id that holds a `discogs` or
+another row's alias (a real item, not an orphan), or that holds an alias whose source is not
+`catalog`. A merge that cannot happen rolls the whole item back and is counted as failed: the
+kinds differ, the Discogs item is itself superseded, or the split item already resolves
+elsewhere. A barcode or catalogue
+number the MusicBrainz side won moves to the Discogs item; if the Discogs item already holds a
+current alias for the same value it is not duplicated, and the split row stays closed. The
+module docstring documents the lock order and why a concurrent loader attach converges.
+
+**Dry run is the default.** A dry run only runs the read-only census. Per kind, it reports:
+
+- split items;
+- guarded items, by reason;
+- items with dependents, by table;
+- `will_move`: among eligible items, how many have dependents and how many artifact and
+  owned-copy rows the merge will re-point;
+- identifier aliases the split items hold, and how many of those the Discogs record also
+  carries;
+- Discogs ids that resolve to nothing yet.
+
+Writing needs an explicit flag. Every applying run writes one `admin_audit_log` entry under
+its job id, the id its supersessions name. The entry is written first, as
+`identity.reattach.started`, before any identity write; if it cannot be written, the run does
+not start and changes nothing. When the run finishes, the entry becomes
+`identity.reattach.apply` with per-kind outcomes: supersessions opened, chains compressed, rows
+moved and caches recomputed per table, and `merged_with_dependents`. It holds counts only,
+never a user id or a user-owned row id, because that table outlives erasure. A run that fails
+becomes `identity.reattach.failed`. If that last update itself fails, the entry stays
+`identity.reattach.started` and an error is logged, so a supersession's `decision_ref` always
+names a real entry. Re-running is safe: a repaired item is no longer split, and a
+guarded item is skipped again.
+
+- **Admin API**: `POST /api/admin/identity/reattach` (admin JWT required) returns `202` with a
+  job id; add `?apply=true` to write. The census and per-item outcomes are logged.
+
+  ```bash
+  curl -X POST -H "Authorization: Bearer <admin-jwt>" \
+    "https://api.groovemap.music/api/admin/identity/reattach?apply=true"
+  # {"id": "...", "status": "running", "apply": true}
+  ```
+
+- **CLI**: `catalog-identity-reattach` prints the census; `--apply --admin-id <uuid>` writes,
+  auditing the run against that admin:
+
+  ```bash
+  docker exec <api-container> catalog-identity-reattach
+  docker exec <api-container> catalog-identity-reattach --apply --admin-id <admin-uuid>
+  ```
+
+**After an applying run, trigger the `gm_id` projection** (`POST /api/admin/identity/project` or
+`catalog-identity-projection`, above) so the graph follows the alias table.
+
+### Running Both Automatically After Each Discogs Import
+
+Set `IDENTITY_AUTO_REATTACH_ENABLED=true` and the API runs the re-attachment (apply) and then
+the `gm_id` projection by itself, once per completed Discogs extraction. It is off by default;
+`IDENTITY_AUTO_REATTACH_INTERVAL` (seconds, default `300`) sets how often it polls.
+`api/reattach_trigger.py`'s module docstring has the full design.
+
+- **Trigger.** It reads `public.loader_extraction_latch` (declared by `database-schema`,
+  written by `discogs-sql-loader`) and writes nothing there. An extraction is complete when
+  its `loader = 'discogs'` row's `signals` holds `artists`, `labels`, `masters`, and
+  `releases`. Only the newest complete extraction is a candidate: both jobs cover the whole
+  catalog, so one run after the latest import covers earlier ones too, and enabling the
+  watcher on an already-imported deployment runs it once. Until the relation exists the
+  watcher idles.
+- **Exactly once, across restarts and replicas.** Each poll takes a PostgreSQL advisory lock
+  (`pg_try_advisory_lock`); a replica that cannot take it skips the poll. The holder checks
+  the handled marker again under the lock, writes the run's entry, runs both jobs, turns the
+  entry into the marker, and unlocks. A failure, or a process that dies mid-run, leaves no
+  marker, so the next poll by any
+  replica retries it. Both jobs are safe to re-run.
+- **Handled marker and audit.** Each run writes one `admin_audit_log` entry with
+  `target = 'discogs:<version>'`. Its row id is the run's job id, which the run's
+  supersessions name as `decision_ref`, so it is written before the re-attachment as
+  `identity.reattach.auto.started`; if it cannot be written, the run does not start. A
+  finished run updates it to `action = 'identity.reattach.auto'`, with the per-kind
+  re-attachment outcomes and projection counts in `details`. That entry is the durable
+  handled marker, so no new table is needed. A failed run updates it to
+  `identity.reattach.auto.failed`. Neither the started nor the failed entry is the marker, so
+  such a run is retried, under a new job id and entry; the earlier entry stays, and its
+  supersessions' `decision_ref` still resolves.
+- **System actor.** The CLI requires `--admin-id` and the endpoint uses the caller's JWT
+  because there a person decides to write. Here nobody does, so automatic runs are recorded
+  against a reserved system user, `identity-maintenance@system.groovemap.invalid`, that the
+  watcher creates on first use with a fixed id. It is inactive, not an admin, and has a
+  password hash that matches no password, so it cannot log in or call admin routes. It is
+  also counted in the admin dashboard's `total_users`.
+
 ## API Endpoints
 
 ### Authentication
@@ -415,6 +541,47 @@ detail, including how the `types` filter is represented in the recorded payload.
 - `year_max` — Maximum release year (1000–9999)
 - `limit` — Results per page (1–100, default: 20)
 - `offset` — Pagination offset (default: 0)
+
+### Identifier Lookup
+
+Resolve one catalogue identifier — printed on the record itself — to the release or releases
+that carry it ([ADR 0011](https://github.com/groovemap-music/design/blob/main/docs/adr/0011-catalog-identifiers-and-manufacturing-credits.md)).
+Public and rate limited like search, since the caller is standing in a shop with the record
+in hand rather than signed in.
+
+| Method | Path                             | Auth Required | Rate Limit | Description                                    |
+| ------ | -------------------------------- | ------------- | ---------- | ----------------------------------------------- |
+| GET    | `/api/lookup/{provider}/{value}` | No            | 30/min     | Resolve a barcode, catalogue number, or matrix  |
+
+`provider` is one of `barcode`, `catalog_number`, or `matrix` — the alias namespaces ADR 0011
+mints. `value` is normalized with that namespace's declared rule before it is looked up (a
+barcode's grouping spaces or dashes, for instance, don't matter). An unminted namespace is
+`400`; a value no alias carries, or whose alias points at no loaded release row, is `404`.
+
+**Barcode equivalence ([ADR 0011's "UPC-A and EAN-13 are one GTIN at lookup" amendment](https://github.com/groovemap-music/design/blob/main/docs/adr/0011-catalog-identifiers-and-manufacturing-credits.md#2026-09-25-upc-a-and-ean-13-are-one-gtin-at-lookup-no-alias-is-re-keyed)):**
+GS1 treats GTIN-12, GTIN-13, and GTIN-14 as one number space — a shorter GTIN is the same GTIN
+zero-padded to 14 digits — and this surface applies that at lookup, without re-keying any
+stored alias:
+
+- A 12-digit value `D` is equivalent to `0D` and `00D`.
+- A 13-digit value is equivalent to its own 14-digit zero-padded form, and additionally to the
+  bare 12-digit form when it itself already starts with `0`.
+- A 14-digit value starting with `0` is equivalent to the same value with one or two leading
+  zeros removed, as far as that stays 12 or 13 digits.
+- A 14-digit value starting with a nonzero indicator digit (`1`-`9`, GS1's marker for a
+  different trade item such as a case), an 8-digit EAN-8/UPC-E, and every other length are
+  equivalent only to themselves. The check digit is never validated.
+
+A request for any one form probes every equivalent form in the same batched query, so a
+sleeve read as `036000291452` also finds an item minted as `0036000291452` or `00036000291452`.
+When the resolved rows name two or more native items, the lookup returns every one of them —
+it does not pick a winner, merge them, or treat it as a split. The additive `matches` array
+carries one entry per resolved row (a native id reached through two forms is not deduplicated
+into one entry), each with its own `gm_id`, the stored `external_id` that resolved it, and its
+`releases`; entries are ordered by an exact match to the typed value first, then by the stored
+value's own length (shortest first), then by native id. The top-level `gm_id`/`releases` name
+the first entry, so a single-item client keeps working unchanged. `matches` is empty for the
+ordinary case where every resolved row names the same item.
 
 ### Path Finder
 

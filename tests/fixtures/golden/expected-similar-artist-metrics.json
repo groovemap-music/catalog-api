@@ -1,0 +1,74 @@
+{
+  "baseline_version": "similar-artist-all-signals-2026-09",
+  "compared_to_baseline_version": "heuristics-2026-09",
+  "golden_set_generator_version": "golden-2026-09",
+  "split_cut": "2023-01-01",
+  "metrics": {
+    "similar_artist": {
+      "collectors": 12,
+      "overall": {
+        "precision_at_10": 0.3416666666666666,
+        "recall_at_10": 0.5361441798941798,
+        "precision_at_25": 0.15666666666666668,
+        "recall_at_25": 0.6250330687830687,
+        "hit_rate": 1.0
+      },
+      "by_format": {
+        "vinyl": {
+          "held_out": 27,
+          "hits_at_10": 15,
+          "recall_at_10": 0.5555555555555556,
+          "hits_at_25": 16,
+          "recall_at_25": 0.5925925925925926
+        },
+        "optical": {
+          "held_out": 26,
+          "hits_at_10": 9,
+          "recall_at_10": 0.34615384615384615,
+          "hits_at_25": 14,
+          "recall_at_25": 0.5384615384615384
+        },
+        "tape": {
+          "held_out": 23,
+          "hits_at_10": 17,
+          "recall_at_10": 0.7391304347826086,
+          "hits_at_25": 17,
+          "recall_at_25": 0.7391304347826086
+        }
+      }
+    },
+    "similar_artist_legacy": {
+      "collectors": 12,
+      "overall": {
+        "precision_at_10": 0.2833333333333333,
+        "recall_at_10": 0.4450727513227513,
+        "precision_at_25": 0.13,
+        "recall_at_25": 0.5200727513227513,
+        "hit_rate": 0.9166666666666666
+      },
+      "by_format": {
+        "vinyl": {
+          "held_out": 27,
+          "hits_at_10": 11,
+          "recall_at_10": 0.4074074074074074,
+          "hits_at_25": 12,
+          "recall_at_25": 0.4444444444444444
+        },
+        "optical": {
+          "held_out": 26,
+          "hits_at_10": 8,
+          "recall_at_10": 0.3076923076923077,
+          "hits_at_25": 12,
+          "recall_at_25": 0.46153846153846156
+        },
+        "tape": {
+          "held_out": 23,
+          "hits_at_10": 15,
+          "recall_at_10": 0.6521739130434783,
+          "hits_at_25": 15,
+          "recall_at_25": 0.6521739130434783
+        }
+      }
+    }
+  }
+}

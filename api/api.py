@@ -77,6 +77,7 @@ from api.limiter import limiter
 from api.metrics_collector import MetricsBuffer, normalize_path, run_collector
 from api.notifications import LogNotificationChannel, ResendNotificationChannel
 from api.queries.search_queries import ALL_TYPES, execute_search
+from api.reattach_trigger import run_trigger_loop
 from api.services.discogs import (
     DISCOGS_AUTHORIZE_URL,
     REDIS_OAUTH_STATE_TTL,
@@ -369,7 +370,20 @@ async def _start_service(_app: FastAPI) -> _LifecycleResources:
     _app.state.metrics_buffer = metrics_buffer
     _app.state.collector_task = asyncio.create_task(run_collector(pool, config, metrics_buffer))
     logger.info("📊 Metrics collector started", interval=config.metrics_collection_interval)
+    _start_identity_maintenance(_app, config, pool, _neo4j)
     return _LifecycleResources(health_server=health_server, anthropic_client=anthropic_client)
+
+
+def _start_identity_maintenance(_app: FastAPI, config: ApiConfig, pool: Any, neo4j: Any) -> None:
+    """Start the automatic re-attachment + gm_id projection watcher when it is enabled."""
+    _app.state.identity_maintenance_task = None
+    if not config.identity_auto_reattach_enabled:
+        return
+    if neo4j is None:
+        logger.warning("⚠️ IDENTITY_AUTO_REATTACH_ENABLED is set but Neo4j is not configured; the watcher is not started")
+        return
+    _app.state.identity_maintenance_task = asyncio.create_task(run_trigger_loop(pool, neo4j, config.identity_auto_reattach_interval))
+    logger.info("🔗 Automatic identity maintenance watcher started", interval=config.identity_auto_reattach_interval)
 
 
 async def _cancel_tasks(tasks: list[asyncio.Task[Any]]) -> None:
@@ -387,6 +401,9 @@ async def _stop_service(_app: FastAPI, resources: _LifecycleResources) -> None:
         await _cancel_tasks([_app.state.prewarm_task])
     if hasattr(_app.state, "collector_task"):
         await _cancel_tasks([_app.state.collector_task])
+    identity_maintenance_task = getattr(_app.state, "identity_maintenance_task", None)
+    if isinstance(identity_maintenance_task, asyncio.Task):
+        await _cancel_tasks([identity_maintenance_task])
     if _neo4j:
         await _neo4j.close()
     if _pool:

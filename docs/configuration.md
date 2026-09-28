@@ -114,6 +114,8 @@ origin in production so password-reset links do not point at localhost.
 | `RABBITMQ_PASSWORD` | `groovemap` | RabbitMQ management password |
 | `METRICS_RETENTION_DAYS` | `366` | API metrics retention window |
 | `METRICS_COLLECTION_INTERVAL` | `300` | Metrics collection interval in seconds |
+| `IDENTITY_AUTO_REATTACH_ENABLED` | `false` | Run the catalog re-attachment then the `gm_id` projection after each completed Discogs extraction (see `api/README.md`) |
+| `IDENTITY_AUTO_REATTACH_INTERVAL` | `300` | How often that watcher polls `loader_extraction_latch`, in seconds |
 
 The internal Analytics secret and RabbitMQ credentials support their corresponding `_FILE`
 forms. [`discogs-ingestion`](https://github.com/groovemap-music/discogs-ingestion) and

@@ -27,9 +27,10 @@ class RecordedCall:
 class FakeCursor:
     """An async cursor that records statements and replays queued result sets."""
 
-    def __init__(self, results: list[list[tuple[Any, ...]]], calls: list[RecordedCall]) -> None:
+    def __init__(self, results: list[list[tuple[Any, ...]]], calls: list[RecordedCall], raise_on: dict[str, Exception] | None = None) -> None:
         self._results = results
         self._calls = calls
+        self._raise_on = raise_on or {}
         self._rows: list[tuple[Any, ...]] = []
 
     async def __aenter__(self) -> Self:
@@ -40,6 +41,9 @@ class FakeCursor:
 
     async def execute(self, sql: Any, params: Any = None) -> None:
         self._calls.append(RecordedCall(str(sql), params))
+        for prefix, error in self._raise_on.items():
+            if str(sql).startswith(prefix):
+                raise error
         self._rows = self._results.pop(0) if self._results else []
 
     async def fetchone(self) -> tuple[Any, ...] | None:
@@ -49,10 +53,30 @@ class FakeCursor:
         return list(self._rows)
 
 
+class FakeTransaction:
+    """`conn.transaction()` — records BEGIN, then COMMIT or ROLLBACK, among the statements."""
+
+    def __init__(self, calls: list[RecordedCall]) -> None:
+        self._calls = calls
+
+    async def __aenter__(self) -> Self:
+        self._calls.append(RecordedCall("BEGIN", None))
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        _exc: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        self._calls.append(RecordedCall("ROLLBACK" if exc_type else "COMMIT", None))
+
+
 class FakeConnection:
-    def __init__(self, results: list[list[tuple[Any, ...]]], calls: list[RecordedCall]) -> None:
+    def __init__(self, results: list[list[tuple[Any, ...]]], calls: list[RecordedCall], raise_on: dict[str, Exception] | None = None) -> None:
         self._results = results
         self._calls = calls
+        self._raise_on = raise_on
 
     async def __aenter__(self) -> Self:
         return self
@@ -66,7 +90,10 @@ class FakeConnection:
         return None
 
     def cursor(self) -> FakeCursor:
-        return FakeCursor(self._results, self._calls)
+        return FakeCursor(self._results, self._calls, self._raise_on)
+
+    def transaction(self) -> FakeTransaction:
+        return FakeTransaction(self._calls)
 
 
 class FakePool:
@@ -74,14 +101,17 @@ class FakePool:
 
     Args:
         results: One list of rows per `execute`, handed out in order.
+        raise_on: A statement starting with one of these prefixes is recorded, then raises
+            the mapped error instead of consuming a result set.
     """
 
-    def __init__(self, results: list[list[tuple[Any, ...]]] | None = None) -> None:
+    def __init__(self, results: list[list[tuple[Any, ...]]] | None = None, *, raise_on: dict[str, Exception] | None = None) -> None:
         self._results = list(results or [])
+        self._raise_on = raise_on
         self.calls: list[RecordedCall] = []
 
     def connection(self) -> FakeConnection:
-        return FakeConnection(self._results, self.calls)
+        return FakeConnection(self._results, self.calls, self._raise_on)
 
     @property
     def sql(self) -> str:

@@ -23,7 +23,7 @@ from typing import Any, Final
 
 from api.evaluation.baseline import BaselineRun, run_baseline
 from api.evaluation.fixtures import EXPECTED_METRICS_FILE, GOLDEN_DIR, GoldenSet, load_golden_set
-from api.evaluation.metrics import rank_stability, rarity_metrics, recommendation_metrics
+from api.evaluation.metrics import rank_stability, rarity_metrics, recommendation_metrics, similar_artist_metrics
 from api.evaluation.split import SPLIT_CUT, observed_graph, split_golden_set
 
 
@@ -36,6 +36,10 @@ EXPECTED_METRICS_PATH: Final[Path] = GOLDEN_DIR / EXPECTED_METRICS_FILE
 #: How far two runs of the same baseline may differ. The harness is deterministic, so this is
 #: a floating-point allowance, not a noise budget.
 METRICS_TOLERANCE: Final[float] = 1e-9
+
+#: The gm-catalog-api-tsmu.1 baseline's own committed snapshot, kept separate from
+#: ``EXPECTED_METRICS_PATH`` so registering it never touches ``heuristics-2026-09``'s bytes.
+SIMILAR_ARTIST_EXPECTED_METRICS_PATH: Final[Path] = GOLDEN_DIR / "expected-similar-artist-metrics.json"
 
 
 def evaluate(golden: GoldenSet | None = None) -> tuple[dict[str, Any], BaselineRun]:
@@ -116,6 +120,70 @@ def write_expected_metrics(report: dict[str, Any], path: Path = EXPECTED_METRICS
     """Overwrite the committed snapshot from ``report``. Run when a baseline change is intended."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(serialize(metrics_snapshot(report)), encoding="utf-8")
+    return path
+
+
+# ── gm-catalog-api-tsmu.1: the similar-artist candidate baseline ──────
+#
+# A second, narrower harness registered alongside the one above rather than folded into it:
+# ``evaluate()`` and ``EXPECTED_METRICS_PATH`` stay exactly as they were so heuristics-2026-09's
+# committed snapshot never moves, and this one scores only what changed -- the similar-artist
+# candidate generator -- comparing the new scope against the frozen one on the identical split.
+
+
+def evaluate_similar_artist_candidates(golden: GoldenSet | None = None) -> tuple[dict[str, Any], BaselineRun, BaselineRun]:
+    """Score the new similar-artist candidate scope against the frozen one, same split.
+
+    Args:
+        golden: The fixture to evaluate. Defaults to the committed golden set.
+
+    Returns:
+        The report body, the new-candidate-scope run (``SIMILAR_ARTIST_CANDIDATES_VERSION``),
+        and the legacy run (``BASELINE_VERSION``) it is compared against.
+    """
+    fixture = golden if golden is not None else load_golden_set()
+    splits = split_golden_set(fixture, SPLIT_CUT)
+    graph = observed_graph(fixture, SPLIT_CUT)
+    legacy_run = run_baseline(graph)
+    all_signals_run = run_baseline(graph, similar_artist_candidates="all_signals")
+
+    report = {
+        "baseline_version": all_signals_run.version,
+        "compared_to_baseline_version": legacy_run.version,
+        "golden_set": {
+            "generator_version": fixture.generator_version,
+            "seed": fixture.seed,
+        },
+        "split": {"cut": SPLIT_CUT.isoformat()},
+        "metrics": {
+            "similar_artist": similar_artist_metrics(all_signals_run, splits, fixture),
+            "similar_artist_legacy": similar_artist_metrics(legacy_run, splits, fixture),
+        },
+    }
+    return report, all_signals_run, legacy_run
+
+
+def similar_artist_metrics_snapshot(report: dict[str, Any]) -> dict[str, Any]:
+    """Return the time-invariant slice of an ``evaluate_similar_artist_candidates`` report."""
+    return {
+        "baseline_version": report["baseline_version"],
+        "compared_to_baseline_version": report["compared_to_baseline_version"],
+        "golden_set_generator_version": report["golden_set"]["generator_version"],
+        "split_cut": report["split"]["cut"],
+        "metrics": report["metrics"],
+    }
+
+
+def load_similar_artist_expected_metrics(path: Path = SIMILAR_ARTIST_EXPECTED_METRICS_PATH) -> dict[str, Any]:
+    """Load the committed similar-artist-candidates snapshot."""
+    loaded: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    return loaded
+
+
+def write_similar_artist_expected_metrics(report: dict[str, Any], path: Path = SIMILAR_ARTIST_EXPECTED_METRICS_PATH) -> Path:
+    """Overwrite the committed similar-artist-candidates snapshot from ``report``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(serialize(similar_artist_metrics_snapshot(report)), encoding="utf-8")
     return path
 
 
