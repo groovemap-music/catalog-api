@@ -140,6 +140,8 @@ health compatibility wire; Catalog API does not schedule or coordinate MusicBrai
 | `NLQ_CACHE_TTL` | `3600` | NLQ cache lifetime in seconds |
 | `NLQ_RATE_LIMIT` | `10/minute` | Per-client rate limit |
 | `LOG_LEVEL` | `INFO` | API and server log level |
+| `LOG_FILE_MAX_BYTES` | `104857600` | Size in bytes at which `/logs/api.log` rolls over |
+| `LOG_FILE_BACKUP_COUNT` | `5` | Number of rotated `/logs/api.log` backups retained |
 | `FORWARDED_ALLOW_IPS` | `172.20.0.0/16` | Trusted proxy addresses for Uvicorn |
 | `GROOVEMAP_SOURCE_REVISION` | build revision | Exact source revision linked from OpenAPI metadata |
 
