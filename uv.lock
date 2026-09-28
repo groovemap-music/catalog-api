@@ -6,9 +6,6 @@ requires-python = "==3.14.*"
 exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P2D"
 
-[manifest]
-overrides = [{ name = "groovemap-runtime", extras = ["neo4j", "otel", "otel-http", "postgres"], git = "https://github.com/groovemap-music/python-libraries.git?rev=9bac0220df80fdb550fde78d4db8228ca4273625" }]
-
 [[package]]
 name = "annotated-doc"
 version = "0.0.5"
@@ -597,7 +594,7 @@ name = "groovemap-agent-tools"
 version = "0.1.0"
 source = { git = "https://github.com/groovemap-music/python-libraries.git?subdirectory=agent-tools&rev=9bac0220df80fdb550fde78d4db8228ca4273625#9bac0220df80fdb550fde78d4db8228ca4273625" }
 dependencies = [
-    { name = "groovemap-runtime", extra = ["neo4j", "otel", "otel-http", "postgres"] },
+    { name = "groovemap-runtime" },
 ]
 
 [[package]]
@@ -675,7 +672,7 @@ dev = [
     { name = "commitizen", specifier = ">=4.18.0" },
     { name = "cyclonedx-bom", specifier = ">=7.3.1" },
     { name = "fakeredis", specifier = ">=2.37.1" },
-    { name = "groovemap-database-schema", git = "https://github.com/groovemap-music/database-schema.git?rev=f6fedea8870a1693fa9818b144bce09ab70465c5" },
+    { name = "groovemap-database-schema", git = "https://github.com/groovemap-music/database-schema.git?rev=525cbc1847749da0630e8f45a288b2a587437b51" },
     { name = "hypothesis", specifier = ">=6.167.1" },
     { name = "mypy", specifier = ">=2.3.1" },
     { name = "pip-audit", specifier = ">=2.10.1" },
@@ -693,10 +690,10 @@ dev = [
 
 [[package]]
 name = "groovemap-database-schema"
-version = "0.4.0"
-source = { git = "https://github.com/groovemap-music/database-schema.git?rev=f6fedea8870a1693fa9818b144bce09ab70465c5#f6fedea8870a1693fa9818b144bce09ab70465c5" }
+version = "0.4.1"
+source = { git = "https://github.com/groovemap-music/database-schema.git?rev=525cbc1847749da0630e8f45a288b2a587437b51#525cbc1847749da0630e8f45a288b2a587437b51" }
 dependencies = [
-    { name = "groovemap-runtime", extra = ["neo4j", "otel", "otel-http", "postgres"] },
+    { name = "groovemap-runtime", extra = ["neo4j", "otel", "postgres"] },
     { name = "psycopg", extra = ["binary"] },
 ]
 
