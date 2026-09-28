@@ -482,8 +482,8 @@ class NLQToolRunner:
         self._driver = neo4j_driver
         self._pool = pg_pool
         self._redis = redis
-        # Which engine the `get_collaborators` tool's one_hop_collaborators family
-        # (gm-catalog-api-91a.3) resolves to; every other handler is Neo4j-only today.
+        # Which engine the migrated graph-query families resolve to. Handlers that have
+        # not crossed the graph-backend seam continue to call Neo4j directly.
         self._graph_backend = graph_backend
 
     async def execute(
@@ -682,9 +682,10 @@ class NLQToolRunner:
     async def _handle_find_path(self, params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:
         import common.agent_tools as agent_tools  # noqa: PLC0415
 
+        from api.graph_backend import get_paths_backend  # noqa: PLC0415
         from api.queries import neo4j_queries  # noqa: PLC0415
 
-        async def resolve_name(driver: Any, name: str, entity_type: str) -> dict[str, Any] | None:
+        async def resolve_name(_driver: Any, name: str, entity_type: str) -> dict[str, Any] | None:
             if name and name.isdigit():
                 return {"id": name}
             if not entity_type:
@@ -693,7 +694,9 @@ class NLQToolRunner:
             handler = neo4j_queries.EXPLORE_DISPATCH.get(entity_type)
             if handler is None:
                 return None
-            result: dict[str, Any] | None = await handler(driver, name)
+            # Name resolution still uses the existing typed lookup. The path call itself
+            # receives the selected backend's handle below.
+            result: dict[str, Any] | None = await handler(self._driver, name)
             return result
 
         # Clamp the model-supplied max_depth to the same bound the HTTP
@@ -709,15 +712,36 @@ class NLQToolRunner:
             raw_max_depth = neo4j_queries.DEFAULT_PATH_DEPTH
         max_depth = max(neo4j_queries.MIN_PATH_DEPTH, min(raw_max_depth, neo4j_queries.MAX_PATH_DEPTH))
 
+        backend = get_paths_backend(self._graph_backend)
+        handle = self._pool if self._graph_backend == "postgres" else self._driver
+
+        async def find_path_for_backend(
+            driver: Any,
+            from_id: str,
+            to_id: str,
+            max_depth: int,
+            from_type: str,
+            to_type: str,
+        ) -> dict[str, Any] | None:
+            """Adapt agent-tools' legacy ``driver=`` callback to either backend handle."""
+            return await backend.find_shortest_path(
+                driver,
+                from_id,
+                to_id,
+                max_depth=max_depth,
+                from_type=from_type,
+                to_type=to_type,
+            )
+
         return await agent_tools.find_path(
-            driver=self._driver,
+            driver=handle,
             from_name=params.get("from_id", ""),
             from_type=params.get("from_type", ""),
             to_name=params.get("to_id", ""),
             to_type=params.get("to_type", ""),
             max_depth=max_depth,
             resolve_name=resolve_name,
-            find_shortest_path_fn=neo4j_queries.find_shortest_path,
+            find_shortest_path_fn=find_path_for_backend,
         )
 
     async def _handle_get_collaborators(self, params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:

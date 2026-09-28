@@ -1,12 +1,14 @@
-"""Rarity scoring queries and PostgreSQL lookups.
+"""Rarity scoring queries and PostgreSQL lookups — the Neo4j backend.
 
 Fetches the graph and community facts the rarity index needs, scores them through
 :mod:`api.rarity`, and provides lookup functions for the precomputed results.
 
 The scoring itself lives in :mod:`api.rarity`: a media-neutral core plus per-family extension
-modules, per ADR 0007. This module owns only the data access and the paging around it. The
-pure scoring functions and the tier table are re-exported here, so the historical import path
-``api.queries.rarity_queries`` keeps working.
+modules, per ADR 0007. The walk that drives it — paging, the join, the percentile pass, the
+coverage check — lives in :mod:`api.queries.rarity_pipeline`, because none of it is Cypher and
+the PostgreSQL backend (:mod:`api.queries.rarity_pg_queries`) runs the same walk. This module
+owns the Cypher and nothing else. The pure scoring functions and the tier table are
+re-exported here, so the historical import path ``api.queries.rarity_queries`` keeps working.
 
 Graph model:
   (Release)-[:BY]->(Artist)
@@ -17,14 +19,22 @@ Graph model:
   (Release)-[:ISSUED_ON {qty, source}]->(Medium {id, family})
 """
 
-import bisect
-from datetime import UTC, datetime
 from typing import Any
 
 import structlog
 from psycopg.rows import dict_row
 
 from api.queries.helpers import run_query
+from api.queries.rarity_pipeline import (
+    RARITY_PAGE_SIZE,
+    RARITY_QUERY_TIMEOUT_SECONDS,
+    RarityHandles,
+    rows_by_release_id,
+    score_all_rarity_signals,
+)
+from api.queries.rarity_pipeline import (
+    percentile_rank as _percentile_rank,
+)
 from api.rarity import (
     CORE_SIGNAL_WEIGHTS,
     FORMAT_RARITY_SCORES,
@@ -53,7 +63,8 @@ logger = structlog.get_logger(__name__)
 # importable here because the chunking-contract regression tests pin it by this path.
 _PRESSING_QUERY = _grooved.PRESSING_QUERY
 
-# Re-exported for the historical import path; the definitions live in api.rarity.
+# Re-exported for the historical import path; the definitions live in api.rarity and
+# api.queries.rarity_pipeline.
 __all__ = [
     "CORE_SIGNAL_WEIGHTS",
     "FORMAT_RARITY_SCORES",
@@ -61,6 +72,7 @@ __all__ = [
     "RARITY_PAGE_SIZE",
     "RARITY_QUERY_TIMEOUT_SECONDS",
     "RARITY_TIERS",
+    "RarityHandles",
     "compute_collection_prevalence_score",
     "compute_format_rarity_score",
     "compute_graph_isolation_score",
@@ -69,7 +81,10 @@ __all__ = [
     "compute_pressing_scarcity_score",
     "compute_rarity_tier",
     "compute_temporal_scarcity_score",
+    "count_releases",
     "fetch_all_rarity_signals",
+    "fetch_page_signals",
+    "fetch_release_id_page",
     "get_rarity_by_artist",
     "get_rarity_by_label",
     "get_rarity_for_release",
@@ -78,11 +93,28 @@ __all__ = [
     "medium_rarity_score",
 ]
 
+# Referenced so the re-exports above are not flagged as unused by the linter; every name is
+# part of this module's historical public surface.
+_REEXPORTED = (
+    ReleaseContext,
+    compute_collection_prevalence_score,
+    compute_format_rarity_score,
+    compute_graph_isolation_score,
+    compute_label_catalog_score,
+    compute_medium_rarity_score,
+    compute_temporal_scarcity_score,
+    family_queries,
+    resolve_media,
+    score_release,
+    _percentile_rank,
+)
+
 
 # ── Neo4j batch signal queries ──────────────────────────────────────
 #
-# CHUNKING CONTRACT — read before editing any query in this section, or any query a family
-# extension module contributes.
+# CHUNKING CONTRACT — read before editing any query in this section, any query a family
+# extension module contributes, or the PostgreSQL spelling of either in
+# `api/queries/rarity_pg_queries.py`.
 #
 # These signal queries used to run as eight UNBOUNDED full-graph scans
 # (`MATCH (r:Release) ...`). On the production graph that never completed:
@@ -102,20 +134,15 @@ __all__ = [
 # explicit server-side timeout well under db.transaction.timeout, so a pathological
 # page fails fast and loudly instead of silently burning the 600s budget.
 #
+# The PostgreSQL backend spells the same contract `WHERE release_id = ANY(%(ids)s)` over the
+# same page, with the same timeout applied as a `statement_timeout`. Neither page may grow a
+# scan of the whole release set.
+#
 # Pages are produced by keyset pagination over `r.id` (a string — the extractor
 # parses ids as text), which is index-backed and, unlike SKIP/LIMIT, does not
 # degrade as the offset grows.
 #
 # DO NOT reintroduce a bare `MATCH (r:Release)` here.
-
-# Releases per page. Sized so a page's queries stay far inside the 600s
-# server-side transaction timeout while keeping the number of round trips sane.
-RARITY_PAGE_SIZE = 20_000
-
-# Per-query server-side timeout. Must stay comfortably below Neo4j's
-# db.transaction.timeout (600s in production) so a slow page surfaces as a fast,
-# attributable failure rather than a 600s stall.
-RARITY_QUERY_TIMEOUT_SECONDS = 120.0
 
 # Keyset pagination over the (uniqueness-constrained, therefore indexed) r.id.
 # Ids are strings, so "" is a valid open-ended start cursor.
@@ -138,11 +165,20 @@ RETURN count(r) AS total
 # This is deliberately media-neutral and family-neutral. It used to be folded into the
 # grooved pressing-scarcity query, which made the core's result set depend on a
 # grooved-media concept; ADR 0007 requires the core to enumerate releases on its own.
+#
+# `artist_name` is `min(a.name)` rather than the historical `collect(DISTINCT a.name)[0]`.
+# The `[0]` took an arbitrary element of an unordered collect, so a release with more than one
+# credited artist had no defined display name — the value depended on the order Neo4j's expand
+# happened to return the BY edges in, and no PostgreSQL spelling can reproduce that. `min`
+# is the same "one of the credited names" with a rule attached, ignores nulls exactly as the
+# comprehension's `[0]` would have skipped a missing name, and is what lets the two backends
+# be compared at all. Releases with a single credit — the overwhelming majority — are
+# unaffected.
 _RELEASE_QUERY = """
 UNWIND $ids AS rid
 MATCH (r:Release {id: rid})
 OPTIONAL MATCH (r)-[:BY]->(a:Artist)
-WITH r, collect(DISTINCT a.name)[0] AS artist_name
+WITH r, min(a.name) AS artist_name
 RETURN r.id AS release_id, r.title AS title, artist_name, r.year AS year
 """
 
@@ -235,17 +271,13 @@ _CORE_QUERIES: dict[str, str] = {
 }
 
 
-def _percentile_rank(value: float, sorted_values: list[float]) -> float:
-    """Return percentile rank (0.0 to 1.0) of value in sorted list."""
-    if not sorted_values or value <= 0:
-        return 0.0
-    return bisect.bisect_left(sorted_values, value) / len(sorted_values)
+# ── The four graph reads the rarity family's Neo4j backend contributes ───────
 
 
-async def _fetch_release_id_page(driver: Any, cursor: str, limit: int) -> list[str]:
-    """Return the next page of release ids strictly after ``cursor``."""
+async def fetch_release_id_page(handles: RarityHandles, cursor: str, limit: int) -> list[str]:
+    """Return the next page of release ids strictly after ``cursor``, in ascending order."""
     rows = await run_query(
-        driver,
+        handles.graph,
         _RELEASE_ID_PAGE_QUERY,
         database="neo4j",
         timeout=RARITY_QUERY_TIMEOUT_SECONDS,
@@ -255,23 +287,7 @@ async def _fetch_release_id_page(driver: Any, cursor: str, limit: int) -> list[s
     return [row["release_id"] for row in rows]
 
 
-async def _load_community_counts(pool: Any) -> dict[str, tuple[int, int]]:
-    """Load community have/want counts from PostgreSQL (neutral fallback on failure)."""
-    if pool is None:
-        return {}
-    try:
-        async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute("SELECT release_id, have_count, want_count FROM insights.community_counts")
-            community_rows = await cur.fetchall()
-        community_map = {str(r["release_id"]): (r["have_count"], r["want_count"]) for r in community_rows}
-        logger.info("📊 Community counts loaded", count=len(community_map))
-    except Exception:
-        logger.warning("⚠️ Failed to load community counts, using neutral fallback", exc_info=True)
-        return {}
-    return community_map
-
-
-async def _fetch_page_signals(driver: Any, ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+async def fetch_page_signals(handles: RarityHandles, ids: list[str]) -> dict[str, list[dict[str, Any]]]:
     """Run the core and family-extension signal queries for one page of release ids.
 
     Run sequentially, not via asyncio.gather: running them concurrently sums
@@ -287,7 +303,7 @@ async def _fetch_page_signals(driver: Any, ids: list[str]) -> dict[str, list[dic
 
     async def _run(cypher: str) -> list[dict[str, Any]]:
         return await run_query(
-            driver,
+            handles.graph,
             cypher,
             database="neo4j",
             timeout=RARITY_QUERY_TIMEOUT_SECONDS,
@@ -296,206 +312,51 @@ async def _fetch_page_signals(driver: Any, ids: list[str]) -> dict[str, list[dic
 
     signals: dict[str, list[dict[str, Any]]] = {}
     for fact, cypher in (*_CORE_QUERIES.items(), *family_queries().items()):
-        signals[fact] = await _run(cypher)
+        signals[fact] = rows_by_release_id(await _run(cypher))
     return signals
 
 
-def _index_by_release(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Index signal rows by their release_id."""
-    return {row["release_id"]: row for row in rows}
+async def count_releases(handles: RarityHandles) -> int | None:
+    """Return how many releases the graph holds, for the walk's coverage check.
+
+    Served from Neo4j's label count store (O(1), not a scan), so the check costs nothing.
+    """
+    rows = await run_query(
+        handles.graph,
+        _RELEASE_COUNT_QUERY,
+        database="neo4j",
+        timeout=RARITY_QUERY_TIMEOUT_SECONDS,
+    )
+    if not rows:
+        return None
+    total = rows[0].get("total")
+    return total if isinstance(total, int) else None
 
 
 async def fetch_all_rarity_signals(
-    driver: Any,
-    pool: Any = None,
+    handles: RarityHandles,
     *,
     page_size: int = RARITY_PAGE_SIZE,
 ) -> list[dict[str, Any]]:
     """Fetch all rarity signals from Neo4j and compute scores.
 
-    Walks the Release set in keyset-paginated chunks of ``page_size``. For each page it runs
-    the core signal queries plus those every installed family extension declares, scoped to
-    that page's ids, joins them by release_id, and composes the rarity score through
-    :func:`api.rarity.score_release`. Community counts (have/want) are loaded once from
-    PostgreSQL when a pool is provided.
-
-    Hidden-gem scoring needs percentile ranks over the *global* quality-signal
-    distributions, so those are accumulated while paging and applied in a final
-    pass — no second trip to Neo4j.
-
-    Args:
-        driver: The async Neo4j driver.
-        pool: Optional PostgreSQL pool for community counts.
-        page_size: Releases per chunk. Bounds per-transaction working set.
-
-    Returns:
-        A list of dicts ready for PostgreSQL insertion. Each carries the historical keys plus
-        ``media_families``, ``family_signals``, and ``medium_rarity``. ``pressing_scarcity`` is
-        ``None`` for a release no family extension claims — a CD has no pressings to count.
+    The walk, the join, and the scoring are :func:`api.queries.rarity_pipeline.score_all_rarity_signals`;
+    this binds it to the three Cypher reads above. See that function for what comes back.
     """
-    current_year = datetime.now(UTC).year
-
-    logger.info("🔍 Fetching rarity signals from Neo4j...", page_size=page_size)
-
-    community_map = await _load_community_counts(pool)
-    family_facts = tuple(family_queries())
-
-    results: list[dict[str, Any]] = []
-    # Deferred hidden-gem inputs, positionally parallel to `results`:
-    # (unrounded rarity_score, artist_max_degree, label_max_catalog,
-    # genre_max_release_count). The UNROUNDED score is kept deliberately —
-    # hidden_gem_score has always been derived from it, not from the rounded
-    # value stored in the result dict.
-    quality_inputs: list[tuple[float, float, float, float]] = []
-    all_artist_degrees: list[float] = []
-    all_label_sizes: list[float] = []
-    all_genre_counts: list[float] = []
-
-    cursor = ""
-    pages = 0
-    while True:
-        ids = await _fetch_release_id_page(driver, cursor, page_size)
-        if not ids:
-            break
-        cursor = ids[-1]
-        pages += 1
-
-        signals = await _fetch_page_signals(driver, ids)
-
-        media_map = _index_by_release(signals["media"])
-        label_map = {r["release_id"]: r["label_catalog_size"] for r in signals["label"]}
-        temporal_map = _index_by_release(signals["temporal"])
-        degree_map = {r["release_id"]: r["degree"] for r in signals["degree"]}
-        artist_deg_map = {r["release_id"]: r["artist_max_degree"] for r in signals["artist_degree"]}
-        label_size_map = {r["release_id"]: r["label_max_catalog"] for r in signals["label_size"]}
-        genre_count_map = {r["release_id"]: r["genre_max_release_count"] for r in signals["genre_count"]}
-        fact_maps = {fact: _index_by_release(signals.get(fact, [])) for fact in family_facts}
-
-        all_artist_degrees.extend(r["artist_max_degree"] for r in signals["artist_degree"] if r["artist_max_degree"])
-        all_label_sizes.extend(r["label_max_catalog"] for r in signals["label_size"] if r["label_max_catalog"])
-        all_genre_counts.extend(r["genre_max_release_count"] for r in signals["genre_count"] if r["genre_max_release_count"])
-
-        for row in signals["release"]:
-            rid = row["release_id"]
-
-            media_row = media_map.get(rid, {})
-            formats = media_row.get("formats") or []
-            media = resolve_media(
-                mediums=media_row.get("mediums"),
-                media_families=media_row.get("media_families"),
-                formats=formats,
-            )
-
-            temporal_info = temporal_map.get(rid, {})
-            have, want = community_map.get(rid, (None, None))
-
-            core_signals = {
-                "label_catalog": compute_label_catalog_score(label_map.get(rid, 0)),
-                "medium_rarity": compute_medium_rarity_score(media),
-                "temporal_scarcity": compute_temporal_scarcity_score(
-                    temporal_info.get("year"),
-                    temporal_info.get("latest_sibling_year"),
-                    current_year,
-                ),
-                "graph_isolation": compute_graph_isolation_score(degree_map.get(rid, 0)),
-                # Neutral fallback when the community counts are unavailable.
-                "collection_prevalence": compute_collection_prevalence_score(have, want or 0) if have is not None else 50.0,
-            }
-
-            scored = score_release(
-                ReleaseContext(
-                    release_id=rid,
-                    media=media,
-                    year=row.get("year"),
-                    facts={fact: fact_maps[fact].get(rid, {}) for fact in family_facts},
-                ),
-                core_signals,
-            )
-
-            quality_inputs.append(
-                (
-                    scored.score,
-                    artist_deg_map.get(rid, 0) or 0,
-                    label_size_map.get(rid, 0) or 0,
-                    genre_count_map.get(rid, 0) or 0,
-                )
-            )
-
-            results.append(
-                {
-                    "release_id": rid,
-                    "title": row.get("title") or "",
-                    "artist_name": row.get("artist_name") or "",
-                    "year": row.get("year"),
-                    "rarity_score": round(scored.score, 1),
-                    "tier": scored.tier,
-                    # Filled in below, once the global distributions are known.
-                    "hidden_gem_score": 0.0,
-                    # None when no family extension claimed this release.
-                    "pressing_scarcity": scored.signals.get("pressing_scarcity"),
-                    "label_catalog": core_signals["label_catalog"],
-                    # Deprecated, unscored, retained for one minor version.
-                    "format_rarity": compute_format_rarity_score(formats),
-                    "temporal_scarcity": core_signals["temporal_scarcity"],
-                    "graph_isolation": core_signals["graph_isolation"],
-                    "collection_prevalence": core_signals["collection_prevalence"],
-                    "medium_rarity": core_signals["medium_rarity"],
-                    "media_families": list(media.families),
-                    "family_signals": scored.family_signals,
-                }
-            )
-
-        logger.debug("📄 Rarity page scored", page=pages, ids=len(ids), scored=len(results))
-
-    # Percentile normalization for quality signals, over the global distributions.
-    all_artist_degrees.sort()
-    all_label_sizes.sort()
-    all_genre_counts.sort()
-
-    for entry, (rarity_score, artist_deg, label_sz, genre_ct) in zip(results, quality_inputs, strict=True):
-        quality_multiplier = (
-            0.4 * _percentile_rank(artist_deg, all_artist_degrees)
-            + 0.3 * _percentile_rank(label_sz, all_label_sizes)
-            + 0.3 * _percentile_rank(genre_ct, all_genre_counts)
-        )
-        entry["hidden_gem_score"] = round(rarity_score * quality_multiplier, 1)
-
-    # Coverage check. The keyset walk compares `r.id > $cursor` against a string
-    # cursor; if the graph ever held non-string Release ids the comparison would
-    # yield null and silently truncate the walk. count(r) is served from Neo4j's
-    # label count store (O(1), not a scan), so this costs nothing and turns a
-    # silent partial result into a loud one.
-    await _warn_on_incomplete_coverage(driver, scored=len(results))
-
-    logger.info("✅ Rarity scores computed", total=len(results), pages=pages)
-    return results
-
-
-async def _warn_on_incomplete_coverage(driver: Any, scored: int) -> None:
-    """Log a warning when the paginated walk scored fewer releases than exist."""
-    try:
-        count_rows = await run_query(
-            driver,
-            _RELEASE_COUNT_QUERY,
-            database="neo4j",
-            timeout=RARITY_QUERY_TIMEOUT_SECONDS,
-        )
-    except Exception:
-        logger.debug("⚠️ Release count check skipped", exc_info=True)
-        return
-    if not count_rows:
-        return
-    total = count_rows[0].get("total")
-    if isinstance(total, int) and scored < total:
-        logger.warning(
-            "⚠️ Rarity pagination covered fewer releases than the graph holds",
-            scored=scored,
-            total=total,
-            missing=total - scored,
-        )
+    return await score_all_rarity_signals(
+        handles,
+        page=fetch_release_id_page,
+        signals=fetch_page_signals,
+        count=count_releases,
+        page_size=page_size,
+    )
 
 
 # ── PostgreSQL lookup functions ─────────────────────────────────────
+#
+# These three read `insights.release_rarity` directly and never touch a graph, so they are
+# not part of what ADR 0012 migrates and are not in the rarity family's `Protocol`: there is
+# one implementation and both backends call it.
 
 
 async def get_rarity_for_release(pool: Any, release_id: int) -> dict[str, Any] | None:
@@ -598,9 +459,50 @@ async def get_rarity_hidden_gems(
     return items, total
 
 
+# ── The two graph-keyed lookups ─────────────────────────────────────
+#
+# Two round trips each on this backend, because the ids live in Neo4j and the scores live in
+# PostgreSQL and nothing can join across the two. The PostgreSQL backend collapses each of
+# these to one statement; see `api/queries/rarity_pg_queries.py`.
+
+_ARTIST_IDENTITY_QUERY = "MATCH (a:Artist {id: $artist_id}) RETURN a.id AS id, a.name AS name LIMIT 1"
+_ARTIST_RELEASES_QUERY = "MATCH (a:Artist {id: $artist_id})<-[:BY]-(r:Release) RETURN r.id AS release_id"
+_LABEL_IDENTITY_QUERY = "MATCH (l:Label {id: $label_id}) RETURN l.id AS id, l.name AS name LIMIT 1"
+_LABEL_RELEASES_QUERY = "MATCH (l:Label {id: $label_id})<-[:ON]-(r:Release) RETURN r.id AS release_id"
+
+_RARITY_PAGE_SQL = """
+            SELECT release_id, title, artist_name, year, rarity_score, tier, hidden_gem_score
+            FROM insights.release_rarity
+            WHERE release_id = ANY(%s)
+            ORDER BY rarity_score DESC, release_id
+            LIMIT %s OFFSET %s
+            """
+
+_RARITY_TOTAL_SQL = "SELECT count(*) AS total FROM insights.release_rarity WHERE release_id = ANY(%s)"
+
+
+async def _rarity_page(pool: Any, release_ids: list[int], page: int, page_size: int) -> tuple[list[dict[str, Any]], int]:
+    """Return one page of stored rarity rows for *release_ids*, and how many there are."""
+    offset = (page - 1) * page_size
+
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(_RARITY_PAGE_SQL, (release_ids, page_size, offset))
+        items = await cur.fetchall()
+
+        await cur.execute(_RARITY_TOTAL_SQL, (release_ids,))
+        count_row = await cur.fetchone()
+        total = count_row["total"] if count_row else 0
+
+    return items, total
+
+
+def _numeric_release_ids(rows: list[dict[str, Any]]) -> list[int]:
+    """Return the stored-table ids for *rows*, dropping any release id that is not numeric."""
+    return [int(r["release_id"]) for r in rows if str(r["release_id"]).isdigit()]
+
+
 async def get_rarity_by_artist(
-    driver: Any,
-    pool: Any,
+    handles: RarityHandles,
     artist_id: str,
     page: int = 1,
     page_size: int = 20,
@@ -611,8 +513,8 @@ async def get_rarity_by_artist(
     Returns None if artist not found.
     """
     artist_rows = await run_query(
-        driver,
-        "MATCH (a:Artist {id: $artist_id}) RETURN a.id AS id, a.name AS name LIMIT 1",
+        handles.graph,
+        _ARTIST_IDENTITY_QUERY,
         database="neo4j",
         artist_id=artist_id,
     )
@@ -620,45 +522,23 @@ async def get_rarity_by_artist(
         return None
 
     release_rows = await run_query(
-        driver,
-        "MATCH (a:Artist {id: $artist_id})<-[:BY]-(r:Release) RETURN r.id AS release_id",
+        handles.graph,
+        _ARTIST_RELEASES_QUERY,
         database="neo4j",
         artist_id=artist_id,
     )
     if not release_rows:
         return [], 0
 
-    release_ids = [int(r["release_id"]) for r in release_rows if str(r["release_id"]).isdigit()]
+    release_ids = _numeric_release_ids(release_rows)
     if not release_ids:
         return [], 0
-    offset = (page - 1) * page_size
 
-    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            """
-            SELECT release_id, title, artist_name, year, rarity_score, tier, hidden_gem_score
-            FROM insights.release_rarity
-            WHERE release_id = ANY(%s)
-            ORDER BY rarity_score DESC, release_id
-            LIMIT %s OFFSET %s
-            """,
-            (release_ids, page_size, offset),
-        )
-        items = await cur.fetchall()
-
-        await cur.execute(
-            "SELECT count(*) AS total FROM insights.release_rarity WHERE release_id = ANY(%s)",
-            (release_ids,),
-        )
-        count_row = await cur.fetchone()
-        total = count_row["total"] if count_row else 0
-
-    return items, total
+    return await _rarity_page(handles.insights, release_ids, page, page_size)
 
 
 async def get_rarity_by_label(
-    driver: Any,
-    pool: Any,
+    handles: RarityHandles,
     label_id: str,
     page: int = 1,
     page_size: int = 20,
@@ -669,8 +549,8 @@ async def get_rarity_by_label(
     Returns None if label not found.
     """
     label_rows = await run_query(
-        driver,
-        "MATCH (l:Label {id: $label_id}) RETURN l.id AS id, l.name AS name LIMIT 1",
+        handles.graph,
+        _LABEL_IDENTITY_QUERY,
         database="neo4j",
         label_id=label_id,
     )
@@ -678,37 +558,16 @@ async def get_rarity_by_label(
         return None
 
     release_rows = await run_query(
-        driver,
-        "MATCH (l:Label {id: $label_id})<-[:ON]-(r:Release) RETURN r.id AS release_id",
+        handles.graph,
+        _LABEL_RELEASES_QUERY,
         database="neo4j",
         label_id=label_id,
     )
     if not release_rows:
         return [], 0
 
-    release_ids = [int(r["release_id"]) for r in release_rows if str(r["release_id"]).isdigit()]
+    release_ids = _numeric_release_ids(release_rows)
     if not release_ids:
         return [], 0
-    offset = (page - 1) * page_size
 
-    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            """
-            SELECT release_id, title, artist_name, year, rarity_score, tier, hidden_gem_score
-            FROM insights.release_rarity
-            WHERE release_id = ANY(%s)
-            ORDER BY rarity_score DESC, release_id
-            LIMIT %s OFFSET %s
-            """,
-            (release_ids, page_size, offset),
-        )
-        items = await cur.fetchall()
-
-        await cur.execute(
-            "SELECT count(*) AS total FROM insights.release_rarity WHERE release_id = ANY(%s)",
-            (release_ids,),
-        )
-        count_row = await cur.fetchone()
-        total = count_row["total"] if count_row else 0
-
-    return items, total
+    return await _rarity_page(handles.insights, release_ids, page, page_size)

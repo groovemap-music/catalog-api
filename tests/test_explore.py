@@ -880,7 +880,7 @@ class TestPathEndpoint:
 
         with (
             patch("api.routers.explore.EXPLORE_DISPATCH", {"artist": AsyncMock(side_effect=[from_result, to_result])}),
-            patch("api.routers.explore.find_shortest_path", AsyncMock(return_value=path_data)),
+            patch("api.queries.neo4j_queries.find_shortest_path", AsyncMock(return_value=path_data)),
         ):
             response = test_client.get("/api/path?from_name=Miles+Davis&from_type=artist&to_name=Daft+Punk&to_type=artist")
 
@@ -892,13 +892,49 @@ class TestPathEndpoint:
         assert data["path"][0]["rel"] is None
         assert data["path"][1]["rel"] == "BY"
 
+    def test_path_resolves_the_postgres_backend_and_pool(self, test_client: TestClient) -> None:
+        """GRAPH_BACKEND=postgres sends the procedural path call to PostgreSQL."""
+        import api.routers.explore as explore_module
+        from api.queries import paths_pg_queries
+
+        pool = object()
+        resolved = {"id": 1, "name": "Path Zero"}
+        path_data = {"nodes": [{"id": "1", "name": "Path Zero", "labels": ["Artist"]}], "rels": []}
+        driver, redis, original_pool, backend = (
+            explore_module._neo4j_driver,
+            explore_module._redis,
+            explore_module._pg_pool,
+            explore_module._graph_backend,
+        )
+        mock_find = AsyncMock(return_value=path_data)
+        try:
+            explore_module.configure(driver, None, redis, pg_pool=pool, graph_backend="postgres")
+            assert explore_module._paths_backend is paths_pg_queries
+            with (
+                patch("api.routers.explore.EXPLORE_DISPATCH", {"artist": AsyncMock(side_effect=[resolved, resolved])}),
+                patch("api.queries.paths_pg_queries.find_shortest_path", mock_find),
+            ):
+                response = test_client.get("/api/path?from_name=Path+Zero&from_type=artist&to_name=Path+Zero&to_type=artist")
+        finally:
+            explore_module.configure(driver, None, redis, pg_pool=original_pool, graph_backend=backend)
+
+        assert response.status_code == 200
+        mock_find.assert_awaited_once_with(
+            pool,
+            "1",
+            "1",
+            max_depth=6,
+            from_type="artist",
+            to_type="artist",
+        )
+
     def test_path_not_found(self, test_client: TestClient) -> None:
         from_result = {"id": 1, "name": "Miles Davis"}
         to_result = {"id": 2, "name": "Daft Punk"}
 
         with (
             patch("api.routers.explore.EXPLORE_DISPATCH", {"artist": AsyncMock(side_effect=[from_result, to_result])}),
-            patch("api.routers.explore.find_shortest_path", AsyncMock(return_value=None)),
+            patch("api.queries.neo4j_queries.find_shortest_path", AsyncMock(return_value=None)),
         ):
             response = test_client.get("/api/path?from_name=Miles+Davis&from_type=artist&to_name=Daft+Punk&to_type=artist")
 
@@ -923,8 +959,8 @@ class TestPathEndpoint:
 
         assert response.status_code == 404
 
-    def test_path_max_depth_capped_at_15(self, test_client: TestClient) -> None:
-        """FastAPI rejects max_depth > 15 with 422 (Query le=15 constraint)."""
+    def test_path_max_depth_capped_at_10(self, test_client: TestClient) -> None:
+        """FastAPI rejects max_depth > 10 with 422."""
         response = test_client.get("/api/path?from_name=Miles+Davis&from_type=artist&to_name=Daft+Punk&to_type=artist&max_depth=99")
         assert response.status_code == 422
 
@@ -956,7 +992,7 @@ class TestPathEndpoint:
 
         with (
             patch("api.routers.explore.EXPLORE_DISPATCH", {"artist": AsyncMock(side_effect=[entity, entity])}),
-            patch("api.routers.explore.find_shortest_path", AsyncMock(return_value=path_data)),
+            patch("api.queries.neo4j_queries.find_shortest_path", AsyncMock(return_value=path_data)),
         ):
             response = test_client.get("/api/path?from_name=Miles+Davis&from_type=artist&to_name=Miles+Davis&to_type=artist")
 

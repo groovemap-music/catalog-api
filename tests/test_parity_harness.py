@@ -114,6 +114,19 @@ class TestADeclaredDifference:
         with pytest.raises(pytest.fail.Exception, match="EXPECTED_DIFFERENCES"):
             assert_parity("collaborators", other, neo4j_result=6, postgres_result=5)
 
+    def test_a_declaration_can_be_narrowed_to_one_rendered_call(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setitem(
+            EXPECTED_DIFFERENCES,
+            ("collaborators", str(CALL)),
+            ExpectedDifference(reason="only this fixture case differs", normalize=lambda _rows: []),
+        )
+
+        assert_parity("collaborators", CALL, neo4j_result=ROWS, postgres_result=[])
+
+        other = ParityCall("get_multi_hop_collaborators", ("8",), {"depth": 2, "limit": 50})
+        with pytest.raises(pytest.fail.Exception, match="EXPECTED_DIFFERENCES"):
+            assert_parity("collaborators", other, neo4j_result=ROWS, postgres_result=[])
+
 
 class TestRegistration:
     def test_registering_a_family_records_its_calls_and_the_functions_they_cover(self, monkeypatch: pytest.MonkeyPatch) -> None:

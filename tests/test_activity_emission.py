@@ -224,7 +224,7 @@ class TestRecommendationImpressions:
     def test_explore_uses_its_policy(self, test_client: TestClient, auth_headers: dict[str, str], stamped: Any) -> None:
         scored = [{"id": "1", "name": "N", "type": "artist", "score": 0.7, "path": [], "reason": "r"}]
         with (
-            patch("api.routers.recommend.get_explore_traversal", AsyncMock(return_value=[])),
+            patch("api.queries.recommend_queries.get_explore_traversal", AsyncMock(return_value=[])),
             patch("api.routers.recommend.get_taste_heatmap", AsyncMock(return_value=([], 0))),
             patch("api.routers.recommend.get_blind_spots", AsyncMock(return_value=[])),
             patch("api.routers.recommend.score_discoveries", MagicMock(return_value=scored)),

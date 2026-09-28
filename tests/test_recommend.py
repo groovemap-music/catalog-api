@@ -118,7 +118,7 @@ class TestExploreFromHereEndpoint:
 
     @patch("api.routers.recommend.get_blind_spots")
     @patch("api.routers.recommend.get_taste_heatmap")
-    @patch("api.routers.recommend.get_explore_traversal")
+    @patch("api.queries.recommend_queries.get_explore_traversal")
     def test_success(
         self,
         mock_traversal: AsyncMock,
@@ -154,9 +154,56 @@ class TestExploreFromHereEndpoint:
         assert len(data["discoveries"]) == 1
         assert data["discoveries"][0]["name"] == "Warp Records"
 
+    def test_explore_resolves_the_postgres_paths_backend(
+        self,
+        test_client: TestClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """GRAPH_BACKEND=postgres invokes the bounded traversal with the pool and row limit."""
+        import api.routers.recommend as mod
+        from api.queries import paths_pg_queries, taste_pg_queries
+
+        saved = (
+            mod._neo4j_driver,
+            mod._pg_pool,
+            mod._graph_backend,
+            mod._paths_backend,
+            mod._taste_backend,
+            mod._recommendations_backend,
+            mod._cache,
+        )
+        pool = object()
+        mock_traversal = AsyncMock(return_value=[])
+        try:
+            mod.configure(saved[0], None, None, pg_pool=pool, graph_backend="postgres")
+            mod._cache = None
+            assert mod._paths_backend is paths_pg_queries
+            with (
+                patch("api.queries.paths_pg_queries.get_explore_traversal", mock_traversal),
+                patch.object(taste_pg_queries, "get_taste_heatmap", AsyncMock(return_value=([], 0))),
+                patch.object(taste_pg_queries, "get_blind_spots", AsyncMock(return_value=[])),
+            ):
+                response = test_client.get(
+                    "/api/recommend/explore/artist/postgres-path-fixture?hops=3",
+                    headers=auth_headers,
+                )
+        finally:
+            (
+                mod._neo4j_driver,
+                mod._pg_pool,
+                mod._graph_backend,
+                mod._paths_backend,
+                mod._taste_backend,
+                mod._recommendations_backend,
+                mod._cache,
+            ) = saved
+
+        assert response.status_code == 200
+        mock_traversal.assert_awaited_once_with(pool, "artist", "postgres-path-fixture", hops=3, row_limit=100)
+
     @patch("api.routers.recommend.get_blind_spots")
     @patch("api.routers.recommend.get_taste_heatmap")
-    @patch("api.routers.recommend.get_explore_traversal")
+    @patch("api.queries.recommend_queries.get_explore_traversal")
     def test_empty_traversal(
         self,
         mock_traversal: AsyncMock,
@@ -281,7 +328,7 @@ class TestExploreFromHereCacheHit:
         mod._neo4j_driver = AsyncMock()
         try:
             with (
-                patch("api.routers.recommend.get_explore_traversal", new=AsyncMock(return_value=[])),
+                patch("api.queries.recommend_queries.get_explore_traversal", new=AsyncMock(return_value=[])),
                 patch("api.routers.recommend.get_taste_heatmap", new=AsyncMock(return_value=([], 0))),
                 patch("api.routers.recommend.get_blind_spots", new=AsyncMock(return_value=[])),
             ):

@@ -10,7 +10,6 @@ import structlog
 from common.media import legacy_format_names_to_media
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
-from neo4j.exceptions import ClientError as Neo4jClientError
 
 from api.graph_backend import (
     GRAPH_BACKEND_ERROR_TYPES,
@@ -20,25 +19,26 @@ from api.graph_backend import (
     ExploreBackend,
     GenreTreeBackend,
     OneHopCollaboratorsBackend,
+    PathsBackend,
     get_autocomplete_backend,
     get_catalog_overview_backend,
     get_collaborator_identity_backend,
     get_explore_backend,
     get_genre_tree_backend,
     get_one_hop_collaborators_backend,
+    get_paths_backend,
     is_graph_backend_unavailable,
     is_graph_query_timeout,
 )
 from api.limiter import limiter
 from api.models import PathNode, PathResponse
-from api.queries import autocomplete_queries, collaborator_queries, genre_tree_queries, neo4j_queries
+from api.queries import autocomplete_queries, collaborator_queries, genre_tree_queries, neo4j_queries, paths_queries
 from api.queries.neo4j_queries import (
     COUNT_DISPATCH,
     DETAILS_DISPATCH,
     EXPAND_DISPATCH,
     EXPLORE_DISPATCH,
     TRENDS_DISPATCH,
-    find_shortest_path,
     get_genre_emergence,
     get_graph_stats,
     get_year_range,
@@ -84,6 +84,7 @@ _collaborator_identity_backend: CollaboratorIdentityBackend = collaborator_queri
 # Resolved through the graph-backend selector, exactly as the network router resolves the
 # collaborators family.
 _autocomplete_backend: AutocompleteBackend = autocomplete_queries
+_paths_backend: PathsBackend = paths_queries
 _explore_backend: ExploreBackend = neo4j_queries
 _catalog_overview_backend: CatalogOverviewBackend = neo4j_queries
 _genre_tree_backend: GenreTreeBackend = genre_tree_queries
@@ -113,6 +114,7 @@ def configure(
 ) -> None:
     global _neo4j_driver, _redis, _pg_pool, _graph_backend, _one_hop_collaborators_backend, _collaborator_identity_backend, _autocomplete_backend
     global _explore_backend, _catalog_overview_backend, _genre_tree_backend, _genre_tree_cache
+    global _paths_backend
     _neo4j_driver = neo4j
     _redis = redis
     _pg_pool = pg_pool
@@ -120,6 +122,7 @@ def configure(
     _one_hop_collaborators_backend = get_one_hop_collaborators_backend(graph_backend)
     _collaborator_identity_backend = get_collaborator_identity_backend(graph_backend)
     _autocomplete_backend = get_autocomplete_backend(graph_backend)
+    _paths_backend = get_paths_backend(graph_backend)
     _explore_backend = get_explore_backend(graph_backend)
     _catalog_overview_backend = get_catalog_overview_backend(graph_backend)
     _genre_tree_backend = get_genre_tree_backend(graph_backend)
@@ -160,6 +163,11 @@ def _autocomplete_handle() -> Any:
     Read at call time rather than frozen in `configure`, so the handle tracks the
     module-level connection the rest of this router uses.
     """
+    return _pg_pool if _graph_backend == "postgres" else _neo4j_driver
+
+
+def _paths_handle() -> Any:
+    """Return the selected graph connection for the variable-length path family."""
     return _pg_pool if _graph_backend == "postgres" else _neo4j_driver
 
 
@@ -586,21 +594,23 @@ async def find_path(
         )
 
     try:
-        raw = await find_shortest_path(
-            _neo4j_driver,
+        raw = await _paths_backend.find_shortest_path(
+            _paths_handle(),
             str(from_node["id"]),
             str(to_node["id"]),
             max_depth=max_depth,
             from_type=from_type_lower,
             to_type=to_type_lower,
         )
-    except Neo4jClientError as exc:
-        if "TransactionTimedOut" in str(exc):
+    except GRAPH_BACKEND_ERROR_TYPES as exc:
+        if is_graph_query_timeout(exc):
             logger.warning("⏱️ Path query timed out", from_name=from_name, to_name=to_name, max_depth=max_depth)
             return JSONResponse(
                 content={"error": "Path query timed out — try reducing max_depth or searching closer nodes"},
                 status_code=504,
             )
+        if is_graph_backend_unavailable(exc):
+            return JSONResponse(content={"error": "Service not ready"}, status_code=503)
         raise
 
     if raw is None:

@@ -10,7 +10,14 @@ from fastapi.responses import JSONResponse
 import api.activity as activity
 from api.cache import RecommendCache
 from api.dependencies import get_optional_user, require_user
-from api.graph_backend import RecommendationsBackend, TasteBackend, get_recommendations_backend, get_taste_backend
+from api.graph_backend import (
+    PathsBackend,
+    RecommendationsBackend,
+    TasteBackend,
+    get_paths_backend,
+    get_recommendations_backend,
+    get_taste_backend,
+)
 from api.identity import NativeIdCache, catalog_ref, native_ids_for, native_ids_for_pairs
 from api.limiter import limiter
 from api.models import (
@@ -20,13 +27,13 @@ from api.models import (
     SimilarArtist,
     SimilarArtistsResponse,
 )
+from api.queries import paths_queries
 from api.queries.recommend_queries import (  # noqa: F401 -- preserve legacy patch points
     MIN_ARTIST_RELEASES,
     compute_similar_artists,
     get_artist_identity,
     get_artist_profile,
     get_candidate_artists,
-    get_explore_traversal,
     score_discoveries,
 )
 from api.queries.taste_queries import get_blind_spots, get_taste_heatmap  # noqa: F401 -- legacy patch points
@@ -39,21 +46,33 @@ router = APIRouter()
 _neo4j_driver: Any = None
 _pg_pool: Any = None
 _graph_backend = "neo4j"
+_paths_backend: PathsBackend = paths_queries
 _taste_backend: TasteBackend = get_taste_backend("neo4j")
 _recommendations_backend: RecommendationsBackend = get_recommendations_backend("neo4j")
 _cache: RecommendCache | None = None
 
 
-def configure(neo4j: Any, jwt_secret: str | None, redis: Any | None, graph_backend: str = "neo4j", pg_pool: Any = None) -> None:  # noqa: ARG001
+def configure(
+    neo4j: Any,
+    _jwt_secret: str | None,
+    redis: Any | None,
+    graph_backend: str = "neo4j",
+    pg_pool: Any = None,
+) -> None:
     """Configure the recommend router with Neo4j driver, JWT secret, and Redis cache."""
-    global _neo4j_driver, _pg_pool, _graph_backend, _taste_backend, _recommendations_backend, _cache
+    global _neo4j_driver, _pg_pool, _graph_backend, _paths_backend, _taste_backend, _recommendations_backend, _cache
     _neo4j_driver = neo4j
     _pg_pool = pg_pool
     _graph_backend = graph_backend
+    _paths_backend = get_paths_backend(graph_backend)
     _taste_backend = get_taste_backend(graph_backend)
     _recommendations_backend = get_recommendations_backend(graph_backend)
     if redis is not None:
         _cache = RecommendCache(redis=redis, default_ttl=3600)
+
+
+def _paths_handle() -> Any:
+    return _pg_pool if _graph_backend == "postgres" else _neo4j_driver
 
 
 _VALID_ENTITY_TYPES = {"artist", "label", "genre", "style"}
@@ -164,7 +183,7 @@ async def explore_from_here(
     limit: int = Query(10, ge=1, le=50),
 ) -> JSONResponse:
     """Personalized multi-hop traversal from an entity, ranked by user taste."""
-    if not _neo4j_driver:
+    if not _paths_handle() or not _taste_handle():
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     if entity_type not in _VALID_ENTITY_TYPES:
@@ -188,7 +207,7 @@ async def explore_from_here(
 
     # Run traversal and user taste queries in parallel
     traversal_results, heatmap_result, blind_spots_raw = await asyncio.gather(
-        get_explore_traversal(_neo4j_driver, entity_type, entity_id, hops=hops),
+        _paths_backend.get_explore_traversal(_paths_handle(), entity_type, entity_id, hops=hops, row_limit=100),
         _taste_query("get_taste_heatmap")(_taste_handle(), user_id),
         _taste_query("get_blind_spots")(_taste_handle(), user_id),
     )

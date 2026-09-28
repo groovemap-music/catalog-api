@@ -45,12 +45,20 @@ from api.queries import (
     gap_queries,
     genre_tree_pg_queries,
     genre_tree_queries,
+    insights_neo4j_queries,
+    insights_pg_queries,
     label_dna_pg_queries,
     label_dna_queries,
+    musicbrainz_pg_queries,
+    musicbrainz_queries,
     neo4j_pg_queries,
     neo4j_queries,
     network_pg_queries,
     network_queries,
+    paths_pg_queries,
+    paths_queries,
+    rarity_pg_queries,
+    rarity_queries,
     recommend_pg_queries,
     recommend_queries,
     taste_pg_queries,
@@ -58,6 +66,8 @@ from api.queries import (
     user_pg_queries,
     user_queries,
 )
+from api.queries.musicbrainz_pipeline import MusicBrainzHandles
+from api.queries.rarity_pipeline import RARITY_PAGE_SIZE, RarityHandles
 
 
 class CollaboratorsBackend(Protocol):
@@ -432,6 +442,108 @@ _NEO4J_FIT: FitBackend = fit_queries
 _POSTGRES_FIT: FitBackend = fit_pg_queries
 
 
+# ── The "rarity" family (gm-catalog-api-wpku.1) ──────────────────────────────
+class RarityBackend(Protocol):
+    """The six graph-reading functions the "rarity" family is made of.
+
+    The family is the rarity signal batch plus the two lookups that key a stored rarity page
+    off a graph vertex. Its handle is a `RarityHandles` rather than a bare driver or pool,
+    which is the one thing that makes it unlike every family above it: the batch reads
+    `insights.community_counts` and the two lookups read `insights.release_rarity`, and those
+    are PostgreSQL tables on *both* backends because ADR 0012 moves the graph reads, not the
+    results table. The Neo4j backend therefore needs two connections and the PostgreSQL
+    backend needs one, and a family whose two implementations took different argument counts
+    could not be bound to one `Protocol`. One handle carrying both is what keeps them equal —
+    and on the PostgreSQL side both fields are the same pool, which is precisely why
+    `get_rarity_by_artist` and `get_rarity_by_label` collapse from four round trips to one.
+
+    The three page-level reads are part of the family rather than private helpers of
+    `fetch_all_rarity_signals` because each is a separate graph question with a separate
+    chunking-contract obligation, and the parity harness can only prove what it can call.
+    """
+
+    async def fetch_release_id_page(self, handles: Any, cursor: str, limit: int, /) -> list[str]: ...
+
+    async def fetch_page_signals(self, handles: Any, ids: list[str], /) -> dict[str, list[dict[str, Any]]]: ...
+
+    async def count_releases(self, handles: Any, /) -> int | None: ...
+
+    async def fetch_all_rarity_signals(self, handles: Any, /, *, page_size: int = RARITY_PAGE_SIZE) -> list[dict[str, Any]]: ...
+
+    async def get_rarity_by_artist(
+        self, handles: Any, artist_id: str, /, page: int = 1, page_size: int = 20
+    ) -> tuple[list[dict[str, Any]], int] | None: ...
+
+    async def get_rarity_by_label(
+        self, handles: Any, label_id: str, /, page: int = 1, page_size: int = 20
+    ) -> tuple[list[dict[str, Any]], int] | None: ...
+
+
+_NEO4J_RARITY: RarityBackend = rarity_queries
+_POSTGRES_RARITY: RarityBackend = rarity_pg_queries
+# ── end rarity family ────────────────────────────────────────────────────────
+
+
+# ── The "insights" family (gm-catalog-api-wpku.2) ──────────────────────────
+class InsightsBackend(Protocol):
+    """The four graph-backed computations served by the internal insights API."""
+
+    async def query_artist_centrality(self, handle: Any, /, limit: int = 100) -> list[dict[str, Any]]: ...
+
+    async def query_genre_trends(self, handle: Any, /, genre: str | None = None) -> list[dict[str, Any]]: ...
+
+    async def query_label_longevity(self, handle: Any, /, limit: int = 50) -> list[dict[str, Any]]: ...
+
+    async def query_monthly_anniversaries(
+        self,
+        handle: Any,
+        /,
+        current_year: int,
+        current_month: int,
+        milestone_years: list[int] | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+
+_NEO4J_INSIGHTS: InsightsBackend = insights_neo4j_queries
+_POSTGRES_INSIGHTS: InsightsBackend = insights_pg_queries
+# ── end insights family ──────────────────────────────────────────────────────
+
+
+# ── The "musicbrainz" family (gm-catalog-api-wpku.3) ──────────────────────
+class MusicBrainzBackend(Protocol):
+    """The four MusicBrainz enrichment reads exposed by the API."""
+
+    async def get_artist_musicbrainz(self, handles: MusicBrainzHandles, discogs_id: int | str, /) -> dict[str, Any] | None: ...
+
+    async def get_artist_mb_relationships(self, handles: MusicBrainzHandles, discogs_id: int | str, /) -> list[dict[str, Any]]: ...
+
+    async def get_artist_external_links(self, handles: MusicBrainzHandles, discogs_id: int | str, /) -> list[dict[str, Any]]: ...
+
+    async def get_enrichment_status(self, handles: MusicBrainzHandles, /) -> dict[str, Any]: ...
+
+
+_NEO4J_MUSICBRAINZ: MusicBrainzBackend = musicbrainz_queries
+_POSTGRES_MUSICBRAINZ: MusicBrainzBackend = musicbrainz_pg_queries
+# ── end musicbrainz family ───────────────────────────────────────────────────
+
+
+class PathsBackend(Protocol):
+    """The two bounded variable-length traversals."""
+
+    async def find_shortest_path(
+        self, handle: Any, from_id: str, to_id: str, max_depth: int = 6, from_type: str = "", to_type: str = ""
+    ) -> dict[str, Any] | None: ...
+
+    async def get_explore_traversal(
+        self, handle: Any, entity_type: str, entity_id: str, hops: int = 2, row_limit: int = 100
+    ) -> list[dict[str, Any]]: ...
+
+
+_NEO4J_PATHS: PathsBackend = paths_queries
+_POSTGRES_PATHS: PathsBackend = paths_pg_queries
+# ── end paths family ─────────────────────────────────────────────────────────
+
+
 # family name -> backend name -> module implementing that family's query functions.
 _FAMILY_BACKENDS: dict[str, dict[str, ModuleType]] = {
     "collaborators": {
@@ -463,6 +575,22 @@ _FAMILY_BACKENDS: dict[str, dict[str, ModuleType]] = {
     "admin_storage": {
         "neo4j": admin_queries,
         "postgres": admin_pg_queries,
+    },
+    "rarity": {
+        "neo4j": rarity_queries,
+        "postgres": rarity_pg_queries,
+    },
+    "insights": {
+        "neo4j": insights_neo4j_queries,
+        "postgres": insights_pg_queries,
+    },
+    "musicbrainz": {
+        "neo4j": musicbrainz_queries,
+        "postgres": musicbrainz_pg_queries,
+    },
+    "paths": {
+        "neo4j": paths_queries,
+        "postgres": paths_pg_queries,
     },
     # ── credits family (gm-catalog-api-dl8.1) ────────────────────────────────
     "credits": {
@@ -575,6 +703,41 @@ def get_genre_tree_backend(backend: str) -> GenreTreeBackend:
 def get_admin_storage_backend(backend: str) -> AdminStorageBackend:
     """Resolve the "admin_storage" family for *backend*, typed rather than as a module."""
     return cast("AdminStorageBackend", get_backend("admin_storage", backend))
+
+
+def get_rarity_backend(backend: str) -> RarityBackend:
+    """Resolve the "rarity" family for *backend*, typed rather than as a module."""
+    return cast("RarityBackend", get_backend("rarity", backend))
+
+
+def get_insights_backend(backend: str) -> InsightsBackend:
+    """Resolve the "insights" family for *backend*, typed rather than as a module."""
+    return cast("InsightsBackend", get_backend("insights", backend))
+
+
+def get_musicbrainz_backend(backend: str) -> MusicBrainzBackend:
+    """Resolve the "musicbrainz" family for *backend*, typed rather than as a module."""
+    return cast("MusicBrainzBackend", get_backend("musicbrainz", backend))
+
+
+def get_paths_backend(backend: str) -> PathsBackend:
+    """Resolve the "paths" family for *backend*, typed rather than as a module."""
+    return cast("PathsBackend", get_backend("paths", backend))
+
+
+def musicbrainz_handles(backend: str, neo4j: Any, pg_pool: Any) -> MusicBrainzHandles:
+    """Bundle the selected graph store with the always-relational MusicBrainz tables."""
+    return MusicBrainzHandles(graph=pg_pool if backend == "postgres" else neo4j, relational=pg_pool)
+
+
+def rarity_handles(backend: str, neo4j: Any, pg_pool: Any) -> RarityHandles:
+    """Return the handle the "rarity" family's *backend* is called with.
+
+    The graph half is whichever store answers the traversals; the insights half is always the
+    PostgreSQL pool. A router holds both connections already and should not have to know which
+    of them a given backend reads — see `RarityBackend` for why the two are one argument.
+    """
+    return RarityHandles(graph=pg_pool if backend == "postgres" else neo4j, insights=pg_pool)
 
 
 # ── credits family (gm-catalog-api-dl8.1) ────────────────────────────────────

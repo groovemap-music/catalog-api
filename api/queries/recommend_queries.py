@@ -414,6 +414,7 @@ async def get_explore_traversal(
     entity_type: str,
     entity_id: str,
     hops: int = 2,
+    row_limit: int = 100,
 ) -> list[dict[str, Any]]:
     """Perform variable-length traversal from an entity and return discovered nodes with paths."""
     if not (1 <= hops <= 3):
@@ -451,9 +452,9 @@ async def get_explore_traversal(
            END AS type,
            best.path_names AS path_names, best.rel_types AS rel_types, best.dist AS dist
     ORDER BY best.dist
-    LIMIT 100
+    LIMIT $row_limit
     """
-    return await run_query(driver, cypher, entity_id=entity_id)
+    return await run_query(driver, cypher, entity_id=entity_id, row_limit=row_limit)
 
 
 def score_discoveries(
