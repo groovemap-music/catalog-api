@@ -38,12 +38,18 @@ from api.graph_backend import (
     GapAnalysisBackend,
     GapMetadataBackend,
     GenreTreeBackend,
+    InsightsBackend,
     LabelDnaBackend,
+    MusicBrainzBackend,
     OneHopCollaboratorsBackend,
+    PathsBackend,
+    RarityBackend,
     RecommendationsBackend,
     TasteBackend,
     UserCollectionBackend,
     get_backend,
+    musicbrainz_handles,
+    rarity_handles,
     registered_families,
 )
 from api.queries import (
@@ -59,6 +65,8 @@ from api.queries import (
 )
 from api.queries.credits_queries import get_person_connections
 from api.queries.helpers import run_count, run_query, run_single
+from api.queries.musicbrainz_pipeline import MusicBrainzHandles
+from api.queries.rarity_pipeline import RarityHandles
 from api.syncer import DISCOGS_API_BASE, sync_collection
 from tests import graph_fixture
 
@@ -350,6 +358,23 @@ class ParityCall:
         return f"{self.function}({', '.join(rendered)})"
 
 
+# ── rarity family (gm-catalog-api-wpku.1): a family may name its own handle ──
+# Every family above this is called with the backend's own connection — the Neo4j driver or
+# the PostgreSQL pool — and that is still the default. The rarity family cannot be: its batch
+# reads `insights.community_counts` and its two lookups read `insights.release_rarity`, and
+# those are PostgreSQL tables on *both* backends, because ADR 0012 migrates the graph reads
+# and not the results table. So its Neo4j backend needs two connections where its PostgreSQL
+# backend needs one, and both take them as a single `RarityHandles` so the two implementations
+# can be bound to one `Protocol`. A family that needs that says so here rather than the
+# harness growing a special case for it.
+def _backend_handle(backend: str, backends: graph_fixture.ParityBackends) -> Any:
+    """Return the connection *backend* is called with: its own, which is the usual case."""
+    return backends.neo4j if backend == "neo4j" else backends.postgres
+
+
+# ── end rarity family handle hook ────────────────────────────────────────────
+
+
 @dataclass(frozen=True)
 class ParityFamily:
     """A query family and the calls the harness proves parity on."""
@@ -357,6 +382,7 @@ class ParityFamily:
     name: str
     calls: tuple[ParityCall, ...]
     requires_property_graph: bool = True
+    handle: Callable[[str, graph_fixture.ParityBackends], Any] = _backend_handle
 
     @property
     def functions(self) -> frozenset[str]:
@@ -368,14 +394,21 @@ class ParityFamily:
 PARITY_FAMILIES: dict[str, ParityFamily] = {}
 
 
-def register_parity_family(name: str, calls: Sequence[ParityCall], *, requires_property_graph: bool = True) -> None:
+def register_parity_family(
+    name: str,
+    calls: Sequence[ParityCall],
+    *,
+    requires_property_graph: bool = True,
+    handle: Callable[[str, graph_fixture.ParityBackends], Any] = _backend_handle,
+) -> None:
     """Register *name* — a family in `api/graph_backend.py` — with the calls to compare.
 
     The backends themselves are not passed: the harness resolves them through the same
     selector the router uses, so a family cannot be proven at parity against a module the
-    router would not actually call.
+    router would not actually call. *handle* is what each backend is called with and defaults
+    to that backend's own connection; see `_backend_handle`.
     """
-    PARITY_FAMILIES[name] = ParityFamily(name=name, calls=tuple(calls), requires_property_graph=requires_property_graph)
+    PARITY_FAMILIES[name] = ParityFamily(name=name, calls=tuple(calls), requires_property_graph=requires_property_graph, handle=handle)
 
 
 @dataclass(frozen=True)
@@ -391,9 +424,11 @@ class ExpectedDifference:
     normalize: Callable[[Any], Any]
 
 
-# (family, function) -> the difference that is allowed to stand between its two backends.
+# (family, function-or-rendered-call) -> the difference allowed between its two backends.
 #
-# The harness fails on any divergence that is not in here, and names this mapping when it
+# A rendered-call key makes a tolerance as narrow as one fixture question; a function key
+# remains the fallback for differences (such as autocomplete scoring) that apply to every
+# call. The harness fails on any divergence that is not in here, and names this mapping when it
 # does: a diff is tolerated only once someone has written down what it is and why. It also
 # fails on an entry whose difference did not materialise, so a tolerance cannot outlive
 # the behaviour it was granted for.
@@ -428,7 +463,8 @@ def _type_shape(result: Any) -> Any:
 
 def assert_parity(family: str, call: ParityCall, *, neo4j_result: Any, postgres_result: Any) -> None:
     """Fail unless the two backends agreed, or agreed as far as a declared difference allows."""
-    declared = EXPECTED_DIFFERENCES.get((family, call.function))
+    difference_key = (family, str(call)) if (family, str(call)) in EXPECTED_DIFFERENCES else (family, call.function)
+    declared = EXPECTED_DIFFERENCES.get(difference_key)
     agrees = postgres_result == neo4j_result and _type_shape(postgres_result) == _type_shape(neo4j_result)
 
     if declared is None:
@@ -447,7 +483,7 @@ def assert_parity(family: str, call: ParityCall, *, neo4j_result: Any, postgres_
 
     if agrees:
         pytest.fail(
-            f"EXPECTED_DIFFERENCES declares a difference for ({family!r}, {call.function!r}) — "
+            f"EXPECTED_DIFFERENCES declares a difference for {difference_key!r} — "
             f"{declared.reason} — but the two backends agree on {call}. Delete the entry."
         )
 
@@ -690,6 +726,228 @@ FAMILY_PROTOCOLS["autocomplete"] = AutocompleteBackend
 # worth covering and is covered in `tests/test_autocomplete_pg_queries.py`, on one engine,
 # where agreeing is not a failure.
 EXPECTED_DIFFERENCES.update({("autocomplete", function): _LUCENE_SCORE_DIFFERENCE for function in PARITY_FAMILIES["autocomplete"].functions})
+
+
+# ── The insights family (gm-catalog-api-wpku.2) ─────────────────────────────
+# These are relational aggregates over the materialized graph relations rather than
+# GRAPH_TABLE traversals, so they run on both PostgreSQL tiers.  Every function gets a
+# non-empty call and the optional/filtering paths get their own calls as well.
+INSIGHTS_CALLS: tuple[ParityCall, ...] = (
+    ParityCall("query_artist_centrality", (), {"limit": 100}),
+    ParityCall("query_artist_centrality", (), {"limit": 3}),
+    ParityCall("query_genre_trends"),
+    ParityCall("query_genre_trends", (), {"genre": graph_fixture.RARITY_GENRE_NAME}),
+    ParityCall("query_genre_trends", (), {"genre": "does-not-exist"}),
+    ParityCall("query_label_longevity", (), {"limit": 50}),
+    ParityCall("query_label_longevity", (), {"limit": 1}),
+    ParityCall("query_monthly_anniversaries", (2025, 9, [25])),
+    ParityCall("query_monthly_anniversaries", (2025, 9, [10])),
+)
+
+register_parity_family("insights", INSIGHTS_CALLS, requires_property_graph=False)
+FAMILY_PROTOCOLS["insights"] = InsightsBackend
+# ── end insights family ──────────────────────────────────────────────────────
+
+
+# ── The musicbrainz family (gm-catalog-api-wpku.3) ─────────────────────────
+def _musicbrainz_handle(backend: str, backends: graph_fixture.ParityBackends) -> MusicBrainzHandles:
+    return musicbrainz_handles(backend, backends.neo4j, backends.postgres)
+
+
+MUSICBRAINZ_CALLS: tuple[ParityCall, ...] = (
+    ParityCall("get_artist_musicbrainz", (graph_fixture.ANCHOR_ARTIST_ID,)),
+    ParityCall("get_artist_musicbrainz", ("999999",)),
+    ParityCall("get_artist_mb_relationships", (graph_fixture.ANCHOR_ARTIST_ID,)),
+    ParityCall("get_artist_mb_relationships", ("2",)),
+    ParityCall("get_artist_mb_relationships", ("999999",)),
+    ParityCall("get_artist_external_links", (graph_fixture.ANCHOR_ARTIST_ID,)),
+    ParityCall("get_artist_external_links", ("999999",)),
+    ParityCall("get_enrichment_status"),
+)
+
+# Spike gm-database-schema-9c8.2, "The MusicBrainz relationship-type vocabulary" and
+# "Unbound relationship patterns", predicted two differences before the loader molecules
+# landed: raw relationship vocabulary and the enricher's post-MERGE source stamping. Neither
+# remains observable here. The SQL path reads the mapped `relationship_type` and filters NULL
+# mappings exactly as the enricher does; both stores expose the same stamped edge identity.
+#
+# The fidelity review found one different, production-observable mismatch that the spike did
+# not list. `musicbrainz.relationships` preserves separate instances by dates/attributes,
+# while musicbrainz-graph-enricher's MERGE key is only (source, mapped type, target) and the
+# enricher writes none of those properties. PostgreSQL intentionally returns its richer rows.
+# The narrow call-level declaration below tolerates exactly that instance/property difference;
+# it still compares mapped type, endpoint, name, and direction. The missing-artist call has no
+# declaration and must continue agreeing exactly, so the tolerance cannot hide filtering bugs.
+# The issued_on/IN_FAMILY media divergences and deletion-boundary assumptions recorded by
+# the loader review do not intersect any of these four reads, so they remain loader
+# carry-forwards rather than parity exceptions here. These statements use phase-0 views and
+# therefore run on PostgreSQL 18 too; GRAPH_BACKEND=postgres startup still independently
+# requires graph.catalog through verify_postgres_graph_backend.
+register_parity_family("musicbrainz", MUSICBRAINZ_CALLS, requires_property_graph=False, handle=_musicbrainz_handle)
+FAMILY_PROTOCOLS["musicbrainz"] = MusicBrainzBackend
+
+
+def _musicbrainz_edge_identities(rows: Any) -> list[dict[str, Any]]:
+    """Collapse relationship instances to the edge identity Neo4j's MERGE retains."""
+    identities = {(row["type"], row["target_id"], row["target_name"], row["direction"]) for row in rows}
+    return [
+        {
+            "type": relationship_type,
+            "target_id": target_id,
+            "target_name": target_name,
+            "direction": direction,
+            "begin_date": None,
+            "end_date": None,
+            "attributes": None,
+        }
+        for relationship_type, target_id, target_name, direction in sorted(identities)
+    ]
+
+
+_MB_INSTANCE_DIFFERENCE = ExpectedDifference(
+    reason=(
+        "PostgreSQL preserves MusicBrainz relationship instances and their dates/attributes; "
+        "the production Neo4j enricher MERGEs by mapped type and endpoints and writes only source "
+        "(fidelity finding following gm-database-schema-9c8.2)"
+    ),
+    normalize=_musicbrainz_edge_identities,
+)
+EXPECTED_DIFFERENCES.update(
+    {
+        ("musicbrainz", str(call)): _MB_INSTANCE_DIFFERENCE
+        for call in MUSICBRAINZ_CALLS
+        if call.function == "get_artist_mb_relationships" and call.args[0] != "999999"
+    }
+)
+# ── end musicbrainz family ───────────────────────────────────────────────────
+
+
+# ── The paths family (gm-catalog-api-wpku.4) ─────────────────────────────────
+PATH_CALLS: tuple[ParityCall, ...] = (
+    *(
+        ParityCall(
+            "find_shortest_path",
+            (graph_fixture.PATH_ANCHOR_ARTIST_ID, target_id),
+            {"max_depth": distance, "from_type": "artist", "to_type": target_type},
+        )
+        for distance, (target_type, target_id) in enumerate(graph_fixture.PATH_DISTANCE_TARGETS, start=1)
+    ),
+    ParityCall(
+        "find_shortest_path",
+        (graph_fixture.PATH_ANCHOR_ARTIST_ID, graph_fixture.PATH_UNREACHABLE_ARTIST_ID),
+        {"max_depth": 10, "from_type": "artist", "to_type": "artist"},
+    ),
+    *(
+        ParityCall("find_shortest_path", (left_id, right_id), {"max_depth": 1, "from_type": left_type, "to_type": right_type})
+        for source_type, source_id, target_type, target_id in (
+            ("release", "1301", "artist", graph_fixture.PATH_ANCHOR_ARTIST_ID),
+            ("release", "731", "label", graph_fixture.RARITY_LABEL_ID),
+            ("release", "731", "genre", graph_fixture.RARITY_GENRE_NAME),
+            ("release", "731", "master", graph_fixture.RARITY_MASTER_ID),
+            ("artist", "1", "artist", "2"),
+            ("artist", graph_fixture.PATH_ALIAS_ARTIST_ID, "artist", "1204"),
+        )
+        for left_type, left_id, right_type, right_id in (
+            (source_type, source_id, target_type, target_id),
+            (target_type, target_id, source_type, source_id),
+        )
+    ),
+    ParityCall("get_explore_traversal", ("artist", graph_fixture.PATH_ANCHOR_ARTIST_ID), {"hops": 2, "row_limit": 100}),
+    ParityCall("get_explore_traversal", ("artist", graph_fixture.PATH_ANCHOR_ARTIST_ID), {"hops": 3, "row_limit": 100}),
+)
+
+register_parity_family("paths", PATH_CALLS, requires_property_graph=False)
+FAMILY_PROTOCOLS["paths"] = PathsBackend
+# ── end paths family ─────────────────────────────────────────────────────────
+
+
+# ── The rarity family (gm-catalog-api-wpku.1) ────────────────────────────────
+# The rarity signal batch, and the two lookups that key a stored rarity page off a graph
+# vertex. Six functions, and every one of them is registered: the three page-level reads are
+# family members rather than private helpers of the batch precisely so the harness can prove
+# them, because each is a separate graph question carrying its own chunking-contract
+# obligation and a batch that agrees overall can still be built from a page read that does not.
+#
+# Every statement traverses `graph.catalog`, so the family keeps the default
+# `requires_property_graph=True` and its calls run only on the PostgreSQL 19 tier.
+
+
+def _rarity_handle(backend: str, backends: graph_fixture.ParityBackends) -> RarityHandles:
+    """Return the graph-and-insights handle the rarity family's *backend* is called with.
+
+    The same function `api/graph_backend.py` gives a router, applied to the fixture's two
+    engines: the graph half is whichever store answers the traversals, the insights half is
+    always the PostgreSQL pool. On the PostgreSQL backend both are the same pool, which is why
+    its two lookups are one statement rather than four round trips.
+    """
+    return rarity_handles(backend, backends.neo4j, backends.postgres)
+
+
+# The page reads. "" is the open-ended start cursor, so the first call is the walk's first
+# page; "7" lands between the traversal components' ids and the rarity component's, which is a
+# real keyset boundary rather than an endpoint; "zzz" is past every id and must come back
+# empty on both engines, which is what terminates the walk.
+_RARITY_PAGE_CALLS: tuple[ParityCall, ...] = (
+    ParityCall("fetch_release_id_page", ("", 5)),
+    ParityCall("fetch_release_id_page", ("7", 100)),
+    ParityCall("fetch_release_id_page", ("zzz", 10)),
+)
+
+# One page carrying every shape the eight core signal queries have to answer for: a release
+# with tags but no media (101), the rarity component's fully-equipped release with a label, a
+# master with siblings, a medium, and the collection and wantlist rows that are the live half
+# of its degree (731), the unique pressing of a master (734), the standalone two-credit
+# release (735), and a release with credits and no year at all (901).
+_RARITY_SIGNAL_PAGE = ["101", "731", "734", "735", "901"]
+
+_RARITY_SIGNAL_CALLS: tuple[ParityCall, ...] = (
+    ParityCall("fetch_page_signals", (_RARITY_SIGNAL_PAGE,)),
+    ParityCall("fetch_page_signals", ([graph_fixture.RARITY_COLLECTED_RELEASE_ID],)),
+    # A page of ids that are not in the store. Both engines must answer with a row set per
+    # fact and no rows in any of them, not with a missing fact.
+    ParityCall("fetch_page_signals", (["does-not-exist"],)),
+)
+
+# The batch itself, twice: once on the production page size, where the whole fixture is one
+# page, and once on a page size small enough to force six pages. The second is what proves the
+# keyset walk agrees, not just the arithmetic on top of it — a cursor that advanced differently
+# on the two engines would score the same releases in a different order, or twice.
+_RARITY_BATCH_CALLS: tuple[ParityCall, ...] = (
+    ParityCall("fetch_all_rarity_signals"),
+    ParityCall("fetch_all_rarity_signals", (), {"page_size": 4}),
+    ParityCall("count_releases"),
+)
+
+# The two lookups. Three answers have to stay distinguishable and each is registered: no such
+# vertex (None), a vertex that exists with nothing scored against it — `ANCHOR_ARTIST_ID` and
+# `LABEL_ID` are from the earlier components, which the batch has never written rows for —
+# and a vertex with a page. The paging calls run against the rarity artist and label, whose
+# stored rows carry distinct scores so `rarity_score DESC, release_id` is a total order.
+_RARITY_LOOKUP_CALLS: tuple[ParityCall, ...] = (
+    ParityCall("get_rarity_by_artist", ("701",)),
+    ParityCall("get_rarity_by_artist", ("702",)),
+    ParityCall("get_rarity_by_artist", (graph_fixture.ANCHOR_ARTIST_ID,)),
+    ParityCall("get_rarity_by_artist", ("does-not-exist",)),
+    ParityCall("get_rarity_by_artist", ("701", 1, 2)),
+    ParityCall("get_rarity_by_artist", ("701", 2, 2)),
+    ParityCall("get_rarity_by_artist", ("701", 9, 2)),
+    ParityCall("get_rarity_by_label", (graph_fixture.RARITY_LABEL_ID,)),
+    ParityCall("get_rarity_by_label", (graph_fixture.LABEL_ID,)),
+    ParityCall("get_rarity_by_label", ("does-not-exist",)),
+    ParityCall("get_rarity_by_label", (graph_fixture.RARITY_LABEL_ID, 1, 3)),
+    ParityCall("get_rarity_by_label", (graph_fixture.RARITY_LABEL_ID, 2, 3)),
+)
+
+RARITY_CALLS: tuple[ParityCall, ...] = (
+    *_RARITY_PAGE_CALLS,
+    *_RARITY_SIGNAL_CALLS,
+    *_RARITY_BATCH_CALLS,
+    *_RARITY_LOOKUP_CALLS,
+)
+
+register_parity_family("rarity", RARITY_CALLS, handle=_rarity_handle)
+FAMILY_PROTOCOLS["rarity"] = RarityBackend
+# ── end rarity family ────────────────────────────────────────────────────────
 
 
 # ── The credits family (gm-catalog-api-dl8.1) ────────────────────────────────
@@ -1143,8 +1401,9 @@ async def test_graph_query_family_agrees_on_both_backends(
     family 1) needs no property graph and is never asked to assert for one, while a
     `GRAPH_TABLE` family still is.
     """
-    neo4j_result = await _invoke(get_backend(family, "neo4j"), call, parity_backends.neo4j)
-    postgres_result = await _invoke(get_backend(family, "postgres"), call, parity_backends.postgres)
+    handle = PARITY_FAMILIES[family].handle
+    neo4j_result = await _invoke(get_backend(family, "neo4j"), call, handle("neo4j", parity_backends))
+    postgres_result = await _invoke(get_backend(family, "postgres"), call, handle("postgres", parity_backends))
 
     assert_parity(family, call, neo4j_result=neo4j_result, postgres_result=postgres_result)
 
