@@ -34,37 +34,10 @@ class TestArtistCentralityEndpoint:
     def test_success(self, test_client: TestClient) -> None:
         """Returns 200 with artist centrality results."""
         items = [{"artist_id": "1", "artist_name": "Miles Davis", "edge_count": 500}]
-        backend = AsyncMock()
-        backend.query_artist_centrality.return_value = items
-        with patch("api.routers.insights_compute.get_insights_backend", return_value=backend):
+        with patch("api.routers.insights_compute.query_artist_centrality", new_callable=AsyncMock, return_value=items):
             response = test_client.get("/api/internal/insights/artist-centrality")
         assert response.status_code == 200
         assert response.json() == {"items": items}
-
-    def test_postgres_backend_does_not_require_neo4j(self, test_client: TestClient) -> None:
-        import api.routers.insights_compute as mod
-
-        original_neo4j = mod._neo4j
-        original_config = mod._config
-        backend = AsyncMock()
-        backend.query_artist_centrality.return_value = []
-        mod._neo4j = None
-        mod._config = type(
-            "Config",
-            (),
-            {
-                "graph_backend": "postgres",
-                "insights_internal_secret": original_config.insights_internal_secret,
-            },
-        )()
-        try:
-            with patch("api.routers.insights_compute.get_insights_backend", return_value=backend):
-                response = test_client.get("/api/internal/insights/artist-centrality")
-            assert response.status_code == 200
-            backend.query_artist_centrality.assert_awaited_once()
-        finally:
-            mod._neo4j = original_neo4j
-            mod._config = original_config
 
     def test_not_ready(self, test_client: TestClient) -> None:
         """Returns 503 when Neo4j is not configured."""
@@ -85,9 +58,7 @@ class TestGenreTrendsEndpoint:
     def test_success(self, test_client: TestClient) -> None:
         """Returns 200 with genre trends results."""
         items = [{"genre": "Jazz", "decade": 1960, "release_count": 50}]
-        backend = AsyncMock()
-        backend.query_genre_trends.return_value = items
-        with patch("api.routers.insights_compute.get_insights_backend", return_value=backend):
+        with patch("api.routers.insights_compute.query_genre_trends", new_callable=AsyncMock, return_value=items):
             response = test_client.get("/api/internal/insights/genre-trends")
         assert response.status_code == 200
         assert response.json() == {"items": items}
@@ -111,9 +82,7 @@ class TestLabelLongevityEndpoint:
     def test_success(self, test_client: TestClient) -> None:
         """Returns 200 with label longevity results."""
         items = [{"label_id": "1", "label_name": "Blue Note", "years_active": 80}]
-        backend = AsyncMock()
-        backend.query_label_longevity.return_value = items
-        with patch("api.routers.insights_compute.get_insights_backend", return_value=backend):
+        with patch("api.routers.insights_compute.query_label_longevity", new_callable=AsyncMock, return_value=items):
             response = test_client.get("/api/internal/insights/label-longevity")
         assert response.status_code == 200
         assert response.json() == {"items": items}
@@ -137,9 +106,7 @@ class TestAnniversariesEndpoint:
     def test_success(self, test_client: TestClient) -> None:
         """Returns 200 with anniversary results."""
         items = [{"master_id": "1", "title": "Kind of Blue", "release_year": 1959}]
-        backend = AsyncMock()
-        backend.query_monthly_anniversaries.return_value = items
-        with patch("api.routers.insights_compute.get_insights_backend", return_value=backend):
+        with patch("api.routers.insights_compute.query_monthly_anniversaries", new_callable=AsyncMock, return_value=items):
             response = test_client.get("/api/internal/insights/anniversaries?year=2026&month=3")
         assert response.status_code == 200
         assert response.json() == {"items": items}
@@ -280,7 +247,7 @@ class TestRarityScoresEndpoint:
         """Returns 200 with rarity score results."""
         mock_results = [{"release_id": "1", "rarity_score": 85.0, "tier": "ultra-rare"}]
         with patch(
-            "api.queries.rarity_queries.fetch_all_rarity_signals",
+            "api.routers.insights_compute.fetch_all_rarity_signals",
             new=AsyncMock(return_value=mock_results),
         ):
             response = test_client.get("/api/internal/insights/rarity-scores")
@@ -300,39 +267,13 @@ class TestRarityScoresEndpoint:
         finally:
             ic_router._neo4j = original
 
-    def test_postgres_backend_does_not_require_neo4j(self, test_client: TestClient) -> None:
-        """PostgreSQL is the graph and insights store in postgres mode."""
-        import api.routers.insights_compute as ic_router
-
-        original_neo4j = ic_router._neo4j
-        original_config = ic_router._config
-        backend = AsyncMock()
-        backend.fetch_all_rarity_signals.return_value = []
-        ic_router._neo4j = None
-        ic_router._config = type(
-            "Config",
-            (),
-            {
-                "graph_backend": "postgres",
-                "insights_internal_secret": original_config.insights_internal_secret,
-            },
-        )()
-        try:
-            with patch("api.routers.insights_compute.get_rarity_backend", return_value=backend):
-                response = test_client.get("/api/internal/insights/rarity-scores")
-            assert response.status_code == 200
-            backend.fetch_all_rarity_signals.assert_awaited_once()
-        finally:
-            ic_router._neo4j = original_neo4j
-            ic_router._config = original_config
-
     def test_503_on_transient_neo4j_error(self, test_client: TestClient) -> None:
         """A transient Neo4j error (e.g. out-of-memory) returns 503, not 500."""
         from neo4j.exceptions import TransientError
 
         err = TransientError("MemoryPoolOutOfMemoryError")
         with patch(
-            "api.queries.rarity_queries.fetch_all_rarity_signals",
+            "api.routers.insights_compute.fetch_all_rarity_signals",
             new=AsyncMock(side_effect=err),
         ):
             response = test_client.get("/api/internal/insights/rarity-scores")
@@ -347,7 +288,7 @@ class TestRarityScoresEndpoint:
         """
         err = _neo4j_error("Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration", "transaction timed out")
         with patch(
-            "api.queries.rarity_queries.fetch_all_rarity_signals",
+            "api.routers.insights_compute.fetch_all_rarity_signals",
             new=AsyncMock(side_effect=err),
         ):
             response = test_client.get("/api/internal/insights/rarity-scores")
@@ -360,7 +301,7 @@ class TestRarityScoresEndpoint:
         err = _neo4j_error("Neo.ClientError.Transaction.TransactionTimedOut", "transaction timed out")
         group = ExceptionGroup("unhandled errors in a TaskGroup", [err])
         with patch(
-            "api.queries.rarity_queries.fetch_all_rarity_signals",
+            "api.routers.insights_compute.fetch_all_rarity_signals",
             new=AsyncMock(side_effect=group),
         ):
             response = test_client.get("/api/internal/insights/rarity-scores")
@@ -373,7 +314,7 @@ class TestRarityScoresEndpoint:
         err = _neo4j_error("Neo.ClientError.Statement.SyntaxError", "invalid syntax")
         assert isinstance(err, ClientError)  # same class, non-retryable code
         with patch(
-            "api.queries.rarity_queries.fetch_all_rarity_signals",
+            "api.routers.insights_compute.fetch_all_rarity_signals",
             new=AsyncMock(side_effect=err),
         ):
             # The fixture's TestClient uses raise_server_exceptions=False, so an
@@ -431,9 +372,7 @@ class TestInternalInsightsAuth:
     def test_endpoint_accepts_valid_secret(self, test_client: TestClient) -> None:
         """The configured secret grants access (test_client sends it by default)."""
         items = [{"artist_id": "1", "artist_name": "Miles Davis", "edge_count": 500}]
-        backend = AsyncMock()
-        backend.query_artist_centrality.return_value = items
-        with patch("api.routers.insights_compute.get_insights_backend", return_value=backend):
+        with patch("api.routers.insights_compute.query_artist_centrality", new_callable=AsyncMock, return_value=items):
             response = test_client.get("/api/internal/insights/artist-centrality")
         assert response.status_code == 200
         assert response.json() == {"items": items}

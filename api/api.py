@@ -72,7 +72,6 @@ import api.syncer as _syncer
 from api import __version__
 from api.auth import b64url_encode, decrypt_oauth_token, encrypt_oauth_token, get_oauth_encryption_key
 from api.config import ApiConfig
-from api.graph_backend import verify_postgres_graph_backend
 from api.limiter import limiter
 from api.metrics_collector import MetricsBuffer, normalize_path, run_collector
 from api.notifications import LogNotificationChannel, ResendNotificationChannel
@@ -276,21 +275,21 @@ def _configure_routers(
     _syncer.configure(_activity.record_event)
     _activity_router.configure(pool, redis, neo4j, config)
     _sync_router.configure(pool, neo4j, config, _running_syncs, redis)
-    _explore_router.configure(neo4j, jwt_secret_for_neo4j, redis, pg_pool=pool, graph_backend=config.graph_backend)
-    _user_router.configure(neo4j, jwt_secret_for_neo4j, config.graph_backend, pool)
-    _taste_router.configure(neo4j, jwt_secret_for_neo4j, config.graph_backend, pool)
-    _collection_router.configure(neo4j, pool, jwt_secret_for_neo4j, config.graph_backend)
-    _credits_router.configure(neo4j, redis, config.graph_backend, pg_pool=pool)
-    _label_dna_router.configure(neo4j, redis, config.graph_backend, pool)
-    _recommend_router.configure(neo4j, jwt_secret_for_neo4j, redis, config.graph_backend, pool)
-    _fit_router.configure(neo4j, pool, redis, config.graph_backend)
+    _explore_router.configure(neo4j, jwt_secret_for_neo4j, redis, pg_pool=pool)
+    _user_router.configure(neo4j, jwt_secret_for_neo4j)
+    _taste_router.configure(neo4j, jwt_secret_for_neo4j)
+    _collection_router.configure(neo4j, pool, jwt_secret_for_neo4j)
+    _credits_router.configure(neo4j, redis)
+    _label_dna_router.configure(neo4j, redis)
+    _recommend_router.configure(neo4j, jwt_secret_for_neo4j, redis)
+    _fit_router.configure(neo4j, pool, redis)
     _search_router.configure(pool, redis)
     _lookup_router.configure(pool)
     _insights_compute_router.configure(neo4j, pool, redis, config)
     _admin_router.configure(pool, redis, config, neo4j_driver=neo4j)
-    _musicbrainz_router.configure(pool, neo4j, config.graph_backend)
-    _network_router.configure(neo4j, redis, config.graph_backend, pg_pool=pool)
-    _rarity_router.configure(neo4j, pool, redis, graph_backend=config.graph_backend)
+    _musicbrainz_router.configure(pool, neo4j)
+    _network_router.configure(neo4j, redis)
+    _rarity_router.configure(neo4j, pool, redis)
     _auth_router.configure(
         pool,
         redis,
@@ -316,7 +315,7 @@ def _configure_routers(
         from api.nlq.tools import NLQToolRunner  # noqa: PLC0415
 
         anthropic_client = AsyncAnthropic(api_key=nlq_config.api_key)
-        tool_runner = NLQToolRunner(neo4j_driver=neo4j, pg_pool=pool, redis=redis, graph_backend=config.graph_backend)
+        tool_runner = NLQToolRunner(neo4j_driver=neo4j, pg_pool=pool, redis=redis)
         nlq_engine = NLQEngine(config=nlq_config, client=anthropic_client, tool_runner=tool_runner)
         logger.info("🧠 NLQ engine initialized", model=nlq_config.model)
 
@@ -349,12 +348,6 @@ async def _start_service(_app: FastAPI) -> _LifecycleResources:
     logger.info("🏥 Health server started", port=API_HEALTH_PORT)
 
     pool = await _create_pool(config)
-    # Before anything is wired: with GRAPH_BACKEND=postgres the collaborators family reads
-    # `graph.catalog`, which only a PostgreSQL 19 server carrying the schema producer's
-    # property graph has. Checking it here fails the boot with one clear message rather than
-    # letting the first request discover a missing relation.
-    if config.graph_backend == "postgres":
-        await verify_postgres_graph_backend(pool)
     redis = await _create_redis(config)
     _pool = pool
     _redis = redis

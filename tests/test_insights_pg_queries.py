@@ -7,71 +7,8 @@ import pytest
 from api.queries.insights_pg_queries import (
     _COMBINED_QUERIES,
     _COMPLETENESS_FIELDS,
-    ARTIST_CENTRALITY_SQL,
-    GENRE_TRENDS_FILTERED_SQL,
-    GENRE_TRENDS_SQL,
-    LABEL_LONGEVITY_SQL,
-    MONTHLY_ANNIVERSARIES_SQL,
-    query_artist_centrality,
     query_data_completeness,
-    query_genre_trends,
-    query_label_longevity,
-    query_monthly_anniversaries,
 )
-from tests.fake_postgres import FakePool
-
-
-class TestGraphInsightsQueries:
-    @pytest.mark.asyncio
-    async def test_artist_centrality_reads_the_indexed_counter_and_keeps_isolates(self) -> None:
-        pool = FakePool([[("7", "Artist", 42), ("8", "Isolate", 0)]])
-        assert await query_artist_centrality(pool, limit=2) == [
-            {"artist_id": "7", "artist_name": "Artist", "edge_count": 42},
-            {"artist_id": "8", "artist_name": "Isolate", "edge_count": 0},
-        ]
-        assert "FROM graph.artist_degree AS degree" in ARTIST_CENTRALITY_SQL
-        assert "NOT EXISTS" in ARTIST_CENTRALITY_SQL
-        assert pool.params == {"limit": 2}
-
-    @pytest.mark.asyncio
-    async def test_genre_trends_selects_the_filtered_statement_and_binds_genre(self) -> None:
-        pool = FakePool([[("Jazz", 1960, 12)]])
-        assert await query_genre_trends(pool, genre="Jazz") == [{"genre": "Jazz", "decade": 1960, "release_count": 12}]
-        assert pool.sql == GENRE_TRENDS_FILTERED_SQL
-        assert pool.params == {"genre": "Jazz"}
-
-    @pytest.mark.asyncio
-    async def test_genre_trends_without_filter_has_no_parameters(self) -> None:
-        pool = FakePool([[]])
-        assert await query_genre_trends(pool) == []
-        assert pool.sql == GENRE_TRENDS_SQL
-        assert pool.params == {}
-
-    @pytest.mark.asyncio
-    async def test_label_longevity_maps_the_cypher_projection(self) -> None:
-        pool = FakePool([[("501", "Blue Note", 1939, 2025, 87, 4500, 1960)]])
-        assert await query_label_longevity(pool, limit=1) == [
-            {
-                "label_id": "501",
-                "label_name": "Blue Note",
-                "first_year": 1939,
-                "last_year": 2025,
-                "years_active": 87,
-                "total_releases": 4500,
-                "peak_decade": 1960,
-            }
-        ]
-        assert pool.sql == LABEL_LONGEVITY_SQL
-        assert pool.params == {"limit": 1}
-
-    @pytest.mark.asyncio
-    async def test_anniversaries_binds_derived_target_years(self) -> None:
-        pool = FakePool([[("601", "Fixture Master", "Anchor", 2000)]])
-        assert await query_monthly_anniversaries(pool, 2025, 9, [25]) == [
-            {"master_id": "601", "title": "Fixture Master", "artist_name": "Anchor", "release_year": 2000}
-        ]
-        assert pool.sql == MONTHLY_ANNIVERSARIES_SQL
-        assert pool.params == {"target_years": [2000]}
 
 
 class TestConstants:
