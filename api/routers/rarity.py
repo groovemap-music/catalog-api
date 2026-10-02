@@ -1,14 +1,7 @@
 """Rarity scoring API endpoints.
 
 Serves precomputed rarity scores from PostgreSQL, with Redis caching.
-
-The artist and label endpoints also need the graph, to turn a vertex id into the release ids
-whose stored scores they page over. Those two go through the graph-backend seam
-(`api/graph_backend.py`, ADR 0012): on `GRAPH_BACKEND=neo4j` the ids come from Cypher and are
-then looked up in PostgreSQL; on `GRAPH_BACKEND=postgres` the whole question is one statement,
-because the graph and the stored scores are finally in the same database. The leaderboard,
-hidden gems, and the single-release breakdown read `insights.release_rarity` directly on
-either backend and are not part of the family.
+Artist and label endpoints also query Neo4j for release ID lookups.
 """
 
 from typing import Any
@@ -17,10 +10,10 @@ import structlog
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
-from api.graph_backend import RarityBackend, get_rarity_backend, rarity_handles
 from api.limiter import limiter
-from api.queries.rarity_pipeline import RarityHandles
 from api.queries.rarity_queries import (
+    get_rarity_by_artist,
+    get_rarity_by_label,
     get_rarity_for_release,
     get_rarity_hidden_gems,
     get_rarity_leaderboard,
@@ -34,36 +27,13 @@ router = APIRouter(prefix="/api/rarity", tags=["rarity"])
 
 _neo4j_driver: Any = None
 _pg_pool: Any = None
-_graph_backend: str = "neo4j"
-_rarity_backend: RarityBackend = get_rarity_backend("neo4j")
 
 
-def configure(neo4j: Any, pg_pool: Any, *_args: Any, graph_backend: str = "neo4j", **_kwargs: Any) -> None:
-    """Configure the rarity router with database connections and its graph backend."""
-    global _neo4j_driver, _pg_pool, _graph_backend, _rarity_backend
+def configure(neo4j: Any, pg_pool: Any, *_args: Any, **_kwargs: Any) -> None:
+    """Configure the rarity router with database connections."""
+    global _neo4j_driver, _pg_pool
     _neo4j_driver = neo4j
     _pg_pool = pg_pool
-    _graph_backend = graph_backend
-    _rarity_backend = get_rarity_backend(graph_backend)
-
-
-def _handles() -> RarityHandles:
-    """Return the handle the configured rarity backend is called with.
-
-    The graph half is whichever store answers the vertex lookups; the insights half is the
-    PostgreSQL pool holding `insights.release_rarity`, on either backend. The endpoints below
-    still require both to be configured: the leaderboard and the single-release breakdown read
-    the stored table directly whichever backend is selected, and on `GRAPH_BACKEND=neo4j` the
-    driver is what answers the two vertex lookups.
-    """
-    return rarity_handles(_graph_backend, _neo4j_driver, _pg_pool)
-
-
-def _graph_lookup_ready() -> bool:
-    """Whether both stores selected by the rarity lookup are configured."""
-    if not _pg_pool:
-        return False
-    return bool(_pg_pool if _graph_backend == "postgres" else _neo4j_driver)
 
 
 def _family_signals(row: dict[str, Any]) -> dict[str, dict[str, float]]:
@@ -205,10 +175,10 @@ async def artist_rarity(
     page_size: int = Query(20, ge=1, le=100),
 ) -> JSONResponse:
     """Get rarest releases by a specific artist."""
-    if not _graph_lookup_ready():
+    if not _pg_pool or not _neo4j_driver:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
-    result = await _rarity_backend.get_rarity_by_artist(_handles(), artist_id, page, page_size)
+    result = await get_rarity_by_artist(_neo4j_driver, _pg_pool, artist_id, page, page_size)
     if result is None:
         return JSONResponse(content={"error": "Artist not found"}, status_code=404)
 
@@ -232,10 +202,10 @@ async def label_rarity(
     page_size: int = Query(20, ge=1, le=100),
 ) -> JSONResponse:
     """Get rarest releases on a specific label."""
-    if not _graph_lookup_ready():
+    if not _pg_pool or not _neo4j_driver:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
-    result = await _rarity_backend.get_rarity_by_label(_handles(), label_id, page, page_size)
+    result = await get_rarity_by_label(_neo4j_driver, _pg_pool, label_id, page, page_size)
     if result is None:
         return JSONResponse(content={"error": "Label not found"}, status_code=404)
 

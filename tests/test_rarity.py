@@ -206,7 +206,7 @@ class TestHiddenGems:
 class TestArtistRarity:
     def test_success(self, test_client: TestClient) -> None:
         with patch(
-            "api.queries.rarity_queries.get_rarity_by_artist",
+            "api.routers.rarity.get_rarity_by_artist",
             new=AsyncMock(return_value=([_MOCK_LIST_ITEM], 5)),
         ):
             response = test_client.get("/api/rarity/artist/123")
@@ -216,7 +216,7 @@ class TestArtistRarity:
 
     def test_not_found(self, test_client: TestClient) -> None:
         with patch(
-            "api.queries.rarity_queries.get_rarity_by_artist",
+            "api.routers.rarity.get_rarity_by_artist",
             new=AsyncMock(return_value=None),
         ):
             response = test_client.get("/api/rarity/artist/nonexistent")
@@ -233,31 +233,11 @@ class TestArtistRarity:
         finally:
             rarity_router._pg_pool = original_pool
 
-    def test_postgres_backend_does_not_require_neo4j(self, test_client: TestClient) -> None:
-        import api.routers.rarity as rarity_router
-
-        original_backend = rarity_router._graph_backend
-        original_driver = rarity_router._neo4j_driver
-        backend = AsyncMock()
-        backend.get_rarity_by_artist.return_value = ([_MOCK_LIST_ITEM], 1)
-        original_impl = rarity_router._rarity_backend
-        rarity_router._graph_backend = "postgres"
-        rarity_router._neo4j_driver = None
-        rarity_router._rarity_backend = backend
-        try:
-            response = test_client.get("/api/rarity/artist/123")
-            assert response.status_code == 200
-            backend.get_rarity_by_artist.assert_awaited_once()
-        finally:
-            rarity_router._graph_backend = original_backend
-            rarity_router._neo4j_driver = original_driver
-            rarity_router._rarity_backend = original_impl
-
 
 class TestLabelRarity:
     def test_success(self, test_client: TestClient) -> None:
         with patch(
-            "api.queries.rarity_queries.get_rarity_by_label",
+            "api.routers.rarity.get_rarity_by_label",
             new=AsyncMock(return_value=([_MOCK_LIST_ITEM], 10)),
         ):
             response = test_client.get("/api/rarity/label/456")
@@ -267,7 +247,7 @@ class TestLabelRarity:
 
     def test_not_found(self, test_client: TestClient) -> None:
         with patch(
-            "api.queries.rarity_queries.get_rarity_by_label",
+            "api.routers.rarity.get_rarity_by_label",
             new=AsyncMock(return_value=None),
         ):
             response = test_client.get("/api/rarity/label/nonexistent")
@@ -283,23 +263,3 @@ class TestLabelRarity:
             assert response.status_code == 503
         finally:
             rarity_router._pg_pool = original_pool
-
-    def test_postgres_backend_does_not_require_neo4j(self, test_client: TestClient) -> None:
-        import api.routers.rarity as rarity_router
-
-        original_backend = rarity_router._graph_backend
-        original_driver = rarity_router._neo4j_driver
-        backend = AsyncMock()
-        backend.get_rarity_by_label.return_value = ([_MOCK_LIST_ITEM], 1)
-        original_impl = rarity_router._rarity_backend
-        rarity_router._graph_backend = "postgres"
-        rarity_router._neo4j_driver = None
-        rarity_router._rarity_backend = backend
-        try:
-            response = test_client.get("/api/rarity/label/456")
-            assert response.status_code == 200
-            backend.get_rarity_by_label.assert_awaited_once()
-        finally:
-            rarity_router._graph_backend = original_backend
-            rarity_router._neo4j_driver = original_driver
-            rarity_router._rarity_backend = original_impl

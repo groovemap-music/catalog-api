@@ -19,9 +19,15 @@ from psycopg.rows import dict_row
 
 from api.auth import decrypt_oauth_token, get_oauth_encryption_key
 from api.config import DEFAULT_DISCOGS_USER_AGENT
-from api.graph_backend import get_insights_backend, get_rarity_backend, rarity_handles
 from api.limiter import limiter
+from api.queries.insights_neo4j_queries import (
+    query_artist_centrality,
+    query_genre_trends,
+    query_label_longevity,
+    query_monthly_anniversaries,
+)
 from api.queries.insights_pg_queries import query_data_completeness
+from api.queries.rarity_queries import fetch_all_rarity_signals
 from api.syncer import DISCOGS_API_BASE, MAX_RATE_LIMIT_RETRIES, SYNC_DELAY_SECONDS, _auth_header
 from api.telemetry import CACHE_INSIGHTS_COMPLETENESS, cache_get
 
@@ -100,46 +106,33 @@ def configure(neo4j: Any, pool: Any, redis: Any = None, config: Any = None) -> N
     _config = config
 
 
-def _insights_backend_name() -> str:
-    """Return the configured graph backend, preserving Neo4j as the legacy default."""
-    return getattr(_config, "graph_backend", "neo4j") if _config is not None else "neo4j"
-
-
-def _insights_handle() -> Any:
-    """Return the connection used by the configured insights query backend."""
-    return _pool if _insights_backend_name() == "postgres" else _neo4j
-
-
 @router.get("/artist-centrality")
 @limiter.limit("5/minute")
 async def artist_centrality(request: Request, limit: int = Query(100, ge=1, le=500)) -> JSONResponse:  # noqa: ARG001
-    """Return raw artist centrality results from the configured graph backend."""
-    handle = _insights_handle()
-    if not handle:
+    """Return raw artist centrality query results from Neo4j."""
+    if not _neo4j:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
-    results = await get_insights_backend(_insights_backend_name()).query_artist_centrality(handle, limit=limit)
+    results = await query_artist_centrality(_neo4j, limit=limit)
     return JSONResponse(content={"items": results})
 
 
 @router.get("/genre-trends")
 @limiter.limit("5/minute")
 async def genre_trends(request: Request) -> JSONResponse:  # noqa: ARG001
-    """Return raw genre trends from the configured graph backend."""
-    handle = _insights_handle()
-    if not handle:
+    """Return raw genre trends query results from Neo4j."""
+    if not _neo4j:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
-    results = await get_insights_backend(_insights_backend_name()).query_genre_trends(handle)
+    results = await query_genre_trends(_neo4j)
     return JSONResponse(content={"items": results})
 
 
 @router.get("/label-longevity")
 @limiter.limit("5/minute")
 async def label_longevity(request: Request, limit: int = Query(50, ge=1, le=500)) -> JSONResponse:  # noqa: ARG001
-    """Return raw label longevity from the configured graph backend."""
-    handle = _insights_handle()
-    if not handle:
+    """Return raw label longevity query results from Neo4j."""
+    if not _neo4j:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
-    results = await get_insights_backend(_insights_backend_name()).query_label_longevity(handle, limit=limit)
+    results = await query_label_longevity(_neo4j, limit=limit)
     return JSONResponse(content={"items": results})
 
 
@@ -151,20 +144,14 @@ async def anniversaries(
     month: int = Query(..., ge=1, le=12),
     milestones: str = Query("25,30,40,50,75,100"),
 ) -> JSONResponse:
-    """Return raw anniversary results from the configured graph backend."""
-    handle = _insights_handle()
-    if not handle:
+    """Return raw monthly anniversary query results from Neo4j."""
+    if not _neo4j:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     try:
         milestone_years = [int(m.strip()) for m in milestones.split(",") if m.strip()]
     except ValueError:
         return JSONResponse(content={"error": "milestones must be comma-separated integers"}, status_code=422)
-    results = await get_insights_backend(_insights_backend_name()).query_monthly_anniversaries(
-        handle,
-        current_year=year,
-        current_month=month,
-        milestone_years=milestone_years,
-    )
+    results = await query_monthly_anniversaries(_neo4j, current_year=year, current_month=month, milestone_years=milestone_years)
     return JSONResponse(content={"items": results})
 
 
@@ -241,14 +228,11 @@ def _find_retryable_neo4j_error(exc: BaseException) -> Neo4jError | None:
 @router.get("/rarity-scores")
 @limiter.limit("5/minute")
 async def rarity_scores(request: Request) -> JSONResponse:  # noqa: ARG001
-    """Return computed rarity scores for every release, from the configured graph backend."""
-    backend_name = getattr(_config, "graph_backend", "neo4j") if _config is not None else "neo4j"
-    graph = _pool if backend_name == "postgres" else _neo4j
-    if not _pool or not graph:
+    """Return computed rarity scores for all releases from Neo4j."""
+    if not _neo4j:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
-    backend = get_rarity_backend(backend_name)
     try:
-        results = await backend.fetch_all_rarity_signals(rarity_handles(backend_name, _neo4j, _pool))
+        results = await fetch_all_rarity_signals(_neo4j, _pool)
     except (TransientError, ClientError, BaseExceptionGroup) as exc:
         # TransientError: e.g. MemoryPoolOutOfMemoryError under DB pressure.
         # ClientError: a transaction timeout (see TRANSACTION_TIMEOUT_CODES).

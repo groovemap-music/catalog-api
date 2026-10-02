@@ -2,9 +2,8 @@
 
 It records the statements and parameter maps a query module sends and replays canned
 rows back, which is enough to assert what SQL a function builds and what it does with
-the result without a server. Anything that needs the server to *parse* the SQL — and
-every SQL/PGQ statement does, because only PostgreSQL 19 has a graph to match against —
-belongs in the opt-in integration tests instead.
+the result without a server. Tests that need PostgreSQL to parse or execute a statement
+belong in the opt-in integration suite instead.
 """
 
 from __future__ import annotations

@@ -691,13 +691,7 @@ async def get_artist_details(driver: AsyncResilientNeo4jDriver, node_id: str) ->
     RETURN a.id AS id, a.name AS name, genres, styles, release_count,
            collect(DISTINCT grp.name) AS groups
     """
-    result = await run_single(driver, cypher, id=node_id)
-    if result is not None:
-        # Cypher's collect(DISTINCT ...) does not promise element order. Details
-        # expose these as lists, so normalize before comparing or caching them.
-        for key in ("genres", "styles", "groups"):
-            result[key] = sorted(result[key])
-    return result
+    return await run_single(driver, cypher, id=node_id)
 
 
 async def get_release_details(driver: AsyncResilientNeo4jDriver, node_id: str) -> dict[str, Any] | None:
@@ -871,13 +865,13 @@ async def get_genre_emergence(driver: AsyncResilientNeo4jDriver, before_year: in
     MATCH (g:Genre)
     WHERE g.first_year IS NOT NULL AND g.first_year <= $before_year
     RETURN g.name AS name, g.first_year AS first_year
-    ORDER BY first_year, name
+    ORDER BY first_year
     """
     style_cypher = """
     MATCH (s:Style)
     WHERE s.first_year IS NOT NULL AND s.first_year <= $before_year
     RETURN s.name AS name, s.first_year AS first_year
-    ORDER BY first_year, name
+    ORDER BY first_year
     """
     genres, styles = await asyncio.gather(
         run_query(driver, genre_cypher, before_year=before_year),

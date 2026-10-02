@@ -295,7 +295,7 @@ class TestExploreNativeIds:
             },
         ]
         with (
-            patch("api.queries.recommend_queries.get_explore_traversal", AsyncMock(return_value=traversal)),
+            patch("api.routers.recommend.get_explore_traversal", AsyncMock(return_value=traversal)),
             patch("api.routers.recommend.get_taste_heatmap", AsyncMock(return_value=([{"genre": "Electronic", "decade": 1990, "count": 10}], 10))),
             patch("api.routers.recommend.get_blind_spots", AsyncMock(return_value=[])),
             patch("api.routers.recommend.native_ids_for_pairs", AsyncMock(return_value=resolved)),

@@ -56,56 +56,6 @@ WITH r, CASE WHEN m IS NULL THEN 0 ELSE sibling_count + 1 END AS pressing_count
 RETURN r.id AS release_id, pressing_count
 """
 
-# The same question in SQL/PGQ, for the PostgreSQL backend. ADR 0012 migrates the graph reads
-# family by family and a family extension module owns its graph question in both spellings,
-# because the question is the module's, not the orchestrator's — `api/queries/rarity_pg_queries.py`
-# discovers this the same way `api/queries/rarity_queries.py` discovers `PRESSING_QUERY`.
-#
-# The `$ids` page becomes `= ANY(%(ids)s)` over the same page, which is the chunking contract
-# in its PostgreSQL spelling — do not let either of these grow a scan of the whole release set.
-#
-# The two OPTIONAL MATCHes the note above insists on are the two LEFT JOINs here, and for the
-# same reason: `mastered` answers "is this release linked to a master at all" independently of
-# whether that master has any other pressing, so a unique pressing of a known master still
-# reaches the `+ 1` branch and scores 100.0 rather than falling into the 90.0 standalone case.
-# Folding the two into one walk would make the master link contingent on a sibling existing,
-# which is exactly the groovemap-cu2.75 bug.
-#
-# `sibling.release_id <> r.release_id` is the walk-semantics guard. Neo4j derives it from
-# relationship isomorphism (`sibling <> r`); SQL/PGQ lets the same `derived_from` edge bind to
-# both edge patterns, so without it every mastered release would count itself as its own
-# sibling.
-PRESSING_SQL: Final[str] = """
-WITH page AS (
-    SELECT release_id
-    FROM graph.release
-    WHERE release_id = ANY(%(ids)s)
-),
-mastered AS (
-    SELECT DISTINCT release_id
-    FROM GRAPH_TABLE (graph.catalog
-        MATCH (r IS release WHERE r.release_id = ANY(%(ids)s))-[IS derived_from]->(m IS master)
-        COLUMNS (r.release_id AS release_id)
-    ) AS linked
-),
-siblings AS (
-    SELECT release_id, count(DISTINCT sibling_id) AS tally
-    FROM GRAPH_TABLE (graph.catalog
-        MATCH (r IS release WHERE r.release_id = ANY(%(ids)s))
-              -[IS derived_from]->(m IS master)<-[IS derived_from]-(sibling IS release)
-        WHERE sibling.release_id <> r.release_id
-        COLUMNS (r.release_id AS release_id, sibling.release_id AS sibling_id)
-    ) AS walk
-    GROUP BY release_id
-)
-SELECT page.release_id AS release_id,
-       (CASE WHEN mastered.release_id IS NULL THEN 0 ELSE COALESCE(siblings.tally, 0) + 1 END)::bigint AS pressing_count
-FROM page
-LEFT JOIN mastered ON mastered.release_id = page.release_id
-LEFT JOIN siblings ON siblings.release_id = page.release_id
-ORDER BY page.release_id
-"""
-
 
 def compute_pressing_scarcity_score(pressing_count: int) -> float:
     """Score based on number of pressings of the same master.
@@ -137,7 +87,6 @@ class GroovedSignals:
     module_id: str = "grooved"
     weights: Mapping[str, float] = {"pressing_scarcity": PRESSING_WEIGHT}
     queries: Mapping[str, str] = {PRESSING_FACT: PRESSING_QUERY}
-    sql_queries: Mapping[str, str] = {PRESSING_FACT: PRESSING_SQL}
 
     def applies_to(self, families: Collection[str]) -> bool:
         """Return whether any of ``families`` is a grooved family."""
