@@ -38,20 +38,6 @@ test:
 test-integration:
     bash scripts/test-integration.sh
 
-# Opt-in: the integration suite on the PostgreSQL 19 tier, where the parity harness's
-# property-graph families run instead of skipping, plus the SQL/PGQ predicate suite.
-#
-# Not part of `check`. SQL/PGQ and `graph.catalog` need PostgreSQL 19, which is an advisory
-# tier — the required tier is 18, where the property graph is deliberately absent — so this
-# runs against the digest-pinned beta image on request. The digest is the one
-# `database-schema` runs its own PostgreSQL 19 tier against; pinning it by digest is what
-# keeps a re-tagged beta from silently changing what "19beta3" means.
-test-integration-pg19:
-    POSTGRES_INTEGRATION_IMAGE="postgres:19beta3-alpine@sha256:b1692e50613a21e61c424859f943b9e193ae73e5a8c68abd5382dfb235bf15fc" \
-    SCHEMA_PROPERTY_GRAPH=enabled \
-    INTEGRATION_TEST_TARGET="tests/test_real_databases.py tests/test_graph_parity.py" \
-    bash scripts/test-integration.sh
-
 coverage: test
 
 # Run the offline evaluation harness against the committed golden set.

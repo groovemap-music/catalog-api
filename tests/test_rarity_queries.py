@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from api.queries.rarity_pipeline import RarityHandles
 from api.queries.rarity_queries import (
     _CORE_QUERIES,
     CORE_SIGNAL_WEIGHTS,
@@ -414,7 +413,7 @@ class TestGetRarityByArtist:
         mock_driver = MagicMock()
         mock_pool = MagicMock()
         with patch("api.queries.rarity_queries.run_query", new=AsyncMock(return_value=[])):
-            result = await get_rarity_by_artist(RarityHandles(mock_driver, mock_pool), "nonexistent")
+            result = await get_rarity_by_artist(mock_driver, mock_pool, "nonexistent")
         assert result is None
 
     @pytest.mark.asyncio
@@ -430,7 +429,7 @@ class TestGetRarityByArtist:
                 ]
             ),
         ):
-            result = await get_rarity_by_artist(RarityHandles(mock_driver, mock_pool), "123")
+            result = await get_rarity_by_artist(mock_driver, mock_pool, "123")
         assert result is not None
         items, total = result
         assert items == []
@@ -472,7 +471,7 @@ class TestGetRarityByArtist:
                 ]
             ),
         ):
-            result = await get_rarity_by_artist(RarityHandles(mock_driver, mock_pool), "123")
+            result = await get_rarity_by_artist(mock_driver, mock_pool, "123")
         assert result is not None
         items, total = result
         assert len(items) == 1
@@ -492,7 +491,7 @@ class TestGetRarityByArtist:
                 ]
             ),
         ):
-            result = await get_rarity_by_artist(RarityHandles(mock_driver, mock_pool), "123")
+            result = await get_rarity_by_artist(mock_driver, mock_pool, "123")
         assert result is not None
         items, total = result
         assert items == []
@@ -535,7 +534,7 @@ class TestGetRarityByArtist:
                 ]
             ),
         ):
-            result = await get_rarity_by_artist(RarityHandles(mock_driver, mock_pool), "123")
+            result = await get_rarity_by_artist(mock_driver, mock_pool, "123")
         assert result is not None
         items, _total = result
         assert len(items) == 1
@@ -547,7 +546,7 @@ class TestGetRarityByLabel:
         mock_driver = MagicMock()
         mock_pool = MagicMock()
         with patch("api.queries.rarity_queries.run_query", new=AsyncMock(return_value=[])):
-            result = await get_rarity_by_label(RarityHandles(mock_driver, mock_pool), "nonexistent")
+            result = await get_rarity_by_label(mock_driver, mock_pool, "nonexistent")
         assert result is None
 
     @pytest.mark.asyncio
@@ -563,7 +562,7 @@ class TestGetRarityByLabel:
                 ]
             ),
         ):
-            result = await get_rarity_by_label(RarityHandles(mock_driver, mock_pool), "456")
+            result = await get_rarity_by_label(mock_driver, mock_pool, "456")
         assert result is not None
         items, total = result
         assert items == []
@@ -605,7 +604,7 @@ class TestGetRarityByLabel:
                 ]
             ),
         ):
-            result = await get_rarity_by_label(RarityHandles(mock_driver, mock_pool), "456")
+            result = await get_rarity_by_label(mock_driver, mock_pool, "456")
         assert result is not None
         items, total = result
         assert len(items) == 1
@@ -625,7 +624,7 @@ class TestGetRarityByLabel:
                 ]
             ),
         ):
-            result = await get_rarity_by_label(RarityHandles(mock_driver, mock_pool), "456")
+            result = await get_rarity_by_label(mock_driver, mock_pool, "456")
         assert result is not None
         items, total = result
         assert items == []
@@ -755,7 +754,7 @@ class TestFetchAllRaritySignals:
             genre_count=genre_count_data,
         )
         with patch("api.queries.rarity_queries.run_query", side_effect=run_query):
-            results = await fetch_all_rarity_signals(RarityHandles(mock_driver, mock_pool))
+            results = await fetch_all_rarity_signals(mock_driver, mock_pool)
 
         assert len(results) == 1
         r = results[0]
@@ -795,7 +794,7 @@ class TestFetchAllRaritySignals:
 
         run_query = _fake_run_query(pressing=pressing_data, media=media_data)
         with patch("api.queries.rarity_queries.run_query", side_effect=run_query):
-            results = await fetch_all_rarity_signals(RarityHandles(mock_driver, None))
+            results = await fetch_all_rarity_signals(mock_driver, None)
 
         r = results[0]
         assert r["pressing_scarcity"] is None
@@ -822,7 +821,7 @@ class TestFetchAllRaritySignals:
 
         run_query = _fake_run_query(pressing=pressing_data, media=media_data)
         with patch("api.queries.rarity_queries.run_query", side_effect=run_query):
-            results = await fetch_all_rarity_signals(RarityHandles(mock_driver, None))
+            results = await fetch_all_rarity_signals(mock_driver, None)
 
         r = results[0]
         assert r["medium_rarity"] == 98.0  # lathe cut, from the edge
@@ -866,7 +865,7 @@ class TestFetchAllRaritySignals:
             genre_count=genre_count_data,
         )
         with patch("api.queries.rarity_queries.run_query", side_effect=run_query):
-            results = await fetch_all_rarity_signals(RarityHandles(mock_driver, mock_pool))
+            results = await fetch_all_rarity_signals(mock_driver, mock_pool)
 
         assert len(results) == 1
         assert results[0]["hidden_gem_score"] == 0.0
@@ -901,7 +900,7 @@ class TestFetchAllRaritySignals:
             genre_count=genre_count_data,
         )
         with patch("api.queries.rarity_queries.run_query", side_effect=run_query):
-            results = await fetch_all_rarity_signals(RarityHandles(mock_driver, mock_pool))
+            results = await fetch_all_rarity_signals(mock_driver, mock_pool)
 
         assert len(results) == 1
         assert results[0]["collection_prevalence"] == 50.0
@@ -931,7 +930,7 @@ class TestFetchAllRaritySignals:
             genre_count=genre_count_data,
         )
         with patch("api.queries.rarity_queries.run_query", side_effect=run_query):
-            results = await fetch_all_rarity_signals(RarityHandles(mock_driver, None))
+            results = await fetch_all_rarity_signals(mock_driver, None)
 
         assert len(results) == 1
         assert results[0]["collection_prevalence"] == 50.0
@@ -956,7 +955,7 @@ class TestFetchAllRaritySignals:
             return await run_query(driver, cypher, **kwargs)
 
         with patch("api.queries.rarity_queries.run_query", side_effect=_recording):
-            await fetch_all_rarity_signals(RarityHandles(mock_driver, None))
+            await fetch_all_rarity_signals(mock_driver, None)
 
         pressing_cypher = next(c for c in sent if "AS pressing_count" in c)
         # Two independent OPTIONAL MATCH clauses, not one combined pattern that
@@ -1006,7 +1005,7 @@ class TestFetchAllRaritySignals:
             genre_count=genre_count_data,
         )
         with patch("api.queries.rarity_queries.run_query", side_effect=run_query):
-            results = await fetch_all_rarity_signals(RarityHandles(mock_driver, None))
+            results = await fetch_all_rarity_signals(mock_driver, None)
 
         assert results[0]["pressing_scarcity"] == 100.0
 
@@ -1063,7 +1062,7 @@ class TestRarityPaginationTiebreaker:
             "api.queries.rarity_queries.run_query",
             new=AsyncMock(side_effect=[[{"id": "123", "name": "Artist"}], [{"release_id": "1"}]]),
         ):
-            await get_rarity_by_artist(RarityHandles(MagicMock(), mock_pool), "123")
+            await get_rarity_by_artist(MagicMock(), mock_pool, "123")
         assert "ORDER BY rarity_score DESC, release_id" in self._first_order_by_sql(mock_cur)
 
     @pytest.mark.asyncio
@@ -1073,7 +1072,7 @@ class TestRarityPaginationTiebreaker:
             "api.queries.rarity_queries.run_query",
             new=AsyncMock(side_effect=[[{"id": "456", "name": "Label"}], [{"release_id": "1"}]]),
         ):
-            await get_rarity_by_label(RarityHandles(MagicMock(), mock_pool), "456")
+            await get_rarity_by_label(MagicMock(), mock_pool, "456")
         assert "ORDER BY rarity_score DESC, release_id" in self._first_order_by_sql(mock_cur)
 
 
@@ -1086,19 +1085,14 @@ class TestRarityChunking:
     """
 
     def test_no_signal_query_scans_the_whole_release_set(self) -> None:
-        """Every signal query must be scoped to an explicit $ids page.
-
-        The set is discovered the way `fetch_page_signals` discovers it — the core mapping
-        plus whatever the family registry contributes — rather than by scanning the module for
-        constants whose name ends in `_QUERY`. That is the set that actually runs per page, so
-        a signal query cannot escape this by being renamed, and a Cypher constant that is not
-        a signal query (the two vertex lookups behind the artist and label endpoints) is not
-        wrongly held to a contract about pages it has no page of.
-        """
+        """Every signal query must be scoped to an explicit $ids page."""
         from api.queries import rarity_queries
-        from api.rarity import family_queries
 
-        signal_queries = {**rarity_queries._CORE_QUERIES, **family_queries()}
+        signal_queries = {
+            name: value
+            for name, value in vars(rarity_queries).items()
+            if name.endswith("_QUERY") and name not in {"_RELEASE_ID_PAGE_QUERY", "_RELEASE_COUNT_QUERY"}
+        }
         assert signal_queries, "no signal queries discovered — did they get renamed?"
 
         for name, cypher in signal_queries.items():
@@ -1125,7 +1119,7 @@ class TestRarityChunking:
             return await run_query(driver, cypher, **kwargs)
 
         with patch("api.queries.rarity_queries.run_query", side_effect=_recording):
-            await fetch_all_rarity_signals(RarityHandles(mock_driver, None))
+            await fetch_all_rarity_signals(mock_driver, None)
 
         from api.queries.rarity_queries import RARITY_QUERY_TIMEOUT_SECONDS
 
@@ -1153,7 +1147,7 @@ class TestRarityChunking:
             return rows
 
         with patch("api.queries.rarity_queries.run_query", side_effect=_recording):
-            results = await fetch_all_rarity_signals(RarityHandles(mock_driver, None), page_size=page_size)
+            results = await fetch_all_rarity_signals(mock_driver, None, page_size=page_size)
 
         # 25 releases at 10/page -> 10, 10, 5
         assert pages == [10, 10, 5]
@@ -1173,7 +1167,7 @@ class TestRarityChunking:
             return await run_query(driver, cypher, **kwargs)
 
         with patch("api.queries.rarity_queries.run_query", side_effect=_recording):
-            await fetch_all_rarity_signals(RarityHandles(mock_driver, None), page_size=5)
+            await fetch_all_rarity_signals(mock_driver, None, page_size=5)
 
         assert limits and all(limit == 5 for limit in limits)
 
@@ -1191,7 +1185,7 @@ class TestRarityChunking:
             return await run_query(driver, cypher, **kwargs)
 
         with patch("api.queries.rarity_queries.run_query", side_effect=_recording):
-            await fetch_all_rarity_signals(RarityHandles(mock_driver, None), page_size=2)
+            await fetch_all_rarity_signals(mock_driver, None, page_size=2)
 
         assert id_batches
         assert all(len(batch) <= 2 for batch in id_batches)
@@ -1218,7 +1212,7 @@ class TestRarityChunking:
                 page_size=page_size,
             )
             with patch("api.queries.rarity_queries.run_query", side_effect=run_query):
-                scored[page_size] = await fetch_all_rarity_signals(RarityHandles(mock_driver, None), page_size=page_size)
+                scored[page_size] = await fetch_all_rarity_signals(mock_driver, None, page_size=page_size)
 
         # Identical results regardless of how the walk was chunked.
         assert _score(6) == _score(2) == _score(1)
@@ -1239,9 +1233,9 @@ class TestRarityChunking:
 
         with (
             patch("api.queries.rarity_queries.run_query", side_effect=_undercounting),
-            patch("api.queries.rarity_pipeline.logger.warning") as mock_warning,
+            patch("api.queries.rarity_queries.logger.warning") as mock_warning,
         ):
-            await fetch_all_rarity_signals(RarityHandles(mock_driver, None))
+            await fetch_all_rarity_signals(mock_driver, None)
 
         assert mock_warning.called
         assert mock_warning.call_args.kwargs["missing"] == 998
@@ -1252,6 +1246,6 @@ class TestRarityChunking:
         run_query = _fake_run_query()
 
         with patch("api.queries.rarity_queries.run_query", side_effect=run_query):
-            results = await fetch_all_rarity_signals(RarityHandles(mock_driver, None))
+            results = await fetch_all_rarity_signals(mock_driver, None)
 
         assert results == []

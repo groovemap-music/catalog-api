@@ -478,13 +478,10 @@ class NLQToolRunner:
     recorder list supplied by the caller.
     """
 
-    def __init__(self, neo4j_driver: Any, pg_pool: Any, redis: Any, graph_backend: str = "neo4j") -> None:
+    def __init__(self, neo4j_driver: Any, pg_pool: Any, redis: Any) -> None:
         self._driver = neo4j_driver
         self._pool = pg_pool
         self._redis = redis
-        # Which engine the migrated graph-query families resolve to. Handlers that have
-        # not crossed the graph-backend seam continue to call Neo4j directly.
-        self._graph_backend = graph_backend
 
     async def execute(
         self,
@@ -657,15 +654,12 @@ class NLQToolRunner:
     async def _handle_explore_entity(self, params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:
         import common.agent_tools as agent_tools  # noqa: PLC0415
 
-        from api.graph_backend import get_explore_backend  # noqa: PLC0415
         from api.queries import neo4j_queries  # noqa: PLC0415
 
         entity_type = params.get("type", "artist")
-        if entity_type not in neo4j_queries.EXPLORE_DISPATCH:
+        handler = neo4j_queries.EXPLORE_DISPATCH.get(entity_type)
+        if handler is None:
             return {"error": f"Unknown explore type: {entity_type}"}
-        backend = get_explore_backend(self._graph_backend)
-        handler = getattr(backend, f"explore_{entity_type}") if self._graph_backend == "postgres" else neo4j_queries.EXPLORE_DISPATCH[entity_type]
-        handle = self._pool if self._graph_backend == "postgres" else self._driver
 
         tool_fn = {
             "artist": agent_tools.get_artist_details,
@@ -677,15 +671,14 @@ class NLQToolRunner:
         if tool_fn is None:
             return {"error": f"Unknown explore type: {entity_type}"}
 
-        return await tool_fn(driver=handle, name=params.get("name", ""), handler=handler)
+        return await tool_fn(driver=self._driver, name=params.get("name", ""), handler=handler)
 
     async def _handle_find_path(self, params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:
         import common.agent_tools as agent_tools  # noqa: PLC0415
 
-        from api.graph_backend import get_paths_backend  # noqa: PLC0415
         from api.queries import neo4j_queries  # noqa: PLC0415
 
-        async def resolve_name(_driver: Any, name: str, entity_type: str) -> dict[str, Any] | None:
+        async def resolve_name(driver: Any, name: str, entity_type: str) -> dict[str, Any] | None:
             if name and name.isdigit():
                 return {"id": name}
             if not entity_type:
@@ -694,9 +687,7 @@ class NLQToolRunner:
             handler = neo4j_queries.EXPLORE_DISPATCH.get(entity_type)
             if handler is None:
                 return None
-            # Name resolution still uses the existing typed lookup. The path call itself
-            # receives the selected backend's handle below.
-            result: dict[str, Any] | None = await handler(self._driver, name)
+            result: dict[str, Any] | None = await handler(driver, name)
             return result
 
         # Clamp the model-supplied max_depth to the same bound the HTTP
@@ -712,65 +703,38 @@ class NLQToolRunner:
             raw_max_depth = neo4j_queries.DEFAULT_PATH_DEPTH
         max_depth = max(neo4j_queries.MIN_PATH_DEPTH, min(raw_max_depth, neo4j_queries.MAX_PATH_DEPTH))
 
-        backend = get_paths_backend(self._graph_backend)
-        handle = self._pool if self._graph_backend == "postgres" else self._driver
-
-        async def find_path_for_backend(
-            driver: Any,
-            from_id: str,
-            to_id: str,
-            max_depth: int,
-            from_type: str,
-            to_type: str,
-        ) -> dict[str, Any] | None:
-            """Adapt agent-tools' legacy ``driver=`` callback to either backend handle."""
-            return await backend.find_shortest_path(
-                driver,
-                from_id,
-                to_id,
-                max_depth=max_depth,
-                from_type=from_type,
-                to_type=to_type,
-            )
-
         return await agent_tools.find_path(
-            driver=handle,
+            driver=self._driver,
             from_name=params.get("from_id", ""),
             from_type=params.get("from_type", ""),
             to_name=params.get("to_id", ""),
             to_type=params.get("to_type", ""),
             max_depth=max_depth,
             resolve_name=resolve_name,
-            find_shortest_path_fn=find_path_for_backend,
+            find_shortest_path_fn=neo4j_queries.find_shortest_path,
         )
 
     async def _handle_get_collaborators(self, params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:
         import common.agent_tools as agent_tools  # noqa: PLC0415
 
-        from api.graph_backend import get_one_hop_collaborators_backend  # noqa: PLC0415
-
-        backend = get_one_hop_collaborators_backend(self._graph_backend)
-        handle = self._pool if self._graph_backend == "postgres" else self._driver
+        from api.queries import collaborator_queries  # noqa: PLC0415
 
         return await agent_tools.get_collaborators(
-            driver=handle,
+            driver=self._driver,
             artist_id=params.get("artist_id", ""),
             limit=params.get("limit", 20),
-            collaborators_fn=backend.get_collaborators,
+            collaborators_fn=collaborator_queries.get_collaborators,
         )
 
     async def _handle_get_similar_artists(self, params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:
-        from api.graph_backend import get_recommendations_backend  # noqa: PLC0415
-        from api.queries.recommend_queries import compute_similar_artists  # noqa: PLC0415
+        from api.queries.recommend_queries import compute_similar_artists, get_artist_profile, get_candidate_artists  # noqa: PLC0415
 
         artist_id = params.get("artist_id", "")
         limit = params.get("limit", 20)
 
-        backend = get_recommendations_backend(self._graph_backend)
-        handle = self._pool if self._graph_backend == "postgres" else self._driver
         target_profile, candidates = await asyncio.gather(
-            backend.get_artist_profile(handle, artist_id),
-            backend.get_candidate_artists(handle, artist_id),
+            get_artist_profile(self._driver, artist_id),
+            get_candidate_artists(self._driver, artist_id),
         )
         ranked = compute_similar_artists(target_profile, candidates, limit=limit)
         return {"artist_id": artist_id, "similar": ranked}
@@ -787,19 +751,12 @@ class NLQToolRunner:
     async def _handle_get_trends(self, params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:
         import common.agent_tools as agent_tools  # noqa: PLC0415
 
-        from api.graph_backend import get_explore_backend  # noqa: PLC0415
         from api.queries import neo4j_queries  # noqa: PLC0415
 
         entity_type = params.get("type", "artist")
-        backend = get_explore_backend(self._graph_backend)
-        handler = (
-            (getattr(backend, f"trends_{entity_type}") if self._graph_backend == "postgres" else neo4j_queries.TRENDS_DISPATCH[entity_type])
-            if entity_type in neo4j_queries.TRENDS_DISPATCH
-            else None
-        )
-        handle = self._pool if self._graph_backend == "postgres" else self._driver
+        handler = neo4j_queries.TRENDS_DISPATCH.get(entity_type)
         return await agent_tools.get_trends(
-            driver=handle,
+            driver=self._driver,
             entity_type=entity_type,
             name=params.get("name", ""),
             handler=handler,
@@ -808,23 +765,19 @@ class NLQToolRunner:
     async def _handle_get_genre_tree(self, _params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:
         import common.agent_tools as agent_tools  # noqa: PLC0415
 
-        from api.graph_backend import get_genre_tree_backend  # noqa: PLC0415
+        from api.queries import genre_tree_queries  # noqa: PLC0415
 
-        backend = get_genre_tree_backend(self._graph_backend)
-        handle = self._pool if self._graph_backend == "postgres" else self._driver
-        return await agent_tools.get_genre_tree(driver=handle, tree_fn=backend.get_genre_tree)
+        return await agent_tools.get_genre_tree(driver=self._driver, tree_fn=genre_tree_queries.get_genre_tree)
 
     async def _handle_get_graph_stats(self, _params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:
         import common.agent_tools as agent_tools  # noqa: PLC0415
 
-        from api.graph_backend import get_catalog_overview_backend  # noqa: PLC0415
+        from api.queries import neo4j_queries  # noqa: PLC0415
 
-        backend = get_catalog_overview_backend(self._graph_backend)
-        handle = self._pool if self._graph_backend == "postgres" else self._driver
-        return await agent_tools.get_graph_stats(driver=handle, stats_fn=backend.get_graph_stats)
+        return await agent_tools.get_graph_stats(driver=self._driver, stats_fn=neo4j_queries.get_graph_stats)
 
     async def _handle_get_collection_gaps(self, params: dict[str, Any], user_id: str | None) -> dict[str, Any]:
-        from api.graph_backend import get_gap_analysis_backend  # noqa: PLC0415
+        from api.queries import gap_queries  # noqa: PLC0415
         from api.queries.media_filters import UnknownMediaIdsError, resolve_media_filter  # noqa: PLC0415
 
         entity_type = params.get("entity_type", "label")
@@ -838,11 +791,9 @@ class NLQToolRunner:
         except UnknownMediaIdsError as exc:
             return {"error": str(exc)}
 
-        backend = get_gap_analysis_backend(self._graph_backend)
-        handle = self._pool if self._graph_backend == "postgres" else self._driver
         if entity_type == "label":
-            gaps, total = await backend.get_label_gaps(
-                handle,
+            gaps, total = await gap_queries.get_label_gaps(
+                self._driver,
                 user_id,  # type: ignore[arg-type]
                 entity_id,
                 limit=limit,
@@ -850,8 +801,8 @@ class NLQToolRunner:
                 mediums=mediums,
             )
         elif entity_type == "artist":
-            gaps, total = await backend.get_artist_gaps(
-                handle,
+            gaps, total = await gap_queries.get_artist_gaps(
+                self._driver,
                 user_id,  # type: ignore[arg-type]
                 entity_id,
                 limit=limit,
@@ -863,26 +814,20 @@ class NLQToolRunner:
         return {"gaps": gaps, "total": total}
 
     async def _handle_get_taste_fingerprint(self, _params: dict[str, Any], user_id: str | None) -> dict[str, Any]:
-        from api.graph_backend import get_taste_backend  # noqa: PLC0415
+        from api.queries import taste_queries  # noqa: PLC0415
 
-        backend = get_taste_backend(self._graph_backend)
-        handle = self._pool if self._graph_backend == "postgres" else self._driver
-        cells, total = await backend.get_taste_heatmap(handle, user_id)  # type: ignore[arg-type]
+        cells, total = await taste_queries.get_taste_heatmap(self._driver, user_id)  # type: ignore[arg-type]
         return {"heatmap": cells, "total": total}
 
     async def _handle_get_taste_blindspots(self, params: dict[str, Any], user_id: str | None) -> dict[str, Any]:
-        from api.graph_backend import get_taste_backend  # noqa: PLC0415
+        from api.queries import taste_queries  # noqa: PLC0415
 
         limit = params.get("limit", 5)
-        backend = get_taste_backend(self._graph_backend)
-        handle = self._pool if self._graph_backend == "postgres" else self._driver
-        spots = await backend.get_blind_spots(handle, user_id, limit=limit)  # type: ignore[arg-type]
+        spots = await taste_queries.get_blind_spots(self._driver, user_id, limit=limit)  # type: ignore[arg-type]
         return {"blind_spots": spots}
 
     async def _handle_get_collection_stats(self, _params: dict[str, Any], user_id: str | None) -> dict[str, Any]:
-        from api.graph_backend import get_taste_backend  # noqa: PLC0415
+        from api.queries import taste_queries  # noqa: PLC0415
 
-        backend = get_taste_backend(self._graph_backend)
-        handle = self._pool if self._graph_backend == "postgres" else self._driver
-        count = await backend.get_collection_count(handle, user_id)  # type: ignore[arg-type]
+        count = await taste_queries.get_collection_count(self._driver, user_id)  # type: ignore[arg-type]
         return {"collection_count": count}

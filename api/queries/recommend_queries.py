@@ -51,23 +51,23 @@ async def get_artist_profile(driver: AsyncResilientNeo4jDriver, artist_id: str) 
     genre_cypher = """
     MATCH (r:Release)-[:BY]->(a:Artist {id: $artist_id}), (r)-[:IS]->(g:Genre)
     RETURN g.name AS name, count(DISTINCT r) AS count
-    ORDER BY count DESC, name
+    ORDER BY count DESC
     """
     style_cypher = """
     MATCH (r:Release)-[:BY]->(a:Artist {id: $artist_id}), (r)-[:IS]->(s:Style)
     RETURN s.name AS name, count(DISTINCT r) AS count
-    ORDER BY count DESC, name
+    ORDER BY count DESC
     """
     label_cypher = """
     MATCH (r:Release)-[:BY]->(a:Artist {id: $artist_id}), (r)-[:ON]->(l:Label)
     RETURN l.name AS name, count(DISTINCT r) AS count
-    ORDER BY count DESC, name
+    ORDER BY count DESC
     """
     collab_cypher = """
     MATCH (r:Release)-[:BY]->(a:Artist {id: $artist_id}), (r)-[:BY]->(other:Artist)
     WHERE other.id <> $artist_id
     RETURN other.name AS name, count(DISTINCT r) AS count
-    ORDER BY count DESC, name
+    ORDER BY count DESC
     """
     genres, styles, labels, collaborators = await asyncio.gather(
         run_query(driver, genre_cypher, artist_id=artist_id),
@@ -140,13 +140,6 @@ async def _batch_artist_profiles(
     for row in collab_rows:
         if row["artist_id"] in profiles:
             profiles[row["artist_id"]]["collaborators"] = row["items"]
-
-    # Cypher's collect() order is unspecified without an explicit preceding
-    # ORDER BY. Similarity uses a vector, but the API and parity harness should
-    # expose deterministic profile arrays, including unequal-count facets.
-    for profile in profiles.values():
-        for dimension in ("genres", "styles", "labels", "collaborators"):
-            profile[dimension].sort(key=lambda item: (-item["count"], item["name"]))
 
     return profiles
 
@@ -370,7 +363,7 @@ async def get_label_affinity_candidates(driver: AsyncResilientNeo4jDriver, user_
            l.name AS label, rec.year AS year,
            collect(DISTINCT g.name) AS genres,
            label_count AS score
-    ORDER BY score DESC, id
+    ORDER BY score DESC
     LIMIT $limit
     """
     rows = await run_query(driver, cypher, user_id=user_id, limit=limit)
@@ -386,9 +379,7 @@ async def get_blindspot_candidates(driver: AsyncResilientNeo4jDriver, user_id: s
     LIMIT 20
     MATCH (a)<-[:BY]-(other:Release)-[:IS]->(g:Genre)
     WHERE NOT (u)-[:COLLECTED]->(other)
-    WITH u, g.name AS genre, a, other
-    ORDER BY other.id
-    WITH u, genre, count(DISTINCT a) AS artist_overlap, collect(DISTINCT other)[0..5] AS sample
+    WITH u, g.name AS genre, count(DISTINCT a) AS artist_overlap, collect(DISTINCT other)[0..5] AS sample
     OPTIONAL MATCH (u)-[:COLLECTED]->(cr:Release)-[:IS]->(cg:Genre)
     WHERE cg.name = genre
     WITH genre, artist_overlap, sample, count(cr) AS already_have
@@ -402,7 +393,7 @@ async def get_blindspot_candidates(driver: AsyncResilientNeo4jDriver, user_id: s
            rec.year AS year,
            [genre] AS genres,
            artist_overlap AS score
-    ORDER BY score DESC, id
+    ORDER BY score DESC
     LIMIT $limit
     """
     rows = await run_query(driver, cypher, user_id=user_id, limit=limit)
@@ -414,7 +405,6 @@ async def get_explore_traversal(
     entity_type: str,
     entity_id: str,
     hops: int = 2,
-    row_limit: int = 100,
 ) -> list[dict[str, Any]]:
     """Perform variable-length traversal from an entity and return discovered nodes with paths."""
     if not (1 <= hops <= 3):
@@ -452,9 +442,9 @@ async def get_explore_traversal(
            END AS type,
            best.path_names AS path_names, best.rel_types AS rel_types, best.dist AS dist
     ORDER BY best.dist
-    LIMIT $row_limit
+    LIMIT 100
     """
-    return await run_query(driver, cypher, entity_id=entity_id, row_limit=row_limit)
+    return await run_query(driver, cypher, entity_id=entity_id)
 
 
 def score_discoveries(

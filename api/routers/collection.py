@@ -12,9 +12,8 @@ from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
 
 from api.dependencies import require_user
-from api.graph_backend import GapAnalysisBackend, GapMetadataBackend, get_gap_analysis_backend, get_gap_metadata_backend
 from api.queries.collection_media_queries import get_collection_media_summary
-from api.queries.gap_queries import (  # noqa: F401 -- preserve legacy patch points
+from api.queries.gap_queries import (
     get_artist_gap_summary,
     get_artist_gaps,
     get_artist_metadata,
@@ -34,9 +33,6 @@ router = APIRouter()
 
 _neo4j_driver: Any = None
 _pg_pool: Any = None
-_graph_backend = "neo4j"
-_gap_backend: GapAnalysisBackend = get_gap_analysis_backend("neo4j")
-_metadata_backend: GapMetadataBackend = get_gap_metadata_backend("neo4j")
 
 # LRU cache for gap summary counts (keyed by user+entity, with TTL)
 _summary_cache: OrderedDict[tuple[str, str, str], tuple[float, dict[str, Any]]] = OrderedDict()
@@ -45,25 +41,10 @@ _SUMMARY_CACHE_TTL = 300  # 5 minutes
 _summary_cache_lock: asyncio.Lock | None = None  # lazy init to avoid binding to wrong event loop
 
 
-def configure(neo4j: Any, pg_pool: Any, jwt_secret: str | None, graph_backend: str = "neo4j") -> None:  # noqa: ARG001
-    global _neo4j_driver, _pg_pool, _graph_backend, _gap_backend, _metadata_backend
+def configure(neo4j: Any, pg_pool: Any, jwt_secret: str | None) -> None:  # noqa: ARG001
+    global _neo4j_driver, _pg_pool
     _neo4j_driver = neo4j
     _pg_pool = pg_pool
-    _graph_backend = graph_backend
-    _gap_backend = get_gap_analysis_backend(graph_backend)
-    _metadata_backend = get_gap_metadata_backend(graph_backend)
-
-
-def _handle() -> Any:
-    return _pg_pool if _graph_backend == "postgres" else _neo4j_driver
-
-
-def _gap_query(name: str) -> Any:
-    return getattr(_gap_backend, name) if _graph_backend == "postgres" else globals()[name]
-
-
-def _metadata_query(name: str) -> Any:
-    return getattr(_metadata_backend, name) if _graph_backend == "postgres" else globals()[name]
 
 
 def _get_cached_summary(user_id: str, entity_type: str, entity_id: str) -> dict[str, Any] | None:
@@ -164,7 +145,7 @@ async def label_gaps(
     ] = None,
 ) -> JSONResponse:
     """Get releases on a label that the user does not own."""
-    if not _handle():
+    if not _neo4j_driver:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     user_id: str = current_user.get("sub", "")
 
@@ -173,7 +154,7 @@ async def label_gaps(
     except UnknownMediaIdsError as exc:
         return JSONResponse(content={"error": str(exc)}, status_code=400)
 
-    metadata = await _metadata_query("get_label_metadata")(_handle(), label_id)
+    metadata = await get_label_metadata(_neo4j_driver, label_id)
     if metadata is None:
         return JSONResponse(content={"error": "Label not found"}, status_code=404)
 
@@ -183,12 +164,12 @@ async def label_gaps(
     async with _summary_cache_lock:
         summary = _get_cached_summary(user_id, "label", label_id)
     if summary is None:
-        summary = await _gap_query("get_label_gap_summary")(_handle(), user_id, label_id)
+        summary = await get_label_gap_summary(_neo4j_driver, user_id, label_id)
         async with _summary_cache_lock:
             _set_cached_summary(user_id, "label", label_id, summary)
 
-    results, total = await _gap_query("get_label_gaps")(
-        _handle(),
+    results, total = await get_label_gaps(
+        _neo4j_driver,
         user_id,
         label_id,
         limit,
@@ -231,7 +212,7 @@ async def artist_gaps(
     ] = None,
 ) -> JSONResponse:
     """Get releases by an artist that the user does not own."""
-    if not _handle():
+    if not _neo4j_driver:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     user_id: str = current_user.get("sub", "")
 
@@ -240,7 +221,7 @@ async def artist_gaps(
     except UnknownMediaIdsError as exc:
         return JSONResponse(content={"error": str(exc)}, status_code=400)
 
-    metadata = await _metadata_query("get_artist_metadata")(_handle(), artist_id)
+    metadata = await get_artist_metadata(_neo4j_driver, artist_id)
     if metadata is None:
         return JSONResponse(content={"error": "Artist not found"}, status_code=404)
 
@@ -250,12 +231,12 @@ async def artist_gaps(
     async with _summary_cache_lock:
         summary = _get_cached_summary(user_id, "artist", artist_id)
     if summary is None:
-        summary = await _gap_query("get_artist_gap_summary")(_handle(), user_id, artist_id)
+        summary = await get_artist_gap_summary(_neo4j_driver, user_id, artist_id)
         async with _summary_cache_lock:
             _set_cached_summary(user_id, "artist", artist_id, summary)
 
-    results, total = await _gap_query("get_artist_gaps")(
-        _handle(),
+    results, total = await get_artist_gaps(
+        _neo4j_driver,
         user_id,
         artist_id,
         limit,
@@ -298,7 +279,7 @@ async def master_gaps(
     ] = None,
 ) -> JSONResponse:
     """Get editions of a master release that the user does not own."""
-    if not _handle():
+    if not _neo4j_driver:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     user_id: str = current_user.get("sub", "")
 
@@ -307,7 +288,7 @@ async def master_gaps(
     except UnknownMediaIdsError as exc:
         return JSONResponse(content={"error": str(exc)}, status_code=400)
 
-    metadata = await _metadata_query("get_master_metadata")(_handle(), master_id)
+    metadata = await get_master_metadata(_neo4j_driver, master_id)
     if metadata is None:
         return JSONResponse(content={"error": "Master not found"}, status_code=404)
 
@@ -317,12 +298,12 @@ async def master_gaps(
     async with _summary_cache_lock:
         summary = _get_cached_summary(user_id, "master", master_id)
     if summary is None:
-        summary = await _gap_query("get_master_gap_summary")(_handle(), user_id, master_id)
+        summary = await get_master_gap_summary(_neo4j_driver, user_id, master_id)
         async with _summary_cache_lock:
             _set_cached_summary(user_id, "master", master_id, summary)
 
-    results, total = await _gap_query("get_master_gaps")(
-        _handle(),
+    results, total = await get_master_gaps(
+        _neo4j_driver,
         user_id,
         master_id,
         limit,
