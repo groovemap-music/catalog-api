@@ -180,6 +180,8 @@ class TestResendNotificationChannel:
             # breaking the password reset UX when email delivery fails
             await channel.send_password_reset("user@example.com", "https://example.com/reset")
 
+        mock_client.post.assert_awaited_once()
+
     @pytest.mark.asyncio
     async def test_send_password_reset_swallows_non_2xx_response(self) -> None:
         from api.notifications import ResendNotificationChannel
@@ -196,6 +198,8 @@ class TestResendNotificationChannel:
             )
 
             await channel.send_password_reset("user@example.com", "https://example.com/reset")
+
+        mock_response.raise_for_status.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_send_password_reset_success_does_not_log_email(self) -> None:

@@ -1486,10 +1486,12 @@ class TestLifespanShutdownClosesAnthropicClient:
             patch("api.api.AsyncResilientNeo4jDriver", return_value=mock_neo4j),
             patch("api.api.run_collector", new_callable=AsyncMock),
             patch("api.api._prewarm_search_cache", new_callable=AsyncMock),
+            patch("anthropic.AsyncAnthropic") as anthropic_constructor,
         ):
             async with lifespan(MagicMock()):
                 pass  # Should not raise
 
+        anthropic_constructor.assert_not_called()
         mock_neo4j.close.assert_awaited_once()
         mock_pool.close.assert_awaited_once()
         mock_redis.aclose.assert_awaited_once()

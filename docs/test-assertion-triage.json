@@ -1,0 +1,435 @@
+[
+  {
+    "id": "tests/nlq/test_engine.py::TestNLQEngineOnStatusCallback.test_on_status_called_during_tool_use",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "strengthened",
+    "reason": "Checks returned summary and tool list as well as progress notification."
+  },
+  {
+    "id": "tests/test_activity.py::TestPayloadConformance.test_both_validators_accept_the_sample_payload",
+    "baseline_kind": "assertion_free",
+    "origin": "later-finding",
+    "disposition": "intentional",
+    "reason": "Delegated outcome: both schema validators must accept each valid sample without a validation exception; invalid-payload tests exercise rejection separately.",
+    "current_kind": "assertion_free"
+  },
+  {
+    "id": "tests/test_activity.py::TestStartupPartitions.test_a_failing_ensure_does_not_raise",
+    "baseline_kind": "assertion_free",
+    "origin": "later-finding",
+    "disposition": "intentional",
+    "reason": "Intentional failure-tolerance interaction: the failing DDL execute is awaited and cannot abort startup.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_activity.py::TestStartupPartitions.test_an_unconfigured_pool_ensures_nothing",
+    "baseline_kind": "assertion_free",
+    "origin": "later-finding",
+    "disposition": "intentional",
+    "reason": "Intentional no-raise: startup partitions are optional when no activity pool is configured.",
+    "current_kind": "assertion_free"
+  },
+  {
+    "id": "tests/test_activity_emission.py::TestBatchWriter.test_a_failing_batch_write_does_not_raise",
+    "baseline_kind": "assertion_free",
+    "origin": "later-finding",
+    "disposition": "intentional",
+    "reason": "Intentional failure-tolerance interaction: batch insertion is attempted but activity storage failure cannot break the originating request.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_admin_endpoints.py::TestRunProjectionJob.test_noop_when_pool_or_driver_missing",
+    "baseline_kind": "assertion_free",
+    "origin": "later-finding",
+    "disposition": "intentional",
+    "reason": "Intentional no-raise: projection maintenance safely short-circuits when its storage dependencies are absent.",
+    "current_kind": "assertion_free"
+  },
+  {
+    "id": "tests/test_admin_endpoints.py::TestTrackExtraction.test_failed_extraction",
+    "baseline_kind": "assertion_free",
+    "origin": "historical-44",
+    "disposition": "strengthened",
+    "reason": "Checks persisted failed status, original error, record counts, and extraction ID."
+  },
+  {
+    "id": "tests/test_admin_endpoints.py::TestTrackExtraction.test_no_pool",
+    "baseline_kind": "assertion_free",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional no-raise: extraction tracking is optional without a configured persistence pool.",
+    "current_kind": "assertion_free"
+  },
+  {
+    "id": "tests/test_admin_endpoints.py::TestTrackExtraction.test_non_200_health_response",
+    "baseline_kind": "assertion_free",
+    "origin": "historical-44",
+    "disposition": "strengthened",
+    "reason": "Checks failed persisted status after five non-success health responses."
+  },
+  {
+    "id": "tests/test_admin_endpoints.py::TestTrackExtraction.test_unreachable_extractor",
+    "baseline_kind": "assertion_free",
+    "origin": "historical-44",
+    "disposition": "strengthened",
+    "reason": "Checks failed persisted status after five failed health requests."
+  },
+  {
+    "id": "tests/test_admin_setup.py::test_main_add_calls_add_admin_using_env_password",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional credential-source interaction: use ADMIN_PASSWORD and never invoke the interactive password prompt.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_admin_setup.py::test_main_add_prompts_interactively_when_no_env_password",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional credential-source interaction: without ADMIN_PASSWORD, request a non-echoed password and pass it to admin creation.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_admin_setup.py::test_main_list_calls_list_admins",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional CLI routing interaction: --list must dispatch to the admin-list operation with configured connection info.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_api.py::TestLifespanShutdownClosesAnthropicClient.test_shutdown_closes_anthropic_client_when_nlq_enabled",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional lifecycle interaction: await closing the created NLQ client and every other lifespan-owned resource.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_api.py::TestLifespanShutdownClosesAnthropicClient.test_shutdown_skips_anthropic_close_when_nlq_disabled",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional lifecycle interaction: forbid constructing an NLQ client while closing all enabled lifespan-owned resources.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_audit_log.py::TestRecordAuditEntry.test_does_not_raise_on_db_error",
+    "baseline_kind": "assertion_free",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional failure-tolerance interaction: attempted audit insertion must not propagate a database outage into the admin action.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_audit_log.py::TestRecordAuditEntry.test_skips_when_pool_is_none",
+    "baseline_kind": "assertion_free",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional no-raise: audit recording is disabled when no pool is configured.",
+    "current_kind": "assertion_free"
+  },
+  {
+    "id": "tests/test_auth.py::TestHkdfKeyDerivation.test_derive_key_returns_valid_fernet_key",
+    "baseline_kind": "assertion_free",
+    "origin": "historical-44",
+    "disposition": "strengthened",
+    "reason": "Encrypts and decrypts synthetic plaintext with the derived key."
+  },
+  {
+    "id": "tests/test_cache.py::TestRecommendCache.test_invalidate_user_no_keys",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional negative cache interaction: an empty scan must never issue a delete.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_cache.py::TestRecommendCache.test_invalidate_user_redis_error",
+    "baseline_kind": "assertion_free",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional failure-tolerance interaction: invalidation attempts its failing scan and degrades without propagating the outage.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_cache.py::TestRecommendCache.test_set_redis_error",
+    "baseline_kind": "assertion_free",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional failure-tolerance interaction: the attempted cache write is awaited but unavailable cache storage cannot fail the request.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_credits_queries.py::TestAutocompletePerson.test_no_double_wildcard",
+    "baseline_kind": "assertion_free",
+    "origin": "historical-44",
+    "disposition": "strengthened",
+    "reason": "Checks emitted Lucene parameters: a literal escaped input star and one prefix wildcard."
+  },
+  {
+    "id": "tests/test_dependencies.py::TestConfigure.test_sets_jwt_secret",
+    "baseline_kind": "assertion_free",
+    "origin": "historical-44",
+    "disposition": "strengthened",
+    "reason": "Uses configured authentication to validate a signed token and assert its subject."
+  },
+  {
+    "id": "tests/test_dependencies.py::TestConfigure.test_sets_none_secret",
+    "baseline_kind": "assertion_free",
+    "origin": "historical-44",
+    "disposition": "strengthened",
+    "reason": "Requires optional authentication to return no user when the secret is disabled."
+  },
+  {
+    "id": "tests/test_discogs_service.py::TestHmacSha1Signature.test_returns_base64_string",
+    "baseline_kind": "assertion_free",
+    "origin": "historical-44",
+    "disposition": "strengthened",
+    "reason": "Requires strict Base64 decoding and the 20-byte SHA-1 digest shape."
+  },
+  {
+    "id": "tests/test_dockerfile_contract.py::test_image_source_allows_ci_dependency_checkout_and_build_artifacts",
+    "baseline_kind": "assertion_free",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Delegated outcome: subprocess check=True requires the image-source preflight to accept permitted dependency checkout and ignored build artifacts.",
+    "current_kind": "assertion_free"
+  },
+  {
+    "id": "tests/test_explore.py::TestReleaseDetailCatalogBlocks.test_blocks_are_read_for_the_requested_release",
+    "baseline_kind": "call_only",
+    "origin": "later-finding",
+    "disposition": "strengthened",
+    "reason": "Checks successful HTTP response and serialized catalog blocks as well as query ID."
+  },
+  {
+    "id": "tests/test_extraction_analysis.py::TestViolationsReadBoundedAndOffloaded.test_get_violations_runs_off_the_event_loop",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "strengthened",
+    "reason": "Checks returned JSONL records and injected entity type as well as thread offload."
+  },
+  {
+    "id": "tests/test_graph_explorer_contract.py::test_graph_explorer_contract_matches_openapi",
+    "baseline_kind": "assertion_free",
+    "origin": "later-finding",
+    "disposition": "intentional",
+    "reason": "Delegated outcome: assert_contract_matches_openapi asserts every promised Graph Explorer method/path and fails on drift.",
+    "current_kind": "assertion_free"
+  },
+  {
+    "id": "tests/test_label_dna_queries.py::TestLabelMediaProfile.test_no_fallback_when_families_present",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "strengthened",
+    "reason": "Checks the returned nested family/medium profile as well as absence of fallback."
+  },
+  {
+    "id": "tests/test_lookup.py::TestLookupActivity.test_anonymous_lookup_records_nothing",
+    "baseline_kind": "call_only",
+    "origin": "later-finding",
+    "disposition": "strengthened",
+    "reason": "Checks successful resolved lookup response while forbidding anonymous activity emission."
+  },
+  {
+    "id": "tests/test_mcp_server_contract.py::test_mcp_server_contract_matches_openapi",
+    "baseline_kind": "assertion_free",
+    "origin": "later-finding",
+    "disposition": "intentional",
+    "reason": "Delegated outcome: assert_contract_matches_openapi asserts every promised MCP method/path and fails on drift.",
+    "current_kind": "assertion_free"
+  },
+  {
+    "id": "tests/test_media_backfill.py::TestMain.test_collection_only_skips_wantlist",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional CLI routing interaction: collection-only must invoke collection and never invoke wantlist backfill.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_media_backfill.py::TestMain.test_runs_both_backfills_by_default",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional CLI routing interaction: default mode must invoke both collection and wantlist backfills.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_media_backfill.py::TestMain.test_wantlist_only_skips_collection",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional CLI routing interaction: wantlist-only must invoke wantlist and never invoke collection backfill.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_metrics_collector.py::TestPersistMetrics.test_noop_on_empty",
+    "baseline_kind": "assertion_free",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional negative database interaction: no pool connection may be acquired when both metric inputs are empty.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_neo4j_queries.py::TestAutocompleteQueries.test_autocomplete_artist_escapes_query",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "strengthened",
+    "reason": "Checks escaped Lucene query and requested result limit at the database boundary."
+  },
+  {
+    "id": "tests/test_nlq_sse.py::test_streaming_query_does_not_cache_for_authenticated_user",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "strengthened",
+    "reason": "Checks the private SSE result is delivered while no public cache write occurs."
+  },
+  {
+    "id": "tests/test_notifications.py::TestLogNotificationChannel.test_send_password_reset_does_not_raise",
+    "baseline_kind": "assertion_free",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional no-raise: the development log channel accepts a password-reset notification without a delivery backend; separate tests enforce log privacy.",
+    "current_kind": "assertion_free"
+  },
+  {
+    "id": "tests/test_notifications.py::TestResendNotificationChannel.test_send_password_reset_swallows_api_error",
+    "baseline_kind": "assertion_free",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional failure-tolerance interaction: the attempted HTTP POST raises but email failure must not break the reset flow.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_notifications.py::TestResendNotificationChannel.test_send_password_reset_swallows_non_2xx_response",
+    "baseline_kind": "assertion_free",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional failure-tolerance interaction: response status validation is exercised and its error must not break the reset flow.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_python_support_contract.py::test_runtime_images_and_annotations_match_the_managed_runtime",
+    "baseline_kind": "assertion_free",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Delegated outcome: _assert_pinned_python_image validates both runtime image references and required annotations with explicit assertions.",
+    "current_kind": "assertion_free"
+  },
+  {
+    "id": "tests/test_query_helpers.py::TestExplainFallback.test_explain_calls_log_explain_result",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional instrumentation interaction: preserve the original query, parameters, plan summary, and error passed to diagnostic logging.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_query_helpers.py::TestExplainFallback.test_explain_failure_is_swallowed",
+    "baseline_kind": "assertion_free",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional failure-tolerance interaction: EXPLAIN is attempted with the original query; diagnostic failure must not replace the application error.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_query_helpers.py::TestExplainFallback.test_explain_passes_database",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional database-routing interaction: diagnostic EXPLAIN must use the same database as the failed application query.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_query_helpers.py::TestRunCount.test_passes_database",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional database-routing interaction: the exact configured database must be passed to the driver session; result decoding is tested separately.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_query_helpers.py::TestRunQuery.test_logs_at_debug",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional instrumentation interaction: forward Cypher and parameters to the shared logging boundary; filtering belongs to that dependency.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_query_helpers.py::TestRunQuery.test_no_database_kwarg_when_none",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional database-routing interaction: omit an unspecified database so the driver retains its default.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_query_helpers.py::TestRunQuery.test_no_log_at_info",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional instrumentation interaction despite the historical name: the shared logging delegate is still called at INFO; this is not evidence that log filtering works.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_query_helpers.py::TestRunQuery.test_passes_database",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional database-routing interaction: the exact configured database must be passed to the driver session; result decoding is tested separately.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_query_helpers.py::TestRunSingle.test_passes_database",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional database-routing interaction: the exact configured database must be passed to the driver session; result decoding is tested separately.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_reattach.py::TestRunReattachJob.test_noop_when_pool_missing",
+    "baseline_kind": "assertion_free",
+    "origin": "later-finding",
+    "disposition": "intentional",
+    "reason": "Intentional no-raise: identity reattachment is disabled when its PostgreSQL dependency is missing.",
+    "current_kind": "assertion_free"
+  },
+  {
+    "id": "tests/test_reattach_trigger.py::test_lifespan_starts_the_watcher_when_enabled",
+    "baseline_kind": "call_only",
+    "origin": "later-finding",
+    "disposition": "intentional",
+    "reason": "Intentional lifecycle interaction: enabled identity maintenance starts and awaits the watcher with configured interval and storage handles.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_setup.py::TestMain.test_show_calls_show_config",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional CLI routing interaction: --show invokes configuration display; content is verified separately.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_syncer.py::TestReconcileStaleSyncHistory.test_no_stale_rows_is_a_no_op_beyond_the_update",
+    "baseline_kind": "call_only",
+    "origin": "historical-44",
+    "disposition": "intentional",
+    "reason": "Intentional negative database interaction: reconciliation executes exactly one update when no stale rows require follow-up.",
+    "current_kind": "call_only"
+  },
+  {
+    "id": "tests/test_syncer_identity.py::TestRecorderWiring.test_configure_none_restores_the_no_op",
+    "baseline_kind": "call_only",
+    "origin": "later-finding",
+    "disposition": "intentional",
+    "reason": "Intentional recorder-disabling interaction: configuring None prevents activity emission during an otherwise valid collection sync.",
+    "current_kind": "call_only"
+  }
+]

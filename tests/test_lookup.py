@@ -556,9 +556,13 @@ class TestLookupActivity:
     def test_anonymous_lookup_records_nothing(self, test_client: TestClient) -> None:
         resolve, fetch = _patched_lookup(NATIVE_ID, [DISCOGS_ROW])
         with resolve, fetch, patch("api.activity.record_event", new_callable=AsyncMock) as mock_record:
-            test_client.get("/api/lookup/barcode/12345678")
+            response = test_client.get("/api/lookup/barcode/12345678")
 
         mock_record.assert_not_awaited()
+
+        assert response.status_code == 200
+        assert response.json()["gm_id"] == str(NATIVE_ID)
+        assert response.json()["releases"] == [DISCOGS_ROW]
 
     def test_signed_in_lookup_records_a_search_query(self, test_client: TestClient, auth_headers: dict[str, str]) -> None:
         resolve, fetch = _patched_lookup(NATIVE_ID, [DISCOGS_ROW])

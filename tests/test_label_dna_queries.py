@@ -388,8 +388,10 @@ class TestLabelMediaProfile:
         mock_mediums.return_value = [{"family": "vinyl", "medium_id": "vinyl_12", "medium_label": '12" Vinyl', "count": 1}]
 
         driver = AsyncMock()
-        await get_label_media_profile(driver, "L1")
+        result = await get_label_media_profile(driver, "L1")
         mock_fallback.assert_not_called()
+
+        assert result == [{"family": "vinyl", "count": 1, "mediums": [{"id": "vinyl_12", "label": '12" Vinyl', "count": 1}]}]
 
 
 class TestLabelFullProfile:

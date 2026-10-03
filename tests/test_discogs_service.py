@@ -86,7 +86,7 @@ class TestHmacSha1Signature:
         # base64 chars only
         import base64
 
-        base64.b64decode(sig + "==")  # should not raise
+        assert len(base64.b64decode(sig, validate=True)) == 20  # SHA-1 digest, without lenient decoding.
 
     def test_different_methods_produce_different_sigs(self) -> None:
         params = {"oauth_nonce": "abc", "oauth_timestamp": "1234"}

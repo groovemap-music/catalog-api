@@ -527,6 +527,8 @@ class TestPersistMetrics:
         # Should not raise or call anything
         await persist_metrics(mock_pool, [], [])
 
+        mock_pool.connection.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Task 5: prune_old_metrics

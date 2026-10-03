@@ -442,6 +442,8 @@ class TestStartupPartitions:
         mock_cur.execute.side_effect = RuntimeError("no DDL permission")
         await activity.ensure_startup_partitions()
 
+        mock_cur.execute.assert_awaited_once()
+
 
 class TestConfiguration:
     """The wiring the rest of the service reaches the recorder through."""

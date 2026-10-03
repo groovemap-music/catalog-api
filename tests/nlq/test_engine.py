@@ -328,9 +328,12 @@ class TestNLQEngineOnStatusCallback:
         on_status = AsyncMock()
 
         engine = NLQEngine(config=config, client=client, tool_runner=runner)
-        await engine.run("Search for test", NLQContext(), on_status=on_status)
+        result = await engine.run("Search for test", NLQContext(), on_status=on_status)
 
         on_status.assert_called_once_with("Running search...")
+
+        assert result.summary == "Found results."
+        assert result.tools_used == ["search"]
 
 
 class TestNLQEngineEntityDedup:

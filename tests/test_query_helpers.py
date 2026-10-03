@@ -428,6 +428,8 @@ class TestExplainFallback:
         # Should NOT raise — failure is swallowed
         await _try_explain_on_error(driver, "MATCH (n) RETURN n", {"x": 1}, original_error)
 
+        explain_session.run.assert_awaited_once_with("EXPLAIN MATCH (n) RETURN n", {"x": 1})
+
     @pytest.mark.asyncio
     async def test_explain_passes_database(self) -> None:
         """_try_explain_on_error passes database kwarg to session."""
