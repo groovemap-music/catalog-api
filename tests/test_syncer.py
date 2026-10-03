@@ -4,11 +4,14 @@ import asyncio
 import json
 from collections.abc import Generator
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, create_autospec, patch
 from uuid import UUID
 
 import pytest
+from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver
 from common.media import map_discogs_formats
+from neo4j import AsyncResult, AsyncSession
+from psycopg import AsyncConnection, AsyncCursor, AsyncTransaction
 
 from api.syncer import (
     MAX_RATE_LIMIT_RETRIES,
@@ -94,34 +97,25 @@ def _make_want_item(release_id: int = 456, **overrides: object) -> dict:
 
 @pytest.fixture
 def mock_pg_pool() -> MagicMock:
-    """Mock AsyncPostgreSQLPool."""
-    pool = MagicMock()
-    mock_cur = AsyncMock()
-    mock_cur.execute = AsyncMock()
-    mock_cur.executemany = AsyncMock()
-    mock_cur.fetchone = AsyncMock(return_value=None)
-    mock_cur.fetchall = AsyncMock(return_value=[])
+    """Strict runtime pool/connection/cursor doubles with synchronous factories."""
+    cursor = create_autospec(AsyncCursor, instance=True, spec_set=True)
+    cursor.__aenter__.return_value = cursor
+    cursor.__aexit__.return_value = False
+    cursor.fetchone.return_value = None
+    cursor.fetchall.return_value = []
 
-    mock_conn = AsyncMock()
-    cur_ctx = AsyncMock()
-    cur_ctx.__aenter__ = AsyncMock(return_value=mock_cur)
-    cur_ctx.__aexit__ = AsyncMock(return_value=False)
-    mock_conn.cursor = MagicMock(return_value=cur_ctx)
+    transaction = create_autospec(AsyncTransaction, instance=True, spec_set=True)
+    transaction.__aenter__.return_value = transaction
+    transaction.__aexit__.return_value = False
 
-    # The pool hands out autocommit connections, so every page opens an
-    # explicit transaction around its resolve + upsert + copy-minting. On a
-    # bare AsyncMock, conn.transaction() would return a coroutine rather than
-    # a context manager, so it is wired the same way conn.cursor() is.
-    tx_ctx = AsyncMock()
-    tx_ctx.__aenter__ = AsyncMock(return_value=tx_ctx)
-    tx_ctx.__aexit__ = AsyncMock(return_value=False)
-    mock_conn.transaction = MagicMock(return_value=tx_ctx)
+    connection = create_autospec(AsyncConnection, instance=True, spec_set=True)
+    connection.__aenter__.return_value = connection
+    connection.__aexit__.return_value = False
+    connection.cursor.return_value = cursor
+    connection.transaction.return_value = transaction
 
-    conn_ctx = AsyncMock()
-    conn_ctx.__aenter__ = AsyncMock(return_value=mock_conn)
-    conn_ctx.__aexit__ = AsyncMock(return_value=False)
-    pool.connection = MagicMock(return_value=conn_ctx)
-    pool._mock_cur = mock_cur
+    pool = create_autospec(AsyncPostgreSQLPool, instance=True, spec_set=True)
+    pool.connection.return_value = connection
     return pool
 
 
@@ -146,21 +140,60 @@ def pg_calls(mock_pg_pool: MagicMock, fragment: str) -> list[Any]:
     A sync page now issues several statements per connection, so a test that
     wants one of them names it instead of assuming it is the only one.
     """
-    return [call for call in mock_pg_pool._mock_cur.execute.await_args_list if fragment in call.args[0]]
+    return [call for call in mock_pg_pool.connection.return_value.cursor.return_value.execute.await_args_list if fragment in call.args[0]]
 
 
 @pytest.fixture
 def mock_neo4j() -> MagicMock:
-    """Mock AsyncResilientNeo4jDriver."""
-    driver = MagicMock()
-    mock_session = AsyncMock()
-    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-    mock_session.__aexit__ = AsyncMock(return_value=False)
-    mock_session.run = AsyncMock()
+    """Strict runtime driver/session/result doubles with awaitable query methods."""
+    result = create_autospec(AsyncResult, instance=True, spec_set=True)
+    result.__aiter__.return_value = []
+    result.data.return_value = []
+    result.single.return_value = None
+    result.values.return_value = []
 
-    driver.session = MagicMock(return_value=mock_session)
-    driver._mock_session = mock_session
+    session = create_autospec(AsyncSession, instance=True, spec_set=True)
+    session.__aenter__.return_value = session
+    session.__aexit__.return_value = False
+    session.run.return_value = result
+
+    driver = create_autospec(AsyncResilientNeo4jDriver, instance=True, spec_set=True)
+    driver.session.return_value = session
     return driver
+
+
+class TestDatabaseFixtureContracts:
+    """Fixture boundaries reject APIs the real drivers do not expose."""
+
+    @pytest.mark.asyncio
+    async def test_postgres_contexts_and_query_signature(self, mock_pg_pool: MagicMock) -> None:
+        async with mock_pg_pool.connection() as connection, connection.transaction() as transaction, connection.cursor() as cursor:
+            await cursor.execute("SELECT 1")
+        assert transaction is connection.transaction.return_value
+        cursor.execute.assert_awaited_once_with("SELECT 1")
+        connection.__aexit__.assert_awaited_once_with(None, None, None)
+        cursor.__aexit__.assert_awaited_once_with(None, None, None)
+        with pytest.raises(AttributeError):
+            cursor.fetch_everything()
+        with pytest.raises(TypeError):
+            cursor.execute()
+        with pytest.raises(AttributeError):
+            mock_pg_pool.nonexistent_pool_setting = True
+
+    @pytest.mark.asyncio
+    async def test_neo4j_context_query_and_result_contract(self, mock_neo4j: MagicMock) -> None:
+        async with mock_neo4j.session(database="neo4j") as session:
+            result = await session.run("RETURN 1")
+            await result.consume()
+        session.run.assert_awaited_once_with("RETURN 1")
+        result.consume.assert_awaited_once_with()
+        session.__aexit__.assert_awaited_once_with(None, None, None)
+        with pytest.raises(AttributeError):
+            session.execute_sql("SELECT 1")
+        with pytest.raises(TypeError):
+            session.run()
+        with pytest.raises(AttributeError):
+            result.fetch_all_rows()
 
 
 class TestSyncDelaySeconds:
@@ -249,10 +282,10 @@ class TestSyncCollection:
             )
 
         assert result == 1
-        mock_pg_pool._mock_cur.executemany.assert_awaited_once()
+        mock_pg_pool.connection.return_value.cursor.return_value.executemany.assert_awaited_once()
         # 2 session.run calls: the per-page upsert MERGE, then the post-loop
         # stale-row reconciliation DELETE (groovemap-cu2.9).
-        assert mock_neo4j._mock_session.run.await_count == 2
+        assert mock_neo4j.session.return_value.run.await_count == 2
 
     @pytest.mark.asyncio
     async def test_rate_limited_429_retries(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
@@ -323,7 +356,7 @@ class TestSyncCollection:
         assert mock_sleep.await_count == MAX_RATE_LIMIT_RETRIES
         # A raised sync must NOT trigger reconciliation deletes — the fetched
         # data was incomplete, so we cannot tell what's genuinely stale.
-        mock_pg_pool._mock_cur.execute.assert_not_awaited()
+        mock_pg_pool.connection.return_value.cursor.return_value.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_rate_limit_counter_resets_on_success(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
@@ -396,7 +429,7 @@ class TestSyncCollection:
                 )
 
         # A raised sync must NOT trigger reconciliation deletes.
-        mock_pg_pool._mock_cur.execute.assert_not_awaited()
+        mock_pg_pool.connection.return_value.cursor.return_value.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_empty_releases_breaks_loop(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
@@ -453,7 +486,7 @@ class TestSyncCollection:
             )
 
         assert result == 0
-        mock_pg_pool._mock_cur.executemany.assert_not_awaited()
+        mock_pg_pool.connection.return_value.cursor.return_value.executemany.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_multiple_pages(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
@@ -574,8 +607,8 @@ class TestSyncCollection:
 
         # Neo4j: the reconciliation DELETE is the LAST session.run call (after
         # the per-page upsert MERGE).
-        assert mock_neo4j._mock_session.run.await_count == 2
-        reconcile_call = mock_neo4j._mock_session.run.await_args_list[-1]
+        assert mock_neo4j.session.return_value.run.await_count == 2
+        reconcile_call = mock_neo4j.session.return_value.run.await_args_list[-1]
         reconcile_cypher = reconcile_call[0][0]
         reconcile_params = reconcile_call[0][1]
         assert "DELETE c" in reconcile_cypher
@@ -618,14 +651,14 @@ class TestSyncCollection:
             )
 
         # The upsert SQL must not rely on PG's own clock at all.
-        upsert_call = mock_pg_pool._mock_cur.executemany.await_args
+        upsert_call = mock_pg_pool.connection.return_value.cursor.return_value.executemany.await_args
         upsert_sql, upsert_params = upsert_call.args[0], upsert_call.args[1]
         assert "NOW()" not in upsert_sql
         upserted_updated_at = upsert_params[0][-1]
 
         # The Neo4j upsert's synced_at (first session.run call) must be the exact
         # same value/clock source.
-        upsert_cypher_call = mock_neo4j._mock_session.run.await_args_list[0]
+        upsert_cypher_call = mock_neo4j.session.return_value.run.await_args_list[0]
         neo4j_synced_at = upsert_cypher_call[0][1]["synced_at"]
         assert upserted_updated_at.isoformat() == neo4j_synced_at
 
@@ -635,7 +668,7 @@ class TestSyncCollection:
         pg_cutoff = pg_delete_call.args[1][1]
         assert pg_cutoff == upserted_updated_at
 
-        neo4j_reconcile_call = mock_neo4j._mock_session.run.await_args_list[-1]
+        neo4j_reconcile_call = mock_neo4j.session.return_value.run.await_args_list[-1]
         assert neo4j_reconcile_call[0][1]["sync_started"] == neo4j_synced_at
 
     @pytest.mark.asyncio
@@ -669,8 +702,8 @@ class TestSyncCollection:
                     mock_neo4j,
                 )
 
-        mock_pg_pool._mock_cur.execute.assert_not_awaited()
-        mock_neo4j._mock_session.run.assert_not_awaited()
+        mock_pg_pool.connection.return_value.cursor.return_value.execute.assert_not_awaited()
+        mock_neo4j.session.return_value.run.assert_not_awaited()
 
 
 class TestCollectionMedia:
@@ -714,7 +747,7 @@ class TestCollectionMedia:
                 mock_neo4j,
             )
 
-        call_args = mock_pg_pool._mock_cur.executemany.await_args
+        call_args = mock_pg_pool.connection.return_value.cursor.return_value.executemany.await_args
         upsert_sql, batch_params = call_args.args[0], call_args.args[1]
         assert len(batch_params) == 1
 
@@ -765,7 +798,7 @@ class TestCollectionMedia:
                 mock_neo4j,
             )
 
-        call_args = mock_pg_pool._mock_cur.executemany.await_args
+        call_args = mock_pg_pool.connection.return_value.cursor.return_value.executemany.await_args
         batch_params = call_args.args[1]
         media_json = batch_params[0][12]
         assert media_json is not None
@@ -805,12 +838,12 @@ class TestSyncWantlist:
 
         assert result == 1
         # 1 executemany call: the wantlist upsert.
-        assert mock_pg_pool._mock_cur.executemany.await_count == 1
-        first_sql = mock_pg_pool._mock_cur.executemany.await_args_list[0].args[0]
+        assert mock_pg_pool.connection.return_value.cursor.return_value.executemany.await_count == 1
+        first_sql = mock_pg_pool.connection.return_value.cursor.return_value.executemany.await_args_list[0].args[0]
         assert "user_wantlists" in first_sql
         # 2 session.run calls: the per-page upsert MERGE, then the post-loop
         # stale-row reconciliation DELETE (groovemap-cu2.9).
-        assert mock_neo4j._mock_session.run.await_count == 2
+        assert mock_neo4j.session.return_value.run.await_count == 2
 
     @pytest.mark.asyncio
     async def test_rate_limited_429(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
@@ -878,7 +911,7 @@ class TestSyncWantlist:
                 )
 
         assert mock_sleep.await_count == MAX_RATE_LIMIT_RETRIES
-        mock_pg_pool._mock_cur.execute.assert_not_awaited()
+        mock_pg_pool.connection.return_value.cursor.return_value.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_non_200_raises(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
@@ -908,7 +941,7 @@ class TestSyncWantlist:
                     mock_neo4j,
                 )
 
-        mock_pg_pool._mock_cur.execute.assert_not_awaited()
+        mock_pg_pool.connection.return_value.cursor.return_value.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_empty_wants_breaks(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
@@ -1040,8 +1073,8 @@ class TestSyncWantlist:
         pg_sql = sweeps[0].args[0]
         assert "updated_at" in pg_sql
 
-        assert mock_neo4j._mock_session.run.await_count == 2
-        reconcile_call = mock_neo4j._mock_session.run.await_args_list[-1]
+        assert mock_neo4j.session.return_value.run.await_count == 2
+        reconcile_call = mock_neo4j.session.return_value.run.await_args_list[-1]
         assert "DELETE wnt" in reconcile_call[0][0]
         assert "WANTS" in reconcile_call[0][0]
 
@@ -1074,12 +1107,12 @@ class TestSyncWantlist:
                 mock_neo4j,
             )
 
-        upsert_call = mock_pg_pool._mock_cur.executemany.await_args
+        upsert_call = mock_pg_pool.connection.return_value.cursor.return_value.executemany.await_args
         upsert_sql, upsert_params = upsert_call.args[0], upsert_call.args[1]
         assert "NOW()" not in upsert_sql
         upserted_updated_at = upsert_params[0][-1]
 
-        upsert_cypher_call = mock_neo4j._mock_session.run.await_args_list[0]
+        upsert_cypher_call = mock_neo4j.session.return_value.run.await_args_list[0]
         neo4j_synced_at = upsert_cypher_call[0][1]["synced_at"]
         assert upserted_updated_at.isoformat() == neo4j_synced_at
 
@@ -1129,7 +1162,7 @@ class TestWantlistMedia:
                 mock_neo4j,
             )
 
-        call_args = mock_pg_pool._mock_cur.executemany.await_args
+        call_args = mock_pg_pool.connection.return_value.cursor.return_value.executemany.await_args
         upsert_sql, batch_params = call_args.args[0], call_args.args[1]
         assert len(batch_params) == 1
 
@@ -1176,7 +1209,7 @@ class TestWantlistMedia:
                 mock_neo4j,
             )
 
-        call_args = mock_pg_pool._mock_cur.executemany.await_args
+        call_args = mock_pg_pool.connection.return_value.cursor.return_value.executemany.await_args
         batch_params = call_args.args[1]
         media_json = batch_params[0][9]
         assert media_json is not None
@@ -1190,12 +1223,12 @@ class TestRunFullSync:
 
     @pytest.mark.asyncio
     async def test_success(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
-        mock_pg_pool._mock_cur.fetchone.return_value = {
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchone.return_value = {
             "access_token": "enc_at",
             "access_secret": "enc_as",
             "provider_username": TEST_DISCOGS_USERNAME,
         }
-        mock_pg_pool._mock_cur.fetchall.return_value = [
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchall.return_value = [
             {"key": "discogs_consumer_key", "value": "ck"},
             {"key": "discogs_consumer_secret", "value": "cs"},
         ]
@@ -1222,7 +1255,7 @@ class TestRunFullSync:
 
     @pytest.mark.asyncio
     async def test_no_token_raises_valueerror(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
-        mock_pg_pool._mock_cur.fetchone.return_value = None
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchone.return_value = None
 
         result = await run_full_sync(
             TEST_USER_UUID,
@@ -1237,12 +1270,12 @@ class TestRunFullSync:
 
     @pytest.mark.asyncio
     async def test_no_credentials_raises_valueerror(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
-        mock_pg_pool._mock_cur.fetchone.return_value = {
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchone.return_value = {
             "access_token": "at",
             "access_secret": "as",
             "provider_username": "user",
         }
-        mock_pg_pool._mock_cur.fetchall.return_value = []  # no app_config rows
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchall.return_value = []  # no app_config rows
 
         with patch("api.syncer.decrypt_oauth_token", side_effect=lambda val, _key: val):
             result = await run_full_sync(
@@ -1258,12 +1291,12 @@ class TestRunFullSync:
 
     @pytest.mark.asyncio
     async def test_sync_exception_records_error(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
-        mock_pg_pool._mock_cur.fetchone.return_value = {
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchone.return_value = {
             "access_token": "at",
             "access_secret": "as",
             "provider_username": "user",
         }
-        mock_pg_pool._mock_cur.fetchall.return_value = [
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchall.return_value = [
             {"key": "discogs_consumer_key", "value": "ck"},
             {"key": "discogs_consumer_secret", "value": "cs"},
         ]
@@ -1291,12 +1324,12 @@ class TestRunFullSync:
         items_synced=0 and error=None, which would hide the failure from the
         UI and never prompt re-authorization.
         """
-        mock_pg_pool._mock_cur.fetchone.return_value = {
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchone.return_value = {
             "access_token": "at",
             "access_secret": "as",
             "provider_username": "user",
         }
-        mock_pg_pool._mock_cur.fetchall.return_value = [
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchall.return_value = [
             {"key": "discogs_consumer_key", "value": "ck"},
             {"key": "discogs_consumer_secret", "value": "cs"},
         ]
@@ -1327,19 +1360,19 @@ class TestRunFullSync:
         assert "401" in result["error"]
         assert result["collection_count"] == 0
         # sync_history UPDATE must record the failure, not silently 'completed'.
-        history_update = mock_pg_pool._mock_cur.execute.await_args_list[-1]
+        history_update = mock_pg_pool.connection.return_value.cursor.return_value.execute.await_args_list[-1]
         assert "sync_history" in history_update.args[0]
         assert history_update.args[1][0] == "failed"
 
     @pytest.mark.asyncio
     async def test_sync_history_update_failure_handled(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
         """If updating sync_history fails, the function still returns a result."""
-        mock_pg_pool._mock_cur.fetchone.return_value = {
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchone.return_value = {
             "access_token": "at",
             "access_secret": "as",
             "provider_username": "user",
         }
-        mock_pg_pool._mock_cur.fetchall.return_value = [
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchall.return_value = [
             {"key": "discogs_consumer_key", "value": "ck"},
             {"key": "discogs_consumer_secret", "value": "cs"},
         ]
@@ -1354,7 +1387,7 @@ class TestRunFullSync:
             if call_count > 2:
                 raise RuntimeError("DB write failed")
 
-        mock_pg_pool._mock_cur.execute = AsyncMock(side_effect=failing_execute)
+        mock_pg_pool.connection.return_value.cursor.return_value.execute.side_effect = failing_execute
 
         with (
             patch("api.syncer.sync_collection", new_callable=AsyncMock, return_value=5),
@@ -1376,12 +1409,12 @@ class TestRunFullSync:
 
     @pytest.mark.asyncio
     async def test_with_encryption_key(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
-        mock_pg_pool._mock_cur.fetchone.return_value = {
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchone.return_value = {
             "access_token": "enc_at",
             "access_secret": "enc_as",
             "provider_username": "user",
         }
-        mock_pg_pool._mock_cur.fetchall.return_value = [
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchall.return_value = [
             {"key": "discogs_consumer_key", "value": "enc_ck"},
             {"key": "discogs_consumer_secret", "value": "enc_cs"},
         ]
@@ -1408,12 +1441,12 @@ class TestRunFullSync:
     @pytest.mark.asyncio
     async def test_success_invalidates_recommendation_cache(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
         """A fully successful sync invalidates the user-scoped recommendation cache."""
-        mock_pg_pool._mock_cur.fetchone.return_value = {
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchone.return_value = {
             "access_token": "at",
             "access_secret": "as",
             "provider_username": "user",
         }
-        mock_pg_pool._mock_cur.fetchall.return_value = [
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchall.return_value = [
             {"key": "discogs_consumer_key", "value": "ck"},
             {"key": "discogs_consumer_secret", "value": "cs"},
         ]
@@ -1449,12 +1482,12 @@ class TestRunFullSync:
         so skipping invalidation on the exception path would serve stale
         personalized results for up to the cache TTL.
         """
-        mock_pg_pool._mock_cur.fetchone.return_value = {
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchone.return_value = {
             "access_token": "at",
             "access_secret": "as",
             "provider_username": "user",
         }
-        mock_pg_pool._mock_cur.fetchall.return_value = [
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchall.return_value = [
             {"key": "discogs_consumer_key", "value": "ck"},
             {"key": "discogs_consumer_secret", "value": "cs"},
         ]
@@ -1485,12 +1518,12 @@ class TestRunFullSync:
     @pytest.mark.asyncio
     async def test_no_redis_client_skips_invalidation(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
         """When redis_client is None, no RecommendCache is constructed."""
-        mock_pg_pool._mock_cur.fetchone.return_value = {
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchone.return_value = {
             "access_token": "at",
             "access_secret": "as",
             "provider_username": "user",
         }
-        mock_pg_pool._mock_cur.fetchall.return_value = [
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchall.return_value = [
             {"key": "discogs_consumer_key", "value": "ck"},
             {"key": "discogs_consumer_secret", "value": "cs"},
         ]
@@ -1515,7 +1548,7 @@ class TestRunFullSync:
 
     @pytest.mark.asyncio
     async def test_return_dict_structure(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
-        mock_pg_pool._mock_cur.fetchone.return_value = None
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchone.return_value = None
 
         result = await run_full_sync(
             TEST_USER_UUID,
@@ -1534,12 +1567,12 @@ class TestRunFullSync:
         (previously the UPDATE sat after the try/except/finally and never ran
         on cancellation, leaving the row stuck at status='running' forever),
         AND the cancellation must still propagate to the caller."""
-        mock_pg_pool._mock_cur.fetchone.return_value = {
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchone.return_value = {
             "access_token": "at",
             "access_secret": "as",
             "provider_username": "user",
         }
-        mock_pg_pool._mock_cur.fetchall.return_value = [
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchall.return_value = [
             {"key": "discogs_consumer_key", "value": "ck"},
             {"key": "discogs_consumer_secret", "value": "cs"},
         ]
@@ -1557,7 +1590,9 @@ class TestRunFullSync:
                 TEST_USER_AGENT,
             )
 
-        update_calls = [c for c in mock_pg_pool._mock_cur.execute.call_args_list if "UPDATE sync_history" in c.args[0]]
+        update_calls = [
+            c for c in mock_pg_pool.connection.return_value.cursor.return_value.execute.call_args_list if "UPDATE sync_history" in c.args[0]
+        ]
         assert len(update_calls) == 1
         query, params = update_calls[0].args
         assert "SET status = %s" in query
@@ -1568,7 +1603,7 @@ class TestRunFullSync:
     async def test_cancelled_before_sync_still_invalidates_cache(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
         """The finally block's cache-invalidation step must still run on the
         cancellation path, exactly as it does on the exception path."""
-        mock_pg_pool._mock_cur.fetchone.side_effect = asyncio.CancelledError
+        mock_pg_pool.connection.return_value.cursor.return_value.fetchone.side_effect = asyncio.CancelledError
         mock_redis = MagicMock()
 
         with patch("api.syncer.RecommendCache") as mock_cache_cls:
@@ -1594,24 +1629,24 @@ class TestReconcileStaleSyncHistory:
 
     @pytest.mark.asyncio
     async def test_flips_running_rows_to_failed(self, mock_pg_pool: MagicMock) -> None:
-        mock_pg_pool._mock_cur.rowcount = 3
+        mock_pg_pool.connection.return_value.cursor.return_value.rowcount = 3
 
         await reconcile_stale_sync_history(mock_pg_pool)
 
-        mock_pg_pool._mock_cur.execute.assert_awaited_once()
-        query = mock_pg_pool._mock_cur.execute.call_args.args[0]
+        mock_pg_pool.connection.return_value.cursor.return_value.execute.assert_awaited_once()
+        query = mock_pg_pool.connection.return_value.cursor.return_value.execute.call_args.args[0]
         assert "UPDATE sync_history" in query
         assert "SET status = 'failed'" in query
         assert "WHERE status = 'running'" in query
 
     @pytest.mark.asyncio
     async def test_no_stale_rows_is_a_no_op_beyond_the_update(self, mock_pg_pool: MagicMock) -> None:
-        mock_pg_pool._mock_cur.rowcount = 0
+        mock_pg_pool.connection.return_value.cursor.return_value.rowcount = 0
 
         # Must not raise even when nothing needed reconciling.
         await reconcile_stale_sync_history(mock_pg_pool)
 
-        mock_pg_pool._mock_cur.execute.assert_awaited_once()
+        mock_pg_pool.connection.return_value.cursor.return_value.execute.assert_awaited_once()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1652,7 +1687,7 @@ class TestCatalogNumberCapture:
             )
 
         # executemany batch_params: tuple position 11 (0-indexed) is metadata_json
-        call_args = mock_pg_pool._mock_cur.executemany.await_args
+        call_args = mock_pg_pool.connection.return_value.cursor.return_value.executemany.await_args
         batch_params = call_args[0][1]
         assert len(batch_params) == 1
         metadata_json = batch_params[0][11]
@@ -1691,7 +1726,7 @@ class TestCatalogNumberCapture:
         # Cypher params live in the second positional arg of session.run(cypher, params).
         # Call [0] is the per-page upsert MERGE; the post-loop reconciliation
         # DELETE (groovemap-cu2.9) is the subsequent call.
-        run_call = mock_neo4j._mock_session.run.await_args_list[0]
+        run_call = mock_neo4j.session.return_value.run.await_args_list[0]
         cypher_text = run_call[0][0]
         cypher_params = run_call[0][1]
         assert "r += rel.metadata" in cypher_text
@@ -1726,9 +1761,9 @@ class TestCatalogNumberCapture:
                 mock_neo4j,
             )
 
-        batch_params = mock_pg_pool._mock_cur.executemany.await_args[0][1]
+        batch_params = mock_pg_pool.connection.return_value.cursor.return_value.executemany.await_args[0][1]
         assert batch_params[0][11] is None
-        cypher_params = mock_neo4j._mock_session.run.await_args_list[0][0][1]
+        cypher_params = mock_neo4j.session.return_value.run.await_args_list[0][0][1]
         assert cypher_params["releases"][0]["metadata"] == {}
 
     @pytest.mark.asyncio
@@ -1760,7 +1795,7 @@ class TestCatalogNumberCapture:
                 mock_neo4j,
             )
 
-        batch_params = mock_pg_pool._mock_cur.executemany.await_args[0][1]
+        batch_params = mock_pg_pool.connection.return_value.cursor.return_value.executemany.await_args[0][1]
         assert batch_params[0][11] is None
 
     @pytest.mark.asyncio
@@ -1798,7 +1833,7 @@ class TestCatalogNumberCapture:
                 mock_neo4j,
             )
 
-        call_args = mock_pg_pool._mock_cur.executemany.await_args
+        call_args = mock_pg_pool.connection.return_value.cursor.return_value.executemany.await_args
         upsert_sql = call_args[0][0]
         batch_params = call_args[0][1]
 
@@ -1842,7 +1877,7 @@ class TestCatalogNumberCapture:
                 mock_neo4j,
             )
 
-        run_call = mock_neo4j._mock_session.run.await_args_list[0]
+        run_call = mock_neo4j.session.return_value.run.await_args_list[0]
         cypher_text = run_call[0][0]
         cypher_params = run_call[0][1]
         assert "r += w.metadata" in cypher_text
@@ -1878,5 +1913,5 @@ class TestCatalogNumberCapture:
                 mock_neo4j,
             )
 
-        cypher_params = mock_neo4j._mock_session.run.await_args_list[0][0][1]
+        cypher_params = mock_neo4j.session.return_value.run.await_args_list[0][0][1]
         assert cypher_params["wants"][0]["metadata"] == {}
