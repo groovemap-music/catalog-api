@@ -88,6 +88,8 @@ class TestRecordAuditEntry:
             target="admin@test.com",
         )
 
+        mock_cur.execute.assert_awaited_once()
+
     @pytest.mark.asyncio
     async def test_skips_when_pool_is_none(self) -> None:
         await record_audit_entry(

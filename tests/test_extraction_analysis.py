@@ -1340,9 +1340,11 @@ class TestViolationsReadBoundedAndOffloaded:
         (entity_dir / "violations.jsonl").write_text(json.dumps({"record_id": "1", "rule": "x", "severity": "warning"}) + "\n")
 
         with patch("api.routers.extraction_analysis.asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
-            await ea._get_violations(entity_dir.parent)
+            result = await ea._get_violations(entity_dir.parent)
 
         mock_to_thread.assert_called_once_with(ea._read_violations, entity_dir.parent)
+
+        assert result == [{"record_id": "1", "rule": "x", "severity": "warning", "entity_type": "artists"}]
 
     def test_parsing_errors_classification_runs_off_the_event_loop(self, test_client: TestClient, tmp_path: Path) -> None:
         """get_parsing_errors' O(N) per-violation classification loop must run via

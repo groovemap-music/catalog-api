@@ -1045,6 +1045,11 @@ class TestTrackExtraction:
 
         admin_mod._pool = original_pool
         admin_mod._config = original_config
+        terminal = mock_cur.execute.await_args_list[-1].args
+        assert "status = 'failed'" in terminal[0]
+        assert terminal[1][0] == "Disk full"
+        assert json.loads(terminal[1][1]) == {"artists": 10, "labels": 0, "masters": 0, "releases": 0}
+        assert terminal[1][2] == extraction_id
 
     @pytest.mark.asyncio
     async def test_unreachable_extractor(self) -> None:
@@ -1087,6 +1092,10 @@ class TestTrackExtraction:
 
         admin_mod._pool = original_pool
         admin_mod._config = original_config
+        terminal = mock_cur.execute.await_args_list[-1].args
+        assert "status = 'failed'" in terminal[0]
+        assert terminal[1] == ("Extractor became unreachable", extraction_id)
+        assert mock_client_instance.get.await_count == 5
 
     @pytest.mark.asyncio
     async def test_non_200_health_response(self) -> None:
@@ -1131,6 +1140,10 @@ class TestTrackExtraction:
 
         admin_mod._pool = original_pool
         admin_mod._config = original_config
+        terminal = mock_cur.execute.await_args_list[-1].args
+        assert "status = 'failed'" in terminal[0]
+        assert terminal[1] == ("Extractor became unreachable", extraction_id)
+        assert mock_client_instance.get.await_count == 5
 
     @pytest.mark.asyncio
     async def test_cancelled(self) -> None:

@@ -117,7 +117,9 @@ class TestHkdfKeyDerivation:
         master_key = self._make_master_key()
         derived = derive_encryption_key(master_key, b"test-purpose")
         # Fernet expects a 32-byte url-safe base64 key (44 chars with padding)
-        Fernet(derived.encode("ascii"))  # raises if invalid
+        cipher = Fernet(derived.encode("ascii"))
+        plaintext = b"synthetic OAuth state"
+        assert cipher.decrypt(cipher.encrypt(plaintext)) == plaintext
 
     def test_different_purposes_produce_different_keys(self) -> None:
         """Same master key with different info strings must produce different keys."""

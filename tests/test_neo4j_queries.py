@@ -232,9 +232,10 @@ class TestAutocompleteQueries:
         from api.queries.neo4j_queries import autocomplete_artist
 
         driver = _make_driver(records=[])
-        await autocomplete_artist(driver, "AC+DC", limit=5)
-        # Verify run was called (no exception raised)
-        driver.session.assert_called()
+        assert await autocomplete_artist(driver, "AC+DC", limit=5) == []
+        params = driver.session().__aenter__.return_value.run.await_args.args[1]
+        assert params["query"] == r"AC\+DC*"
+        assert params["limit"] == 5
 
 
 # ---------------------------------------------------------------------------

@@ -59,6 +59,8 @@ class TestRecommendCache:
         mock_redis.set = AsyncMock(side_effect=ConnectionError("down"))
         await cache.set("recommend:key", {"data": 1})  # should not raise
 
+        mock_redis.set.assert_awaited_once()
+
     @pytest.mark.asyncio
     async def test_invalidate_user(self, cache: RecommendCache, mock_redis: AsyncMock) -> None:
         # Two SCAN responses: one per pattern (explore:*, enhanced:{user_id})
@@ -81,3 +83,4 @@ class TestRecommendCache:
     async def test_invalidate_user_redis_error(self, cache: RecommendCache, mock_redis: AsyncMock) -> None:
         mock_redis.scan = AsyncMock(side_effect=ConnectionError("down"))
         await cache.invalidate_user("user1")  # should not raise
+        mock_redis.scan.assert_awaited_once()

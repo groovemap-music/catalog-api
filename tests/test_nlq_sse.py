@@ -236,11 +236,14 @@ async def test_streaming_query_does_not_cache_for_authenticated_user() -> None:
     nlq_router._redis = mock_redis
     try:
         response = nlq_router._stream_response("my collection stats", "user-123", None)
-        _ = [event async for event in response.body_iterator]
+        events = [event async for event in response.body_iterator]
     finally:
         nlq_router._redis = original_redis
 
     mock_redis.setex.assert_not_awaited()
+
+    result = next(event for event in events if event.get("event") == "result")
+    assert json.loads(result["data"])["summary"] == "private answer"
 
 
 @pytest.mark.asyncio

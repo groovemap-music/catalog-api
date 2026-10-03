@@ -96,13 +96,17 @@ def _make_admin_token(
 
 
 class TestConfigure:
-    def test_sets_jwt_secret(self) -> None:
+    @pytest.mark.asyncio
+    async def test_sets_jwt_secret(self) -> None:
         configure(TEST_SECRET)
-        # Verify it took effect by using require_user with a valid token
-        # (just verify configure doesn't raise)
+        payload = await require_user(_make_credentials(_make_valid_token()))
+        assert payload["sub"] == "user-1"
 
-    def test_sets_none_secret(self) -> None:
+    @pytest.mark.asyncio
+    async def test_sets_none_secret(self) -> None:
         configure(None)
+
+        assert await get_optional_user(_make_credentials(_make_valid_token())) is None
 
 
 class TestGetOptionalUser:

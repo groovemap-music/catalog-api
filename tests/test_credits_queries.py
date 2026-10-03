@@ -231,8 +231,10 @@ class TestAutocompletePerson:
     @pytest.mark.asyncio
     async def test_no_double_wildcard(self) -> None:
         driver = _make_mock_driver(query_returns=[])
-        await autocomplete_person(driver, "Bob*")
-        # Should not add another wildcard
+        assert await autocomplete_person(driver, "Bob*") == []
+        params = driver.session().__aenter__.return_value.run.await_args.args[1]
+        # Input * is literal; exactly one unescaped prefix wildcard is appended.
+        assert params["query"] == r"Bob\**"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

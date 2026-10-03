@@ -475,3 +475,4 @@ class TestBatchWriter:
         activity.configure(mock_pool, None)
 
         await activity.record_events("user", [("wantlist.item_added", {"item_id": ITEM_ID}, None)])
+        mock_cur.executemany.assert_awaited_once()

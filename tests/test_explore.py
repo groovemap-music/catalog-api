@@ -1335,9 +1335,14 @@ class TestReleaseDetailCatalogBlocks:
             patch("api.routers.explore.get_release_media", AsyncMock(return_value=_MEDIA_BLOCK)),
             patch("api.routers.explore.get_release_catalog_blocks", mock_blocks),
         ):
-            test_client.get("/api/node/10?type=release")
+            response = test_client.get("/api/node/10?type=release")
 
         mock_blocks.assert_awaited_once_with(ANY, "10")
+
+        assert response.status_code == 200
+        assert response.json()["identifiers"] == []
+        assert response.json()["companies"] == []
+        assert response.json()["country"] is None
 
     def test_non_release_detail_gains_none_of_them(self, test_client: TestClient) -> None:
         result = {"id": "1", "name": "Aphex Twin", "release_count": 50, "label_count": 5, "alias_count": 2}
