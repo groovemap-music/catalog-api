@@ -147,7 +147,7 @@
     "current_kind": "call_only"
   },
   {
-    "id": "tests/test_cache.py::TestRecommendCache.test_invalidate_user_redis_error",
+    "id": "tests/test_cache.py::TestRecommendCache.test_invalidate_user_valkey_error",
     "baseline_kind": "assertion_free",
     "origin": "historical-44",
     "disposition": "intentional",
@@ -155,7 +155,7 @@
     "current_kind": "call_only"
   },
   {
-    "id": "tests/test_cache.py::TestRecommendCache.test_set_redis_error",
+    "id": "tests/test_cache.py::TestRecommendCache.test_set_valkey_error",
     "baseline_kind": "assertion_free",
     "origin": "historical-44",
     "disposition": "intentional",

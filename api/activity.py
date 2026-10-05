@@ -93,10 +93,10 @@ __all__ = [
     "record_event",
     "record_events",
     "record_impressions",
-    "redis_client",
     "reset_caches",
     "stamp_recommendation_impressions",
     "subject_for",
+    "valkey_client",
 ]
 
 # The service that wrote the row. `producer` has no safe default in `common.events`
@@ -194,7 +194,7 @@ INSERT INTO activity.impressions (
 """
 
 _pool: Any = None
-_redis: Any = None
+_valkey: Any = None
 
 # The pseudonym is stable for the life of the account, so resolving it once per process
 # per user is correct rather than merely cheap. Erasure removes the link row, and the
@@ -208,22 +208,22 @@ _subjects: dict[str, UUID] = {}
 _ensured_partitions: set[tuple[str, date]] = set()
 
 
-def configure(pool: Any, redis: Any = None) -> None:
-    """Wire the PostgreSQL pool and Redis client from ``api.api`` startup.
+def configure(pool: Any, valkey: Any = None) -> None:
+    """Wire the PostgreSQL pool and Valkey client from ``api.api`` startup.
 
-    The recorder itself writes only to PostgreSQL. The Redis handle is held here because
+    The recorder itself writes only to PostgreSQL. The Valkey handle is held here because
     this module owns the activity plumbing and the erasure procedure's cache closure
-    reaches it through :func:`redis_client` rather than growing a second wiring site.
+    reaches it through :func:`valkey_client` rather than growing a second wiring site.
     """
-    global _pool, _redis
+    global _pool, _valkey
     _pool = pool
-    _redis = redis
+    _valkey = valkey
     reset_caches()
 
 
-def redis_client() -> Any:
-    """Return the Redis client wired at startup, or ``None`` before configuration."""
-    return _redis
+def valkey_client() -> Any:
+    """Return the Valkey client wired at startup, or ``None`` before configuration."""
+    return _valkey
 
 
 def reset_caches() -> None:
@@ -660,7 +660,7 @@ async def stamp_recommendation_impressions(
     """Record one impression per served candidate and stamp each item with its id.
 
     This runs per request served rather than per candidate list computed. Two of the three
-    recommendation surfaces cache their response body in Redis, and an impression is a
+    recommendation surfaces cache their response body in Valkey, and an impression is a
     record of a list having been *shown*: reusing the ids from the request that filled the
     cache would report one showing where there were many, and would hand every later
     viewer an id belonging to somebody else's impression. So the cached body never carries

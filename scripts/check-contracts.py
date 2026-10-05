@@ -17,6 +17,10 @@ def digest(path: Path) -> str:
 
 persistence_source = json.loads((ROOT / "contracts/persistence/v1/source.json").read_text())
 compatibility = json.loads((ROOT / "contracts/persistence/v1/compatibility.json").read_text())
+consumer_runtime = json.loads((ROOT / "contracts/persistence/v1/consumer-runtime.json").read_text())
+assert consumer_runtime["producer_compatibility_sha256"] == persistence_source["contract_sha256"]
+assert consumer_runtime["consumer"] == "catalog-api"
+assert consumer_runtime["application_runtime"]["tested_version"] == "0.1.0"
 with (ROOT / "pyproject.toml").open("rb") as source:
     pyproject = tomllib.load(source)
 
@@ -35,9 +39,9 @@ assert compatibility["contract"] == "groovemap.persistence"
 assert compatibility["version"] == 1
 assert compatibility["application_runtime"]["tested_version"] == "0.1.0"
 runtime_source = pyproject["tool"]["uv"]["sources"]["groovemap-runtime"]
-assert runtime_source["rev"] == compatibility["application_runtime"]["tested_commit"]
+assert runtime_source["rev"] == consumer_runtime["application_runtime"]["tested_commit"]
 agent_tools_source = pyproject["tool"]["uv"]["sources"]["groovemap-agent-tools"]
-assert agent_tools_source["rev"] == compatibility["application_runtime"]["tested_commit"]
+assert agent_tools_source["rev"] == consumer_runtime["application_runtime"]["tested_commit"]
 assert agent_tools_source["subdirectory"] == "agent-tools"
 
 internal_root = ROOT / "api/contracts/internal-insights/v1"

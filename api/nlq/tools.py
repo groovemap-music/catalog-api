@@ -478,10 +478,10 @@ class NLQToolRunner:
     recorder list supplied by the caller.
     """
 
-    def __init__(self, neo4j_driver: Any, pg_pool: Any, redis: Any) -> None:
+    def __init__(self, neo4j_driver: Any, pg_pool: Any, valkey: Any) -> None:
         self._driver = neo4j_driver
         self._pool = pg_pool
-        self._redis = redis
+        self._valkey = valkey
 
     async def execute(
         self,
@@ -624,7 +624,7 @@ class NLQToolRunner:
 
         return await agent_tools.search(
             pool=self._pool,
-            redis=self._redis,
+            redis=self._valkey,  # Pinned shared agent-tools public keyword; store/client are Valkey.
             q=params.get("q", ""),
             types=params.get("types", ["artist", "label", "master", "release"]),
             genres=params.get("genres", []),

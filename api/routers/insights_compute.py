@@ -36,7 +36,7 @@ logger = structlog.get_logger(__name__)
 
 _neo4j: Any = None
 _pool: Any = None
-_redis: Any = None
+_valkey: Any = None
 _config: Any = None
 
 
@@ -97,12 +97,12 @@ MAX_ENRICHMENT_RELEASES = 1500
 _COMPLETENESS_CACHE_TTL = 21600
 
 
-def configure(neo4j: Any, pool: Any, redis: Any = None, config: Any = None) -> None:
+def configure(neo4j: Any, pool: Any, valkey: Any = None, config: Any = None) -> None:
     """Configure the insights compute router with database connections."""
-    global _neo4j, _pool, _redis, _config
+    global _neo4j, _pool, _valkey, _config
     _neo4j = neo4j
     _pool = pool
-    _redis = redis
+    _valkey = valkey
     _config = config
 
 
@@ -160,16 +160,16 @@ async def anniversaries(
 async def data_completeness(request: Request) -> JSONResponse:  # noqa: ARG001
     """Return raw data completeness query results from PostgreSQL.
 
-    Caches results in Redis (6h TTL) because the underlying queries do
+    Caches results in Valkey (6h TTL) because the underlying queries do
     full sequential scans — the releases table alone takes ~400s.
     """
     if not _pool:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     cache_key = "insights:data-completeness"
-    if _redis:
+    if _valkey:
         try:
-            cached = await cache_get(_redis, cache_key, cache=CACHE_INSIGHTS_COMPLETENESS)
+            cached = await cache_get(_valkey, cache_key, cache=CACHE_INSIGHTS_COMPLETENESS)
             if cached:
                 return JSONResponse(content=json.loads(cached))
         except Exception:
@@ -178,9 +178,9 @@ async def data_completeness(request: Request) -> JSONResponse:  # noqa: ARG001
     results = await query_data_completeness(_pool)
     response = {"items": results}
 
-    if _redis:
+    if _valkey:
         try:
-            await _redis.setex(cache_key, _COMPLETENESS_CACHE_TTL, json.dumps(response))
+            await _valkey.setex(cache_key, _COMPLETENESS_CACHE_TTL, json.dumps(response))
         except Exception:
             logger.debug("⚠️ Data completeness cache set failed")
 

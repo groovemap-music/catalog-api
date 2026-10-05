@@ -44,16 +44,16 @@ logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 _neo4j_driver: Any = None
-_redis: Any = None
+_valkey: Any = None
 
-# Redis cache TTL for credits (24 hours — data changes only on import)
+# Valkey cache TTL for credits (24 hours — data changes only on import)
 _CREDITS_CACHE_TTL = 86400
 
 
-def configure(neo4j: Any, redis: Any = None) -> None:
-    global _neo4j_driver, _redis
+def configure(neo4j: Any, valkey: Any = None) -> None:
+    global _neo4j_driver, _valkey
     _neo4j_driver = neo4j
-    _redis = redis
+    _valkey = valkey
 
 
 # ── Person sub-routes MUST be declared before the catch-all {name} route ──
@@ -118,9 +118,9 @@ async def person_credits(
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     cache_key = f"credits:person:{name}"
-    if _redis:
+    if _valkey:
         try:
-            cached = await cache_get(_redis, cache_key, cache=CACHE_CREDITS_PERSON)
+            cached = await cache_get(_valkey, cache_key, cache=CACHE_CREDITS_PERSON)
             if cached:
                 return JSONResponse(content=json.loads(cached))
         except Exception:
@@ -145,9 +145,9 @@ async def person_credits(
     response = PersonCreditsResponse(name=name, total_credits=len(credits), credits=credits)
     response_data = response.model_dump()
 
-    if _redis:
+    if _valkey:
         try:
-            await _redis.setex(cache_key, _CREDITS_CACHE_TTL, json.dumps(response_data, default=str))
+            await _valkey.setex(cache_key, _CREDITS_CACHE_TTL, json.dumps(response_data, default=str))
         except Exception:
             logger.debug("⚠️ Credits person cache set failed", key=cache_key)
 
@@ -200,9 +200,9 @@ async def role_leaderboard(
         )
 
     cache_key = f"credits:leaderboard:{role}:{limit}"
-    if _redis:
+    if _valkey:
         try:
-            cached = await cache_get(_redis, cache_key, cache=CACHE_CREDITS_LEADERBOARD)
+            cached = await cache_get(_valkey, cache_key, cache=CACHE_CREDITS_LEADERBOARD)
             if cached:
                 return JSONResponse(content=json.loads(cached))
         except Exception:
@@ -213,9 +213,9 @@ async def role_leaderboard(
     response = RoleLeaderboardResponse(category=role, entries=entries)
     response_data = response.model_dump()
 
-    if _redis:
+    if _valkey:
         try:
-            await _redis.setex(cache_key, _CREDITS_CACHE_TTL, json.dumps(response_data, default=str))
+            await _valkey.setex(cache_key, _CREDITS_CACHE_TTL, json.dumps(response_data, default=str))
         except Exception:
             logger.debug("⚠️ Credits leaderboard cache set failed", key=cache_key)
 

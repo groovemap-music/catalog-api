@@ -25,7 +25,7 @@ reads; Catalog API does not schedule or coordinate those producers.
 
 - **Language**: Python 3.14 (managed runtime: 3.14.7)
 - **Framework**: FastAPI with async PostgreSQL (`psycopg3`)
-- **Cache**: Redis (OAuth state, graph snapshot persistence, JWT revocation blacklist)
+- **Cache**: Valkey (OAuth state, graph snapshot persistence, JWT revocation blacklist)
 - **Database**: PostgreSQL 18
 - **Auth**: HS256 JWT with PBKDF2-SHA256 password hashing
 - **Service Port**: 8004
@@ -47,8 +47,8 @@ NEO4J_HOST=neo4j
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=groovemap
 
-# Redis (OAuth state + JTI blacklist storage)
-REDIS_HOST=redis
+# Valkey (OAuth state + JTI blacklist storage)
+VALKEY_HOST=valkey
 
 # JWT signing secret
 JWT_SECRET_KEY=your-secret-key-here
@@ -86,7 +86,7 @@ All tokens are HS256 JWTs containing:
 - `email`: User email address
 - `iat`: Issued-at timestamp
 - `exp`: Expiry timestamp
-- `jti`: Unique token ID, used for logout revocation (blacklisted in Redis)
+- `jti`: Unique token ID, used for logout revocation (blacklisted in Valkey)
 
 The API handles JWT validation locally; `JWT_SECRET_KEY` remains inside the catalog-api boundary.
 All JWT consumers delegate token-purpose allowlisting and revocation policy to
@@ -98,7 +98,7 @@ decoding tokens locally.
 The API implements a Discogs OAuth 1.0a flow. With `DISCOGS_OAUTH_CALLBACK_URL` unset it uses
 the OOB (out-of-band) verifier flow; when set it sends users through the registered callback:
 
-1. **Start**: `GET /api/oauth/authorize/discogs` — requests a token from Discogs and returns an authorization URL and state token. State is stored in Redis with a TTL.
+1. **Start**: `GET /api/oauth/authorize/discogs` — requests a token from Discogs and returns an authorization URL and state token. State is stored in Valkey with a TTL.
 1. **Authorize**: User visits the Discogs URL and approves access, receiving a PIN verifier code.
 1. **Complete**: `POST /api/oauth/verify/discogs` — exchanges the verifier for a permanent access token, which is stored in the `oauth_tokens` table.
 
@@ -405,7 +405,7 @@ node responses (`artist`, `genre`, `label`, `style`) are unaffected and carry no
 | POST   | `/api/sync`        | Yes           | 10/min     | Trigger a full Discogs sync     |
 | GET    | `/api/sync/status` | Yes           | —          | Get sync history (last 10 jobs) |
 
-A per-user Redis cooldown additionally blocks re-triggering a sync for 60 seconds after the previous one starts.
+A per-user Valkey cooldown additionally blocks re-triggering a sync for 60 seconds after the previous one starts.
 
 ### User Collection
 
@@ -520,7 +520,7 @@ Save and restore graph exploration states as shareable URLs.
 
 ### Unified Search
 
-Full-text search across all entity types using PostgreSQL, with facet counts and result highlighting. Results are cached in Redis for 5 minutes. The response's `facets` object carries `type`, `genre`, `decade`, and `media` — each a `{value: count}` mapping (`media` keyed by ADR 0007 family id), counted from matching releases.
+Full-text search across all entity types using PostgreSQL, with facet counts and result highlighting. Results are cached in Valkey for 5 minutes. The response's `facets` object carries `type`, `genre`, `decade`, and `media` — each a `{value: count}` mapping (`media` keyed by ADR 0007 family id), counted from matching releases.
 
 | Method | Path          | Auth Required | Rate Limit | Description                                   |
 | ------ | ------------- | ------------- | ---------- | --------------------------------------------- |
@@ -613,7 +613,7 @@ Find artists who share releases with a given artist, with temporal collaboration
 
 ### Collaboration Network
 
-Multi-hop collaborator traversal, centrality scoring, and community detection via the knowledge graph. Centrality and cluster results are cached in Redis (1h TTL). Rate limited to 30 requests/minute.
+Multi-hop collaborator traversal, centrality scoring, and community detection via the knowledge graph. Centrality and cluster results are cached in Valkey (1h TTL). Rate limited to 30 requests/minute.
 
 | Method | Path                                     | Auth Required | Rate Limit | Description                                               |
 | ------ | ---------------------------------------- | ------------- | ---------- | --------------------------------------------------------- |
@@ -632,7 +632,7 @@ Multi-hop collaborator traversal, centrality scoring, and community detection vi
 
 ### Recommendations
 
-Artist similarity and personalized graph-traversal discovery, ranked by multi-dimensional profile matching or the authenticated user's taste. Results are cached in Redis.
+Artist similarity and personalized graph-traversal discovery, ranked by multi-dimensional profile matching or the authenticated user's taste. Results are cached in Valkey.
 
 | Method | Path                                          | Auth Required | Rate Limit | Description                                                    |
 | ------ | ---------------------------------------------- | ------------- | ---------- | ---------------------------------------------------------------- |
@@ -1044,11 +1044,11 @@ No endpoint or field is removed yet; all of the above remain readable and are st
 - **Passwords**: PBKDF2-SHA256 (100,000 iterations, random 32-byte salt)
 - **Constant-time auth**: Login and registration use constant-time comparison to prevent user enumeration via timing attacks
 - **Blind registration**: Duplicate email registration returns the same 201 response to prevent enumeration
-- **JWT revocation**: Logout blacklists the JWT's `jti` claim in Redis with TTL matching the token expiry
+- **JWT revocation**: Logout blacklists the JWT's `jti` claim in Valkey with TTL matching the token expiry
 - **OAuth tokens encrypted at rest**: Discogs OAuth access tokens are encrypted with Fernet symmetric encryption using an HKDF-derived key from `ENCRYPTION_MASTER_KEY`
 - **TOTP 2FA**: Optional time-based one-time password with `pyotp`, Fernet-encrypted secrets, SHA-256 hashed recovery codes, brute-force lockout
-- **Password reset**: Redis-backed tokens (15min TTL), anti-enumeration responses, session revocation on password change
-- **Rate limiting**: register (3/min), login (5/min), sync (10/min), autocomplete (30/min) via slowapi; per-user sync cooldown (60s) in Redis
+- **Password reset**: Valkey-backed tokens (15min TTL), anti-enumeration responses, session revocation on password change
+- **Rate limiting**: register (3/min), login (5/min), sync (10/min), autocomplete (30/min) via slowapi; per-user sync cooldown (60s) in Valkey
 - **Security response headers**: `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`
 - **CORS**: Configurable via `CORS_ORIGINS` env var (disabled by default)
 - **Snapshots require auth**: `POST /api/snapshot` requires a valid JWT

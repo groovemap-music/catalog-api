@@ -1,6 +1,6 @@
 """Rarity scoring API endpoints.
 
-Serves precomputed rarity scores from PostgreSQL, with Redis caching.
+Serves precomputed rarity scores from PostgreSQL, with Valkey caching.
 Artist and label endpoints also query Neo4j for release ID lookups.
 """
 

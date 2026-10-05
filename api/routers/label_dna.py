@@ -41,16 +41,16 @@ logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 _neo4j_driver: Any = None
-_redis: Any = None
+_valkey: Any = None
 
-# Redis cache TTL for label DNA (24 hours — data changes only on import)
+# Valkey cache TTL for label DNA (24 hours — data changes only on import)
 _LABEL_DNA_CACHE_TTL = 86400
 
 
-def configure(neo4j: Any, redis: Any = None) -> None:
-    global _neo4j_driver, _redis
+def configure(neo4j: Any, valkey: Any = None) -> None:
+    global _neo4j_driver, _valkey
     _neo4j_driver = neo4j
-    _redis = redis
+    _valkey = valkey
 
 
 def _add_percentages(items: list[dict[str, Any]], total: int) -> list[dict[str, Any]]:
@@ -94,15 +94,15 @@ async def _build_dna(label_id: str) -> tuple[LabelDNA | None, str]:
 
     Returns (dna, reason) — reason is "ok", "not_found", or "too_few".
 
-    Checks Redis cache first (same key as ``/api/label/{id}/dna``).
+    Checks Valkey cache first (same key as ``/api/label/{id}/dna``).
     On miss, runs profile queries and caches the result so that
     subsequent calls (e.g. from ``/api/label/dna/compare``) are instant.
     """
     # Check cache first — reuses the same key as the /dna endpoint
     cache_key = f"label-dna:{label_id}"
-    if _redis:
+    if _valkey:
         try:
-            cached = await cache_get(_redis, cache_key, cache=CACHE_LABEL_DNA)
+            cached = await cache_get(_valkey, cache_key, cache=CACHE_LABEL_DNA)
             if cached:
                 return LabelDNA(**json.loads(cached)), "ok"
         except Exception:
@@ -163,9 +163,9 @@ async def _build_dna(label_id: str) -> tuple[LabelDNA | None, str]:
     )
 
     # Cache the result so compare and subsequent /dna calls are instant
-    if _redis:
+    if _valkey:
         try:
-            await _redis.setex(cache_key, _LABEL_DNA_CACHE_TTL, json.dumps(dna.model_dump(), default=str))
+            await _valkey.setex(cache_key, _LABEL_DNA_CACHE_TTL, json.dumps(dna.model_dump(), default=str))
         except Exception:
             logger.debug("⚠️ Label DNA _build_dna cache set failed", key=cache_key)
 
@@ -182,7 +182,7 @@ async def label_dna(
     if not _neo4j_driver:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
-    # _build_dna already checks and populates the Redis cache — no redundant lookup here
+    # _build_dna already checks and populates the Valkey cache — no redundant lookup here
     dna, reason = await _build_dna(label_id)
     if dna is None:
         if reason == "not_found":
@@ -210,11 +210,11 @@ async def similar_labels(
     if not _neo4j_driver:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
-    # Check Redis cache first (keyed by label_id + limit)
+    # Check Valkey cache first (keyed by label_id + limit)
     cache_key = f"label-similar:{label_id}:{limit}"
-    if _redis:
+    if _valkey:
         try:
-            cached = await cache_get(_redis, cache_key, cache=CACHE_LABEL_SIMILAR)
+            cached = await cache_get(_valkey, cache_key, cache=CACHE_LABEL_SIMILAR)
             if cached:
                 return JSONResponse(content=json.loads(cached))
         except Exception:
@@ -245,9 +245,9 @@ async def similar_labels(
     response_data = response.model_dump()
 
     # Cache the result
-    if _redis:
+    if _valkey:
         try:
-            await _redis.setex(cache_key, _LABEL_DNA_CACHE_TTL, json.dumps(response_data, default=str))
+            await _valkey.setex(cache_key, _LABEL_DNA_CACHE_TTL, json.dumps(response_data, default=str))
         except Exception:
             logger.debug("⚠️ Label similar cache set failed", key=cache_key)
 

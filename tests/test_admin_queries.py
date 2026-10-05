@@ -386,23 +386,23 @@ class TestGetPostgresStorage:
         assert result["total_size"] == "8192 bytes"
 
 
-class TestGetRedisStorage:
-    """Tests for get_redis_storage query function."""
+class TestGetValkeyStorage:
+    """Tests for get_valkey_storage query function."""
 
     @pytest.mark.asyncio
-    async def test_basic_redis_storage(self):
-        from api.queries.admin_queries import get_redis_storage
+    async def test_basic_valkey_storage(self):
+        from api.queries.admin_queries import get_valkey_storage
 
-        mock_redis = AsyncMock()
-        mock_redis.info = AsyncMock(
+        mock_valkey = AsyncMock()
+        mock_valkey.info = AsyncMock(
             side_effect=lambda section: {
                 "memory": {"used_memory_human": "12.5M", "used_memory_peak_human": "15.2M"},
                 "keyspace": {"db0": {"keys": 342}},
             }.get(section, {})
         )
-        mock_redis.scan = AsyncMock(return_value=(0, [b"cache:foo", b"cache:bar", b"revoked:jti:abc"]))
+        mock_valkey.scan = AsyncMock(return_value=(0, [b"cache:foo", b"cache:bar", b"revoked:jti:abc"]))
 
-        result = await get_redis_storage(mock_redis)
+        result = await get_valkey_storage(mock_valkey)
 
         assert result["status"] == "ok"
         assert result["memory_used"] == "12.5M"
@@ -412,27 +412,27 @@ class TestGetRedisStorage:
         assert "revoked:" in result["keys_by_prefix"]
 
     @pytest.mark.asyncio
-    async def test_redis_none(self):
-        from api.queries.admin_queries import get_redis_storage
+    async def test_valkey_none(self):
+        from api.queries.admin_queries import get_valkey_storage
 
-        result = await get_redis_storage(None)
+        result = await get_valkey_storage(None)
         assert result["status"] == "error"
         assert "not configured" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_redis_no_keys(self):
-        from api.queries.admin_queries import get_redis_storage
+    async def test_valkey_no_keys(self):
+        from api.queries.admin_queries import get_valkey_storage
 
-        mock_redis = AsyncMock()
-        mock_redis.info = AsyncMock(
+        mock_valkey = AsyncMock()
+        mock_valkey.info = AsyncMock(
             side_effect=lambda section: {
                 "memory": {"used_memory_human": "1.2M", "used_memory_peak_human": "1.5M"},
                 "keyspace": {},
             }.get(section, {})
         )
-        mock_redis.scan = AsyncMock(return_value=(0, []))
+        mock_valkey.scan = AsyncMock(return_value=(0, []))
 
-        result = await get_redis_storage(mock_redis)
+        result = await get_valkey_storage(mock_valkey)
 
         assert result["status"] == "ok"
         assert result["total_keys"] == 0

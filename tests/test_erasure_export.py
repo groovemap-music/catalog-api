@@ -2,7 +2,7 @@
 
 Erasure is the one claim in this service that has to be literally true, so these tests
 assert the statements in order, that the immutability bypass is SET LOCAL inside the
-transaction, and that the users row is updated rather than deleted. The Neo4j and Redis
+transaction, and that the users row is updated rather than deleted. The Neo4j and Valkey
 steps are driven to failure as well as to success, because a half-finished erasure that
 reports success would be worse than one that fails loudly.
 """
@@ -56,12 +56,12 @@ def index_of(executed: list[str], fragment: str) -> int:
 
 
 @pytest.fixture
-def erasable(mock_cur: MagicMock, mock_redis: AsyncMock) -> Any:
+def erasable(mock_cur: MagicMock, mock_valkey: AsyncMock) -> Any:
     """A caller whose password verifies, whose subject resolves, and whose erasure records."""
     mock_cur.fetchone.side_effect = [credentials(), {"id": "99999999-9999-9999-9999-999999999999"}]
     mock_cur.rowcount = 7
     # The cache sweep is verified after it runs, so the scan has to answer.
-    mock_redis.scan = AsyncMock(return_value=(0, []))
+    mock_valkey.scan = AsyncMock(return_value=(0, []))
     with (
         patch("api.activity.subject_for", AsyncMock(return_value=SUBJECT_ID)),
         patch("api.activity.record_event", AsyncMock()) as record_event,
@@ -172,26 +172,26 @@ class TestErasureProcedure:
         assert "MATCH (u:User {id: $user_id}) DETACH DELETE u" in cypher
         assert mock_neo4j_session.run.await_args.kwargs["user_id"] == TEST_USER_ID
 
-    def test_every_per_user_redis_key_is_deleted(self, test_client: TestClient, auth_headers: dict[str, str], mock_redis: AsyncMock) -> None:
+    def test_every_per_user_valkey_key_is_deleted(self, test_client: TestClient, auth_headers: dict[str, str], mock_valkey: AsyncMock) -> None:
         with patch("api.cache.RecommendCache.invalidate_user", AsyncMock()) as invalidate:
             test_client.post("/api/user/erasure", json={"password": PASSWORD}, headers=auth_headers)
 
         assert invalidate.await_args.args[0] == TEST_USER_ID
-        deleted = set(mock_redis.delete.await_args.args)
+        deleted = set(mock_valkey.delete.await_args.args)
         assert deleted == {
             f"snapshot:usercount:{TEST_USER_ID}",
             f"sync:lock:{TEST_USER_ID}",
             f"sync:cooldown:{TEST_USER_ID}",
         }
 
-    def test_the_callers_token_is_revoked_last(self, test_client: TestClient, auth_headers: dict[str, str], mock_redis: AsyncMock) -> None:
+    def test_the_callers_token_is_revoked_last(self, test_client: TestClient, auth_headers: dict[str, str], mock_valkey: AsyncMock) -> None:
         test_client.post("/api/user/erasure", json={"password": PASSWORD}, headers=auth_headers)
 
         # The conftest token carries no jti, so nothing is blacklisted; a token that
         # carries one is revoked the way logout does.
-        assert mock_redis.setex.await_count == 0
+        assert mock_valkey.setex.await_count == 0
 
-    def test_a_token_with_a_jti_is_blacklisted(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
+    def test_a_token_with_a_jti_is_blacklisted(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
         import base64
         import hmac
 
@@ -206,7 +206,7 @@ class TestErasureProcedure:
 
         test_client.post("/api/user/erasure", json={"password": PASSWORD}, headers={"Authorization": f"Bearer {header}.{body}.{signature}"})
 
-        assert mock_redis.setex.await_args.args[0] == "revoked:jti:abc"
+        assert mock_valkey.setex.await_args.args[0] == "revoked:jti:abc"
 
     def test_the_cached_pseudonym_is_dropped_so_no_later_write_names_deleted_rows(
         self, test_client: TestClient, auth_headers: dict[str, str]
@@ -233,49 +233,49 @@ class TestErasureFailuresAreReported:
         assert body["events_deleted"] == 7, "the relational half committed and still reports its counts"
         assert any("Neo4j" in failure for failure in body["incomplete"])
 
-    def test_a_failing_redis_step_is_reported(self, test_client: TestClient, auth_headers: dict[str, str], mock_redis: AsyncMock) -> None:
-        mock_redis.delete.side_effect = RuntimeError("cache unavailable")
+    def test_a_failing_valkey_step_is_reported(self, test_client: TestClient, auth_headers: dict[str, str], mock_valkey: AsyncMock) -> None:
+        mock_valkey.delete.side_effect = RuntimeError("cache unavailable")
 
         body = test_client.post("/api/user/erasure", json={"password": PASSWORD}, headers=auth_headers).json()
 
-        assert any("Redis" in failure for failure in body["incomplete"])
+        assert any("Valkey" in failure for failure in body["incomplete"])
 
     def test_a_cache_key_that_survives_the_sweep_is_reported(
-        self, test_client: TestClient, auth_headers: dict[str, str], mock_redis: AsyncMock
+        self, test_client: TestClient, auth_headers: dict[str, str], mock_valkey: AsyncMock
     ) -> None:
         """RecommendCache.invalidate_user swallows its own failures; erasure may not."""
-        mock_redis.scan = AsyncMock(return_value=(0, [f"recommend:enhanced:{TEST_USER_ID}"]))
+        mock_valkey.scan = AsyncMock(return_value=(0, [f"recommend:enhanced:{TEST_USER_ID}"]))
 
         body = test_client.post("/api/user/erasure", json={"password": PASSWORD}, headers=auth_headers).json()
 
         assert any("survived" in failure for failure in body["incomplete"])
 
     def test_the_sweep_is_verified_against_every_per_user_recommendation_pattern(
-        self, test_client: TestClient, auth_headers: dict[str, str], mock_redis: AsyncMock
+        self, test_client: TestClient, auth_headers: dict[str, str], mock_valkey: AsyncMock
     ) -> None:
         test_client.post("/api/user/erasure", json={"password": PASSWORD}, headers=auth_headers)
 
-        verified = {call.kwargs["match"] for call in mock_redis.scan.await_args_list}
+        verified = {call.kwargs["match"] for call in mock_valkey.scan.await_args_list}
         assert f"recommend:explore:{TEST_USER_ID}:*" in verified
         assert f"recommend:enhanced:{TEST_USER_ID}" in verified
 
     def test_both_failures_are_reported_together(
-        self, test_client: TestClient, auth_headers: dict[str, str], mock_neo4j_session: MagicMock, mock_redis: AsyncMock
+        self, test_client: TestClient, auth_headers: dict[str, str], mock_neo4j_session: MagicMock, mock_valkey: AsyncMock
     ) -> None:
         mock_neo4j_session.run.side_effect = RuntimeError("graph unavailable")
-        mock_redis.delete.side_effect = RuntimeError("cache unavailable")
+        mock_valkey.delete.side_effect = RuntimeError("cache unavailable")
 
         body = test_client.post("/api/user/erasure", json={"password": PASSWORD}, headers=auth_headers).json()
 
         assert len(body["incomplete"]) == 2
 
-    def test_an_unconfigured_neo4j_or_redis_is_reported_rather_than_assumed_clean(
+    def test_an_unconfigured_neo4j_or_valkey_is_reported_rather_than_assumed_clean(
         self, test_client: TestClient, auth_headers: dict[str, str]
     ) -> None:
-        original = (activity_router._pool, activity_router._redis, activity_router._neo4j_driver, activity_router._config)
+        original = (activity_router._pool, activity_router._valkey, activity_router._neo4j_driver, activity_router._config)
         activity_router.configure(original[0], None, None, original[3])
         try:
-            with patch("api.activity.redis_client", return_value=None):
+            with patch("api.activity.valkey_client", return_value=None):
                 body = test_client.post("/api/user/erasure", json={"password": PASSWORD}, headers=auth_headers).json()
         finally:
             activity_router.configure(*original)
@@ -503,7 +503,7 @@ class TestExport:
         assert test_client.get("/api/user/export").status_code == 401
 
     def test_an_unconfigured_pool_is_reported(self, test_client: TestClient, auth_headers: dict[str, str]) -> None:
-        original = (activity_router._pool, activity_router._redis, activity_router._neo4j_driver, activity_router._config)
+        original = (activity_router._pool, activity_router._valkey, activity_router._neo4j_driver, activity_router._config)
         activity_router.configure(None, None, None, None)
         try:
             assert test_client.get("/api/user/export", headers=auth_headers).status_code == 503

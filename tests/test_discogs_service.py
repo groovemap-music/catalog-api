@@ -14,8 +14,8 @@ from api.services.discogs import (
     DISCOGS_AUTHORIZE_URL,
     DISCOGS_IDENTITY_URL,
     DISCOGS_REQUEST_TOKEN_URL,
-    REDIS_OAUTH_STATE_TTL,
-    REDIS_STATE_PREFIX,
+    VALKEY_OAUTH_STATE_TTL,
+    VALKEY_STATE_PREFIX,
     DiscogsOAuthError,
     exchange_oauth_verifier,
     fetch_discogs_identity,
@@ -126,11 +126,11 @@ class TestDiscogsOAuthConstants:
         assert "discogs.com" in DISCOGS_IDENTITY_URL
         assert "oauth/identity" in DISCOGS_IDENTITY_URL
 
-    def test_redis_ttl_is_600(self) -> None:
-        assert REDIS_OAUTH_STATE_TTL == 600
+    def test_valkey_ttl_is_600(self) -> None:
+        assert VALKEY_OAUTH_STATE_TTL == 600
 
-    def test_redis_state_prefix(self) -> None:
-        assert REDIS_STATE_PREFIX == "discogs:oauth:state:"
+    def test_valkey_state_prefix(self) -> None:
+        assert VALKEY_STATE_PREFIX == "discogs:oauth:state:"
 
 
 class TestDiscogsOAuthError:

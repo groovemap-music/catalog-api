@@ -27,7 +27,7 @@ _security = HTTPBearer()
 _pool: AsyncPostgreSQLPool | None = None
 _neo4j: AsyncResilientNeo4jDriver | None = None
 _config: Any = None
-_redis: Any = None
+_valkey: Any = None
 _running_syncs: dict[str, asyncio.Task[Any]] = {}
 
 
@@ -36,14 +36,14 @@ def configure(
     neo4j: AsyncResilientNeo4jDriver | None,
     config: Any,
     running_syncs: dict[str, asyncio.Task[Any]],
-    redis: Any = None,
+    valkey: Any = None,
 ) -> None:
-    global _pool, _neo4j, _config, _running_syncs, _redis
+    global _pool, _neo4j, _config, _running_syncs, _valkey
     _pool = pool
     _neo4j = neo4j
     _config = config
     _running_syncs = running_syncs
-    _redis = redis
+    _valkey = valkey
 
 
 async def _get_current_user(
@@ -51,7 +51,7 @@ async def _get_current_user(
 ) -> dict[str, Any]:
     if _config is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
-    return await validate_token(credentials.credentials, _config.jwt_secret_key, _redis)
+    return await validate_token(credentials.credentials, _config.jwt_secret_key, _valkey)
 
 
 @router.post("/api/sync", status_code=status.HTTP_202_ACCEPTED)
@@ -66,10 +66,10 @@ async def trigger_sync(
     if _pool is None or _neo4j is None or _config is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
 
-    # Redis-based per-user sync cooldown (prevents rapid re-triggers)
-    if _redis:
+    # Valkey-based per-user sync cooldown (prevents rapid re-triggers)
+    if _valkey:
         cooldown_key = f"sync:cooldown:{user_id}"
-        in_cooldown = await _redis.get(cooldown_key)
+        in_cooldown = await _valkey.get(cooldown_key)
         if in_cooldown:
             return JSONResponse(
                 content={"status": "cooldown", "message": "Sync rate limited. Please wait before triggering again."},
@@ -77,7 +77,7 @@ async def trigger_sync(
             )
 
         # Atomic lock to prevent duplicate sync tasks from concurrent requests
-        acquired = await _redis.set(f"sync:lock:{user_id}", "1", nx=True, ex=30)
+        acquired = await _valkey.set(f"sync:lock:{user_id}", "1", nx=True, ex=30)
         if not acquired:
             return JSONResponse(
                 content={"status": "already_running"},
@@ -92,11 +92,11 @@ async def trigger_sync(
                 (user_id,),
             )
             existing = await cur.fetchone()
-        # Release the Redis lock since we won't be starting a new sync —
+        # Release the Valkey lock since we won't be starting a new sync —
         # the in-memory task is still running regardless of DB state
-        if _redis:
+        if _valkey:
             with contextlib.suppress(Exception):
-                await _redis.delete(f"sync:lock:{user_id}")
+                await _valkey.delete(f"sync:lock:{user_id}")
         if existing:
             return JSONResponse(
                 content={"sync_id": str(existing["id"]), "status": "already_running"},
@@ -125,7 +125,7 @@ async def trigger_sync(
                 neo4j_driver=_neo4j,
                 discogs_user_agent=_config.discogs_user_agent,
                 oauth_encryption_key=get_oauth_encryption_key(_config.encryption_master_key),
-                redis_client=_redis,
+                valkey_client=_valkey,
             )
         )
         # Clean up completed task to prevent unbounded memory growth and
@@ -134,16 +134,16 @@ async def trigger_sync(
         task.add_done_callback(lambda _t: _running_syncs.pop(_uid, None))
         _running_syncs[user_id] = task
     except Exception:
-        # Release Redis lock on failure so user isn't locked out
-        if _redis:
+        # Release Valkey lock on failure so user isn't locked out
+        if _valkey:
             with contextlib.suppress(Exception):
-                await _redis.delete(f"sync:lock:{user_id}")
+                await _valkey.delete(f"sync:lock:{user_id}")
         raise
 
     # Set cooldown BEFORE releasing lock to prevent TOCTOU race
-    if _redis:
-        await _redis.setex(f"sync:cooldown:{user_id}", 60, "1")
-        await _redis.delete(f"sync:lock:{user_id}")  # Safe: cooldown is already in place
+    if _valkey:
+        await _valkey.setex(f"sync:cooldown:{user_id}", 60, "1")
+        await _valkey.delete(f"sync:lock:{user_id}")  # Safe: cooldown is already in place
 
     logger.info("🔄 Sync triggered", user_id=user_id, sync_id=sync_id)
     return JSONResponse(content={"sync_id": sync_id, "status": "started"}, status_code=status.HTTP_202_ACCEPTED)

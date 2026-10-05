@@ -114,10 +114,10 @@ class TestNLQQuery:
         assert data["cached"] is False
 
     def test_query_returns_cached_result(self, test_client: TestClient) -> None:
-        """When Redis has a cached result, return it with cached=true."""
+        """When Valkey has a cached result, return it with cached=true."""
         original_config = nlq_router._nlq_config
         original_engine = nlq_router._engine
-        original_redis = nlq_router._redis
+        original_valkey = nlq_router._valkey
         try:
             nlq_router._nlq_config = MagicMock(is_available=True, max_query_length=500)
             nlq_router._engine = MagicMock()  # should NOT be called
@@ -129,15 +129,15 @@ class TestNLQQuery:
                 "tools_used": ["search"],
                 "cached": True,
             }
-            mock_redis = AsyncMock()
-            mock_redis.get = AsyncMock(return_value=json.dumps(cached_data))
-            nlq_router._redis = mock_redis
+            mock_valkey = AsyncMock()
+            mock_valkey.get = AsyncMock(return_value=json.dumps(cached_data))
+            nlq_router._valkey = mock_valkey
 
             response = test_client.post("/api/nlq/query", json={"query": "who is Radiohead?"})
         finally:
             nlq_router._nlq_config = original_config
             nlq_router._engine = original_engine
-            nlq_router._redis = original_redis
+            nlq_router._valkey = original_valkey
 
         assert response.status_code == 200
         data = response.json()
@@ -145,10 +145,10 @@ class TestNLQQuery:
         assert data["summary"] == "Cached answer about Radiohead."
 
     def test_query_writes_to_cache_for_public_query(self, test_client: TestClient) -> None:
-        """Public (unauthenticated) queries should be written to Redis cache."""
+        """Public (unauthenticated) queries should be written to Valkey cache."""
         original_config = nlq_router._nlq_config
         original_engine = nlq_router._engine
-        original_redis = nlq_router._redis
+        original_valkey = nlq_router._valkey
         try:
             nlq_router._nlq_config = MagicMock(is_available=True, max_query_length=500, cache_ttl=300)
             mock_engine = MagicMock()
@@ -160,19 +160,19 @@ class TestNLQQuery:
             mock_engine.run = AsyncMock(return_value=mock_result)
             nlq_router._engine = mock_engine
 
-            mock_redis = AsyncMock()
-            mock_redis.get = AsyncMock(return_value=None)
-            mock_redis.setex = AsyncMock()
-            nlq_router._redis = mock_redis
+            mock_valkey = AsyncMock()
+            mock_valkey.get = AsyncMock(return_value=None)
+            mock_valkey.setex = AsyncMock()
+            nlq_router._valkey = mock_valkey
 
             response = test_client.post("/api/nlq/query", json={"query": "who is Radiohead?"})
         finally:
             nlq_router._nlq_config = original_config
             nlq_router._engine = original_engine
-            nlq_router._redis = original_redis
+            nlq_router._valkey = original_valkey
 
         assert response.status_code == 200
-        mock_redis.setex.assert_called_once()
+        mock_valkey.setex.assert_called_once()
 
     def test_cache_key_differs_by_focused_entity_context(self) -> None:
         """Regression groovemap-xcsx: since the engine now conditions its
@@ -194,14 +194,14 @@ class TestNLQQuery:
         deictic references."""
         original_config = nlq_router._nlq_config
         original_engine = nlq_router._engine
-        original_redis = nlq_router._redis
+        original_valkey = nlq_router._valkey
         try:
             nlq_router._nlq_config = MagicMock(is_available=True, max_query_length=500)
             mock_engine = MagicMock()
             mock_result = NLQResult(summary="Their collaborators include Jonny Greenwood.", entities=[], tools_used=["search"])
             mock_engine.run = AsyncMock(return_value=mock_result)
             nlq_router._engine = mock_engine
-            nlq_router._redis = None
+            nlq_router._valkey = None
 
             response = test_client.post(
                 "/api/nlq/query",
@@ -210,7 +210,7 @@ class TestNLQQuery:
         finally:
             nlq_router._nlq_config = original_config
             nlq_router._engine = original_engine
-            nlq_router._redis = original_redis
+            nlq_router._valkey = original_valkey
 
         assert response.status_code == 200
         ctx = mock_engine.run.call_args[0][1]
@@ -221,7 +221,7 @@ class TestNLQQuery:
         """When a valid Bearer token is provided, user_id is extracted and passed to engine."""
         original_config = nlq_router._nlq_config
         original_engine = nlq_router._engine
-        original_redis = nlq_router._redis
+        original_valkey = nlq_router._valkey
         original_jwt_secret = nlq_router._jwt_secret
         try:
             nlq_router._nlq_config = MagicMock(is_available=True, max_query_length=500)
@@ -233,14 +233,14 @@ class TestNLQQuery:
             )
             mock_engine.run = AsyncMock(return_value=mock_result)
             nlq_router._engine = mock_engine
-            nlq_router._redis = None  # No caching for auth requests
+            nlq_router._valkey = None  # No caching for auth requests
             nlq_router._jwt_secret = "test-jwt-secret-for-unit-tests"
 
             response = test_client.post("/api/nlq/query", json={"query": "how many records do I have?"}, headers=auth_headers)
         finally:
             nlq_router._nlq_config = original_config
             nlq_router._engine = original_engine
-            nlq_router._redis = original_redis
+            nlq_router._valkey = original_valkey
             nlq_router._jwt_secret = original_jwt_secret
 
         assert response.status_code == 200
@@ -271,7 +271,7 @@ class TestNLQSSE:
         """When Accept: text/event-stream, response should be SSE with status and result events."""
         original_config = nlq_router._nlq_config
         original_engine = nlq_router._engine
-        original_redis = nlq_router._redis
+        original_valkey = nlq_router._valkey
         try:
             nlq_router._nlq_config = MagicMock(is_available=True, max_query_length=500)
             mock_engine = MagicMock()
@@ -289,8 +289,8 @@ class TestNLQSSE:
 
             mock_engine.run = AsyncMock(side_effect=mock_run)
             nlq_router._engine = mock_engine
-            nlq_router._redis = AsyncMock()
-            nlq_router._redis.get = AsyncMock(return_value=None)
+            nlq_router._valkey = AsyncMock()
+            nlq_router._valkey.get = AsyncMock(return_value=None)
 
             response = test_client.post(
                 "/api/nlq/query",
@@ -300,7 +300,7 @@ class TestNLQSSE:
         finally:
             nlq_router._nlq_config = original_config
             nlq_router._engine = original_engine
-            nlq_router._redis = original_redis
+            nlq_router._valkey = original_valkey
 
         assert response.status_code == 200
         # SSE response should contain event data
@@ -311,15 +311,15 @@ class TestNLQSSE:
         """SSE streaming with context should pass entity info through."""
         original_config = nlq_router._nlq_config
         original_engine = nlq_router._engine
-        original_redis = nlq_router._redis
+        original_valkey = nlq_router._valkey
         try:
             nlq_router._nlq_config = MagicMock(is_available=True, max_query_length=500)
             mock_engine = MagicMock()
             mock_result = NLQResult(summary="Answer.", entities=[], tools_used=[])
             mock_engine.run = AsyncMock(return_value=mock_result)
             nlq_router._engine = mock_engine
-            nlq_router._redis = AsyncMock()
-            nlq_router._redis.get = AsyncMock(return_value=None)
+            nlq_router._valkey = AsyncMock()
+            nlq_router._valkey.get = AsyncMock(return_value=None)
 
             response = test_client.post(
                 "/api/nlq/query",
@@ -329,7 +329,7 @@ class TestNLQSSE:
         finally:
             nlq_router._nlq_config = original_config
             nlq_router._engine = original_engine
-            nlq_router._redis = original_redis
+            nlq_router._valkey = original_valkey
 
         assert response.status_code == 200
 
@@ -341,7 +341,7 @@ class TestNLQSSE:
         """
         original_config = nlq_router._nlq_config
         original_engine = nlq_router._engine
-        original_redis = nlq_router._redis
+        original_valkey = nlq_router._valkey
         try:
             nlq_router._nlq_config = MagicMock(is_available=True, max_query_length=500)
             mock_engine = MagicMock()
@@ -355,8 +355,8 @@ class TestNLQSSE:
                 "actions": [],
                 "cached": True,
             }
-            nlq_router._redis = AsyncMock()
-            nlq_router._redis.get = AsyncMock(return_value=json.dumps(cached_data))
+            nlq_router._valkey = AsyncMock()
+            nlq_router._valkey.get = AsyncMock(return_value=json.dumps(cached_data))
 
             response = test_client.post(
                 "/api/nlq/query",
@@ -366,7 +366,7 @@ class TestNLQSSE:
         finally:
             nlq_router._nlq_config = original_config
             nlq_router._engine = original_engine
-            nlq_router._redis = original_redis
+            nlq_router._valkey = original_valkey
 
         assert response.status_code == 200
         assert "text/event-stream" in response.headers["content-type"]
@@ -383,14 +383,14 @@ class TestSSEStreamErrorHandling:
         """When the NLQ engine raises an exception, an error SSE event should be emitted."""
         original_config = nlq_router._nlq_config
         original_engine = nlq_router._engine
-        original_redis = nlq_router._redis
+        original_valkey = nlq_router._valkey
         try:
             nlq_router._nlq_config = MagicMock(is_available=True, max_query_length=500)
             mock_engine = MagicMock()
             mock_engine.run = AsyncMock(side_effect=RuntimeError("Neo4j connection lost"))
             nlq_router._engine = mock_engine
-            nlq_router._redis = AsyncMock()
-            nlq_router._redis.get = AsyncMock(return_value=None)
+            nlq_router._valkey = AsyncMock()
+            nlq_router._valkey.get = AsyncMock(return_value=None)
 
             response = test_client.post(
                 "/api/nlq/query",
@@ -400,7 +400,7 @@ class TestSSEStreamErrorHandling:
         finally:
             nlq_router._nlq_config = original_config
             nlq_router._engine = original_engine
-            nlq_router._redis = original_redis
+            nlq_router._valkey = original_valkey
 
         assert response.status_code == 200
         body = response.text
@@ -415,43 +415,43 @@ class TestExtractUserIdEdgeCases:
         """No auth header means user_id is None — verified via no caching skip."""
         original_config = nlq_router._nlq_config
         original_engine = nlq_router._engine
-        original_redis = nlq_router._redis
+        original_valkey = nlq_router._valkey
         try:
             nlq_router._nlq_config = MagicMock(is_available=True, max_query_length=500, cache_ttl=300)
             mock_engine = MagicMock()
             mock_result = NLQResult(summary="Test.", entities=[], tools_used=[])
             mock_engine.run = AsyncMock(return_value=mock_result)
             nlq_router._engine = mock_engine
-            mock_redis = AsyncMock()
-            mock_redis.get = AsyncMock(return_value=None)
-            mock_redis.setex = AsyncMock()
-            nlq_router._redis = mock_redis
+            mock_valkey = AsyncMock()
+            mock_valkey.get = AsyncMock(return_value=None)
+            mock_valkey.setex = AsyncMock()
+            nlq_router._valkey = mock_valkey
 
             response = test_client.post("/api/nlq/query", json={"query": "test"})
         finally:
             nlq_router._nlq_config = original_config
             nlq_router._engine = original_engine
-            nlq_router._redis = original_redis
+            nlq_router._valkey = original_valkey
 
         assert response.status_code == 200
         # Public query (no auth) should write to cache
-        mock_redis.setex.assert_called_once()
+        mock_valkey.setex.assert_called_once()
 
     def test_extract_user_id_invalid_token(self, test_client: TestClient) -> None:
         """Invalid Bearer token should result in user_id=None (treated as public)."""
         original_config = nlq_router._nlq_config
         original_engine = nlq_router._engine
-        original_redis = nlq_router._redis
+        original_valkey = nlq_router._valkey
         try:
             nlq_router._nlq_config = MagicMock(is_available=True, max_query_length=500, cache_ttl=300)
             mock_engine = MagicMock()
             mock_result = NLQResult(summary="Test.", entities=[], tools_used=[])
             mock_engine.run = AsyncMock(return_value=mock_result)
             nlq_router._engine = mock_engine
-            mock_redis = AsyncMock()
-            mock_redis.get = AsyncMock(return_value=None)
-            mock_redis.setex = AsyncMock()
-            nlq_router._redis = mock_redis
+            mock_valkey = AsyncMock()
+            mock_valkey.get = AsyncMock(return_value=None)
+            mock_valkey.setex = AsyncMock()
+            nlq_router._valkey = mock_valkey
 
             response = test_client.post(
                 "/api/nlq/query",
@@ -461,58 +461,58 @@ class TestExtractUserIdEdgeCases:
         finally:
             nlq_router._nlq_config = original_config
             nlq_router._engine = original_engine
-            nlq_router._redis = original_redis
+            nlq_router._valkey = original_valkey
 
         assert response.status_code == 200
         # Invalid token => user_id=None => treated as public => cache write
-        mock_redis.setex.assert_called_once()
+        mock_valkey.setex.assert_called_once()
 
     def test_cache_read_failure_gracefully_continues(self, test_client: TestClient) -> None:
-        """If Redis cache read throws, the query should still proceed."""
+        """If Valkey cache read throws, the query should still proceed."""
         original_config = nlq_router._nlq_config
         original_engine = nlq_router._engine
-        original_redis = nlq_router._redis
+        original_valkey = nlq_router._valkey
         try:
             nlq_router._nlq_config = MagicMock(is_available=True, max_query_length=500, cache_ttl=300)
             mock_engine = MagicMock()
             mock_result = NLQResult(summary="Fallback.", entities=[], tools_used=[])
             mock_engine.run = AsyncMock(return_value=mock_result)
             nlq_router._engine = mock_engine
-            mock_redis = AsyncMock()
-            mock_redis.get = AsyncMock(side_effect=RuntimeError("Redis down"))
-            mock_redis.setex = AsyncMock()
-            nlq_router._redis = mock_redis
+            mock_valkey = AsyncMock()
+            mock_valkey.get = AsyncMock(side_effect=RuntimeError("Valkey down"))
+            mock_valkey.setex = AsyncMock()
+            nlq_router._valkey = mock_valkey
 
             response = test_client.post("/api/nlq/query", json={"query": "test"})
         finally:
             nlq_router._nlq_config = original_config
             nlq_router._engine = original_engine
-            nlq_router._redis = original_redis
+            nlq_router._valkey = original_valkey
 
         assert response.status_code == 200
         assert response.json()["summary"] == "Fallback."
 
     def test_cache_write_failure_gracefully_continues(self, test_client: TestClient) -> None:
-        """If Redis cache write throws, the response should still be returned."""
+        """If Valkey cache write throws, the response should still be returned."""
         original_config = nlq_router._nlq_config
         original_engine = nlq_router._engine
-        original_redis = nlq_router._redis
+        original_valkey = nlq_router._valkey
         try:
             nlq_router._nlq_config = MagicMock(is_available=True, max_query_length=500, cache_ttl=300)
             mock_engine = MagicMock()
             mock_result = NLQResult(summary="Success.", entities=[], tools_used=[])
             mock_engine.run = AsyncMock(return_value=mock_result)
             nlq_router._engine = mock_engine
-            mock_redis = AsyncMock()
-            mock_redis.get = AsyncMock(return_value=None)
-            mock_redis.setex = AsyncMock(side_effect=RuntimeError("Redis down"))
-            nlq_router._redis = mock_redis
+            mock_valkey = AsyncMock()
+            mock_valkey.get = AsyncMock(return_value=None)
+            mock_valkey.setex = AsyncMock(side_effect=RuntimeError("Valkey down"))
+            nlq_router._valkey = mock_valkey
 
             response = test_client.post("/api/nlq/query", json={"query": "test"})
         finally:
             nlq_router._nlq_config = original_config
             nlq_router._engine = original_engine
-            nlq_router._redis = original_redis
+            nlq_router._valkey = original_valkey
 
         assert response.status_code == 200
         assert response.json()["summary"] == "Success."

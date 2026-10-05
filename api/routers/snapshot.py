@@ -2,7 +2,7 @@
 
 from typing import Annotated, Any
 
-import redis.asyncio as aioredis
+import valkey.asyncio as aiovalkey
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -17,19 +17,19 @@ router = APIRouter()
 _snapshot_store: SnapshotStore | None = None
 _security = HTTPBearer()
 _jwt_secret: str | None = None
-_redis: aioredis.Redis | None = None
+_valkey: aiovalkey.Valkey | None = None
 
 
 def configure(
     jwt_secret: str | None,
-    redis_client: aioredis.Redis | None = None,
+    valkey_client: aiovalkey.Valkey | None = None,
     ttl_days: int = 28,
     max_nodes: int = 100,
 ) -> None:
-    global _snapshot_store, _jwt_secret, _redis
+    global _snapshot_store, _jwt_secret, _valkey
     _jwt_secret = jwt_secret
-    _redis = redis_client
-    _snapshot_store = SnapshotStore(redis_client, ttl_days=ttl_days, max_nodes=max_nodes) if redis_client is not None else None
+    _valkey = valkey_client
+    _snapshot_store = SnapshotStore(valkey_client, ttl_days=ttl_days, max_nodes=max_nodes) if valkey_client is not None else None
 
 
 async def _get_current_user(
@@ -37,7 +37,7 @@ async def _get_current_user(
 ) -> dict[str, Any]:
     if _jwt_secret is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not configured")
-    return await validate_token(credentials.credentials, _jwt_secret, _redis, expose_admin_mismatch=True)
+    return await validate_token(credentials.credentials, _jwt_secret, _valkey, expose_admin_mismatch=True)
 
 
 @router.post("/api/snapshot", status_code=201)

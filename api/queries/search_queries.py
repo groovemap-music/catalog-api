@@ -92,7 +92,7 @@ def cache_key(
     media: list[str] | None = None,
     countries: list[str] | None = None,
 ) -> str:
-    """Stable Redis cache key for the given search parameters."""
+    """Stable Valkey cache key for the given search parameters."""
     params = {
         "q": q.lower().strip(),
         "types": sorted(types),
@@ -573,7 +573,7 @@ def _format_result(row: dict[str, Any], gm_ids: dict[tuple[str, str], str] | Non
 
 async def execute_search(
     pool: AsyncPostgreSQLPool,
-    redis: Any | None,
+    valkey: Any | None,
     q: str,
     types: list[str],
     genres: list[str],
@@ -587,8 +587,8 @@ async def execute_search(
 ) -> dict[str, Any]:
     """Run full search and return structured response dict.
 
-    Checks Redis cache first (TTL=300s). On miss, runs 6 DB queries
-    concurrently, formats response, stores in Redis, and returns.
+    Checks Valkey cache first (TTL=300s). On miss, runs 6 DB queries
+    concurrently, formats response, stores in Valkey, and returns.
 
     media_families/media_mediums (ADR 0007 family/medium ids, already
     validated by the caller via :func:`split_media_filter`) filter release
@@ -607,11 +607,11 @@ async def execute_search(
     countries = countries or []
     key = cache_key(q, types, genres, year_min, year_max, limit, offset, media=[*media_families, *media_mediums], countries=countries)
 
-    # Cache-aside read — Redis is a pure optimization. A Redis outage (or a
+    # Cache-aside read — Valkey is a pure optimization. A Valkey outage (or a
     # corrupt cache entry) must degrade to a fresh PostgreSQL query, never 500.
-    if redis is not None:
+    if valkey is not None:
         try:
-            cached = await cache_get(redis, key, cache=CACHE_SEARCH)
+            cached = await cache_get(valkey, key, cache=CACHE_SEARCH)
             if cached:
                 return json.loads(cached)  # type: ignore[no-any-return]
         except Exception:
@@ -649,11 +649,11 @@ async def execute_search(
         },
     }
 
-    # Best-effort cache write — a Redis outage must not fail an otherwise
+    # Best-effort cache write — a Valkey outage must not fail an otherwise
     # successful, fully PostgreSQL-backed search response.
-    if redis is not None:
+    if valkey is not None:
         try:
-            await redis.setex(key, _SEARCH_CACHE_TTL, json.dumps(response))
+            await valkey.setex(key, _SEARCH_CACHE_TTL, json.dumps(response))
         except Exception:
             logger.debug("⚠️ Search cache write failed", key=key)
 

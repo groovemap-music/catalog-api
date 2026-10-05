@@ -9,7 +9,7 @@ reads, one precomputed rarity read, the cache, and the impression.
 Two orderings here are load-bearing and both are inherited from the recommendation
 surfaces:
 
-* **Cache, then stamp.** The body cached in Redis never carries an ``impression_id``. An
+* **Cache, then stamp.** The body cached in Valkey never carries an ``impression_id``. An
   impression records a list having been *shown*, and the request that filled the cache is
   not the request that shows it to the next caller; reusing its id would report one
   showing where there were many and would hand every later viewer an id belonging to
@@ -58,13 +58,13 @@ _cache: RecommendCache | None = None
 _FIT_CACHE_TTL = 600
 
 
-def configure(neo4j: Any, pool: Any, redis: Any | None) -> None:
-    """Configure the fit router with the Neo4j driver, the PostgreSQL pool, and Redis."""
+def configure(neo4j: Any, pool: Any, valkey: Any | None) -> None:
+    """Configure the fit router with the Neo4j driver, the PostgreSQL pool, and Valkey."""
     global _neo4j_driver, _pool, _cache
     _neo4j_driver = neo4j
     _pool = pool
-    if redis is not None:
-        _cache = RecommendCache(redis=redis, default_ttl=_FIT_CACHE_TTL)
+    if valkey is not None:
+        _cache = RecommendCache(valkey=valkey, default_ttl=_FIT_CACHE_TTL)
 
 
 def _cache_key(user_id: str, release_id: str) -> str:
@@ -161,7 +161,7 @@ async def release_fit(
         # keys an entry's kind actually uses, and the wire shape should read the same way.
         component["evidence_items"] = [{key: value for key, value in item.items() if value is not None} for item in component["evidence_items"]]
 
-    # Cached before the impression is stamped, so the body in Redis never carries one.
+    # Cached before the impression is stamped, so the body in Valkey never carries one.
     if _cache:
         await _cache.set(cache_key, body, ttl=_FIT_CACHE_TTL)
 

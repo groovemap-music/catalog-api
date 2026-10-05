@@ -18,9 +18,9 @@ def mock_pg_pool(mock_pool: MagicMock) -> MagicMock:
 
 
 @pytest.fixture
-def mock_redis_client() -> AsyncMock:
-    """Mock Redis client for NLQ tool tests."""
-    redis: AsyncMock = AsyncMock()
-    redis.get = AsyncMock(return_value=None)
-    redis.setex = AsyncMock()
-    return redis
+def mock_valkey_client() -> AsyncMock:
+    """Mock Valkey client for NLQ tool tests."""
+    valkey: AsyncMock = AsyncMock()
+    valkey.get = AsyncMock(return_value=None)
+    valkey.setex = AsyncMock()
+    return valkey

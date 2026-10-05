@@ -266,5 +266,5 @@ class TestStorageModels:
         from api.models import StorageResponse, StorageSourceError
 
         err = StorageSourceError(status="error", error="down")
-        obj = StorageResponse(neo4j=err.model_dump(), postgresql=err.model_dump(), redis=err.model_dump())
+        obj = StorageResponse(neo4j=err.model_dump(), postgresql=err.model_dump(), valkey=err.model_dump())
         assert obj.neo4j["status"] == "error"

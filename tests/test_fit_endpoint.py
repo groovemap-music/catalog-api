@@ -197,8 +197,8 @@ def test_service_not_ready_is_a_503(test_client: TestClient, auth_headers: dict[
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_cached_body_never_carries_an_impression_id(test_client: TestClient, auth_headers: dict[str, str], mock_redis: AsyncMock) -> None:
-    """What goes into Redis is the profile, not the record of one person seeing it.
+def test_cached_body_never_carries_an_impression_id(test_client: TestClient, auth_headers: dict[str, str], mock_valkey: AsyncMock) -> None:
+    """What goes into Valkey is the profile, not the record of one person seeing it.
 
     Asserted against the bytes the cache actually wrote rather than against the dictionary
     it was handed, because the handed dictionary is stamped a moment later and a reference
@@ -214,7 +214,7 @@ def test_cached_body_never_carries_an_impression_id(test_client: TestClient, aut
         _stop(patchers)
 
     assert response.json()["impression_id"] == _IMPRESSION_ID
-    written = [json.loads(call.args[1]) for call in mock_redis.set.await_args_list if str(call.args[0]).endswith("fit:release:555")]
+    written = [json.loads(call.args[1]) for call in mock_valkey.set.await_args_list if str(call.args[0]).endswith("fit:release:555")]
     assert written and written[0]["impression_id"] is None
     assert written[0]["fit"] == response.json()["fit"]
     assert written[0]["components"]["depth"]["evidence_items"] == response.json()["components"]["depth"]["evidence_items"]

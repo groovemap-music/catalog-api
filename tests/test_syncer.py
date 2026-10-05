@@ -1451,7 +1451,7 @@ class TestRunFullSync:
             {"key": "discogs_consumer_secret", "value": "cs"},
         ]
 
-        mock_redis = MagicMock()
+        mock_valkey = MagicMock()
 
         with (
             patch("api.syncer.sync_collection", new_callable=AsyncMock, return_value=10),
@@ -1468,7 +1468,7 @@ class TestRunFullSync:
                 mock_pg_pool,
                 mock_neo4j,
                 TEST_USER_AGENT,
-                redis_client=mock_redis,
+                valkey_client=mock_valkey,
             )
 
         assert result["status"] == "completed"
@@ -1492,7 +1492,7 @@ class TestRunFullSync:
             {"key": "discogs_consumer_secret", "value": "cs"},
         ]
 
-        mock_redis = MagicMock()
+        mock_valkey = MagicMock()
 
         with (
             patch("api.syncer.sync_collection", new_callable=AsyncMock, return_value=10),
@@ -1509,15 +1509,15 @@ class TestRunFullSync:
                 mock_pg_pool,
                 mock_neo4j,
                 TEST_USER_AGENT,
-                redis_client=mock_redis,
+                valkey_client=mock_valkey,
             )
 
         assert result["status"] == "failed"
         mock_cache.invalidate_user.assert_awaited_once_with(str(TEST_USER_UUID))
 
     @pytest.mark.asyncio
-    async def test_no_redis_client_skips_invalidation(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
-        """When redis_client is None, no RecommendCache is constructed."""
+    async def test_no_valkey_client_skips_invalidation(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
+        """When valkey_client is None, no RecommendCache is constructed."""
         mock_pg_pool.connection.return_value.cursor.return_value.fetchone.return_value = {
             "access_token": "at",
             "access_secret": "as",
@@ -1536,11 +1536,11 @@ class TestRunFullSync:
         ):
             result = await run_full_sync(
                 TEST_USER_UUID,
-                "sync-no-redis",
+                "sync-no-valkey",
                 mock_pg_pool,
                 mock_neo4j,
                 TEST_USER_AGENT,
-                redis_client=None,
+                valkey_client=None,
             )
 
         assert result["status"] == "completed"
@@ -1604,7 +1604,7 @@ class TestRunFullSync:
         """The finally block's cache-invalidation step must still run on the
         cancellation path, exactly as it does on the exception path."""
         mock_pg_pool.connection.return_value.cursor.return_value.fetchone.side_effect = asyncio.CancelledError
-        mock_redis = MagicMock()
+        mock_valkey = MagicMock()
 
         with patch("api.syncer.RecommendCache") as mock_cache_cls:
             mock_cache_cls.return_value.invalidate_user = AsyncMock()
@@ -1615,7 +1615,7 @@ class TestRunFullSync:
                     mock_pg_pool,
                     mock_neo4j,
                     TEST_USER_AGENT,
-                    redis_client=mock_redis,
+                    valkey_client=mock_valkey,
                 )
 
         mock_cache_cls.return_value.invalidate_user.assert_awaited_once_with(str(TEST_USER_UUID))
