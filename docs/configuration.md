@@ -45,8 +45,30 @@ password in the environment. Do not set both forms to conflicting values.
 | `POSTGRES_POOL_MAX_SIZE` | `8` | Maximum API pool size |
 | `NEO4J_TLS_ENABLED` | `false` | Enable Bolt TLS for a host without a TLS URI scheme |
 | `NEO4J_TLS_VERIFY` | `true` | Verify the Bolt certificate when TLS is enabled |
-| `REDIS_HOST` | `redis://redis:6379/0` | Redis host or URL |
-| `REDIS_PASSWORD` | unset | Optional Redis password; `REDIS_PASSWORD_FILE` is supported |
+| `VALKEY_HOST` | `localhost` | Valkey hostname; supply a host, not a URL |
+| `VALKEY_PORT` | `6379` | Valkey port |
+| `VALKEY_PASSWORD` | unset | Optional plain password; empty disables authentication when no nonempty password-file path is set |
+| `VALKEY_PASSWORD_FILE` | unset | Nonempty file path takes precedence over the plain password; unreadable files fail closed |
+
+The API uses valkey-py with its libvalkey parser and constructs a `valkey://` URL for
+database 0 from these component settings. Passwords are percent-quoted and never
+printed in the startup log; that log reports the host only.
+
+During the transition, unset host and port settings fall back to their deprecated
+`REDIS_HOST` and `REDIS_PORT` counterparts. Either Valkey password setting selects
+the Valkey namespace, including an explicitly empty value; otherwise the deprecated
+`REDIS_PASSWORD` / `REDIS_PASSWORD_FILE` namespace is used. Within the selected
+namespace, a nonempty password-file path wins over the plain password. An empty
+file disables authentication, and an unreadable file raises an error without
+fallback. Each selected legacy variable logs a warning once per process, naming
+only the variable. These aliases remain temporary and require separate cleanup
+after all consumers and the live service have migrated.
+
+The admin storage response now exposes statistics under `valkey` and duplicates
+that object under the legacy `redis` key for one release so an older operations
+console remains compatible. The internal shared agent-tools search adapter still
+uses its pinned public `redis=` keyword with a Valkey client. Release publication
+and live cutover remain separately verified operations.
 
 Use `neo4j+s://...` in `NEO4J_HOST` for a managed Neo4j endpoint that already expresses its
 TLS policy. Deployment-specific certificate and network guidance belongs in `deployment`.
@@ -152,13 +174,13 @@ ever carries an identifier, a cache key, or free text.
 | --- | --- |
 | `http.server.request.duration` | `http.request.method`, `http.route` (the templated path), `http.response.status_code`; `/health` is excluded |
 | `http.client.request.duration` | `http.request.method`, `server.address`, `http.response.status_code`; covers analytics-engine, Discogs, and Anthropic |
-| `db.client.operation.duration` | `db.system.name` (`postgresql`, `neo4j`, or `redis`), `db.operation.name`, `error.type` on failure |
+| `db.client.operation.duration` | `db.system.name` (`postgresql`, `neo4j`, or `valkey`), `db.operation.name`, `error.type` on failure |
 | `groovemap.api.sync.duration` | `outcome` (`completed`, `failed`, `cancelled`) |
-| `groovemap.api.cache` | `outcome` (`hit`, `miss`), `cache` (the logical Redis cache) |
+| `groovemap.api.cache` | `outcome` (`hit`, `miss`), `cache` (the logical Valkey cache) |
 | `groovemap.api.nlq.requests` | `outcome` (`success`, `cached`, `error`, `invalid`, `unavailable`) |
 
 PostgreSQL and Neo4j report `db.client.operation.duration` through the `groovemap-runtime`
-resilient wrappers. Redis is reached without one, so its client is wrapped at startup and
+resilient wrappers. Valkey is reached without one, so its client is wrapped at startup and
 reports the same metric itself. The collector, VictoriaMetrics, Grafana dashboards, and the
 canonical metric catalog are owned by the
 [`deployment` repository](https://github.com/groovemap-music/deployment).
@@ -223,14 +245,14 @@ POSTGRES_DATABASE=groovemap
 NEO4J_HOST=localhost
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=local-only
-REDIS_HOST=localhost
+VALKEY_HOST=localhost
 JWT_SECRET_KEY=replace-with-at-least-32-random-bytes
 DISCOGS_USER_AGENT="GrooveMap-catalog-api/1.0 +https://github.com/groovemap-music/catalog-api"
 APP_BASE_URL=http://localhost:8006
 LOG_LEVEL=INFO
 ```
 
-The test suite uses fakes and does not require live PostgreSQL, Neo4j, Redis, RabbitMQ, Discogs,
+The test suite uses fakes and does not require live PostgreSQL, Neo4j, Valkey, RabbitMQ, Discogs,
 Anthropic, or Resend connections.
 
 ## Operator-owned credentials

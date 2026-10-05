@@ -156,7 +156,7 @@ implementation follows the schema:
 
 **Recommendation impressions.** Every served candidate on a ranked surface is recorded as one
 impression via `stamp_recommendation_impressions`, which mints impression ids *after* the
-response body is filled (two of the three surfaces cache their body in Redis, and an impression
+response body is filled (two of the three surfaces cache their body in Valkey, and an impression
 records a list having been *shown* — reusing ids from the request that populated the cache would
 misattribute every later cache hit to the request that built it). Every served item gets an
 `impression_id` key: `null` when the candidate had no native id (counted, never recorded) or
@@ -251,7 +251,7 @@ caller, across every store, in this order:
      cleared. The row is not deleted — two foreign keys to `users` carry no cascade rule, and
      erasing in place needs no constraint change and cannot orphan an unrelated audit trail.
 2. **Neo4j**: `DETACH DELETE` the user's node.
-3. **Redis**: `RecommendCache.invalidate_user`, plus the snapshot user-count key and any sync
+3. **Valkey**: `RecommendCache.invalidate_user`, plus the snapshot user-count key and any sync
    lock/cooldown keys, then a verification scan for surviving per-user recommendation keys — an
    erasure is not a request path, so a survivor is reported, not silently retried.
 4. **Revoke the caller's own token.**
@@ -262,7 +262,7 @@ is then itself deleted along with every other event for the subject — the dura
 erasure is the `activity.erasures` row, which survives.
 
 **Partial cross-store failure.** The relational transaction commits first; a failure in Neo4j or
-Redis after that point cannot be rolled back, so each of those two steps is verified
+Valkey after that point cannot be rolled back, so each of those two steps is verified
 independently and reported rather than hidden. The response is `202`:
 
 ```json
@@ -275,7 +275,7 @@ independently and reported rather than hidden. The response is `202`:
 ```
 
 `incomplete` is a list of human-readable failure descriptions — one entry per store step that
-did not complete cleanly (e.g. `"Neo4j deletion failed: ServiceUnavailable"`, or `"Redis
+did not complete cleanly (e.g. `"Neo4j deletion failed: ServiceUnavailable"`, or `"Valkey
 deletion incomplete: 2 recommendation key(s) survived"`) — empty when every step succeeded. The
 PostgreSQL half is never reported as incomplete: if it failed, the transaction rolled back and
 the whole request raised instead of returning `202`.
