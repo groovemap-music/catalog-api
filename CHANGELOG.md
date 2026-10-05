@@ -2,6 +2,77 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v0.5.0 (2026-10-05)
+
+### Feat
+
+- **valkey**: migrate catalog client preserving security and compatibility (#20)
+- **valkey**: migrate catalog client and operator names preserving security contracts
+- **lookup**: resolve UPC-A, EAN-13, and zero-led GTIN-14 barcodes as one GTIN (#15)
+- **lookup**: resolve barcode UPC-A and EAN-13 forms as one GTIN
+- **lookup**: add LookupMatch and an additive matches field
+- **lookup**: add batched multi-form provider_alias resolution
+- **recommend**: score every shared-signal artist for similar-artist candidates
+- **identity**: merge re-attached items and remove the dependents guard
+- **identity**: add the native-id merge steps and their exact revert
+- **privacy**: erase and export the catalog-item merge ledger
+- **identity**: re-attach and project gm_id on a completed Discogs extraction latch
+- **identity**: re-attach load-order-split catalog items to their Discogs native id
+- **identity**: add a read-only census of load-order-split catalog items
+- **explore**: add PostgreSQL exploration query family
+- **recommendations**: move fit and recommendation reads to postgres
+- **collection**: move read families to postgres
+- **label-dna**: add postgres backend family
+- **credits**: route the credits router through the graph-backend seam
+- **graph-backend**: register the credits family behind a protocol
+- **credits**: answer the credits family from postgres
+- **paths**: serve bounded traversals from postgres
+- **musicbrainz**: serve enrichment reads from postgres
+- **insights**: serve graph computations from postgres
+- **graph**: register the rarity family in the backend seam
+- **rarity**: answer the rarity signal batch from postgres
+- **graph-backend**: register the vertex-lookup and store-statistics families
+- **admin**: add the postgres storage-panel query, replacing apoc.meta.stats
+- **catalog**: add postgres year-range and graph-stats lookups
+- **gap**: add postgres label/artist/master metadata lookups
+- **collaborators**: add the postgres artist-identity lookup for the Explore endpoint
+- **explore**: apply the backend-neutral error mapping to one_hop_collaborators
+- **api**: serve autocomplete through the graph-backend seam
+- **autocomplete**: answer the name searches from the trigram indexes
+- **nlq**: route the get_collaborators tool through the graph-backend seam
+- **explore**: route get_collaborators/count through the graph-backend seam
+- **graph**: register the one_hop_collaborators family on the seam
+- **collaborators**: add the one-hop GRAPH_TABLE backend over graph.catalog
+- **graph**: map PostgreSQL statement timeouts to the same 504 as Neo4j
+- **network**: serve the collaborators family from graph.catalog with GRAPH_TABLE
+- **graph**: introduce GRAPH_BACKEND setting and a per-family backend selector
+
+### Fix
+
+- **parity**: reinstate the wpku family registrations dropped by the main refresh
+- **identity**: write the re-attachment run's audit entry before its identity writes (#14)
+- **identity**: write the re-attachment run's audit entry before its identity writes
+- **build**: merge the duplicated ruff per-file-ignores table
+- **recommend**: restore the min-releases floor and measure realistic latency
+- **explore**: follow alias-to-primary edge direction
+- **network**: serve artist centrality through selected backend
+- **explore**: route REST and NLQ through selected backend
+- **tests**: remove catalog integration volumes
+- **credits**: cover the backend error mapping, and stop it colliding
+- **rarity**: allow postgres mode without neo4j
+- **rarity**: call every family function with the family handle
+- **explore**: patch the identity lookup's actual backend after 91a.2
+- **graph**: separate backend unavailability from query timeouts
+
+### Refactor
+
+- **graph**: remove the SQL PGQ backend
+- **rarity**: drive the signal batch off a backend-neutral walk
+
+### Perf
+
+- **recommend**: cap and parallelize similar-artist candidate profiling
+
 ## v0.4.0 (2026-09-15)
 
 ### Feat
