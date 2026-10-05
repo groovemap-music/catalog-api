@@ -12,7 +12,7 @@ flowchart LR
     Loaders --> Stores[(PostgreSQL and Neo4j)]
     Clients[GrooveMap consumers] --> API[catalog-api]
     API --> Stores
-    API --> Cache[(Redis)]
+    API --> Cache[(Valkey)]
     API --> HTTPContracts[Versioned HTTP contracts]
     HTTPContracts --> Clients
 ```

@@ -626,7 +626,7 @@ curl -X POST "http://localhost:8004/api/nlq/query" \
 
 ### Graph Snapshots
 
-Snapshots are persisted in Redis with a configurable TTL (default 28 days) and survive service restarts.
+Snapshots are persisted in Valkey with a configurable TTL (default 28 days) and survive service restarts.
 
 ```bash
 # Save a graph snapshot (requires authentication)
