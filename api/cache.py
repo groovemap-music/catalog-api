@@ -1,7 +1,7 @@
-"""Redis cache for recommendation results.
+"""Valkey cache for recommendation results.
 
 Uses cache-aside pattern with configurable TTL per key type.
-All operations are safe — Redis failures fall through silently.
+All operations are safe — Valkey failures fall through silently.
 """
 
 import json
@@ -16,18 +16,18 @@ logger = structlog.get_logger(__name__)
 
 
 class RecommendCache:
-    """Redis cache for recommendation and similarity results."""
+    """Valkey cache for recommendation and similarity results."""
 
-    def __init__(self, redis: Any, default_ttl: int = 3600, cache: str = CACHE_RECOMMEND) -> None:
-        self._redis = redis
+    def __init__(self, valkey: Any, default_ttl: int = 3600, cache: str = CACHE_RECOMMEND) -> None:
+        self._valkey = valkey
         self._default_ttl = default_ttl
         # Names this cache in `groovemap.api.cache`; it is a fixed label, never a key.
         self._cache = cache
 
     async def get(self, key: str) -> dict[str, Any] | None:
-        """Get cached value. Returns None on miss or Redis error."""
+        """Get cached value. Returns None on miss or Valkey error."""
         try:
-            raw = await cache_get(self._redis, key, cache=self._cache)
+            raw = await cache_get(self._valkey, key, cache=self._cache)
             if raw is None:
                 return None
             result: dict[str, Any] = json.loads(raw)
@@ -37,9 +37,9 @@ class RecommendCache:
             return None
 
     async def set(self, key: str, value: dict[str, Any], ttl: int | None = None) -> None:
-        """Cache a value with TTL. Silently fails if Redis is down."""
+        """Cache a value with TTL. Silently fails if Valkey is down."""
         try:
-            await self._redis.set(key, json.dumps(value, default=str), ex=ttl or self._default_ttl)
+            await self._valkey.set(key, json.dumps(value, default=str), ex=ttl or self._default_ttl)
         except Exception:
             logger.debug("⚠️ Cache set failed", key=key)
 
@@ -53,9 +53,9 @@ class RecommendCache:
             for pattern in patterns:
                 cursor: str | int = "0"
                 while True:
-                    cursor, keys = await self._redis.scan(cursor=int(cursor), match=pattern, count=100)
+                    cursor, keys = await self._valkey.scan(cursor=int(cursor), match=pattern, count=100)
                     if keys:
-                        await self._redis.delete(*keys)
+                        await self._valkey.delete(*keys)
                     if str(cursor) == "0":
                         break
         except Exception:

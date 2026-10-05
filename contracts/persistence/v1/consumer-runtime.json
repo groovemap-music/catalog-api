@@ -1,0 +1,17 @@
+{
+  "consumer": "catalog-api",
+  "producer_compatibility_sha256": "65dcdf4226a5feb717953d43cac4d3b591264bce1f783ed7a5061cffb2a0df52",
+  "application_runtime": {
+    "package": "groovemap-runtime",
+    "tested_version": "0.1.0",
+    "tested_commit": "6c3802035e9c973c6598dadbd3e4377daee613d4",
+    "required_capabilities": [
+      "neo4j",
+      "otel",
+      "otel-http",
+      "postgres"
+    ],
+    "additional_required_helper": "_build_valkey_url"
+  },
+  "note": "Consumer-owned runtime promotion; the pinned persistence producer contract remains byte-identical. Validated by catalog-api required checks."
+}

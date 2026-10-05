@@ -11,7 +11,7 @@ import pytest
 async def test_handle_find_path_delegates_to_shared_tool() -> None:
     from api.nlq.tools import NLQToolRunner
 
-    runner = NLQToolRunner(neo4j_driver=object(), pg_pool=object(), redis=object())
+    runner = NLQToolRunner(neo4j_driver=object(), pg_pool=object(), valkey=object())
 
     with patch("common.agent_tools.find_path", new=AsyncMock(return_value={"path": [1, 2]})) as mock_shared:
         result = await runner._handle_find_path(
@@ -27,7 +27,7 @@ async def test_handle_find_path_delegates_to_shared_tool() -> None:
 async def test_handle_explore_entity_delegates() -> None:
     from api.nlq.tools import NLQToolRunner
 
-    runner = NLQToolRunner(neo4j_driver=object(), pg_pool=object(), redis=object())
+    runner = NLQToolRunner(neo4j_driver=object(), pg_pool=object(), valkey=object())
 
     with patch(
         "common.agent_tools.get_artist_details",
@@ -43,7 +43,7 @@ async def test_handle_explore_entity_delegates() -> None:
 async def test_handle_get_collaborators_delegates() -> None:
     from api.nlq.tools import NLQToolRunner
 
-    runner = NLQToolRunner(neo4j_driver=object(), pg_pool=object(), redis=object())
+    runner = NLQToolRunner(neo4j_driver=object(), pg_pool=object(), valkey=object())
 
     with patch(
         "common.agent_tools.get_collaborators",
@@ -59,7 +59,7 @@ async def test_handle_get_collaborators_delegates() -> None:
 async def test_handle_get_trends_delegates() -> None:
     from api.nlq.tools import NLQToolRunner
 
-    runner = NLQToolRunner(neo4j_driver=object(), pg_pool=object(), redis=object())
+    runner = NLQToolRunner(neo4j_driver=object(), pg_pool=object(), valkey=object())
 
     with patch(
         "common.agent_tools.get_trends",
@@ -75,7 +75,7 @@ async def test_handle_get_trends_delegates() -> None:
 async def test_handle_get_graph_stats_delegates() -> None:
     from api.nlq.tools import NLQToolRunner
 
-    runner = NLQToolRunner(neo4j_driver=object(), pg_pool=object(), redis=object())
+    runner = NLQToolRunner(neo4j_driver=object(), pg_pool=object(), valkey=object())
 
     with patch(
         "common.agent_tools.get_graph_stats",
@@ -91,7 +91,7 @@ async def test_handle_get_graph_stats_delegates() -> None:
 async def test_handle_get_genre_tree_delegates() -> None:
     from api.nlq.tools import NLQToolRunner
 
-    runner = NLQToolRunner(neo4j_driver=object(), pg_pool=object(), redis=object())
+    runner = NLQToolRunner(neo4j_driver=object(), pg_pool=object(), valkey=object())
 
     with patch(
         "common.agent_tools.get_genre_tree",
@@ -107,7 +107,7 @@ async def test_handle_get_genre_tree_delegates() -> None:
 async def test_handle_search_delegates() -> None:
     from api.nlq.tools import NLQToolRunner
 
-    runner = NLQToolRunner(neo4j_driver=object(), pg_pool=object(), redis=object())
+    runner = NLQToolRunner(neo4j_driver=object(), pg_pool=object(), valkey=object())
 
     with patch(
         "common.agent_tools.search",
@@ -125,7 +125,7 @@ async def test_handle_explore_entity_no_dispatch_handler_returns_error() -> None
 
     from api.nlq.tools import NLQToolRunner
 
-    runner = NLQToolRunner(neo4j_driver=object(), pg_pool=object(), redis=object())
+    runner = NLQToolRunner(neo4j_driver=object(), pg_pool=object(), valkey=object())
 
     with patch("api.queries.neo4j_queries.EXPLORE_DISPATCH", new={}):
         result = await runner._handle_explore_entity({"type": "unknown_type", "name": "x"}, None)
@@ -141,7 +141,7 @@ async def test_handle_explore_entity_dispatch_has_type_but_no_tool_fn() -> None:
 
     from api.nlq.tools import NLQToolRunner
 
-    runner = NLQToolRunner(neo4j_driver=object(), pg_pool=object(), redis=object())
+    runner = NLQToolRunner(neo4j_driver=object(), pg_pool=object(), valkey=object())
 
     # EXPLORE_DISPATCH has "exotic_type" so handler is not None, but the tool_fn dict doesn't include it
     with patch("api.queries.neo4j_queries.EXPLORE_DISPATCH", new={"exotic_type": MagicMock()}):
@@ -156,7 +156,7 @@ async def test_handle_find_path_resolve_name_returns_none_for_unknown_entity_typ
     """resolve_name inside _handle_find_path returns None when EXPLORE_DISPATCH has no handler."""
     from api.nlq.tools import NLQToolRunner
 
-    runner = NLQToolRunner(neo4j_driver=object(), pg_pool=object(), redis=object())
+    runner = NLQToolRunner(neo4j_driver=object(), pg_pool=object(), valkey=object())
 
     resolve_name_results: list[object] = []
 

@@ -39,12 +39,12 @@ _neo4j_driver: Any = None
 _cache: RecommendCache | None = None
 
 
-def configure(neo4j: Any, jwt_secret: str | None, redis: Any | None) -> None:  # noqa: ARG001
-    """Configure the recommend router with Neo4j driver, JWT secret, and Redis cache."""
+def configure(neo4j: Any, jwt_secret: str | None, valkey: Any | None) -> None:  # noqa: ARG001
+    """Configure the recommend router with Neo4j driver, JWT secret, and Valkey cache."""
     global _neo4j_driver, _cache
     _neo4j_driver = neo4j
-    if redis is not None:
-        _cache = RecommendCache(redis=redis, default_ttl=3600)
+    if valkey is not None:
+        _cache = RecommendCache(valkey=valkey, default_ttl=3600)
 
 
 _VALID_ENTITY_TYPES = {"artist", "label", "genre", "style"}
@@ -116,7 +116,7 @@ async def similar_artists(
     )
     response_data = response.model_dump()
 
-    # Cached before the ids are stamped, so the body in Redis never carries one: an
+    # Cached before the ids are stamped, so the body in Valkey never carries one: an
     # impression records a list having been shown, and the request that filled the cache
     # is not the request that shows it to the next caller.
     if _cache:

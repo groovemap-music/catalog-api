@@ -1,4 +1,4 @@
-"""Redis-backed snapshot store with native TTL for graph state persistence."""
+"""Valkey-backed snapshot store with native TTL for graph state persistence."""
 
 import os
 import secrets
@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import orjson
-import redis.asyncio as aioredis
+import valkey.asyncio as aiovalkey
 
 
 class SnapshotTooLargeError(ValueError):
@@ -18,20 +18,20 @@ class SnapshotQuotaExceededError(ValueError):
 
 
 class SnapshotStore:
-    """Redis-backed store for graph snapshots with native TTL eviction."""
+    """Valkey-backed store for graph snapshots with native TTL eviction."""
 
     _KEY_PREFIX = "snapshot:"
     _USER_COUNT_KEY_PREFIX = "snapshot:usercount:"
 
     def __init__(
         self,
-        redis_client: aioredis.Redis,
+        valkey_client: aiovalkey.Valkey,
         ttl_days: int | None = None,
         max_nodes: int | None = None,
         max_payload_bytes: int | None = None,
         max_per_user: int | None = None,
     ) -> None:
-        self._redis = redis_client
+        self._valkey = valkey_client
         self._ttl_days: int = ttl_days if ttl_days is not None else int(os.environ.get("SNAPSHOT_TTL_DAYS", "28"))
         self._max_nodes: int = max_nodes if max_nodes is not None else int(os.environ.get("SNAPSHOT_MAX_NODES", "100"))
         # Node-count alone doesn't bound per-node string size (SnapshotNode.id/type
@@ -42,7 +42,7 @@ class SnapshotStore:
         )
         # Caps the number of live (non-expired) snapshots a single user can
         # accumulate, so looping POST /api/snapshot can't mint unbounded
-        # 28-day-TTL Redis keys even with small, valid payloads.
+        # 28-day-TTL Valkey keys even with small, valid payloads.
         self._max_per_user: int = max_per_user if max_per_user is not None else int(os.environ.get("SNAPSHOT_MAX_PER_USER", "50"))
         self._ttl_seconds: int = self._ttl_days * 86400
 
@@ -92,7 +92,7 @@ class SnapshotStore:
 
         if user_id:
             count_key = f"{self._USER_COUNT_KEY_PREFIX}{user_id}"
-            count = await self._redis.incr(count_key)
+            count = await self._valkey.incr(count_key)
             # Self-healing TTL: `nx=True` means "set the TTL only if the key
             # doesn't already have one." Normally a no-op after the first
             # save. Previously this was gated on `count == 1` — a ONE-SHOT
@@ -103,29 +103,29 @@ class SnapshotStore:
             # "lifetime saves, forever" and eventually locking the user out
             # permanently (groovemap-7639). `nx=True` makes every save a
             # chance to arm a missing TTL, not just the first.
-            await self._redis.expire(count_key, self._ttl_seconds, nx=True)
+            await self._valkey.expire(count_key, self._ttl_seconds, nx=True)
             if count > self._max_per_user:
-                await self._redis.decr(count_key)
+                await self._valkey.decr(count_key)
                 raise SnapshotQuotaExceededError(f"User already has {count - 1} snapshots, maximum is {self._max_per_user}")
 
             try:
-                await self._redis.set(f"{self._KEY_PREFIX}{token}", payload, ex=self._ttl_seconds)
+                await self._valkey.set(f"{self._KEY_PREFIX}{token}", payload, ex=self._ttl_seconds)
             except Exception:
                 # Compensate: the save didn't happen, so the quota slot it
                 # reserved above must be freed — mirrors the decrement on the
-                # quota-exceeded path. Without this, a transient Redis/network
+                # quota-exceeded path. Without this, a transient Valkey/network
                 # failure on this specific call permanently burns the user's
                 # quota with zero live snapshots to show for it.
-                await self._redis.decr(count_key)
+                await self._valkey.decr(count_key)
                 raise
         else:
-            await self._redis.set(f"{self._KEY_PREFIX}{token}", payload, ex=self._ttl_seconds)
+            await self._valkey.set(f"{self._KEY_PREFIX}{token}", payload, ex=self._ttl_seconds)
 
         return token, expires_at
 
     async def load(self, token: str) -> dict[str, Any] | None:
         """Load a snapshot by token, returning None if not found or expired."""
-        raw = await self._redis.get(f"{self._KEY_PREFIX}{token}")
+        raw = await self._valkey.get(f"{self._KEY_PREFIX}{token}")
         if raw is None:
             return None
         result: dict[str, Any] = orjson.loads(raw)

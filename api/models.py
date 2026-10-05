@@ -678,21 +678,21 @@ class PostgresStorage(BaseModel):
     total_size: str
 
 
-class RedisKeyPrefix(BaseModel):
-    """Redis key prefix with count."""
+class ValkeyKeyPrefix(BaseModel):
+    """Valkey key prefix with count."""
 
     prefix: str
     count: int
 
 
-class RedisStorage(BaseModel):
-    """Redis storage utilization details."""
+class ValkeyStorage(BaseModel):
+    """Valkey storage utilization details."""
 
     status: str
     memory_used: str
     memory_peak: str
     total_keys: int
-    keys_by_prefix: list[RedisKeyPrefix]
+    keys_by_prefix: list[ValkeyKeyPrefix]
 
 
 class StorageSourceError(BaseModel):
@@ -707,7 +707,7 @@ class StorageResponse(BaseModel):
 
     neo4j: dict[str, Any]
     postgresql: dict[str, Any]
-    redis: dict[str, Any]
+    valkey: dict[str, Any]
 
 
 class RaritySignal(BaseModel):

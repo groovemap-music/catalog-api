@@ -43,19 +43,19 @@ logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 _neo4j_driver: Any = None
-_redis: Any = None
+_valkey: Any = None
 _pg_pool: Any = None
 
-# Redis cache TTL for trends (genre/style/label) and explore (artist/label)
+# Valkey cache TTL for trends (genre/style/label) and explore (artist/label)
 # 24 hours — data changes only on import
 _TRENDS_CACHE_TTL = 86400
 _EXPLORE_CACHE_TTL = 86400
 
 
-def configure(neo4j: Any, jwt_secret: str | None, redis: Any = None, pg_pool: Any = None) -> None:  # noqa: ARG001
-    global _neo4j_driver, _redis, _pg_pool
+def configure(neo4j: Any, jwt_secret: str | None, valkey: Any = None, pg_pool: Any = None) -> None:  # noqa: ARG001
+    global _neo4j_driver, _valkey, _pg_pool
     _neo4j_driver = neo4j
-    _redis = redis
+    _valkey = valkey
     _pg_pool = pg_pool
 
 
@@ -147,11 +147,11 @@ async def explore(
     if entity_type not in EXPLORE_DISPATCH:
         return JSONResponse(content={"error": f"Invalid type: {type}. Must be artist, genre, label, or style"}, status_code=400)
 
-    # Cache artist and label explore results in Redis (expensive COUNT traversals)
-    if _redis and entity_type in ("artist", "label"):
+    # Cache artist and label explore results in Valkey (expensive COUNT traversals)
+    if _valkey and entity_type in ("artist", "label"):
         cache_key = f"explore:{entity_type}:{name}"
         try:
-            cached = await cache_get(_redis, cache_key, cache=CACHE_EXPLORE)
+            cached = await cache_get(_valkey, cache_key, cache=CACHE_EXPLORE)
             if cached:
                 return JSONResponse(content=json.loads(cached))
         except Exception:
@@ -164,10 +164,10 @@ async def explore(
     categories = _build_categories(entity_type, result)
     response = {"center": {"id": str(result["id"]), "name": result["name"], "type": entity_type}, "categories": categories}
 
-    if _redis and entity_type in ("artist", "label"):
+    if _valkey and entity_type in ("artist", "label"):
         cache_key = f"explore:{entity_type}:{name}"
         try:
-            await _redis.setex(cache_key, _EXPLORE_CACHE_TTL, json.dumps(response))
+            await _valkey.setex(cache_key, _EXPLORE_CACHE_TTL, json.dumps(response))
         except Exception:
             logger.debug("⚠️ Explore cache set failed", key=cache_key)
 
@@ -373,11 +373,11 @@ async def get_trends(
     if entity_type not in TRENDS_DISPATCH:
         return JSONResponse(content={"error": f"Invalid type: {type}. Must be artist, genre, label, or style"}, status_code=400)
 
-    # Cache genre, style, and label trends in Redis (data changes only on import)
-    if _redis and entity_type in ("genre", "style", "label"):
+    # Cache genre, style, and label trends in Valkey (data changes only on import)
+    if _valkey and entity_type in ("genre", "style", "label"):
         cache_key = f"trends:{entity_type}:{name}"
         try:
-            cached = await cache_get(_redis, cache_key, cache=CACHE_TRENDS)
+            cached = await cache_get(_valkey, cache_key, cache=CACHE_TRENDS)
             if cached:
                 return JSONResponse(content=json.loads(cached))
         except Exception:
@@ -387,10 +387,10 @@ async def get_trends(
     results = await query_func(_neo4j_driver, name)
     response = {"name": name, "type": entity_type, "data": results}
 
-    if _redis and entity_type in ("genre", "style", "label"):
+    if _valkey and entity_type in ("genre", "style", "label"):
         cache_key = f"trends:{entity_type}:{name}"
         try:
-            await _redis.setex(cache_key, _TRENDS_CACHE_TTL, json.dumps(response))
+            await _valkey.setex(cache_key, _TRENDS_CACHE_TTL, json.dumps(response))
         except Exception:
             logger.debug("⚠️ Trends cache set failed", key=cache_key)
 

@@ -4,7 +4,7 @@
 verified the signature and ``exp`` via ``decode_token`` and returned ``sub``
 directly, performing NEITHER the ``revoked:jti:{jti}`` check nor the
 ``password_changed:{user_id}`` check that every other auth site performs. The
-helper was sync and so could not await Redis, and the resolved user_id unlocks
+helper was sync and so could not await Valkey, and the resolved user_id unlocks
 the authenticated NLQ collection tools — so a token revoked by logout or a
 password change kept reading the victim's private collection data until it expired.
 
@@ -59,10 +59,10 @@ def _fake_request(token: str) -> Any:
     return _Req()
 
 
-def _redis_returning(mapping: dict[str, Any]) -> AsyncMock:
-    redis = AsyncMock()
-    redis.get = AsyncMock(side_effect=lambda key: mapping.get(key))
-    return redis
+def _valkey_returning(mapping: dict[str, Any]) -> AsyncMock:
+    valkey = AsyncMock()
+    valkey.get = AsyncMock(side_effect=lambda key: mapping.get(key))
+    return valkey
 
 
 @pytest.mark.asyncio
@@ -70,8 +70,8 @@ async def test_nlq_rejects_a_token_revoked_by_logout() -> None:
     """A logged-out token must not resolve to a user in the NLQ router."""
     from api.routers import nlq as nlq_router
 
-    redis = _redis_returning({"revoked:jti:jti-1": "1"})
-    nlq_router.configure(nlq_router.NLQConfig(), engine=None, redis=redis, jwt_secret=SECRET)
+    valkey = _valkey_returning({"revoked:jti:jti-1": "1"})
+    nlq_router.configure(nlq_router.NLQConfig(), engine=None, valkey=valkey, jwt_secret=SECRET)
 
     assert await nlq_router._extract_user_id(_fake_request(_access_token())) is None
 
@@ -81,8 +81,8 @@ async def test_nlq_rejects_token_invalidated_by_password_change() -> None:
     """A token issued before a password change must not resolve to a user."""
     from api.routers import nlq as nlq_router
 
-    redis = _redis_returning({"password_changed:user-1": "2000"})
-    nlq_router.configure(nlq_router.NLQConfig(), engine=None, redis=redis, jwt_secret=SECRET)
+    valkey = _valkey_returning({"password_changed:user-1": "2000"})
+    nlq_router.configure(nlq_router.NLQConfig(), engine=None, valkey=valkey, jwt_secret=SECRET)
 
     assert await nlq_router._extract_user_id(_fake_request(_access_token(iat=1_000))) is None
 
@@ -92,8 +92,8 @@ async def test_nlq_rejects_token_issued_in_the_same_second_as_password_change() 
     """Boundary: the comparison is inclusive (issued_at <= changed_at)."""
     from api.routers import nlq as nlq_router
 
-    redis = _redis_returning({"password_changed:user-1": "2000"})
-    nlq_router.configure(nlq_router.NLQConfig(), engine=None, redis=redis, jwt_secret=SECRET)
+    valkey = _valkey_returning({"password_changed:user-1": "2000"})
+    nlq_router.configure(nlq_router.NLQConfig(), engine=None, valkey=valkey, jwt_secret=SECRET)
 
     assert await nlq_router._extract_user_id(_fake_request(_access_token(iat=2_000))) is None
 
@@ -103,8 +103,8 @@ async def test_nlq_accepts_token_issued_after_password_change() -> None:
     """A token minted after the change is still valid — revocation is not a blanket ban."""
     from api.routers import nlq as nlq_router
 
-    redis = _redis_returning({"password_changed:user-1": "2000"})
-    nlq_router.configure(nlq_router.NLQConfig(), engine=None, redis=redis, jwt_secret=SECRET)
+    valkey = _valkey_returning({"password_changed:user-1": "2000"})
+    nlq_router.configure(nlq_router.NLQConfig(), engine=None, valkey=valkey, jwt_secret=SECRET)
 
     assert await nlq_router._extract_user_id(_fake_request(_access_token(iat=2_001))) == "user-1"
 
@@ -114,20 +114,20 @@ async def test_nlq_accepts_live_token() -> None:
     """A live token with no revocation state resolves normally."""
     from api.routers import nlq as nlq_router
 
-    redis = _redis_returning({})
-    nlq_router.configure(nlq_router.NLQConfig(), engine=None, redis=redis, jwt_secret=SECRET)
+    valkey = _valkey_returning({})
+    nlq_router.configure(nlq_router.NLQConfig(), engine=None, valkey=valkey, jwt_secret=SECRET)
 
     assert await nlq_router._extract_user_id(_fake_request(_access_token())) == "user-1"
 
 
 @pytest.mark.asyncio
-async def test_nlq_fails_closed_when_redis_errors() -> None:
+async def test_nlq_fails_closed_when_valkey_errors() -> None:
     """If revocation state can't be read, the query degrades to anonymous, not authenticated."""
     from api.routers import nlq as nlq_router
 
-    redis = AsyncMock()
-    redis.get = AsyncMock(side_effect=ConnectionError("redis down"))
-    nlq_router.configure(nlq_router.NLQConfig(), engine=None, redis=redis, jwt_secret=SECRET)
+    valkey = AsyncMock()
+    valkey.get = AsyncMock(side_effect=ConnectionError("valkey down"))
+    nlq_router.configure(nlq_router.NLQConfig(), engine=None, valkey=valkey, jwt_secret=SECRET)
 
     assert await nlq_router._extract_user_id(_fake_request(_access_token())) is None
 
@@ -145,13 +145,13 @@ async def test_revoked_token_does_not_unlock_authenticated_tools() -> None:
     from api.nlq.engine import NLQResult
     from api.routers import nlq as nlq_router
 
-    redis = _redis_returning({"revoked:jti:jti-1": "1"})
+    valkey = _valkey_returning({"revoked:jti:jti-1": "1"})
     engine = AsyncMock()
     engine.run = AsyncMock(return_value=NLQResult(summary="ok", entities=[], tools_used=[]))
 
     original_config = nlq_router._nlq_config
     try:
-        nlq_router.configure(nlq_router.NLQConfig(enabled=True, api_key="sk-test"), engine=engine, redis=redis, jwt_secret=SECRET)
+        nlq_router.configure(nlq_router.NLQConfig(enabled=True, api_key="sk-test"), engine=engine, valkey=valkey, jwt_secret=SECRET)
         app = FastAPI()
         app.include_router(nlq_router.router)
         with TestClient(app) as client:
@@ -161,7 +161,7 @@ async def test_revoked_token_does_not_unlock_authenticated_tools() -> None:
                 headers={"Authorization": f"Bearer {_access_token()}"},
             )
     finally:
-        nlq_router.configure(original_config, engine=None, redis=None, jwt_secret=None)
+        nlq_router.configure(original_config, engine=None, valkey=None, jwt_secret=None)
 
     assert response.status_code == 200
     ctx = engine.run.call_args[0][1]
@@ -181,12 +181,23 @@ async def test_shared_helper_classifies_token_revocation(state: dict[str, Any], 
     """The single implementation every auth site delegates to."""
     payload = {"sub": "user-1", "jti": "jti-1", "iat": 1_000}
 
-    assert await token_revocation_reason(payload, _redis_returning(state)) == expected
+    assert await token_revocation_reason(payload, _valkey_returning(state)) == expected
 
 
 @pytest.mark.asyncio
-async def test_shared_helper_without_redis_is_permissive() -> None:
-    """No Redis configured means no revocation store — tokens stand on signature alone."""
+async def test_shared_helper_without_valkey_is_permissive() -> None:
+    """No Valkey configured means no revocation store — tokens stand on signature alone."""
     payload = {"sub": "user-1", "jti": "jti-1", "iat": 1_000}
 
     assert await token_revocation_reason(payload, None) is None
+
+
+@pytest.mark.asyncio
+async def test_security_store_key_prefixes_survive_driver_migration() -> None:
+    """Persisted logout/password keys must remain readable after switching clients."""
+    store = _valkey_returning({})
+    assert await token_revocation_reason({"jti": "fixture-jti", "sub": "fixture-user", "iat": 1000}, store) is None
+    assert [call.args[0] for call in store.get.await_args_list] == [
+        "revoked:jti:fixture-jti",
+        "password_changed:fixture-user",
+    ]

@@ -39,16 +39,16 @@ router = APIRouter()
 _SUGGESTIONS_CACHE_TTL = 300  # 5 minutes
 _nlq_config: NLQConfig = NLQConfig()
 _engine: NLQEngine | None = None
-_redis: Any = None
+_valkey: Any = None
 _jwt_secret: str | None = None
 
 
-def configure(nlq_config: NLQConfig, engine: NLQEngine | None, redis: Any = None, jwt_secret: str | None = None) -> None:
-    """Wire NLQ config, engine, Redis, and JWT secret into the router."""
-    global _nlq_config, _engine, _redis, _jwt_secret
+def configure(nlq_config: NLQConfig, engine: NLQEngine | None, valkey: Any = None, jwt_secret: str | None = None) -> None:
+    """Wire NLQ config, engine, Valkey, and JWT secret into the router."""
+    global _nlq_config, _engine, _valkey, _jwt_secret
     _nlq_config = nlq_config
     _engine = engine
-    _redis = redis
+    _valkey = valkey
     _jwt_secret = jwt_secret
 
 
@@ -62,9 +62,9 @@ class NLQQueryRequest(BaseModel):
 async def _extract_user_id(request: Request) -> str | None:
     """Extract user_id from an optional Bearer token. Returns None if missing, invalid, or revoked.
 
-    Async because revocation state lives in Redis: a resolved user_id unlocks the
+    Async because revocation state lives in Valkey: a resolved user_id unlocks the
     authenticated collection tools, so a logged-out or password-changed token must
-    NOT resolve here either (groovemap-aexv). Any failure — bad token, Redis
+    NOT resolve here either (groovemap-aexv). Any failure — bad token, Valkey
     error — fails closed to None, i.e. an anonymous/public query.
     """
     auth_header = request.headers.get("authorization", "")
@@ -74,14 +74,14 @@ async def _extract_user_id(request: Request) -> str | None:
     try:
         if _jwt_secret is None:
             return None
-        payload = await validate_token(token, _jwt_secret, _redis)
+        payload = await validate_token(token, _jwt_secret, _valkey)
         return payload.get("sub")
     except Exception:
         return None
 
 
 def _cache_key(query: str, context: dict[str, Any] | None = None) -> str:
-    """Build a Redis cache key from a normalized query and its entity context.
+    """Build a Valkey cache key from a normalized query and its entity context.
 
     The engine now resolves deictic references ("this artist") using
     ``current_entity_id``/``current_entity_type`` (groovemap-xcsx), so the
@@ -107,9 +107,9 @@ async def nlq_suggestions(
 ) -> JSONResponse:
     """Return dynamic suggested queries for the Ask pill."""
     cache_key = f"nlq:suggest:{pane}:{focus or ''}:{focus_type or ''}"
-    if _redis is not None:
+    if _valkey is not None:
         try:
-            cached = await cache_get(_redis, cache_key, cache=CACHE_NLQ_SUGGESTIONS)
+            cached = await cache_get(_valkey, cache_key, cache=CACHE_NLQ_SUGGESTIONS)
             if cached is not None:
                 return JSONResponse(content=json.loads(cached))
         except Exception:
@@ -118,9 +118,9 @@ async def nlq_suggestions(
     suggestions = build_suggestions(pane=pane, focus=focus, focus_type=focus_type)
     payload = {"suggestions": suggestions}
 
-    if _redis is not None:
+    if _valkey is not None:
         try:
-            await _redis.setex(cache_key, _SUGGESTIONS_CACHE_TTL, json.dumps(payload))
+            await _valkey.setex(cache_key, _SUGGESTIONS_CACHE_TTL, json.dumps(payload))
         except Exception:
             logger.debug("⚠️ NLQ suggestions cache write failed", key=cache_key)
 
@@ -168,12 +168,12 @@ async def nlq_query(request: Request, body: NLQQueryRequest) -> Any:
     accept = request.headers.get("accept", "")
     wants_stream = "text/event-stream" in accept
 
-    # Check Redis cache for public (unauthenticated) queries
+    # Check Valkey cache for public (unauthenticated) queries
     cached_data: dict[str, Any] | None = None
-    if user_id is None and _redis is not None:
+    if user_id is None and _valkey is not None:
         cache_k = _cache_key(body.query, body.context)
         try:
-            cached = await cache_get(_redis, cache_k, cache=CACHE_NLQ_QUERY)
+            cached = await cache_get(_valkey, cache_k, cache=CACHE_NLQ_QUERY)
             if cached is not None:
                 cached_data = json.loads(cached)
                 cached_data["cached"] = True
@@ -216,10 +216,10 @@ async def nlq_query(request: Request, body: NLQQueryRequest) -> Any:
         }
 
         # Cache public results
-        if user_id is None and _redis is not None:
+        if user_id is None and _valkey is not None:
             cache_k = _cache_key(body.query, body.context)
             try:
-                await _redis.setex(cache_k, _nlq_config.cache_ttl, json.dumps(response_data))
+                await _valkey.setex(cache_k, _nlq_config.cache_ttl, json.dumps(response_data))
             except Exception:
                 logger.debug("⚠️ NLQ cache write failed", key=cache_k)
 
@@ -317,7 +317,7 @@ def _stream_response(
                 }
 
                 # Emit final result. `actions` is repeated here on purpose: the
-                # non-streaming JSON body and the Redis cache entry both carry it on
+                # non-streaming JSON body and the Valkey cache entry both carry it on
                 # the result object, and a client that only subscribes to `result`
                 # would otherwise apply nothing at all. See groovemap-l6fm.
                 response_data = {
@@ -336,10 +336,10 @@ def _stream_response(
                 # before the "result" yield: a client disconnect raises GeneratorExit
                 # at that yield, and a write placed after it would never run.
                 # See groovemap-c584.
-                if user_id is None and _redis is not None:
+                if user_id is None and _valkey is not None:
                     cache_k = _cache_key(query, context)
                     try:
-                        await _redis.setex(cache_k, _nlq_config.cache_ttl, json.dumps(response_data))
+                        await _valkey.setex(cache_k, _nlq_config.cache_ttl, json.dumps(response_data))
                     except Exception:
                         logger.debug("⚠️ NLQ cache write failed", key=cache_k)
 

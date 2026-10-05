@@ -892,11 +892,11 @@ class TestSearchQueryAsyncFunctions:
         from api.queries.search_queries import execute_search
 
         cached_response = {"query": "blue", "total": 1, "facets": {}, "results": [], "pagination": {}}
-        mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(return_value=json.dumps(cached_response))
+        mock_valkey = AsyncMock()
+        mock_valkey.get = AsyncMock(return_value=json.dumps(cached_response))
         mock_pool = MagicMock()
 
-        result = await execute_search(mock_pool, mock_redis, "blue", ["artist"], [], None, None, 20, 0)
+        result = await execute_search(mock_pool, mock_valkey, "blue", ["artist"], [], None, None, 20, 0)
         assert result == cached_response
 
     @pytest.mark.asyncio
@@ -917,22 +917,22 @@ class TestSearchQueryAsyncFunctions:
         mock_pool = MagicMock()
         mock_pool.connection = MagicMock(return_value=mock_conn)
 
-        mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(return_value=None)
-        mock_redis.setex = AsyncMock()
+        mock_valkey = AsyncMock()
+        mock_valkey.get = AsyncMock(return_value=None)
+        mock_valkey.setex = AsyncMock()
 
         with patch("api.queries.search_queries.execute_sql", new_callable=AsyncMock):
-            result = await execute_search(mock_pool, mock_redis, "blue", ["artist"], [], None, None, 20, 0)
+            result = await execute_search(mock_pool, mock_valkey, "blue", ["artist"], [], None, None, 20, 0)
 
         assert result["query"] == "blue"
         assert result["total"] == 0
         assert "facets" in result
         assert "results" in result
         assert "pagination" in result
-        mock_redis.setex.assert_awaited_once()
+        mock_valkey.setex.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_execute_search_no_redis(self) -> None:
+    async def test_execute_search_no_valkey(self) -> None:
         from api.queries.search_queries import execute_search
 
         mock_cursor = AsyncMock()
@@ -971,46 +971,46 @@ class TestSearchQueryAsyncFunctions:
         return mock_pool
 
     @pytest.mark.asyncio
-    async def test_execute_search_degrades_when_redis_get_raises(self) -> None:
-        """groovemap-cu2.23: a Redis read outage must fall through to the DB,
+    async def test_execute_search_degrades_when_valkey_get_raises(self) -> None:
+        """groovemap-cu2.23: a Valkey read outage must fall through to the DB,
         not propagate a 500 — search is fully PostgreSQL-backed.
         """
-        from redis.exceptions import ConnectionError as RedisConnectionError
+        from valkey.exceptions import ConnectionError as ValkeyConnectionError
 
         from api.queries.search_queries import execute_search
 
         mock_pool = self._db_mocks()
-        mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(side_effect=RedisConnectionError("Connection refused"))
-        mock_redis.setex = AsyncMock()
+        mock_valkey = AsyncMock()
+        mock_valkey.get = AsyncMock(side_effect=ValkeyConnectionError("Connection refused"))
+        mock_valkey.setex = AsyncMock()
 
         with patch("api.queries.search_queries.execute_sql", new_callable=AsyncMock):
-            result = await execute_search(mock_pool, mock_redis, "blue", ["artist"], [], None, None, 20, 0)
+            result = await execute_search(mock_pool, mock_valkey, "blue", ["artist"], [], None, None, 20, 0)
 
-        # Answered from PostgreSQL despite the Redis outage.
+        # Answered from PostgreSQL despite the Valkey outage.
         assert result["query"] == "blue"
         assert result["total"] == 0
-        mock_redis.get.assert_awaited_once()
+        mock_valkey.get.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_execute_search_returns_when_redis_setex_raises(self) -> None:
-        """groovemap-cu2.23: a Redis write outage must not fail an otherwise
+    async def test_execute_search_returns_when_valkey_setex_raises(self) -> None:
+        """groovemap-cu2.23: a Valkey write outage must not fail an otherwise
         successful search response.
         """
-        from redis.exceptions import ConnectionError as RedisConnectionError
+        from valkey.exceptions import ConnectionError as ValkeyConnectionError
 
         from api.queries.search_queries import execute_search
 
         mock_pool = self._db_mocks()
-        mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(return_value=None)
-        mock_redis.setex = AsyncMock(side_effect=RedisConnectionError("Connection refused"))
+        mock_valkey = AsyncMock()
+        mock_valkey.get = AsyncMock(return_value=None)
+        mock_valkey.setex = AsyncMock(side_effect=ValkeyConnectionError("Connection refused"))
 
         with patch("api.queries.search_queries.execute_sql", new_callable=AsyncMock):
-            result = await execute_search(mock_pool, mock_redis, "blue", ["artist"], [], None, None, 20, 0)
+            result = await execute_search(mock_pool, mock_valkey, "blue", ["artist"], [], None, None, 20, 0)
 
         assert result["query"] == "blue"
-        mock_redis.setex.assert_awaited_once()
+        mock_valkey.setex.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_execute_search_treats_corrupt_cache_entry_as_miss(self) -> None:
@@ -1020,12 +1020,12 @@ class TestSearchQueryAsyncFunctions:
         from api.queries.search_queries import execute_search
 
         mock_pool = self._db_mocks()
-        mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(return_value="{not valid json")
-        mock_redis.setex = AsyncMock()
+        mock_valkey = AsyncMock()
+        mock_valkey.get = AsyncMock(return_value="{not valid json")
+        mock_valkey.setex = AsyncMock()
 
         with patch("api.queries.search_queries.execute_sql", new_callable=AsyncMock):
-            result = await execute_search(mock_pool, mock_redis, "blue", ["artist"], [], None, None, 20, 0)
+            result = await execute_search(mock_pool, mock_valkey, "blue", ["artist"], [], None, None, 20, 0)
 
         assert result["query"] == "blue"
 

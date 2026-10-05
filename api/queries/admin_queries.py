@@ -275,13 +275,13 @@ async def get_audit_log(
     }
 
 
-async def get_redis_storage(redis: Any) -> dict[str, Any]:
-    """Fetch Redis memory usage and key distribution grouped by prefix."""
-    if redis is None:
-        return {"status": "error", "error": "Redis not configured"}
+async def get_valkey_storage(valkey: Any) -> dict[str, Any]:
+    """Fetch Valkey memory usage and key distribution grouped by prefix."""
+    if valkey is None:
+        return {"status": "error", "error": "Valkey not configured"}
 
-    memory_info = await redis.info("memory")
-    keyspace_info = await redis.info("keyspace")
+    memory_info = await valkey.info("memory")
+    keyspace_info = await valkey.info("keyspace")
 
     total_keys = 0
     for db_info in keyspace_info.values():
@@ -293,7 +293,7 @@ async def get_redis_storage(redis: Any) -> dict[str, Any]:
     max_scan_keys = 10_000
     total_scanned = 0
     while True:
-        cursor, keys = await redis.scan(cursor=cursor, count=500)
+        cursor, keys = await valkey.scan(cursor=cursor, count=500)
         for key in keys:
             key_str = key if isinstance(key, str) else key.decode("utf-8", errors="replace")
             prefix = key_str.split(":")[0] + ":" if ":" in key_str else key_str

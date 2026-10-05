@@ -149,9 +149,9 @@ def test_execute_action_filter_graph_unknown_media_id_returns_readable_error() -
 
 
 @pytest.fixture
-def runner(mock_neo4j_driver: MagicMock, mock_pg_pool: MagicMock, mock_redis_client: AsyncMock) -> NLQToolRunner:
+def runner(mock_neo4j_driver: MagicMock, mock_pg_pool: MagicMock, mock_valkey_client: AsyncMock) -> NLQToolRunner:
     """Create an NLQToolRunner with mocked dependencies."""
-    return NLQToolRunner(mock_neo4j_driver, mock_pg_pool, mock_redis_client)
+    return NLQToolRunner(mock_neo4j_driver, mock_pg_pool, mock_valkey_client)
 
 
 @pytest.mark.asyncio

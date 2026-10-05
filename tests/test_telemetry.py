@@ -11,7 +11,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
-import fakeredis.aioredis as aioredis_fake
+import fakeredis as fake_store
 import httpx
 import pytest
 import respx
@@ -118,15 +118,15 @@ def collector(monkeypatch: pytest.MonkeyPatch) -> Iterator[Collector]:
 
 
 class TestCacheInstrument:
-    """groovemap.api.cache — Redis cache-aside hits and misses."""
+    """groovemap.api.cache — Valkey cache-aside hits and misses."""
 
     @pytest.mark.asyncio
     async def test_hit_and_miss_carry_outcome_and_cache(self, collector: Collector) -> None:
-        redis = aioredis_fake.FakeRedis(decode_responses=True)
-        await redis.set("k", "cached-value")
+        valkey = fake_store.FakeAsyncValkey(decode_responses=True)
+        await valkey.set("k", "cached-value")
 
-        assert await telemetry.cache_get(redis, "k", cache=telemetry.CACHE_SEARCH) == "cached-value"
-        assert await telemetry.cache_get(redis, "absent", cache=telemetry.CACHE_SEARCH) is None
+        assert await telemetry.cache_get(valkey, "k", cache=telemetry.CACHE_SEARCH) == "cached-value"
+        assert await telemetry.cache_get(valkey, "absent", cache=telemetry.CACHE_SEARCH) is None
 
         assert collector.attributes(CACHE_METRIC) == [
             {"outcome": "hit", "cache": "search"},
@@ -135,24 +135,24 @@ class TestCacheInstrument:
 
     @pytest.mark.asyncio
     async def test_failed_read_counts_a_miss_and_re_raises(self, collector: Collector) -> None:
-        redis = AsyncMock()
-        redis.get = AsyncMock(side_effect=RuntimeError("redis down"))
+        valkey = AsyncMock()
+        valkey.get = AsyncMock(side_effect=RuntimeError("valkey down"))
 
         with pytest.raises(RuntimeError):
-            await telemetry.cache_get(redis, "k", cache=telemetry.CACHE_NLQ_QUERY)
+            await telemetry.cache_get(valkey, "k", cache=telemetry.CACHE_NLQ_QUERY)
 
         assert collector.attributes(CACHE_METRIC) == [{"outcome": "miss", "cache": "nlq_query"}]
 
     @pytest.mark.asyncio
-    async def test_no_redis_records_nothing(self, collector: Collector) -> None:
+    async def test_no_valkey_records_nothing(self, collector: Collector) -> None:
         assert await telemetry.cache_get(None, "k", cache=telemetry.CACHE_SEARCH) is None
 
         assert collector.attributes(CACHE_METRIC) == []
 
     @pytest.mark.asyncio
     async def test_recommend_cache_labels_its_own_reads(self, collector: Collector) -> None:
-        redis = aioredis_fake.FakeRedis(decode_responses=True)
-        cache = RecommendCache(redis=redis)
+        valkey = fake_store.FakeAsyncValkey(decode_responses=True)
+        cache = RecommendCache(valkey=valkey)
         await cache.set("recommend:similar:artist:1", {"similar": []})
 
         assert await cache.get("recommend:similar:artist:1") == {"similar": []}
@@ -164,11 +164,11 @@ class TestCacheInstrument:
         ]
 
     @pytest.mark.asyncio
-    async def test_recommend_cache_swallows_a_redis_error_after_counting_it(self, collector: Collector) -> None:
-        redis = AsyncMock()
-        redis.get = AsyncMock(side_effect=RuntimeError("redis down"))
+    async def test_recommend_cache_swallows_a_valkey_error_after_counting_it(self, collector: Collector) -> None:
+        valkey = AsyncMock()
+        valkey.get = AsyncMock(side_effect=RuntimeError("valkey down"))
 
-        assert await RecommendCache(redis=redis).get("recommend:explore:u:1") is None
+        assert await RecommendCache(valkey=valkey).get("recommend:explore:u:1") is None
 
         assert collector.attributes(CACHE_METRIC) == [{"outcome": "miss", "cache": "recommend"}]
 
@@ -179,37 +179,37 @@ class TestCacheInstrument:
         assert all(label.replace("_", "").isalnum() for label in labels)
 
 
-class TestRedisOperationDuration:
-    """db.client.operation.duration — Redis is not behind a shared resilient wrapper."""
+class TestValkeyOperationDuration:
+    """db.client.operation.duration — Valkey is not behind a shared resilient wrapper."""
 
     @pytest.mark.asyncio
     async def test_command_records_system_and_operation(self, collector: Collector) -> None:
-        redis = telemetry.instrument_redis(aioredis_fake.FakeRedis())
+        valkey = telemetry.instrument_valkey(fake_store.FakeAsyncValkey())
 
-        await redis.set("k", "v")
-        assert await redis.get("k") == b"v"
+        await valkey.set("k", "v")
+        assert await valkey.get("k") == b"v"
 
         assert collector.attributes(DB_DURATION) == [
-            {"db.system.name": "redis", "db.operation.name": "set"},
-            {"db.system.name": "redis", "db.operation.name": "get"},
+            {"db.system.name": "valkey", "db.operation.name": "set"},
+            {"db.system.name": "valkey", "db.operation.name": "get"},
         ]
 
     @pytest.mark.asyncio
     async def test_failed_command_records_error_type(self, collector: Collector) -> None:
         client = AsyncMock()
         client.get = AsyncMock(side_effect=TimeoutError("no route"))
-        redis = telemetry.instrument_redis(client)
+        valkey = telemetry.instrument_valkey(client)
 
         with pytest.raises(TimeoutError):
-            await redis.get("k")
+            await valkey.get("k")
 
-        assert collector.attributes(DB_DURATION) == [{"db.system.name": "redis", "db.operation.name": "get", "error.type": "TimeoutError"}]
+        assert collector.attributes(DB_DURATION) == [{"db.system.name": "valkey", "db.operation.name": "get", "error.type": "TimeoutError"}]
 
     @pytest.mark.asyncio
     async def test_duration_is_recorded_in_seconds(self, collector: Collector) -> None:
-        redis = telemetry.instrument_redis(aioredis_fake.FakeRedis())
+        valkey = telemetry.instrument_valkey(fake_store.FakeAsyncValkey())
 
-        await redis.get("k")
+        await valkey.get("k")
 
         (point,) = collector.metrics()[DB_DURATION].data.data_points
         assert point.count == 1
@@ -218,13 +218,13 @@ class TestRedisOperationDuration:
 
     @pytest.mark.asyncio
     async def test_proxy_stands_in_for_the_client(self, collector: Collector) -> None:
-        client = aioredis_fake.FakeRedis()
-        redis = telemetry.instrument_redis(client)
+        client = fake_store.FakeAsyncValkey()
+        valkey = telemetry.instrument_valkey(client)
 
         # Non-command attributes pass through untouched, and closing is lifecycle, not a
         # database operation, so it is not timed.
-        assert redis.connection_pool is client.connection_pool
-        await redis.aclose()
+        assert valkey.connection_pool is client.connection_pool
+        await valkey.aclose()
 
         assert collector.attributes(DB_DURATION) == []
 
@@ -232,12 +232,12 @@ class TestRedisOperationDuration:
     async def test_pipeline_is_returned_intact_not_wrapped(self, collector: Collector) -> None:
         # A Pipeline is awaitable but is used as an async context manager, so it must come
         # back as itself. Wrapping every awaitable rather than every coroutine breaks this.
-        redis = telemetry.instrument_redis(aioredis_fake.FakeRedis(decode_responses=True))
+        valkey = telemetry.instrument_valkey(fake_store.FakeAsyncValkey(decode_responses=True))
 
-        async with redis.pipeline() as pipe:
+        async with valkey.pipeline() as pipe:
             pipe.set("k", "v")
             assert await pipe.execute() == [True]
-        assert await redis.get("k") == "v"
+        assert await valkey.get("k") == "v"
 
         # The pipeline object itself is not proxied, so its batched commands are not timed
         # individually. The service issues no pipelines; what matters here is that one works.
@@ -245,12 +245,12 @@ class TestRedisOperationDuration:
 
     @pytest.mark.asyncio
     async def test_cache_aside_read_through_the_proxy_records_both_metrics(self, collector: Collector) -> None:
-        redis = telemetry.instrument_redis(aioredis_fake.FakeRedis())
+        valkey = telemetry.instrument_valkey(fake_store.FakeAsyncValkey())
 
-        await telemetry.cache_get(redis, "absent", cache=telemetry.CACHE_TRENDS)
+        await telemetry.cache_get(valkey, "absent", cache=telemetry.CACHE_TRENDS)
 
         assert collector.attributes(CACHE_METRIC) == [{"outcome": "miss", "cache": "trends"}]
-        assert collector.attributes(DB_DURATION) == [{"db.system.name": "redis", "db.operation.name": "get"}]
+        assert collector.attributes(DB_DURATION) == [{"db.system.name": "valkey", "db.operation.name": "get"}]
 
 
 class TestSyncDuration:
@@ -355,7 +355,7 @@ class TestHttpServerInstrumentation:
         """
         import api.routers.network as network_router
 
-        previous = (network_router._neo4j, network_router._redis)
+        previous = (network_router._neo4j, network_router._valkey)
         network_router.configure(None, None)
 
         app = FastAPI()
@@ -638,8 +638,8 @@ class TestEventLoopMonitor:
         mock_pool = MagicMock()
         mock_pool.initialize = AsyncMock()
         mock_pool.close = AsyncMock()
-        mock_redis = AsyncMock()
-        mock_redis.aclose = AsyncMock()
+        mock_valkey = AsyncMock()
+        mock_valkey.aclose = AsyncMock()
         app = MagicMock()
 
         with (
@@ -647,7 +647,7 @@ class TestEventLoopMonitor:
             patch("api.api.HealthServer", return_value=mock_health),
             patch("api.api.AsyncPostgreSQLPool", return_value=mock_pool),
             patch("api.api.reconcile_stale_sync_history", new_callable=AsyncMock),
-            patch("api.api.aioredis.from_url", new_callable=AsyncMock, return_value=mock_redis),
+            patch("api.api.aiovalkey.from_url", new_callable=AsyncMock, return_value=mock_valkey),
             patch("api.api.run_collector", new_callable=AsyncMock),
             patch("api.api._prewarm_search_cache", new_callable=AsyncMock),
         ):
@@ -665,7 +665,7 @@ class TestEventLoopMonitor:
 
         api_module._pool = None
         api_module._config = None
-        api_module._redis = None
+        api_module._valkey = None
         api_module._neo4j = None
 
     @pytest.mark.asyncio

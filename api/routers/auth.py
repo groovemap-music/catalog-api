@@ -48,7 +48,7 @@ router = APIRouter()
 
 # Module-level state (set via configure())
 _pool: Any = None
-_redis: Any = None
+_valkey: Any = None
 _config: ApiConfig | None = None
 _get_current_user_fn: Any = None
 _create_access_token_fn: Any = None
@@ -59,7 +59,7 @@ _security = HTTPBearer()
 
 def configure(
     pool: Any,
-    redis: Any,
+    valkey: Any,
     config: ApiConfig,
     get_current_user: Any,
     create_access_token: Any,
@@ -67,9 +67,9 @@ def configure(
     notification_channel: Any = None,
 ) -> None:
     """Initialise module state — called once during app lifespan startup."""
-    global _pool, _redis, _config, _get_current_user_fn, _create_access_token_fn, _notification_channel
+    global _pool, _valkey, _config, _get_current_user_fn, _create_access_token_fn, _notification_channel
     _pool = pool
-    _redis = redis
+    _valkey = valkey
     _config = config
     _get_current_user_fn = get_current_user
     _create_access_token_fn = create_access_token
@@ -187,10 +187,10 @@ async def login(request: Request, body: LoginRequest) -> JSONResponse:  # noqa: 
 
     # If TOTP 2FA is enabled, return a challenge instead of an access token
     if user.get("totp_enabled"):
-        if _redis is None:
+        if _valkey is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Service not ready (Redis required for 2FA)",
+                detail="Service not ready (Valkey required for 2FA)",
             )
         jti = secrets.token_hex(16)
         challenge = create_challenge_token(
@@ -200,8 +200,8 @@ async def login(request: Request, body: LoginRequest) -> JSONResponse:  # noqa: 
             issued_at=credential_issued_at,
             jti=jti,
         )
-        # Store challenge JTI in Redis with 5 min TTL
-        await _redis.setex(f"2fa_challenge:{jti}", 300, str(user["id"]))
+        # Store challenge JTI in Valkey with 5 min TTL
+        await _valkey.setex(f"2fa_challenge:{jti}", 300, str(user["id"]))
         return JSONResponse(
             content={
                 "requires_2fa": True,
@@ -227,13 +227,13 @@ async def logout(
     current_user: Annotated[dict[str, Any], Depends(_require_user)],
 ) -> JSONResponse:
     """Logout and revoke the current JWT token."""
-    if _redis:
+    if _valkey:
         jti: str | None = current_user.get("jti")
         exp: int | None = current_user.get("exp")
         if jti:
             now = int(datetime.now(UTC).timestamp())
             ttl = max((exp - now), 60) if exp else 3600
-            await _redis.setex(f"revoked:jti:{jti}", ttl, "1")
+            await _valkey.setex(f"revoked:jti:{jti}", ttl, "1")
     return JSONResponse(content={"logged_out": True})
 
 
@@ -286,20 +286,20 @@ async def get_me(
 
 
 async def _process_reset_request(user: dict[str, Any] | None) -> None:
-    """Mint the reset token, write it to Redis, and send the email — OFF the request path.
+    """Mint the reset token, write it to Valkey, and send the email — OFF the request path.
 
     Scheduled unconditionally by the caller (whether or not the account
     exists) and only does real work when ``user`` is truthy. This means the
     HTTP response for reset-request returns after nothing but the initial
     SELECT on both branches, so response timing carries no signal about
-    account existence — the Redis `setex` and the outbound Resend HTTP call
+    account existence — the Valkey `setex` and the outbound Resend HTTP call
     (the actual timing oracle) both happen after the client already has the
     response (groovemap-0lof).
     """
-    if not user or _redis is None or _config is None:
+    if not user or _valkey is None or _config is None:
         return
     token = secrets.token_urlsafe(32)
-    await _redis.setex(
+    await _valkey.setex(
         f"reset:{token}",
         900,  # 15 min TTL
         json.dumps({"user_id": str(user["id"]), "email": user["email"]}),
@@ -315,7 +315,7 @@ async def _process_reset_request(user: dict[str, Any] | None) -> None:
 @limiter.limit("3/minute")
 async def reset_request(request: Request, body: ResetRequestModel, background_tasks: BackgroundTasks) -> JSONResponse:  # noqa: ARG001
     """Request a password reset. Same response whether email exists or not."""
-    if _pool is None or _redis is None or _config is None:
+    if _pool is None or _valkey is None or _config is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
 
     async with _pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -332,11 +332,11 @@ async def reset_request(request: Request, body: ResetRequestModel, background_ta
 @limiter.limit("5/minute")
 async def reset_confirm(request: Request, body: ResetConfirmModel) -> JSONResponse:  # noqa: ARG001
     """Confirm a password reset with a valid token and new password."""
-    if _pool is None or _redis is None or _config is None:
+    if _pool is None or _valkey is None or _config is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
 
     # Atomically consume the token to prevent concurrent reuse (TOCTOU)
-    raw = await _redis.getdel(f"reset:{body.token}")
+    raw = await _valkey.getdel(f"reset:{body.token}")
     if not raw:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired reset token")
 
@@ -363,7 +363,7 @@ async def reset_confirm(request: Request, body: ResetConfirmModel) -> JSONRespon
         )
 
     # Invalidate all existing sessions
-    await _redis.setex(f"password_changed:{user_id}", _config.jwt_expire_minutes * 60, str(now_ts))
+    await _valkey.setex(f"password_changed:{user_id}", _config.jwt_expire_minutes * 60, str(now_ts))
 
     logger.info("✅ Password reset completed", user_id=user_id)
     return JSONResponse(content={"message": "Password has been reset"})
@@ -377,7 +377,7 @@ async def change_password(
     body: ChangePasswordRequest,
 ) -> JSONResponse:
     """Change password for the currently authenticated user."""
-    if _pool is None or _redis is None or _config is None:
+    if _pool is None or _valkey is None or _config is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
 
     user_id = current_user.get("sub")
@@ -406,7 +406,7 @@ async def change_password(
             (hashed_password, user_id),
         )
         # Bulk-revoke third-party app tokens too (same pattern as reset-confirm;
-        # see groovemap-ci4a for why the Redis password_changed marker
+        # see groovemap-ci4a for why the Valkey password_changed marker
         # alone cannot cover app tokens).
         await execute_sql(
             cur,
@@ -415,7 +415,7 @@ async def change_password(
         )
 
     # Invalidate all existing sessions (same pattern as reset-confirm)
-    await _redis.setex(f"password_changed:{user_id}", _config.jwt_expire_minutes * 60, str(now_ts))
+    await _valkey.setex(f"password_changed:{user_id}", _config.jwt_expire_minutes * 60, str(now_ts))
 
     logger.info("✅ Password changed", user_id=user_id)
     return JSONResponse(content={"message": "Password has been changed"})
@@ -556,10 +556,10 @@ async def twofa_confirm(
 @limiter.limit("10/minute")
 async def twofa_verify(request: Request, body: TwoFactorVerifyModel) -> JSONResponse:  # noqa: ARG001
     """Verify a TOTP code during login using a challenge token."""
-    if _pool is None or _config is None or _redis is None:
+    if _pool is None or _config is None or _valkey is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
 
-    payload = await validate_token(body.challenge_token, _config.jwt_secret_key, _redis, kind=JwtKind.TWO_FACTOR_CHALLENGE)
+    payload = await validate_token(body.challenge_token, _config.jwt_secret_key, _valkey, kind=JwtKind.TWO_FACTOR_CHALLENGE)
 
     jti = payload.get("jti")
     if not jti:
@@ -568,7 +568,7 @@ async def twofa_verify(request: Request, body: TwoFactorVerifyModel) -> JSONResp
     # Verify challenge exists (without consuming) before checking lockout,
     # so locked-out users don't waste their challenge token.
     challenge_key = f"2fa_challenge:{jti}"
-    challenge_data = await _redis.get(challenge_key)
+    challenge_data = await _valkey.get(challenge_key)
     if not challenge_data:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Challenge expired or already used")
 
@@ -668,7 +668,7 @@ async def twofa_verify(request: Request, body: TwoFactorVerifyModel) -> JSONResp
     # Success — consume the challenge NOW (only after a correct code) to prevent
     # replay. getdel is atomic, so concurrent requests replaying the same valid
     # challenge race here and exactly one wins; the loser gets None -> 401.
-    consumed = await _redis.getdel(challenge_key)
+    consumed = await _valkey.getdel(challenge_key)
     if not consumed:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Challenge expired or already used")
 
@@ -698,10 +698,10 @@ async def twofa_verify(request: Request, body: TwoFactorVerifyModel) -> JSONResp
 @limiter.limit("5/minute")
 async def twofa_recovery(request: Request, body: TwoFactorRecoveryModel) -> JSONResponse:  # noqa: ARG001
     """Use a recovery code to complete 2FA login."""
-    if _pool is None or _config is None or _redis is None:
+    if _pool is None or _config is None or _valkey is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
 
-    payload = await validate_token(body.challenge_token, _config.jwt_secret_key, _redis, kind=JwtKind.TWO_FACTOR_CHALLENGE)
+    payload = await validate_token(body.challenge_token, _config.jwt_secret_key, _valkey, kind=JwtKind.TWO_FACTOR_CHALLENGE)
 
     jti = payload.get("jti")
     if not jti:
@@ -711,7 +711,7 @@ async def twofa_recovery(request: Request, body: TwoFactorRecoveryModel) -> JSON
     # so a mistyped recovery code does not burn the challenge token. The challenge
     # is consumed only after the recovery code is successfully redeemed below.
     challenge_key = f"2fa_challenge:{jti}"
-    challenge_data = await _redis.get(challenge_key)
+    challenge_data = await _valkey.get(challenge_key)
     if not challenge_data:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Challenge expired or already used")
 
@@ -769,7 +769,7 @@ async def twofa_recovery(request: Request, body: TwoFactorRecoveryModel) -> JSON
     # (groovemap-kqw4). The recovery code redeemed above is *not*
     # un-spent on this path; that's an accepted, bounded trade (same one
     # twofa_verify's loser already takes on its TOTP code).
-    consumed = await _redis.getdel(challenge_key)
+    consumed = await _valkey.getdel(challenge_key)
     if not consumed:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Challenge expired or already used")
 

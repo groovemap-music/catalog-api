@@ -523,7 +523,7 @@ class TestDiscogsOAuthEndpoints:
         self,
         test_client: TestClient,
         mock_cur: AsyncMock,
-        mock_redis: AsyncMock,  # noqa: ARG002
+        mock_valkey: AsyncMock,  # noqa: ARG002
         auth_headers: dict[str, str],
     ) -> None:
         from unittest.mock import patch
@@ -569,7 +569,7 @@ class TestDiscogsOAuthEndpoints:
         self,
         test_client: TestClient,
         mock_cur: AsyncMock,
-        mock_redis: AsyncMock,  # noqa: ARG002
+        mock_valkey: AsyncMock,  # noqa: ARG002
         auth_headers: dict[str, str],
     ) -> None:
         """When DISCOGS_OAUTH_CALLBACK_URL is set, the endpoint forwards it to request_oauth_token."""
@@ -600,7 +600,7 @@ class TestDiscogsOAuthEndpoints:
         self,
         test_client: TestClient,
         mock_cur: AsyncMock,
-        mock_redis: AsyncMock,  # noqa: ARG002
+        mock_valkey: AsyncMock,  # noqa: ARG002
         auth_headers: dict[str, str],
     ) -> None:
         """When DISCOGS_OAUTH_CALLBACK_URL is None, the OOB fallback (callback_url=None) is used."""
@@ -620,7 +620,7 @@ class TestDiscogsOAuthEndpoints:
         self,
         test_client: TestClient,
         mock_cur: AsyncMock,
-        mock_redis: AsyncMock,  # noqa: ARG002
+        mock_valkey: AsyncMock,  # noqa: ARG002
         auth_headers: dict[str, str],
     ) -> None:
         """The authorize response includes callback_mode so the frontend knows which flow to use."""
@@ -660,7 +660,7 @@ class TestDiscogsOAuthEndpoints:
         self,
         test_client: TestClient,
         mock_cur: AsyncMock,
-        mock_redis: AsyncMock,
+        mock_valkey: AsyncMock,
         auth_headers: dict[str, str],
     ) -> None:
         mock_cur.fetchall.return_value = [
@@ -669,13 +669,13 @@ class TestDiscogsOAuthEndpoints:
         ]
         mock_cur.fetchone.return_value = {"id": 1}
 
-        def _redis_get(key: str) -> str | None:
+        def _valkey_get(key: str) -> str | None:
             if key.startswith("discogs:oauth:state:"):
                 return "reqsecret"
             return None
 
-        mock_redis.get = AsyncMock(side_effect=_redis_get)
-        mock_redis.delete = AsyncMock(return_value=1)
+        mock_valkey.get = AsyncMock(side_effect=_valkey_get)
+        mock_valkey.delete = AsyncMock(return_value=1)
 
         with (
             patch(
@@ -702,14 +702,14 @@ class TestDiscogsOAuthEndpoints:
         self,
         test_client: TestClient,
         mock_cur: AsyncMock,
-        mock_redis: AsyncMock,
+        mock_valkey: AsyncMock,
         auth_headers: dict[str, str],
     ) -> None:
         mock_cur.fetchall.return_value = [
             {"key": "discogs_consumer_key", "value": "ckey"},
             {"key": "discogs_consumer_secret", "value": "csecret"},
         ]
-        mock_redis.getdel.return_value = None  # state expired
+        mock_valkey.getdel.return_value = None  # state expired
 
         response = test_client.post(
             "/api/oauth/verify/discogs",
@@ -765,27 +765,27 @@ class TestDiscogsOAuthEndpoints:
         test_client: TestClient,
         auth_headers: dict[str, str],
     ) -> None:
-        """Returns 503 when Redis is None."""
+        """Returns 503 when Valkey is None."""
         import api.api as api_module
 
-        original_redis = api_module._redis
-        api_module._redis = None
+        original_valkey = api_module._valkey
+        api_module._valkey = None
         try:
             response = test_client.get("/api/oauth/authorize/discogs", headers=auth_headers)
             assert response.status_code == 503
         finally:
-            api_module._redis = original_redis
+            api_module._valkey = original_valkey
 
     def test_verify_discogs_service_not_ready_503(
         self,
         test_client: TestClient,
         auth_headers: dict[str, str],
     ) -> None:
-        """Returns 503 when Redis is None."""
+        """Returns 503 when Valkey is None."""
         import api.api as api_module
 
-        original_redis = api_module._redis
-        api_module._redis = None
+        original_valkey = api_module._valkey
+        api_module._valkey = None
         try:
             response = test_client.post(
                 "/api/oauth/verify/discogs",
@@ -794,13 +794,13 @@ class TestDiscogsOAuthEndpoints:
             )
             assert response.status_code == 503
         finally:
-            api_module._redis = original_redis
+            api_module._valkey = original_valkey
 
     def test_verify_discogs_exchange_error_400(
         self,
         test_client: TestClient,
         mock_cur: AsyncMock,
-        mock_redis: AsyncMock,
+        mock_valkey: AsyncMock,
         auth_headers: dict[str, str],
     ) -> None:
         """Returns 400 when exchange_oauth_verifier raises DiscogsOAuthError."""
@@ -811,13 +811,13 @@ class TestDiscogsOAuthEndpoints:
             {"key": "discogs_consumer_secret", "value": "csecret"},
         ]
 
-        def _redis_get_exchange(key: str) -> str | None:
+        def _valkey_get_exchange(key: str) -> str | None:
             if key.startswith("discogs:oauth:state:"):
                 return "reqsecret"
             return None
 
-        mock_redis.get = AsyncMock(side_effect=_redis_get_exchange)
-        mock_redis.delete = AsyncMock(return_value=1)
+        mock_valkey.get = AsyncMock(side_effect=_valkey_get_exchange)
+        mock_valkey.delete = AsyncMock(return_value=1)
 
         with patch(
             "api.api.exchange_oauth_verifier",
@@ -1098,44 +1098,44 @@ class TestLogoutEndpoint:
         assert response.status_code == 200
         assert response.json()["logged_out"] is True
 
-    def test_logout_revokes_jti_in_redis(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
+    def test_logout_revokes_jti_in_valkey(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
         from api.api import _create_access_token
 
         token, _ = _create_access_token(TEST_USER_ID, TEST_USER_EMAIL)
         response = test_client.post("/api/auth/logout", headers={"Authorization": f"Bearer {token}"})
         assert response.status_code == 200
-        mock_redis.setex.assert_awaited_once()
-        assert mock_redis.setex.call_args[0][0].startswith("revoked:jti:")
+        mock_valkey.setex.assert_awaited_once()
+        assert mock_valkey.setex.call_args[0][0].startswith("revoked:jti:")
 
-    def test_logout_redis_none_succeeds_gracefully(self, test_client: TestClient, auth_headers: dict[str, str]) -> None:
+    def test_logout_valkey_none_succeeds_gracefully(self, test_client: TestClient, auth_headers: dict[str, str]) -> None:
         import api.api as api_module
 
-        original = api_module._redis
-        api_module._redis = None
+        original = api_module._valkey
+        api_module._valkey = None
         try:
             response = test_client.post("/api/auth/logout", headers=auth_headers)
             assert response.status_code == 200
         finally:
-            api_module._redis = original
+            api_module._valkey = original
 
 
 class TestJtiBlacklist:
     """Tests for JTI blacklist check in _get_current_user."""
 
-    def test_revoked_jti_returns_401(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
+    def test_revoked_jti_returns_401(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
         from api.api import _create_access_token
 
         token, _ = _create_access_token(TEST_USER_ID, TEST_USER_EMAIL)
-        mock_redis.get.return_value = "1"  # jti is revoked
+        mock_valkey.get.return_value = "1"  # jti is revoked
         response = test_client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
         assert response.status_code == 401
 
     def test_non_revoked_jti_allows_access(
-        self, test_client: TestClient, mock_redis: AsyncMock, mock_cur: AsyncMock, auth_headers: dict[str, str]
+        self, test_client: TestClient, mock_valkey: AsyncMock, mock_cur: AsyncMock, auth_headers: dict[str, str]
     ) -> None:
         from datetime import UTC, datetime
 
-        mock_redis.get.return_value = None  # not revoked
+        mock_valkey.get.return_value = None  # not revoked
         mock_cur.fetchone.return_value = {
             "id": TEST_USER_ID,
             "email": TEST_USER_EMAIL,
@@ -1186,17 +1186,17 @@ class TestSecurityHeaders:
         assert "geolocation=()" in response.headers.get("permissions-policy", "")
 
 
-class TestVerifyDiscogsOAuthErrorPreservesRedisState:
-    """Test that DiscogsOAuthError during verify preserves Redis state for retry."""
+class TestVerifyDiscogsOAuthErrorPreservesValkeyState:
+    """Test that DiscogsOAuthError during verify preserves Valkey state for retry."""
 
-    def test_exchange_error_preserves_redis_state(
+    def test_exchange_error_preserves_valkey_state(
         self,
         test_client: TestClient,
         mock_cur: AsyncMock,
-        mock_redis: AsyncMock,
+        mock_valkey: AsyncMock,
         auth_headers: dict[str, str],
     ) -> None:
-        """On exchange failure, state stays in Redis so user can retry the callback."""
+        """On exchange failure, state stays in Valkey so user can retry the callback."""
         from api.services.discogs import DiscogsOAuthError
 
         mock_cur.fetchall.return_value = [
@@ -1204,13 +1204,13 @@ class TestVerifyDiscogsOAuthErrorPreservesRedisState:
             {"key": "discogs_consumer_secret", "value": "csecret"},
         ]
 
-        def _redis_get_cleanup(key: str) -> str | None:
+        def _valkey_get_cleanup(key: str) -> str | None:
             if key.startswith("discogs:oauth:state:"):
                 return "reqsecret"
             return None
 
-        mock_redis.get = AsyncMock(side_effect=_redis_get_cleanup)
-        mock_redis.delete = AsyncMock(return_value=1)
+        mock_valkey.get = AsyncMock(side_effect=_valkey_get_cleanup)
+        mock_valkey.delete = AsyncMock(return_value=1)
 
         with patch(
             "api.api.exchange_oauth_verifier",
@@ -1222,8 +1222,8 @@ class TestVerifyDiscogsOAuthErrorPreservesRedisState:
                 json={"state": "reqtok", "oauth_verifier": "bad"},
             )
         assert response.status_code == 400
-        # Verify redis.delete was NOT called — state preserved for retry
-        mock_redis.delete.assert_not_awaited()
+        # Verify valkey.delete was NOT called — state preserved for retry
+        mock_valkey.delete.assert_not_awaited()
 
 
 class TestVerifyDiscogsUpsertFetchoneNone:
@@ -1233,7 +1233,7 @@ class TestVerifyDiscogsUpsertFetchoneNone:
         self,
         test_client: TestClient,
         mock_cur: AsyncMock,
-        mock_redis: AsyncMock,
+        mock_valkey: AsyncMock,
         auth_headers: dict[str, str],
     ) -> None:
         """Lines 597-602: fetchone() returns None after upsert raises 500."""
@@ -1242,12 +1242,12 @@ class TestVerifyDiscogsUpsertFetchoneNone:
             {"key": "discogs_consumer_secret", "value": "csecret"},
         ]
 
-        def _redis_get_upsert(key: str) -> str | None:
+        def _valkey_get_upsert(key: str) -> str | None:
             if key.startswith("discogs:oauth:state:"):
                 return "reqsecret"
             return None
 
-        mock_redis.get = AsyncMock(side_effect=_redis_get_upsert)
+        mock_valkey.get = AsyncMock(side_effect=_valkey_get_upsert)
         mock_cur.fetchone.return_value = None  # INSERT RETURNING fails
 
         with (
@@ -1310,7 +1310,7 @@ class TestVerifyDiscogsOAuthStateBinding:
         self,
         test_client: TestClient,
         mock_cur: AsyncMock,
-        mock_redis: AsyncMock,
+        mock_valkey: AsyncMock,
         auth_headers: dict[str, str],
     ) -> None:
         """Returns 403 when the OAuth state was initiated by a different user."""
@@ -1323,12 +1323,12 @@ class TestVerifyDiscogsOAuthStateBinding:
         # State data with a different user_id than TEST_USER_ID
         state_data = _json.dumps({"secret": "reqsecret", "user_id": "different-user-id"})
 
-        def _redis_getdel_state(key: str) -> str | None:
+        def _valkey_getdel_state(key: str) -> str | None:
             if key.startswith("discogs:oauth:state:"):
                 return state_data
             return None
 
-        mock_redis.getdel = AsyncMock(side_effect=_redis_getdel_state)
+        mock_valkey.getdel = AsyncMock(side_effect=_valkey_getdel_state)
 
         response = test_client.post(
             "/api/oauth/verify/discogs",
@@ -1342,10 +1342,10 @@ class TestVerifyDiscogsOAuthStateBinding:
         self,
         test_client: TestClient,
         mock_cur: AsyncMock,
-        mock_redis: AsyncMock,
+        mock_valkey: AsyncMock,
         auth_headers: dict[str, str],
     ) -> None:
-        """Raw string (not JSON) in Redis is treated as secret with no user binding."""
+        """Raw string (not JSON) in Valkey is treated as secret with no user binding."""
         mock_cur.fetchall.return_value = [
             {"key": "discogs_consumer_key", "value": "ckey"},
             {"key": "discogs_consumer_secret", "value": "csecret"},
@@ -1353,12 +1353,12 @@ class TestVerifyDiscogsOAuthStateBinding:
         mock_cur.fetchone.return_value = {"id": 1}
 
         # Raw string — not JSON, triggers backwards compat path
-        def _redis_getdel_compat(key: str) -> str | None:
+        def _valkey_getdel_compat(key: str) -> str | None:
             if key.startswith("discogs:oauth:state:"):
                 return "plain-secret-string"
             return None
 
-        mock_redis.getdel = AsyncMock(side_effect=_redis_getdel_compat)
+        mock_valkey.getdel = AsyncMock(side_effect=_valkey_getdel_compat)
 
         with (
             patch(
@@ -1384,7 +1384,7 @@ class TestVerifyDiscogsOAuthStateBinding:
 
 class TestLifespanShutdownClosesAnthropicClient:
     """groovemap-8nle: the lifespan-created AsyncAnthropic client must be
-    closed on shutdown, mirroring the existing _neo4j/_pool/_redis cleanup."""
+    closed on shutdown, mirroring the existing _neo4j/_pool/_valkey cleanup."""
 
     @staticmethod
     def _make_config() -> ApiConfig:
@@ -1416,8 +1416,8 @@ class TestLifespanShutdownClosesAnthropicClient:
         mock_pool.initialize = AsyncMock()
         mock_pool.close = AsyncMock()
 
-        mock_redis = AsyncMock()
-        mock_redis.aclose = AsyncMock()
+        mock_valkey = AsyncMock()
+        mock_valkey.aclose = AsyncMock()
 
         mock_neo4j = MagicMock()
         mock_neo4j.close = AsyncMock()
@@ -1430,7 +1430,7 @@ class TestLifespanShutdownClosesAnthropicClient:
             patch("api.api.HealthServer", return_value=mock_health),
             patch("api.api.AsyncPostgreSQLPool", return_value=mock_pool),
             patch("api.api.reconcile_stale_sync_history", new_callable=AsyncMock),
-            patch("api.api.aioredis.from_url", new_callable=AsyncMock, return_value=mock_redis),
+            patch("api.api.aiovalkey.from_url", new_callable=AsyncMock, return_value=mock_valkey),
             patch("api.api.AsyncResilientNeo4jDriver", return_value=mock_neo4j),
             patch("anthropic.AsyncAnthropic", return_value=mock_anthropic_client),
             patch("api.api.run_collector", new_callable=AsyncMock),
@@ -1443,7 +1443,7 @@ class TestLifespanShutdownClosesAnthropicClient:
         # The other lifespan-owned clients must still be closed too.
         mock_neo4j.close.assert_awaited_once()
         mock_pool.close.assert_awaited_once()
-        mock_redis.aclose.assert_awaited_once()
+        mock_valkey.aclose.assert_awaited_once()
         mock_health.start_background.assert_called_once()
         mock_health.stop.assert_called_once()
 
@@ -1451,7 +1451,7 @@ class TestLifespanShutdownClosesAnthropicClient:
         # file see the fixture-provisioned state again.
         api_module._pool = None
         api_module._config = None
-        api_module._redis = None
+        api_module._valkey = None
         api_module._neo4j = None
 
     @pytest.mark.asyncio
@@ -1471,8 +1471,8 @@ class TestLifespanShutdownClosesAnthropicClient:
         mock_pool.initialize = AsyncMock()
         mock_pool.close = AsyncMock()
 
-        mock_redis = AsyncMock()
-        mock_redis.aclose = AsyncMock()
+        mock_valkey = AsyncMock()
+        mock_valkey.aclose = AsyncMock()
 
         mock_neo4j = MagicMock()
         mock_neo4j.close = AsyncMock()
@@ -1482,7 +1482,7 @@ class TestLifespanShutdownClosesAnthropicClient:
             patch("api.api.HealthServer", return_value=mock_health),
             patch("api.api.AsyncPostgreSQLPool", return_value=mock_pool),
             patch("api.api.reconcile_stale_sync_history", new_callable=AsyncMock),
-            patch("api.api.aioredis.from_url", new_callable=AsyncMock, return_value=mock_redis),
+            patch("api.api.aiovalkey.from_url", new_callable=AsyncMock, return_value=mock_valkey),
             patch("api.api.AsyncResilientNeo4jDriver", return_value=mock_neo4j),
             patch("api.api.run_collector", new_callable=AsyncMock),
             patch("api.api._prewarm_search_cache", new_callable=AsyncMock),
@@ -1494,11 +1494,11 @@ class TestLifespanShutdownClosesAnthropicClient:
         anthropic_constructor.assert_not_called()
         mock_neo4j.close.assert_awaited_once()
         mock_pool.close.assert_awaited_once()
-        mock_redis.aclose.assert_awaited_once()
+        mock_valkey.aclose.assert_awaited_once()
         mock_health.start_background.assert_called_once()
         mock_health.stop.assert_called_once()
 
         api_module._pool = None
         api_module._config = None
-        api_module._redis = None
+        api_module._valkey = None
         api_module._neo4j = None
