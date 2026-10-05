@@ -470,7 +470,7 @@ The original profiling effort found the largest improvements in these categories
 | --- | --- |
 | Path finding | Typed relationship traversal and bounded depth |
 | Genre and style exploration | Indexed anchors and promoted aggregate properties |
-| Artist and label similarity | Candidate caps, batched profiles, and Redis caching |
+| Artist and label similarity | Candidate caps, batched profiles, and Valkey caching |
 | Label DNA | Shared cache reuse |
 | Full-text search | Per-table limits, concurrent facets, and bounded counts |
 | Year range | Index-backed first and last entry |

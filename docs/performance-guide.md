@@ -72,10 +72,10 @@ The API owns cache keys, TTLs, and invalidation for its responses. Current examp
 | Result | Cache behavior |
 | --- | --- |
 | Genre tree | Five-minute in-process cache |
-| Explore and trends | Redis cache for stable imported data |
-| Recommendations and label DNA | Redis cache with bounded TTL |
-| Search | Redis cache after bounded PostgreSQL queries |
-| Data completeness | Six-hour Redis cache for expensive aggregate scans |
+| Explore and trends | Valkey cache for stable imported data |
+| Recommendations and label DNA | Valkey cache with bounded TTL |
+| Search | Valkey cache after bounded PostgreSQL queries |
+| Data completeness | Six-hour Valkey cache for expensive aggregate scans |
 | User timeline and collection gaps | Bounded in-process caches |
 
 Cache correctness is part of the API contract: invalidation follows successful writes, a failed

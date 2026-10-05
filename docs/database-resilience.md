@@ -16,15 +16,15 @@ stateDiagram-v2
 
 ## Required startup dependencies
 
-The API initializes its PostgreSQL pool and constructs Redis and Neo4j clients during lifespan
+The API initializes its PostgreSQL pool and constructs Valkey and Neo4j clients during lifespan
 startup. Missing required configuration or PostgreSQL initialization failure prevents application
-traffic. Redis and Neo4j failures are surfaced when their operations run. Connection construction and retry primitives come
+traffic. Valkey and Neo4j failures are surfaced when their operations run. Connection construction and retry primitives come
 from the pinned shared runtime in
 [`python-libraries`](https://github.com/groovemap-music/python-libraries).
 
 - PostgreSQL stores users, tokens, audit records, metrics, and relational catalog data.
 - Neo4j serves graph exploration, recommendations, credits, and relationship queries.
-- Redis stores short-lived OAuth state, revocations, snapshots, rate limits, and caches.
+- Valkey stores short-lived OAuth state, revocations, snapshots, rate limits, and caches.
 
 The authoritative PostgreSQL and Neo4j definitions are owned by
 [`database-schema`](https://github.com/groovemap-music/database-schema). `catalog-api` must not
@@ -36,7 +36,7 @@ create or mutate infrastructure schema during ordinary startup.
 | --- | --- |
 | PostgreSQL | Database exceptions become bounded request failures; pooled connections are recycled by the shared runtime |
 | Neo4j | Sessions use the resilient driver and explicit per-query timeouts for expensive paths |
-| Redis | Cache operations degrade to database work where safe; security state that cannot safely degrade fails closed |
+| Valkey | Cache operations degrade to database work where safe; security state that cannot safely degrade fails closed |
 | `analytics-engine` | `/api/insights/*` proxy requests return 503 when the service is unavailable |
 | `discogs-ingestion` | The retained administrative trigger/tracker records a terminal failure when its configured endpoint cannot be reached |
 | `musicbrainz-ingestion` | Not called by Catalog API; missing or stale loaded data remains visible through ordinary query/analysis results |
@@ -56,7 +56,7 @@ awaited write and restored ahead of newer entries if persistence fails. The boun
 oldest entries first when its limit is reached.
 
 User synchronization invalidates caches only after durable writes succeed. OAuth state and JWT
-revocation remain TTL-bound in Redis. Authentication and authorization paths must never treat an
+revocation remain TTL-bound in Valkey. Authentication and authorization paths must never treat an
 unknown dependency result as successful.
 
 ## Health and observability
@@ -71,7 +71,7 @@ include credentials, connection strings, tokens, or secret-file contents.
 
 ## Validation
 
-Default tests use fakes and mocks and must not connect to live PostgreSQL, Neo4j, Redis, RabbitMQ,
+Default tests use fakes and mocks and must not connect to live PostgreSQL, Neo4j, Valkey, RabbitMQ,
 Discogs, Anthropic, or Resend services. Test production-like outage and recovery behavior only in
 an isolated environment provided by `deployment`.
 

@@ -11,7 +11,7 @@ flowchart LR
     Explorer[graph-explorer] --> API
     API --> PG[(PostgreSQL catalog)]
     API --> Neo4j[(Neo4j graph)]
-    API --> Redis[(Redis cache)]
+    API --> Valkey[(Valkey cache)]
     API --> Discogs[Discogs API]
     API --> Analytics[analytics-engine]
     DI[discogs-ingestion] -->|v1 events| DC[Discogs loaders]
