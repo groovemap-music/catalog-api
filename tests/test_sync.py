@@ -353,50 +353,50 @@ class TestSyncGetCurrentUser:
             del app.dependency_overrides[_get_current_user]
 
 
-class TestSyncRedisCooldown:
-    """Tests for per-user Redis cooldown in trigger_sync."""
+class TestSyncValkeyCooldown:
+    """Tests for per-user Valkey cooldown in trigger_sync."""
 
-    def test_in_cooldown_returns_429(self, test_client: TestClient, mock_redis: AsyncMock, auth_headers: dict[str, str]) -> None:
-        mock_redis.get = AsyncMock(side_effect=lambda key: "1" if key.startswith("sync:cooldown:") else None)
+    def test_in_cooldown_returns_429(self, test_client: TestClient, mock_valkey: AsyncMock, auth_headers: dict[str, str]) -> None:
+        mock_valkey.get = AsyncMock(side_effect=lambda key: "1" if key.startswith("sync:cooldown:") else None)
         response = test_client.post("/api/sync", headers=auth_headers)
         assert response.status_code == 429
         data = response.json()
         assert data["status"] == "cooldown"
 
-    def test_cooldown_key_uses_user_id(self, test_client: TestClient, mock_redis: AsyncMock, auth_headers: dict[str, str]) -> None:
-        mock_redis.get = AsyncMock(side_effect=lambda key: "1" if key.startswith("sync_cooldown:") or key.startswith("sync:cooldown:") else None)
+    def test_cooldown_key_uses_user_id(self, test_client: TestClient, mock_valkey: AsyncMock, auth_headers: dict[str, str]) -> None:
+        mock_valkey.get = AsyncMock(side_effect=lambda key: "1" if key.startswith("sync_cooldown:") or key.startswith("sync:cooldown:") else None)
         test_client.post("/api/sync", headers=auth_headers)
         # get is called for password_changed check and cooldown check
-        cooldown_calls = [c for c in mock_redis.get.call_args_list if "sync:cooldown:" in str(c)]
+        cooldown_calls = [c for c in mock_valkey.get.call_args_list if "sync:cooldown:" in str(c)]
         assert len(cooldown_calls) == 1
         call_key = cooldown_calls[0][0][0]
         assert call_key == f"sync:cooldown:{TEST_USER_ID}"
 
     def test_sets_cooldown_after_trigger(
-        self, test_client: TestClient, mock_redis: AsyncMock, mock_cur: AsyncMock, auth_headers: dict[str, str]
+        self, test_client: TestClient, mock_valkey: AsyncMock, mock_cur: AsyncMock, auth_headers: dict[str, str]
     ) -> None:
         import asyncio
         from unittest.mock import MagicMock
 
-        mock_redis.get.return_value = None  # not in cooldown
+        mock_valkey.get.return_value = None  # not in cooldown
         mock_cur.fetchone.return_value = {"id": "new-sync-id"}
         fake_task = MagicMock(spec=asyncio.Task)
         fake_task.done.return_value = False
         with patch("api.routers.sync.asyncio.create_task", side_effect=_close_coro_and_return(fake_task)):
             test_client.post("/api/sync", headers=auth_headers)
-        mock_redis.setex.assert_awaited_once()
-        setex_args = mock_redis.setex.call_args[0]
+        mock_valkey.setex.assert_awaited_once()
+        setex_args = mock_valkey.setex.call_args[0]
         assert setex_args[0] == f"sync:cooldown:{TEST_USER_ID}"
         assert setex_args[1] == 60
 
-    def test_redis_none_skips_cooldown(self, test_client: TestClient, mock_cur: AsyncMock, auth_headers: dict[str, str]) -> None:
+    def test_valkey_none_skips_cooldown(self, test_client: TestClient, mock_cur: AsyncMock, auth_headers: dict[str, str]) -> None:
         import asyncio
         from unittest.mock import MagicMock
 
         import api.routers.sync as sync_module
 
-        original = sync_module._redis
-        sync_module._redis = None
+        original = sync_module._valkey
+        sync_module._valkey = None
         mock_cur.fetchone.return_value = {"id": "sync-id"}
         try:
             fake_task = MagicMock(spec=asyncio.Task)
@@ -405,7 +405,7 @@ class TestSyncRedisCooldown:
                 response = test_client.post("/api/sync", headers=auth_headers)
             assert response.status_code == 202
         finally:
-            sync_module._redis = original
+            sync_module._valkey = original
 
     def test_trigger_sync_passes_encryption_key(self, test_client: TestClient, mock_cur: AsyncMock, auth_headers: dict[str, str]) -> None:
         import asyncio
@@ -436,7 +436,7 @@ class TestSyncRedisCooldown:
 class TestSyncTokenRevocation:
     """Tests for jti-based token revocation in sync._get_current_user (lines 56-65)."""
 
-    def test_revoked_jti_returns_401(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
+    def test_revoked_jti_returns_401(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
         """A JWT with a jti claim that has been revoked should return 401."""
         import base64
         import hashlib
@@ -458,13 +458,13 @@ class TestSyncTokenRevocation:
         sig = b64url(hmac.new(TEST_JWT_SECRET.encode("utf-8"), signing_input, hashlib.sha256).digest())
         token = f"{header}.{body}.{sig}"
 
-        # mock_redis.get returns truthy for the revoked key
+        # mock_valkey.get returns truthy for the revoked key
         async def fake_get(key: str) -> str | None:
             if key == f"revoked:jti:{jti_value}":
                 return "1"
             return None
 
-        mock_redis.get = AsyncMock(side_effect=fake_get)
+        mock_valkey.get = AsyncMock(side_effect=fake_get)
 
         response = test_client.post("/api/sync", headers={"Authorization": f"Bearer {token}"})
         assert response.status_code == 401
@@ -474,7 +474,7 @@ class TestSyncTokenRevocation:
 class TestSyncPasswordChanged:
     """Tests for password_changed check in sync._get_current_user (lines 68-77)."""
 
-    def test_token_issued_before_password_change_returns_401(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
+    def test_token_issued_before_password_change_returns_401(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
         """A JWT issued before a password change should return 401."""
         import base64
         import hashlib
@@ -503,7 +503,7 @@ class TestSyncPasswordChanged:
                 return "2000"
             return None
 
-        mock_redis.get = AsyncMock(side_effect=fake_get)
+        mock_valkey.get = AsyncMock(side_effect=fake_get)
 
         response = test_client.post("/api/sync", headers={"Authorization": f"Bearer {token}"})
         assert response.status_code == 401
@@ -514,11 +514,11 @@ class TestSyncAtomicLock:
     """Tests for atomic lock preventing duplicate sync tasks (lines 97-103)."""
 
     def test_lock_not_acquired_returns_202_already_running(
-        self, test_client: TestClient, mock_redis: AsyncMock, auth_headers: dict[str, str]
+        self, test_client: TestClient, mock_valkey: AsyncMock, auth_headers: dict[str, str]
     ) -> None:
-        """When Redis nx lock is not acquired, should return 202 with already_running."""
-        mock_redis.get.return_value = None  # not in cooldown
-        mock_redis.set = AsyncMock(return_value=None)  # lock NOT acquired
+        """When Valkey nx lock is not acquired, should return 202 with already_running."""
+        mock_valkey.get.return_value = None  # not in cooldown
+        mock_valkey.set = AsyncMock(return_value=None)  # lock NOT acquired
 
         response = test_client.post("/api/sync", headers=auth_headers)
         assert response.status_code == 202

@@ -405,7 +405,7 @@ class TestNLQEngineMediaFilteredGapRoundTrip:
     async def test_cassette_only_gaps_round_trip(self) -> None:
         config = _make_config()
         client = _make_client()
-        real_runner = NLQToolRunner(neo4j_driver=MagicMock(), pg_pool=MagicMock(), redis=MagicMock())
+        real_runner = NLQToolRunner(neo4j_driver=MagicMock(), pg_pool=MagicMock(), valkey=MagicMock())
 
         tool_call = _make_tool_use_response(
             "get_collection_gaps",
@@ -432,7 +432,7 @@ class TestNLQEngineMediaFilteredGapRoundTrip:
         """An id the model hallucinates comes back as a tool_result error, not an exception."""
         config = _make_config()
         client = _make_client()
-        real_runner = NLQToolRunner(neo4j_driver=MagicMock(), pg_pool=MagicMock(), redis=MagicMock())
+        real_runner = NLQToolRunner(neo4j_driver=MagicMock(), pg_pool=MagicMock(), valkey=MagicMock())
 
         tool_call = _make_tool_use_response(
             "get_collection_gaps",

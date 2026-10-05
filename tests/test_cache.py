@@ -12,17 +12,17 @@ class TestRecommendCache:
     """Tests for the RecommendCache class."""
 
     @pytest.fixture
-    def mock_redis(self) -> AsyncMock:
-        redis = AsyncMock()
-        redis.get = AsyncMock(return_value=None)
-        redis.set = AsyncMock()
-        redis.scan = AsyncMock(return_value=(0, []))
-        redis.delete = AsyncMock()
-        return redis
+    def mock_valkey(self) -> AsyncMock:
+        valkey = AsyncMock()
+        valkey.get = AsyncMock(return_value=None)
+        valkey.set = AsyncMock()
+        valkey.scan = AsyncMock(return_value=(0, []))
+        valkey.delete = AsyncMock()
+        return valkey
 
     @pytest.fixture
-    def cache(self, mock_redis: AsyncMock) -> RecommendCache:
-        return RecommendCache(redis=mock_redis, default_ttl=3600)
+    def cache(self, mock_valkey: AsyncMock) -> RecommendCache:
+        return RecommendCache(valkey=mock_valkey, default_ttl=3600)
 
     @pytest.mark.asyncio
     async def test_get_miss(self, cache: RecommendCache) -> None:
@@ -30,57 +30,57 @@ class TestRecommendCache:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_get_hit(self, cache: RecommendCache, mock_redis: AsyncMock) -> None:
-        mock_redis.get = AsyncMock(return_value=json.dumps({"key": "value"}))
+    async def test_get_hit(self, cache: RecommendCache, mock_valkey: AsyncMock) -> None:
+        mock_valkey.get = AsyncMock(return_value=json.dumps({"key": "value"}))
         result = await cache.get("recommend:hit")
         assert result == {"key": "value"}
 
     @pytest.mark.asyncio
-    async def test_get_redis_error(self, cache: RecommendCache, mock_redis: AsyncMock) -> None:
-        mock_redis.get = AsyncMock(side_effect=ConnectionError("down"))
+    async def test_get_valkey_error(self, cache: RecommendCache, mock_valkey: AsyncMock) -> None:
+        mock_valkey.get = AsyncMock(side_effect=ConnectionError("down"))
         result = await cache.get("recommend:fail")
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_set_stores_with_ttl(self, cache: RecommendCache, mock_redis: AsyncMock) -> None:
+    async def test_set_stores_with_ttl(self, cache: RecommendCache, mock_valkey: AsyncMock) -> None:
         await cache.set("recommend:key", {"data": 1}, ttl=7200)
-        mock_redis.set.assert_called_once()
-        call_kwargs = mock_redis.set.call_args
+        mock_valkey.set.assert_called_once()
+        call_kwargs = mock_valkey.set.call_args
         assert call_kwargs[1]["ex"] == 7200
 
     @pytest.mark.asyncio
-    async def test_set_uses_default_ttl(self, cache: RecommendCache, mock_redis: AsyncMock) -> None:
+    async def test_set_uses_default_ttl(self, cache: RecommendCache, mock_valkey: AsyncMock) -> None:
         await cache.set("recommend:key", {"data": 1})
-        call_kwargs = mock_redis.set.call_args
+        call_kwargs = mock_valkey.set.call_args
         assert call_kwargs[1]["ex"] == 3600
 
     @pytest.mark.asyncio
-    async def test_set_redis_error(self, cache: RecommendCache, mock_redis: AsyncMock) -> None:
-        mock_redis.set = AsyncMock(side_effect=ConnectionError("down"))
+    async def test_set_valkey_error(self, cache: RecommendCache, mock_valkey: AsyncMock) -> None:
+        mock_valkey.set = AsyncMock(side_effect=ConnectionError("down"))
         await cache.set("recommend:key", {"data": 1})  # should not raise
 
-        mock_redis.set.assert_awaited_once()
+        mock_valkey.set.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_invalidate_user(self, cache: RecommendCache, mock_redis: AsyncMock) -> None:
+    async def test_invalidate_user(self, cache: RecommendCache, mock_valkey: AsyncMock) -> None:
         # Two SCAN responses: one per pattern (explore:*, enhanced:{user_id})
-        mock_redis.scan = AsyncMock(
+        mock_valkey.scan = AsyncMock(
             side_effect=[
                 (0, ["recommend:explore:user1:artist:a1"]),
                 (0, ["recommend:enhanced:user1"]),
             ]
         )
         await cache.invalidate_user("user1")
-        assert mock_redis.delete.call_count == 2
+        assert mock_valkey.delete.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_invalidate_user_no_keys(self, cache: RecommendCache, mock_redis: AsyncMock) -> None:
-        mock_redis.scan = AsyncMock(return_value=(0, []))
+    async def test_invalidate_user_no_keys(self, cache: RecommendCache, mock_valkey: AsyncMock) -> None:
+        mock_valkey.scan = AsyncMock(return_value=(0, []))
         await cache.invalidate_user("user1")
-        mock_redis.delete.assert_not_called()
+        mock_valkey.delete.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_invalidate_user_redis_error(self, cache: RecommendCache, mock_redis: AsyncMock) -> None:
-        mock_redis.scan = AsyncMock(side_effect=ConnectionError("down"))
+    async def test_invalidate_user_valkey_error(self, cache: RecommendCache, mock_valkey: AsyncMock) -> None:
+        mock_valkey.scan = AsyncMock(side_effect=ConnectionError("down"))
         await cache.invalidate_user("user1")  # should not raise
-        mock_redis.scan.assert_awaited_once()
+        mock_valkey.scan.assert_awaited_once()

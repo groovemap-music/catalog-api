@@ -448,12 +448,12 @@ class TestStartupPartitions:
 class TestConfiguration:
     """The wiring the rest of the service reaches the recorder through."""
 
-    def test_configure_holds_the_redis_client_for_the_erasure_closure(self, mock_pool: MagicMock) -> None:
+    def test_configure_holds_the_valkey_client_for_the_erasure_closure(self, mock_pool: MagicMock) -> None:
         sentinel = object()
         activity.configure(mock_pool, sentinel)
-        assert activity.redis_client() is sentinel
+        assert activity.valkey_client() is sentinel
         activity.configure(None, None)
-        assert activity.redis_client() is None
+        assert activity.valkey_client() is None
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("recorder")
@@ -558,7 +558,7 @@ class TestPayloadConformance:
 class TestServiceWiring:
     """The recorder reaches the sync and the partitions through `api.api` startup."""
 
-    def test_startup_makes_the_recorder_the_syncs_event_hook(self, mock_pool: MagicMock, mock_redis: Any) -> None:
+    def test_startup_makes_the_recorder_the_syncs_event_hook(self, mock_pool: MagicMock, mock_valkey: Any) -> None:
         """The collection sync holds a no-op recorder until startup hands it the real one.
 
         That indirection is what keeps `api.syncer` free of any dependency on the activity
@@ -572,7 +572,7 @@ class TestServiceWiring:
             syncer.configure(None)
             assert syncer._event_recorder is syncer._discard_event
 
-            api_module._configure_routers(api_module.ApiConfig.from_env(), mock_pool, mock_redis, None)
+            api_module._configure_routers(api_module.ApiConfig.from_env(), mock_pool, mock_valkey, None)
 
             assert syncer._event_recorder is activity.record_event
         finally:

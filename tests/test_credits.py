@@ -266,8 +266,8 @@ class TestCreditsServiceNotReady:
         assert self._with_driver_none(test_client, "/api/credits/autocomplete?q=Test") == 503
 
 
-class TestCreditsRedisCaching:
-    """Tests for Redis cache hit/miss paths."""
+class TestCreditsValkeyCaching:
+    """Tests for Valkey cache hit/miss paths."""
 
     @patch("api.routers.credits.get_person_credits")
     def test_person_credits_cache_hit(self, mock_query: AsyncMock, test_client: TestClient) -> None:
@@ -281,17 +281,17 @@ class TestCreditsRedisCaching:
                 {"release_id": "1", "title": "Cached", "year": 2000, "role": "Mastered By", "category": "mastering", "artists": [], "labels": []}
             ],
         }
-        original_redis = credits_router._redis
-        mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(return_value=json.dumps(cached_data))
-        credits_router._redis = mock_redis
+        original_valkey = credits_router._valkey
+        mock_valkey = AsyncMock()
+        mock_valkey.get = AsyncMock(return_value=json.dumps(cached_data))
+        credits_router._valkey = mock_valkey
         try:
             response = test_client.get("/api/credits/person/Bob%20Ludwig")
             assert response.status_code == 200
             assert response.json()["credits"][0]["title"] == "Cached"
             mock_query.assert_not_called()
         finally:
-            credits_router._redis = original_redis
+            credits_router._valkey = original_valkey
 
     @patch("api.routers.credits.get_person_credits")
     def test_person_credits_cache_miss_sets_cache(self, mock_query: AsyncMock, test_client: TestClient) -> None:
@@ -301,37 +301,37 @@ class TestCreditsRedisCaching:
         mock_query.return_value = [
             {"release_id": "1", "title": "Fresh", "year": 2000, "role": "Producer", "category": "production", "artists": [], "labels": []},
         ]
-        original_redis = credits_router._redis
-        mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(return_value=None)
-        mock_redis.setex = AsyncMock()
-        credits_router._redis = mock_redis
+        original_valkey = credits_router._valkey
+        mock_valkey = AsyncMock()
+        mock_valkey.get = AsyncMock(return_value=None)
+        mock_valkey.setex = AsyncMock()
+        credits_router._valkey = mock_valkey
         try:
             response = test_client.get("/api/credits/person/Test")
             assert response.status_code == 200
-            mock_redis.setex.assert_called_once()
+            mock_valkey.setex.assert_called_once()
         finally:
-            credits_router._redis = original_redis
+            credits_router._valkey = original_valkey
 
     @patch("api.routers.credits.get_person_credits")
     def test_person_credits_cache_get_error(self, mock_query: AsyncMock, test_client: TestClient) -> None:
-        """Test that Redis get error falls through to Neo4j query."""
+        """Test that Valkey get error falls through to Neo4j query."""
         import api.routers.credits as credits_router
 
         mock_query.return_value = [
             {"release_id": "1", "title": "Fallback", "year": 2000, "role": "Engineer", "category": "engineering", "artists": [], "labels": []},
         ]
-        original_redis = credits_router._redis
-        mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(side_effect=Exception("Redis down"))
-        mock_redis.setex = AsyncMock(side_effect=Exception("Redis down"))
-        credits_router._redis = mock_redis
+        original_valkey = credits_router._valkey
+        mock_valkey = AsyncMock()
+        mock_valkey.get = AsyncMock(side_effect=Exception("Valkey down"))
+        mock_valkey.setex = AsyncMock(side_effect=Exception("Valkey down"))
+        credits_router._valkey = mock_valkey
         try:
             response = test_client.get("/api/credits/person/Test")
             assert response.status_code == 200
             assert response.json()["credits"][0]["title"] == "Fallback"
         finally:
-            credits_router._redis = original_redis
+            credits_router._valkey = original_valkey
 
     @patch("api.routers.credits.get_role_leaderboard")
     def test_leaderboard_cache_hit(self, mock_query: AsyncMock, test_client: TestClient) -> None:
@@ -339,31 +339,31 @@ class TestCreditsRedisCaching:
         import api.routers.credits as credits_router
 
         cached_data = {"category": "mastering", "entries": [{"name": "Cached Person", "credit_count": 999}]}
-        original_redis = credits_router._redis
-        mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(return_value=json.dumps(cached_data))
-        credits_router._redis = mock_redis
+        original_valkey = credits_router._valkey
+        mock_valkey = AsyncMock()
+        mock_valkey.get = AsyncMock(return_value=json.dumps(cached_data))
+        credits_router._valkey = mock_valkey
         try:
             response = test_client.get("/api/credits/role/mastering/top")
             assert response.status_code == 200
             assert response.json()["entries"][0]["name"] == "Cached Person"
             mock_query.assert_not_called()
         finally:
-            credits_router._redis = original_redis
+            credits_router._valkey = original_valkey
 
     @patch("api.routers.credits.get_role_leaderboard")
     def test_leaderboard_cache_error(self, mock_query: AsyncMock, test_client: TestClient) -> None:
-        """Test leaderboard falls through on Redis error."""
+        """Test leaderboard falls through on Valkey error."""
         import api.routers.credits as credits_router
 
         mock_query.return_value = [{"name": "Test", "credit_count": 10}]
-        original_redis = credits_router._redis
-        mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(side_effect=Exception("Redis down"))
-        mock_redis.setex = AsyncMock(side_effect=Exception("Redis down"))
-        credits_router._redis = mock_redis
+        original_valkey = credits_router._valkey
+        mock_valkey = AsyncMock()
+        mock_valkey.get = AsyncMock(side_effect=Exception("Valkey down"))
+        mock_valkey.setex = AsyncMock(side_effect=Exception("Valkey down"))
+        credits_router._valkey = mock_valkey
         try:
             response = test_client.get("/api/credits/role/mastering/top")
             assert response.status_code == 200
         finally:
-            credits_router._redis = original_redis
+            credits_router._valkey = original_valkey

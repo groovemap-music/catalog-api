@@ -34,9 +34,9 @@ class TestSaveSnapshot:
             "center": {"id": "0", "type": "artist"},
         }
         original_store = snap_module._snapshot_store
-        import fakeredis.aioredis as aioredis_fake
+        import fakeredis as fake_store
 
-        small_store = SnapshotStore(aioredis_fake.FakeRedis(), max_nodes=2)
+        small_store = SnapshotStore(fake_store.FakeAsyncValkey(), max_nodes=2)
         snap_module._snapshot_store = small_store
         try:
             response = test_client.post("/api/snapshot", json=body, headers=auth_headers)
@@ -112,9 +112,9 @@ class TestSnapshotPayloadAndQuotaLimits:
         import api.routers.snapshot as snap_module
 
         original_store = snap_module._snapshot_store
-        import fakeredis.aioredis as aioredis_fake
+        import fakeredis as fake_store
 
-        small_payload_store = SnapshotStore(aioredis_fake.FakeRedis(), max_payload_bytes=50)
+        small_payload_store = SnapshotStore(fake_store.FakeAsyncValkey(), max_payload_bytes=50)
         snap_module._snapshot_store = small_payload_store
         try:
             body = {
@@ -130,9 +130,9 @@ class TestSnapshotPayloadAndQuotaLimits:
         import api.routers.snapshot as snap_module
 
         original_store = snap_module._snapshot_store
-        import fakeredis.aioredis as aioredis_fake
+        import fakeredis as fake_store
 
-        quota_store = SnapshotStore(aioredis_fake.FakeRedis(), max_per_user=1)
+        quota_store = SnapshotStore(fake_store.FakeAsyncValkey(), max_per_user=1)
         snap_module._snapshot_store = quota_store
         try:
             body = {
@@ -157,11 +157,11 @@ class TestSnapshotRateLimits:
         import api.routers.snapshot as snap_module
 
         original_store = snap_module._snapshot_store
-        import fakeredis.aioredis as aioredis_fake
+        import fakeredis as fake_store
 
         # Quota comfortably above the rate limit so the quota check doesn't
         # mask the rate-limit behavior under test.
-        store = SnapshotStore(aioredis_fake.FakeRedis(), max_per_user=1000)
+        store = SnapshotStore(fake_store.FakeAsyncValkey(), max_per_user=1000)
         snap_module._snapshot_store = store
         try:
             body = {"nodes": [{"id": "1", "type": "artist"}], "center": {"id": "1", "type": "artist"}}
@@ -217,7 +217,7 @@ class TestRestoreSnapshot:
         finally:
             snap_module._snapshot_store = original
 
-    def test_restore_snapshot_expired(self, test_client: TestClient, fake_redis_server: fakeredis.FakeServer) -> None:
+    def test_restore_snapshot_expired(self, test_client: TestClient, fake_valkey_server: fakeredis.FakeServer) -> None:
         import secrets
 
         import api.routers.snapshot as snap_module
@@ -225,9 +225,9 @@ class TestRestoreSnapshot:
         token = secrets.token_urlsafe(16)
 
         # Delete the key (or never insert it) to simulate a missing/expired entry
-        sync_redis = fakeredis.FakeRedis(server=fake_redis_server)
+        sync_valkey = fakeredis.FakeValkey(server=fake_valkey_server)
         key = f"{snap_module._snapshot_store._KEY_PREFIX}{token}"
-        sync_redis.delete(key)
+        sync_valkey.delete(key)
 
         response = test_client.get(f"/api/snapshot/{token}")
         assert response.status_code == 404
@@ -318,16 +318,16 @@ class TestSnapshotAuth:
 
         import api.routers.snapshot as snap_module
 
-        original_redis = snap_module._redis
-        mock_redis = AsyncMock()
+        original_valkey = snap_module._valkey
+        mock_valkey = AsyncMock()
 
         async def fake_get(key: str) -> str | None:
             if key == f"revoked:jti:{jti_value}":
                 return "1"
             return None
 
-        mock_redis.get = AsyncMock(side_effect=fake_get)
-        snap_module._redis = mock_redis
+        mock_valkey.get = AsyncMock(side_effect=fake_get)
+        snap_module._valkey = mock_valkey
         try:
             body = {"nodes": [{"id": "1", "type": "artist"}], "center": {"id": "1", "type": "artist"}}
             response = test_client.post(
@@ -338,7 +338,7 @@ class TestSnapshotAuth:
             assert response.status_code == 401
             assert "revoked" in response.json()["detail"].lower()
         finally:
-            snap_module._redis = original_redis
+            snap_module._valkey = original_valkey
 
 
 class TestSnapshotTokenChecks:
@@ -434,16 +434,16 @@ class TestSnapshotTokenChecks:
 
         import api.routers.snapshot as snap_module
 
-        original_redis = snap_module._redis
-        mock_redis = AsyncMock()
+        original_valkey = snap_module._valkey
+        mock_valkey = AsyncMock()
 
         async def fake_get(key: str) -> str | None:
             if key == f"password_changed:{TEST_USER_ID}":
                 return "2000"  # password changed at timestamp 2000, after iat=1000
             return None
 
-        mock_redis.get = AsyncMock(side_effect=fake_get)
-        snap_module._redis = mock_redis
+        mock_valkey.get = AsyncMock(side_effect=fake_get)
+        snap_module._valkey = mock_valkey
         try:
             body = {"nodes": [{"id": "1", "type": "artist"}], "center": {"id": "1", "type": "artist"}}
             response = test_client.post(
@@ -454,4 +454,4 @@ class TestSnapshotTokenChecks:
             assert response.status_code == 401
             assert "password" in response.json()["detail"].lower()
         finally:
-            snap_module._redis = original_redis
+            snap_module._valkey = original_valkey

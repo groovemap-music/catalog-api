@@ -14,9 +14,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
-import redis.asyncio as aioredis
 import structlog
 import uvicorn
+import valkey.asyncio as aiovalkey
 from common import (
     AsyncPostgreSQLPool,
     AsyncResilientNeo4jDriver,
@@ -79,15 +79,15 @@ from api.queries.search_queries import ALL_TYPES, execute_search
 from api.reattach_trigger import run_trigger_loop
 from api.services.discogs import (
     DISCOGS_AUTHORIZE_URL,
-    REDIS_OAUTH_STATE_TTL,
-    REDIS_STATE_PREFIX,
+    VALKEY_OAUTH_STATE_TTL,
+    VALKEY_STATE_PREFIX,
     DiscogsOAuthError,
     exchange_oauth_verifier,
     fetch_discogs_identity,
     request_oauth_token,
 )
 from api.syncer import reconcile_stale_sync_history
-from api.telemetry import instrument_redis
+from api.telemetry import instrument_valkey
 
 
 logger = structlog.get_logger(__name__)
@@ -116,7 +116,7 @@ STARTUP_BANNER = r"""
 # Module-level state
 _pool: AsyncPostgreSQLPool | None = None
 _config: ApiConfig | None = None
-_redis: aioredis.Redis | None = None
+_valkey: aiovalkey.Valkey | None = None
 _neo4j: AsyncResilientNeo4jDriver | None = None
 _running_syncs: dict[str, asyncio.Task[Any]] = {}
 _security = HTTPBearer()
@@ -125,7 +125,7 @@ _security = HTTPBearer()
 class OAuthVerifyRequest(BaseModel):
     """Request body for completing Discogs OAuth verification."""
 
-    state: str  # The state token (maps to redis key for request token)
+    state: str  # The state token (maps to valkey key for request token)
     oauth_verifier: str  # Verification code from Discogs
 
 
@@ -181,26 +181,26 @@ async def _get_current_user(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Service not ready",
         )
-    return await _dependencies.validate_token(credentials.credentials, _config.jwt_secret_key, _redis)
+    return await _dependencies.validate_token(credentials.credentials, _config.jwt_secret_key, _valkey)
 
 
 # Common search terms that produce high-cardinality FTS results (~9s for "Rock").
-# Pre-warming the Redis cache on startup ensures users never wait for cold cache.
+# Pre-warming the Valkey cache on startup ensures users never wait for cold cache.
 _PREWARM_SEARCH_TERMS = ["Rock", "Electronic", "Jazz", "Pop", "Punk", "Hip Hop", "Trance", "Blues", "Country", "Metal"]
 
 
 async def _prewarm_search_cache() -> None:  # pragma: no cover
-    """Pre-warm Redis search cache for common high-cardinality terms.
+    """Pre-warm Valkey search cache for common high-cardinality terms.
 
     Runs as a background task after startup. Each term is searched with
-    default parameters, populating the Redis cache (1h TTL). Errors are
+    default parameters, populating the Valkey cache (1h TTL). Errors are
     logged and swallowed — pre-warming is best-effort.
     """
-    if not _pool or not _redis:
+    if not _pool or not _valkey:
         return
     for term in _PREWARM_SEARCH_TERMS:
         try:
-            await execute_search(_pool, _redis, term, ALL_TYPES, [], None, None, 20, 0)
+            await execute_search(_pool, _valkey, term, ALL_TYPES, [], None, None, 20, 0)
             logger.debug("🔥 Search cache pre-warmed", term=term)
         except Exception:
             logger.debug("⚠️ Search pre-warm failed", term=term)
@@ -225,11 +225,11 @@ async def _create_pool(config: ApiConfig) -> AsyncPostgreSQLPool:
     return pool
 
 
-async def _create_redis(config: ApiConfig) -> aioredis.Redis:
-    redis = instrument_redis(await aioredis.from_url(config.redis_host, decode_responses=True))
-    redis_host = config.redis_host.split("@")[-1] if "@" in config.redis_host else config.redis_host.split("://")[-1]
-    logger.info("✅ Redis connected", host=redis_host)
-    return redis
+async def _create_valkey(config: ApiConfig) -> aiovalkey.Valkey:
+    valkey = instrument_valkey(await aiovalkey.from_url(config.valkey_url, decode_responses=True))
+    valkey_host = config.valkey_url.split("@")[-1] if "@" in config.valkey_url else config.valkey_url.split("://")[-1]
+    logger.info("✅ Valkey connected", host=valkey_host)
+    return valkey
 
 
 def _create_neo4j(config: ApiConfig) -> AsyncResilientNeo4jDriver | None:
@@ -258,41 +258,41 @@ def _notification_channel(config: ApiConfig) -> ResendNotificationChannel | LogN
 def _configure_routers(
     config: ApiConfig,
     pool: AsyncPostgreSQLPool,
-    redis: aioredis.Redis,
+    valkey: aiovalkey.Valkey,
     neo4j: AsyncResilientNeo4jDriver | None,
 ) -> Any:
     """Wire concrete runtime adapters into the routers and return the optional AI client."""
     from api.nlq.config import NLQConfig as _NLQConfig  # noqa: PLC0415
 
     jwt_secret_for_neo4j = config.jwt_secret_key if config.neo4j_host else None
-    _dependencies.configure(jwt_secret_for_neo4j, redis, pool=pool)
+    _dependencies.configure(jwt_secret_for_neo4j, valkey, pool=pool)
     _app_tokens.configure(pool)
     _identity.configure(pool)
     _observations_router.configure(pool)
     # One writer for every event and impression, and the sync's change events flow through
     # the same one: `api.syncer` holds a no-op recorder until this hands it the real thing.
-    _activity.configure(pool, redis)
+    _activity.configure(pool, valkey)
     _syncer.configure(_activity.record_event)
-    _activity_router.configure(pool, redis, neo4j, config)
-    _sync_router.configure(pool, neo4j, config, _running_syncs, redis)
-    _explore_router.configure(neo4j, jwt_secret_for_neo4j, redis, pg_pool=pool)
+    _activity_router.configure(pool, valkey, neo4j, config)
+    _sync_router.configure(pool, neo4j, config, _running_syncs, valkey)
+    _explore_router.configure(neo4j, jwt_secret_for_neo4j, valkey, pg_pool=pool)
     _user_router.configure(neo4j, jwt_secret_for_neo4j)
     _taste_router.configure(neo4j, jwt_secret_for_neo4j)
     _collection_router.configure(neo4j, pool, jwt_secret_for_neo4j)
-    _credits_router.configure(neo4j, redis)
-    _label_dna_router.configure(neo4j, redis)
-    _recommend_router.configure(neo4j, jwt_secret_for_neo4j, redis)
-    _fit_router.configure(neo4j, pool, redis)
-    _search_router.configure(pool, redis)
+    _credits_router.configure(neo4j, valkey)
+    _label_dna_router.configure(neo4j, valkey)
+    _recommend_router.configure(neo4j, jwt_secret_for_neo4j, valkey)
+    _fit_router.configure(neo4j, pool, valkey)
+    _search_router.configure(pool, valkey)
     _lookup_router.configure(pool)
-    _insights_compute_router.configure(neo4j, pool, redis, config)
-    _admin_router.configure(pool, redis, config, neo4j_driver=neo4j)
+    _insights_compute_router.configure(neo4j, pool, valkey, config)
+    _admin_router.configure(pool, valkey, config, neo4j_driver=neo4j)
     _musicbrainz_router.configure(pool, neo4j)
-    _network_router.configure(neo4j, redis)
-    _rarity_router.configure(neo4j, pool, redis)
+    _network_router.configure(neo4j, valkey)
+    _rarity_router.configure(neo4j, pool, valkey)
     _auth_router.configure(
         pool,
-        redis,
+        valkey,
         config,
         _get_current_user,
         _create_access_token,
@@ -300,7 +300,7 @@ def _configure_routers(
     )
     _snapshot_router.configure(
         jwt_secret=config.jwt_secret_key,
-        redis_client=redis,
+        valkey_client=valkey,
         ttl_days=config.snapshot_ttl_days,
         max_nodes=config.snapshot_max_nodes,
     )
@@ -315,11 +315,11 @@ def _configure_routers(
         from api.nlq.tools import NLQToolRunner  # noqa: PLC0415
 
         anthropic_client = AsyncAnthropic(api_key=nlq_config.api_key)
-        tool_runner = NLQToolRunner(neo4j_driver=neo4j, pg_pool=pool, redis=redis)
+        tool_runner = NLQToolRunner(neo4j_driver=neo4j, pg_pool=pool, valkey=valkey)
         nlq_engine = NLQEngine(config=nlq_config, client=anthropic_client, tool_runner=tool_runner)
         logger.info("🧠 NLQ engine initialized", model=nlq_config.model)
 
-    _nlq_router.configure(nlq_config, nlq_engine, redis, jwt_secret=config.jwt_secret_key)
+    _nlq_router.configure(nlq_config, nlq_engine, valkey, jwt_secret=config.jwt_secret_key)
     _extraction_analysis_router.configure(
         discogs_root=os.environ.get("DISCOGS_DATA_ROOT"),
         musicbrainz_root=os.environ.get("MUSICBRAINZ_DATA_ROOT"),
@@ -336,7 +336,7 @@ class _LifecycleResources:
 
 
 async def _start_service(_app: FastAPI) -> _LifecycleResources:
-    global _pool, _config, _redis, _neo4j
+    global _pool, _config, _valkey, _neo4j
 
     logger.info("🚀 API service starting...")
     _app.state.event_loop_monitor = start_event_loop_monitor()
@@ -348,13 +348,13 @@ async def _start_service(_app: FastAPI) -> _LifecycleResources:
     logger.info("🏥 Health server started", port=API_HEALTH_PORT)
 
     pool = await _create_pool(config)
-    redis = await _create_redis(config)
+    valkey = await _create_valkey(config)
     _pool = pool
-    _redis = redis
+    _valkey = valkey
     neo4j = _create_neo4j(config)
     if neo4j is not None:
         _neo4j = neo4j
-    anthropic_client = _configure_routers(config, pool, redis, _neo4j)
+    anthropic_client = _configure_routers(config, pool, valkey, _neo4j)
     logger.info("✅ API service ready", port=API_PORT)
 
     await _activity.ensure_startup_partitions()
@@ -401,8 +401,8 @@ async def _stop_service(_app: FastAPI, resources: _LifecycleResources) -> None:
         await _neo4j.close()
     if _pool:
         await _pool.close()
-    if _redis:
-        await _redis.aclose()
+    if _valkey:
+        await _valkey.aclose()
     if resources.anthropic_client is not None:
         await resources.anthropic_client.close()
     resources.health_server.stop()
@@ -550,7 +550,7 @@ async def authorize_discogs(
     The frontend should open the URL in a popup and ask the user to paste
     the verifier code, then call /api/oauth/verify/discogs.
     """
-    if _pool is None or _redis is None or _config is None:
+    if _pool is None or _valkey is None or _config is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Service not ready",
@@ -589,13 +589,13 @@ async def authorize_discogs(
             detail="Failed to initiate Discogs OAuth",
         ) from exc
 
-    # Store request token in Redis (keyed by state = request_token itself)
+    # Store request token in Valkey (keyed by state = request_token itself)
     # This acts as both a CSRF token and a lookup key for the token secret
     state = token_data["oauth_token"]
-    redis_key = f"{REDIS_STATE_PREFIX}{state}"
+    valkey_key = f"{VALKEY_STATE_PREFIX}{state}"
     # Store both the token secret and the initiating user_id to prevent cross-user OAuth binding
     state_data = json.dumps({"secret": token_data["oauth_token_secret"], "user_id": current_user.get("sub")})
-    await _redis.setex(redis_key, REDIS_OAUTH_STATE_TTL, state_data)
+    await _valkey.setex(valkey_key, VALKEY_OAUTH_STATE_TTL, state_data)
 
     authorize_url = f"{DISCOGS_AUTHORIZE_URL}?oauth_token={state}"
     callback_mode = "callback" if _config.discogs_oauth_callback_url else "oob"
@@ -605,7 +605,7 @@ async def authorize_discogs(
         content={
             "authorize_url": authorize_url,
             "state": state,
-            "expires_in": REDIS_OAUTH_STATE_TTL,
+            "expires_in": VALKEY_OAUTH_STATE_TTL,
             "callback_mode": callback_mode,
         }
     )
@@ -621,7 +621,7 @@ async def verify_discogs(
     The user pastes the verifier code shown on Discogs into the app.
     This exchanges the verifier for a permanent access token and stores it.
     """
-    if _pool is None or _redis is None or _config is None:
+    if _pool is None or _valkey is None or _config is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Service not ready",
@@ -649,8 +649,8 @@ async def verify_discogs(
     # Atomically consume the OAuth state to prevent replay attacks.
     # OAuth 1.0a request tokens are single-use at Discogs, so retrying with
     # the same state after a failed exchange is not possible anyway.
-    redis_key = f"{REDIS_STATE_PREFIX}{request.state}"
-    raw_state_data = await _redis.getdel(redis_key)
+    valkey_key = f"{VALKEY_STATE_PREFIX}{request.state}"
+    raw_state_data = await _valkey.getdel(valkey_key)
 
     if not raw_state_data:
         raise HTTPException(
@@ -704,7 +704,7 @@ async def verify_discogs(
 
     _oauth_key = get_oauth_encryption_key(_config.encryption_master_key)
 
-    # Upsert oauth_tokens record (Redis state was already deleted after successful exchange above)
+    # Upsert oauth_tokens record (Valkey state was already deleted after successful exchange above)
     async with _pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         await execute_sql(
             cur,

@@ -73,7 +73,7 @@ async def _run_with_action(tool_name: str, tool_input: dict[str, Any]) -> NLQRes
     client.messages.create = AsyncMock(side_effect=[first, final])
 
     # Use a real runner so action validation and recording happen end-to-end.
-    runner = NLQToolRunner(neo4j_driver=MagicMock(), pg_pool=MagicMock(), redis=MagicMock())
+    runner = NLQToolRunner(neo4j_driver=MagicMock(), pg_pool=MagicMock(), valkey=MagicMock())
     engine = NLQEngine(config=_make_config(), client=client, tool_runner=runner)
     return await engine.run("do the thing", NLQContext())
 
@@ -283,7 +283,7 @@ async def test_invalid_action_payload_returns_error_and_skips_recording() -> Non
     client.messages = MagicMock()
     client.messages.create = AsyncMock(side_effect=[first, final])
 
-    runner = NLQToolRunner(neo4j_driver=MagicMock(), pg_pool=MagicMock(), redis=MagicMock())
+    runner = NLQToolRunner(neo4j_driver=MagicMock(), pg_pool=MagicMock(), valkey=MagicMock())
     engine = NLQEngine(config=_make_config(), client=client, tool_runner=runner)
     result = await engine.run("switch", NLQContext())
 
@@ -304,7 +304,7 @@ async def test_multiple_distinct_actions_recorded_in_order() -> None:
     client.messages = MagicMock()
     client.messages.create = AsyncMock(side_effect=[first, final])
 
-    runner = NLQToolRunner(neo4j_driver=MagicMock(), pg_pool=MagicMock(), redis=MagicMock())
+    runner = NLQToolRunner(neo4j_driver=MagicMock(), pg_pool=MagicMock(), valkey=MagicMock())
     engine = NLQEngine(config=_make_config(), client=client, tool_runner=runner)
     result = await engine.run("trends please", NLQContext())
 

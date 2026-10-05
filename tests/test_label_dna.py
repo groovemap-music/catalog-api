@@ -587,10 +587,10 @@ class TestLabelDnaModels:
 
 
 class TestLabelDnaCaching:
-    """Tests for Redis caching on label DNA and similar endpoints."""
+    """Tests for Valkey caching on label DNA and similar endpoints."""
 
-    def test_dna_cache_hit(self, test_client: TestClient, mock_redis: AsyncMock) -> None:  # noqa: ARG002
-        """Cached DNA response returned via _build_dna (which checks Redis internally)."""
+    def test_dna_cache_hit(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:  # noqa: ARG002
+        """Cached DNA response returned via _build_dna (which checks Valkey internally)."""
         from api.models import LabelDNA
 
         fake_dna = LabelDNA(
@@ -613,11 +613,11 @@ class TestLabelDnaCaching:
         assert response.status_code == 200
         assert response.json()["label_id"] == "157"
 
-    def test_dna_cache_miss_stores_result(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
-        """On cache miss, DNA result should be computed and stored in Redis."""
+    def test_dna_cache_miss_stores_result(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        """On cache miss, DNA result should be computed and stored in Valkey."""
         from api.models import LabelDNA
 
-        mock_redis.get = AsyncMock(return_value=None)
+        mock_valkey.get = AsyncMock(return_value=None)
         fake_dna = LabelDNA(
             label_id="157",
             label_name="Hooj",
@@ -639,19 +639,19 @@ class TestLabelDnaCaching:
         assert response.status_code == 200
         # Endpoint no longer caches — _build_dna handles caching internally
 
-    def test_dna_cache_get_failure_falls_through(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
-        """Redis get failure should fall through to Neo4j query."""
-        mock_redis.get = AsyncMock(side_effect=Exception("connection lost"))
+    def test_dna_cache_get_failure_falls_through(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        """Valkey get failure should fall through to Neo4j query."""
+        mock_valkey.get = AsyncMock(side_effect=Exception("connection lost"))
         with patch("api.routers.label_dna._build_dna", return_value=(None, "not_found")):
             response = test_client.get("/api/label/999/dna")
         assert response.status_code == 404
 
-    def test_dna_cache_set_failure_still_returns(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
-        """Redis set failure should not prevent DNA response."""
+    def test_dna_cache_set_failure_still_returns(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        """Valkey set failure should not prevent DNA response."""
         from api.models import LabelDNA
 
-        mock_redis.get = AsyncMock(return_value=None)
-        mock_redis.setex = AsyncMock(side_effect=Exception("connection lost"))
+        mock_valkey.get = AsyncMock(return_value=None)
+        mock_valkey.setex = AsyncMock(side_effect=Exception("connection lost"))
         fake_dna = LabelDNA(
             label_id="157",
             label_name="Hooj",
@@ -671,9 +671,9 @@ class TestLabelDnaCaching:
             response = test_client.get("/api/label/157/dna")
         assert response.status_code == 200
 
-    def test_similar_cache_get_failure_falls_through(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
-        """Redis get failure on similar should fall through to Neo4j query."""
-        mock_redis.get = AsyncMock(side_effect=Exception("connection lost"))
+    def test_similar_cache_get_failure_falls_through(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        """Valkey get failure on similar should fall through to Neo4j query."""
+        mock_valkey.get = AsyncMock(side_effect=Exception("connection lost"))
 
         with (
             patch(
@@ -686,18 +686,18 @@ class TestLabelDnaCaching:
             response = test_client.get("/api/label/157/similar")
         assert response.status_code == 200
 
-    def test_similar_cache_hit(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
+    def test_similar_cache_hit(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
         """Cached similar-labels response should be returned without computing."""
         cached = {"label_id": "157", "label_name": "Hooj Choons", "similar": []}
-        mock_redis.get = AsyncMock(return_value=json.dumps(cached))
+        mock_valkey.get = AsyncMock(return_value=json.dumps(cached))
 
         response = test_client.get("/api/label/157/similar")
         assert response.status_code == 200
         assert response.json() == cached
 
-    def test_similar_cache_miss_stores_result(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
-        """On cache miss, similar result should be stored in Redis."""
-        mock_redis.get = AsyncMock(return_value=None)
+    def test_similar_cache_miss_stores_result(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        """On cache miss, similar result should be stored in Valkey."""
+        mock_valkey.get = AsyncMock(return_value=None)
 
         with (
             patch(
@@ -710,14 +710,14 @@ class TestLabelDnaCaching:
             response = test_client.get("/api/label/157/similar")
 
         assert response.status_code == 200
-        mock_redis.setex.assert_called_once()
-        call_args = mock_redis.setex.call_args
+        mock_valkey.setex.assert_called_once()
+        call_args = mock_valkey.setex.call_args
         assert call_args[0][0] == "label-similar:157:10"
 
-    def test_similar_cache_set_failure_still_returns(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
-        """Redis set failure should not prevent response."""
-        mock_redis.get = AsyncMock(return_value=None)
-        mock_redis.setex = AsyncMock(side_effect=Exception("connection lost"))
+    def test_similar_cache_set_failure_still_returns(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        """Valkey set failure should not prevent response."""
+        mock_valkey.get = AsyncMock(return_value=None)
+        mock_valkey.setex = AsyncMock(side_effect=Exception("connection lost"))
 
         with (
             patch(
@@ -733,9 +733,9 @@ class TestLabelDnaCaching:
 
 
 class TestBuildDnaCaching:
-    """Tests for Redis caching inside _build_dna."""
+    """Tests for Valkey caching inside _build_dna."""
 
-    def test_build_dna_cache_hit(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
+    def test_build_dna_cache_hit(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
         """_build_dna returns cached LabelDNA without running queries."""
         from api.models import DecadeCount, FormatWeight, GenreWeight, LabelDNA, StyleWeight
 
@@ -754,7 +754,7 @@ class TestBuildDnaCaching:
             media=[],
             decades=[DecadeCount(decade=1970, count=200, percentage=100.0)],
         )
-        mock_redis.get = AsyncMock(return_value=json.dumps(dna.model_dump(), default=str))
+        mock_valkey.get = AsyncMock(return_value=json.dumps(dna.model_dump(), default=str))
 
         response = test_client.get("/api/label/42/dna")
         assert response.status_code == 200
@@ -771,10 +771,10 @@ class TestBuildDnaCaching:
         mock_formats: AsyncMock,
         mock_media: AsyncMock,
         test_client: TestClient,
-        mock_redis: AsyncMock,
+        mock_valkey: AsyncMock,
     ) -> None:
         """_build_dna caches computed DNA on miss."""
-        mock_redis.get = AsyncMock(return_value=None)
+        mock_valkey.get = AsyncMock(return_value=None)
         mock_full_profile.return_value = {
             "label_id": "42",
             "label_name": "ECM",
@@ -790,8 +790,8 @@ class TestBuildDnaCaching:
 
         response = test_client.get("/api/label/42/dna")
         assert response.status_code == 200
-        assert mock_redis.setex.call_count >= 1
-        cache_keys = [call[0][0] for call in mock_redis.setex.call_args_list]
+        assert mock_valkey.setex.call_count >= 1
+        cache_keys = [call[0][0] for call in mock_valkey.setex.call_args_list]
         assert "label-dna:42" in cache_keys
 
     @patch("api.routers.label_dna.get_label_media_profile")
@@ -805,11 +805,11 @@ class TestBuildDnaCaching:
         mock_formats: AsyncMock,
         mock_media: AsyncMock,
         test_client: TestClient,
-        mock_redis: AsyncMock,
+        mock_valkey: AsyncMock,
     ) -> None:
         """_build_dna still returns DNA even if cache set fails."""
-        mock_redis.get = AsyncMock(return_value=None)
-        mock_redis.setex = AsyncMock(side_effect=Exception("write failed"))
+        mock_valkey.get = AsyncMock(return_value=None)
+        mock_valkey.setex = AsyncMock(side_effect=Exception("write failed"))
         mock_full_profile.return_value = {
             "label_id": "42",
             "label_name": "ECM",

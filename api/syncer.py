@@ -969,7 +969,7 @@ async def run_full_sync(
     neo4j_driver: AsyncResilientNeo4jDriver,
     discogs_user_agent: str,
     oauth_encryption_key: str | None = None,
-    redis_client: Any | None = None,
+    valkey_client: Any | None = None,
 ) -> dict[str, Any]:
     """Run a full collection + wantlist sync for a user, inside the `api.sync` span.
 
@@ -985,7 +985,7 @@ async def run_full_sync(
         dict with sync results (items_synced, pages_fetched, error)
     """
     with api_span(SPAN_SYNC):
-        return await _run_full_sync(user_uuid, sync_id, pg_pool, neo4j_driver, discogs_user_agent, oauth_encryption_key, redis_client)
+        return await _run_full_sync(user_uuid, sync_id, pg_pool, neo4j_driver, discogs_user_agent, oauth_encryption_key, valkey_client)
 
 
 async def _run_full_sync(
@@ -995,7 +995,7 @@ async def _run_full_sync(
     neo4j_driver: AsyncResilientNeo4jDriver,
     discogs_user_agent: str,
     oauth_encryption_key: str | None,
-    redis_client: Any | None,
+    valkey_client: Any | None,
 ) -> dict[str, Any]:
     """Do the sync itself. Split out only so the span above wraps every exit path."""
     error_message = None
@@ -1086,10 +1086,10 @@ async def _run_full_sync(
         # on a later page) can leave the collection/wantlist durably changed
         # even though run_full_sync takes the exception path above. Without
         # this, stale personalized recommendations would keep serving for up
-        # to the cache's TTL. invalidate_user() already swallows Redis errors
+        # to the cache's TTL. invalidate_user() already swallows Valkey errors
         # internally, so running it unconditionally here is safe.
-        if redis_client is not None:
-            rec_cache = RecommendCache(redis=redis_client)
+        if valkey_client is not None:
+            rec_cache = RecommendCache(valkey=valkey_client)
             await rec_cache.invalidate_user(str(user_uuid))
             logger.info("🔄 Recommendation cache invalidated", user_id=str(user_uuid))
 

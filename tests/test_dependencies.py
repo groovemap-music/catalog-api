@@ -358,10 +358,10 @@ class TestRequireAdmin:
 
     @pytest.mark.asyncio
     async def test_revoked_token_rejected(self) -> None:
-        """Valid admin token but revoked in Redis -> 401."""
-        mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(return_value="1")
-        configure(TEST_SECRET, redis=mock_redis)
+        """Valid admin token but revoked in Valkey -> 401."""
+        mock_valkey = AsyncMock()
+        mock_valkey.get = AsyncMock(return_value="1")
+        configure(TEST_SECRET, valkey=mock_valkey)
         from fastapi import HTTPException
 
         token = _make_admin_token()
@@ -373,15 +373,15 @@ class TestRequireAdmin:
     @pytest.mark.asyncio
     async def test_password_changed_revokes_admin_token(self) -> None:
         """Admin token issued before password change -> 401."""
-        mock_redis = AsyncMock()
+        mock_valkey = AsyncMock()
 
-        async def redis_get(key: str) -> str | None:
+        async def valkey_get(key: str) -> str | None:
             if key.startswith("password_changed:"):
                 return "2000"
             return None  # revoked:jti:... returns None
 
-        mock_redis.get = AsyncMock(side_effect=redis_get)
-        configure(TEST_SECRET, redis=mock_redis)
+        mock_valkey.get = AsyncMock(side_effect=valkey_get)
+        configure(TEST_SECRET, valkey=mock_valkey)
         from fastapi import HTTPException
 
         token = _make_token_with_claims({"type": "admin", "jti": "admin:pw1", "iat": 1000, "sub": "admin-1"})
@@ -394,16 +394,16 @@ class TestRequireAdmin:
     @pytest.mark.asyncio
     async def test_password_changed_allows_newer_admin_token(self) -> None:
         """Admin token issued after password change -> allowed (proceeds to DB check)."""
-        mock_redis = AsyncMock()
+        mock_valkey = AsyncMock()
 
-        async def redis_get(key: str) -> str | None:
+        async def valkey_get(key: str) -> str | None:
             if key.startswith("password_changed:"):
                 return "2000"
             return None
 
-        mock_redis.get = AsyncMock(side_effect=redis_get)
+        mock_valkey.get = AsyncMock(side_effect=valkey_get)
         # No pool configured, so DB check is skipped and token passes
-        configure(TEST_SECRET, redis=mock_redis)
+        configure(TEST_SECRET, valkey=mock_valkey)
 
         token = _make_token_with_claims({"type": "admin", "jti": "admin:pw2", "iat": 3000, "sub": "admin-1"})
         creds = _make_credentials(token)
@@ -436,21 +436,21 @@ class TestGetOptionalUserRevocationChecks:
     @pytest.mark.asyncio
     async def test_revoked_jti_returns_none(self) -> None:
         """Token with a revoked JTI returns None."""
-        mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(return_value="1")
-        configure(TEST_SECRET, redis=mock_redis)
+        mock_valkey = AsyncMock()
+        mock_valkey.get = AsyncMock(return_value="1")
+        configure(TEST_SECRET, valkey=mock_valkey)
 
         token = _make_token_with_claims({"jti": "test-jti-123"})
         creds = _make_credentials(token)
         result = await get_optional_user(creds)
 
         assert result is None
-        mock_redis.get.assert_any_call("revoked:jti:test-jti-123")
+        mock_valkey.get.assert_any_call("revoked:jti:test-jti-123")
 
     @pytest.mark.asyncio
-    async def test_revoked_jti_no_redis_returns_payload(self) -> None:
-        """Token with a JTI but no redis configured returns the payload normally."""
-        configure(TEST_SECRET)  # no redis
+    async def test_revoked_jti_no_valkey_returns_payload(self) -> None:
+        """Token with a JTI but no valkey configured returns the payload normally."""
+        configure(TEST_SECRET)  # no valkey
 
         token = _make_token_with_claims({"jti": "test-jti-123"})
         creds = _make_credentials(token)
@@ -462,15 +462,15 @@ class TestGetOptionalUserRevocationChecks:
     @pytest.mark.asyncio
     async def test_password_changed_before_token_returns_none(self) -> None:
         """Token issued before password change returns None."""
-        mock_redis = AsyncMock()
+        mock_valkey = AsyncMock()
 
-        async def redis_get(key: str) -> str | None:
+        async def valkey_get(key: str) -> str | None:
             if key.startswith("password_changed:"):
                 return "2000"
             return None  # revoked:jti:... returns None
 
-        mock_redis.get = AsyncMock(side_effect=redis_get)
-        configure(TEST_SECRET, redis=mock_redis)
+        mock_valkey.get = AsyncMock(side_effect=valkey_get)
+        configure(TEST_SECRET, valkey=mock_valkey)
 
         token = _make_token_with_claims({"iat": 1000})
         creds = _make_credentials(token)
@@ -481,15 +481,15 @@ class TestGetOptionalUserRevocationChecks:
     @pytest.mark.asyncio
     async def test_password_changed_after_token_returns_payload(self) -> None:
         """Token issued after password change returns the payload."""
-        mock_redis = AsyncMock()
+        mock_valkey = AsyncMock()
 
-        async def redis_get(key: str) -> str | None:
+        async def valkey_get(key: str) -> str | None:
             if key.startswith("password_changed:"):
                 return "2000"
             return None
 
-        mock_redis.get = AsyncMock(side_effect=redis_get)
-        configure(TEST_SECRET, redis=mock_redis)
+        mock_valkey.get = AsyncMock(side_effect=valkey_get)
+        configure(TEST_SECRET, valkey=mock_valkey)
 
         token = _make_token_with_claims({"iat": 3000})
         creds = _make_credentials(token)
@@ -516,9 +516,9 @@ class TestRequireUserTokenChecks:
 
     @pytest.mark.asyncio
     async def test_revoked_jti_returns_401(self) -> None:
-        mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(return_value="1")
-        configure(TEST_SECRET, redis=mock_redis)
+        mock_valkey = AsyncMock()
+        mock_valkey.get = AsyncMock(return_value="1")
+        configure(TEST_SECRET, valkey=mock_valkey)
         from fastapi import HTTPException
 
         token = _make_token_with_claims({"jti": "test-jti-123"})
@@ -527,19 +527,19 @@ class TestRequireUserTokenChecks:
             await require_user(creds)
         assert exc_info.value.status_code == 401
         assert "Token has been revoked" in str(exc_info.value.detail)
-        mock_redis.get.assert_any_call("revoked:jti:test-jti-123")
+        mock_valkey.get.assert_any_call("revoked:jti:test-jti-123")
 
     @pytest.mark.asyncio
     async def test_password_changed_revocation(self) -> None:
-        mock_redis = AsyncMock()
+        mock_valkey = AsyncMock()
 
-        async def redis_get(key: str) -> str | None:
+        async def valkey_get(key: str) -> str | None:
             if key.startswith("password_changed:"):
                 return "2000"
             return None
 
-        mock_redis.get = AsyncMock(side_effect=redis_get)
-        configure(TEST_SECRET, redis=mock_redis)
+        mock_valkey.get = AsyncMock(side_effect=valkey_get)
+        configure(TEST_SECRET, valkey=mock_valkey)
         from fastapi import HTTPException
 
         token = _make_token_with_claims({"iat": 1000})
@@ -551,15 +551,15 @@ class TestRequireUserTokenChecks:
 
     @pytest.mark.asyncio
     async def test_password_changed_allows_newer_token(self) -> None:
-        mock_redis = AsyncMock()
+        mock_valkey = AsyncMock()
 
-        async def redis_get(key: str) -> str | None:
+        async def valkey_get(key: str) -> str | None:
             if key.startswith("password_changed:"):
                 return "2000"
             return None
 
-        mock_redis.get = AsyncMock(side_effect=redis_get)
-        configure(TEST_SECRET, redis=mock_redis)
+        mock_valkey.get = AsyncMock(side_effect=valkey_get)
+        configure(TEST_SECRET, valkey=mock_valkey)
 
         token = _make_token_with_claims({"iat": 3000})
         creds = _make_credentials(token)

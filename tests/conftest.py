@@ -13,7 +13,7 @@ os.environ.setdefault("POSTGRES_USERNAME", "test")
 os.environ.setdefault("POSTGRES_PASSWORD", "test")
 os.environ.setdefault("POSTGRES_DATABASE", "test")
 os.environ.setdefault("JWT_SECRET_KEY", "test-jwt-secret-for-unit-tests")
-os.environ.setdefault("REDIS_HOST", "redis://localhost:6379/0")
+os.environ.setdefault("VALKEY_HOST", "localhost")
 os.environ.setdefault("NEO4J_HOST", "bolt://localhost:7687")
 os.environ.setdefault("NEO4J_USERNAME", "neo4j")
 os.environ.setdefault("NEO4J_PASSWORD", "testpassword")
@@ -24,7 +24,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, create_autospec
 
 import fakeredis
-import fakeredis.aioredis as aioredis_fake
+import fakeredis as fake_store
 import pytest
 from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver
 from fastapi import FastAPI
@@ -101,14 +101,14 @@ def mock_pool(mock_conn: MagicMock) -> MagicMock:
 
 
 @pytest.fixture
-def mock_redis() -> AsyncMock:
-    """Mock aioredis client."""
-    redis = AsyncMock()
-    redis.get = AsyncMock(return_value=None)
-    redis.setex = AsyncMock()
-    redis.delete = AsyncMock()
-    redis.aclose = AsyncMock()
-    return redis
+def mock_valkey() -> AsyncMock:
+    """Mock aiovalkey client."""
+    valkey = AsyncMock()
+    valkey.get = AsyncMock(return_value=None)
+    valkey.setex = AsyncMock()
+    valkey.delete = AsyncMock()
+    valkey.aclose = AsyncMock()
+    return valkey
 
 
 @pytest.fixture
@@ -149,7 +149,7 @@ def test_api_config() -> ApiConfig:
         postgres_password="test",  # noqa: S106
         postgres_database="test",
         jwt_secret_key=TEST_JWT_SECRET,
-        redis_host="redis://localhost:6379/0",
+        valkey_url="valkey://localhost:6379/0",
         jwt_expire_minutes=30,
         neo4j_host="bolt://localhost:7687",
         neo4j_username="neo4j",
@@ -165,18 +165,18 @@ def valid_token() -> str:
 
 
 @pytest.fixture
-def fake_redis_server() -> fakeredis.FakeServer:
+def fake_valkey_server() -> fakeredis.FakeServer:
     """Shared FakeServer allowing both async and sync fakeredis clients to access the same data."""
-    return fakeredis.FakeServer()
+    return fakeredis.FakeServer(server_type="valkey")
 
 
 @pytest.fixture
 def test_client(
     mock_pool: MagicMock,
-    mock_redis: AsyncMock,
+    mock_valkey: AsyncMock,
     mock_neo4j: MagicMock,
     test_api_config: ApiConfig,
-    fake_redis_server: fakeredis.FakeServer,
+    fake_valkey_server: fakeredis.FakeServer,
 ) -> Generator[TestClient]:
     """Create a TestClient with mocked lifespan and module-level state."""
     import api.api as api_module
@@ -189,13 +189,13 @@ def test_client(
     original_lifespan = app.router.lifespan_context
     original_pool = api_module._pool
     original_config = api_module._config
-    original_redis = api_module._redis
+    original_valkey = api_module._valkey
     original_neo4j = api_module._neo4j
 
     app.router.lifespan_context = mock_lifespan
     api_module._pool = mock_pool
     api_module._config = test_api_config
-    api_module._redis = mock_redis
+    api_module._valkey = mock_valkey
     api_module._neo4j = mock_neo4j
 
     import api.routers.admin as _admin_router
@@ -211,22 +211,22 @@ def test_client(
     import api.routers.taste as _taste_router
     import api.routers.user as _user_router
 
-    fake_redis = aioredis_fake.FakeRedis(server=fake_redis_server)
-    _sync_router.configure(mock_pool, mock_neo4j, test_api_config, api_module._running_syncs, mock_redis)
-    _explore_router.configure(mock_neo4j, test_api_config.jwt_secret_key, mock_redis, pg_pool=mock_pool)
-    _label_dna_router.configure(mock_neo4j, mock_redis)
+    fake_valkey = fake_store.FakeAsyncValkey(server=fake_valkey_server)
+    _sync_router.configure(mock_pool, mock_neo4j, test_api_config, api_module._running_syncs, mock_valkey)
+    _explore_router.configure(mock_neo4j, test_api_config.jwt_secret_key, mock_valkey, pg_pool=mock_pool)
+    _label_dna_router.configure(mock_neo4j, mock_valkey)
     _user_router.configure(mock_neo4j, test_api_config.jwt_secret_key)
     _taste_router.configure(mock_neo4j, test_api_config.jwt_secret_key)
     _collection_router.configure(mock_neo4j, mock_pool, test_api_config.jwt_secret_key)
-    _snapshot_router.configure(jwt_secret=TEST_JWT_SECRET, redis_client=fake_redis)
+    _snapshot_router.configure(jwt_secret=TEST_JWT_SECRET, valkey_client=fake_valkey)
     import api.routers.insights_compute as _insights_compute_router
 
-    _search_router.configure(mock_pool, mock_redis)
+    _search_router.configure(mock_pool, mock_valkey)
     _lookup_router.configure(mock_pool)
-    _recommend_router.configure(mock_neo4j, test_api_config.jwt_secret_key, mock_redis)
-    _fit_router.configure(mock_neo4j, mock_pool, mock_redis)
-    _insights_compute_router.configure(mock_neo4j, mock_pool, mock_redis, test_api_config)
-    _admin_router.configure(mock_pool, mock_redis, test_api_config, neo4j_driver=mock_neo4j)
+    _recommend_router.configure(mock_neo4j, test_api_config.jwt_secret_key, mock_valkey)
+    _fit_router.configure(mock_neo4j, mock_pool, mock_valkey)
+    _insights_compute_router.configure(mock_neo4j, mock_pool, mock_valkey, test_api_config)
+    _admin_router.configure(mock_pool, mock_valkey, test_api_config, neo4j_driver=mock_neo4j)
     import api.routers.extraction_analysis as _extraction_analysis_router
 
     _extraction_analysis_router.configure(discogs_root=None, musicbrainz_root=None)
@@ -247,7 +247,7 @@ def test_client(
 
     import api.dependencies as _deps
 
-    _deps.configure(TEST_JWT_SECRET, mock_redis, pool=_admin_verify_pool)
+    _deps.configure(TEST_JWT_SECRET, mock_valkey, pool=_admin_verify_pool)
 
     import api.app_tokens as _app_tokens_module
 
@@ -259,26 +259,26 @@ def test_client(
 
     _identity_module.configure(mock_pool)
     _observations_router.configure(mock_pool)
-    _activity_module.configure(mock_pool, mock_redis)
+    _activity_module.configure(mock_pool, mock_valkey)
 
     import api.routers.activity as _activity_router
 
-    _activity_router.configure(mock_pool, mock_redis, mock_neo4j, test_api_config)
+    _activity_router.configure(mock_pool, mock_valkey, mock_neo4j, test_api_config)
 
     import api.routers.nlq as _nlq_router
     from api.nlq.config import NLQConfig
 
-    _nlq_router.configure(NLQConfig(), None, mock_redis, jwt_secret=TEST_JWT_SECRET)
+    _nlq_router.configure(NLQConfig(), None, mock_valkey, jwt_secret=TEST_JWT_SECRET)
 
     import api.routers.credits as _credits_router
     import api.routers.musicbrainz as _musicbrainz_router
     import api.routers.network as _network_router
     import api.routers.rarity as _rarity_router
 
-    _credits_router.configure(mock_neo4j, mock_redis)
+    _credits_router.configure(mock_neo4j, mock_valkey)
     _musicbrainz_router.configure(mock_pool, mock_neo4j)
-    _network_router.configure(mock_neo4j, mock_redis)
-    _rarity_router.configure(mock_neo4j, mock_pool, mock_redis)
+    _network_router.configure(mock_neo4j, mock_valkey)
+    _rarity_router.configure(mock_neo4j, mock_pool, mock_valkey)
 
     # Set up metrics buffer so the metrics middleware records requests
     from api.metrics_collector import MetricsBuffer
@@ -290,7 +290,7 @@ def test_client(
 
     _auth_router.configure(
         mock_pool,
-        mock_redis,
+        mock_valkey,
         test_api_config,
         api_module._get_current_user,
         api_module._create_access_token,
@@ -308,7 +308,7 @@ def test_client(
         del app.state.metrics_buffer
     api_module._pool = original_pool
     api_module._config = original_config
-    api_module._redis = original_redis
+    api_module._valkey = original_valkey
     api_module._neo4j = original_neo4j
     api_module._running_syncs.clear()
     app.router.lifespan_context = original_lifespan

@@ -163,14 +163,14 @@ class TestAdminLogin:
 
 
 class TestAdminLogout:
-    def test_success(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
+    def test_success(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
         resp = test_client.post(
             "/api/admin/auth/logout",
             headers=_admin_auth_headers(),
         )
         assert resp.status_code == 200
         assert resp.json()["logged_out"] is True
-        mock_redis.setex.assert_called_once()
+        mock_valkey.setex.assert_called_once()
 
     def test_no_token(self, test_client: TestClient) -> None:
         resp = test_client.post("/api/admin/auth/logout")
@@ -1336,27 +1336,28 @@ class TestStorageEndpoint:
         with (
             patch("api.routers.admin.get_neo4j_storage", new_callable=AsyncMock) as mock_neo4j,
             patch("api.routers.admin.get_postgres_storage", new_callable=AsyncMock) as mock_pg,
-            patch("api.routers.admin.get_redis_storage", new_callable=AsyncMock) as mock_redis,
+            patch("api.routers.admin.get_valkey_storage", new_callable=AsyncMock) as mock_valkey,
         ):
             mock_neo4j.return_value = {"status": "ok", "nodes": [], "relationships": [], "store_sizes": None}
             mock_pg.return_value = {"status": "ok", "tables": [], "total_size": "10 MB"}
-            mock_redis.return_value = {"status": "ok", "memory_used": "1M", "memory_peak": "2M", "total_keys": 5, "keys_by_prefix": {}}
+            mock_valkey.return_value = {"status": "ok", "memory_used": "1M", "memory_peak": "2M", "total_keys": 5, "keys_by_prefix": {}}
             resp = test_client.get("/api/admin/storage", headers=_admin_auth_headers())
             assert resp.status_code == 200
             data = resp.json()
             assert data["neo4j"]["status"] == "ok"
             assert data["postgresql"]["status"] == "ok"
-            assert data["redis"]["status"] == "ok"
+            assert data["valkey"]["status"] == "ok"
+            assert data["redis"] == data["valkey"]
 
     def test_partial_failure(self, test_client: TestClient) -> None:
         with (
             patch("api.routers.admin.get_neo4j_storage", new_callable=AsyncMock) as mock_neo4j,
             patch("api.routers.admin.get_postgres_storage", new_callable=AsyncMock) as mock_pg,
-            patch("api.routers.admin.get_redis_storage", new_callable=AsyncMock) as mock_redis,
+            patch("api.routers.admin.get_valkey_storage", new_callable=AsyncMock) as mock_valkey,
         ):
             mock_neo4j.side_effect = Exception("connection refused")
             mock_pg.return_value = {"status": "ok", "tables": [], "total_size": "10 MB"}
-            mock_redis.return_value = {"status": "ok", "memory_used": "1M", "memory_peak": "2M", "total_keys": 0, "keys_by_prefix": {}}
+            mock_valkey.return_value = {"status": "ok", "memory_used": "1M", "memory_peak": "2M", "total_keys": 0, "keys_by_prefix": {}}
             resp = test_client.get("/api/admin/storage", headers=_admin_auth_headers())
             assert resp.status_code == 200
             data = resp.json()
@@ -1628,9 +1629,9 @@ class TestRequireAdminRevocation:
     async def test_revoked_token(self) -> None:
         import api.dependencies as deps
 
-        mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(return_value="1")  # Token is revoked
-        deps.configure(TEST_JWT_SECRET, mock_redis)
+        mock_valkey = AsyncMock()
+        mock_valkey.get = AsyncMock(return_value="1")  # Token is revoked
+        deps.configure(TEST_JWT_SECRET, mock_valkey)
 
         from fastapi import HTTPException
         from fastapi.security import HTTPAuthorizationCredentials

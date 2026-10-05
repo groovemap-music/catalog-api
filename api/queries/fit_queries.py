@@ -175,7 +175,7 @@ def fold_collection(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Fold one row per held release into the id sets and counts the scoring reads.
 
     Everything is returned as lists and dicts rather than sets: the result is cached as
-    JSON, and a set would round-trip through Redis as the repr of a set. Lists are sorted
+    JSON, and a set would round-trip through Valkey as the repr of a set. Lists are sorted
     so two folds of the same collection are byte-identical, which is what makes the cached
     body and the scoring deterministic.
     """

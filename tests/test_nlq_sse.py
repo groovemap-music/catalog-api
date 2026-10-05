@@ -174,7 +174,7 @@ async def test_streamed_cached_replay_result_event_carries_actions() -> None:
 
 
 @pytest.mark.asyncio
-async def test_streaming_query_writes_redis_cache_for_anonymous_user() -> None:
+async def test_streaming_query_writes_valkey_cache_for_anonymous_user() -> None:
     """Regression groovemap-c584.
 
     The streaming path is the ONLY path the production Ask UI uses (nlq.js
@@ -194,23 +194,23 @@ async def test_streaming_query_writes_redis_cache_for_anonymous_user() -> None:
 
     from api.nlq.config import NLQConfig
 
-    mock_redis = AsyncMock()
-    original_redis = nlq_router._redis
+    mock_valkey = AsyncMock()
+    original_valkey = nlq_router._valkey
     original_config = nlq_router._nlq_config
-    nlq_router._redis = mock_redis
+    nlq_router._valkey = mock_valkey
     nlq_router._nlq_config = NLQConfig(enabled=True, api_key="k", cache_ttl=3600)
     try:
         response = nlq_router._stream_response("who produced Thriller", None, None)
         events = [event async for event in response.body_iterator]
     finally:
-        nlq_router._redis = original_redis
+        nlq_router._valkey = original_valkey
         nlq_router._nlq_config = original_config
 
     kinds = [e.get("event") for e in events]
     assert "result" in kinds
 
-    mock_redis.setex.assert_awaited_once()
-    call_args = mock_redis.setex.call_args
+    mock_valkey.setex.assert_awaited_once()
+    call_args = mock_valkey.setex.call_args
     cache_key, ttl, payload_json = call_args[0]
     assert cache_key == nlq_router._cache_key("who produced Thriller")
     assert ttl == 3600
@@ -231,16 +231,16 @@ async def test_streaming_query_does_not_cache_for_authenticated_user() -> None:
     engine.run = AsyncMock(return_value=NLQResult(summary="private answer", entities=[], tools_used=[], actions=[]))
     nlq_router._engine = engine
 
-    mock_redis = AsyncMock()
-    original_redis = nlq_router._redis
-    nlq_router._redis = mock_redis
+    mock_valkey = AsyncMock()
+    original_valkey = nlq_router._valkey
+    nlq_router._valkey = mock_valkey
     try:
         response = nlq_router._stream_response("my collection stats", "user-123", None)
         events = [event async for event in response.body_iterator]
     finally:
-        nlq_router._redis = original_redis
+        nlq_router._valkey = original_valkey
 
-    mock_redis.setex.assert_not_awaited()
+    mock_valkey.setex.assert_not_awaited()
 
     result = next(event for event in events if event.get("event") == "result")
     assert json.loads(result["data"])["summary"] == "private answer"

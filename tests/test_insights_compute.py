@@ -125,12 +125,12 @@ class TestAnniversariesEndpoint:
 
 
 class TestDataCompletenessCache:
-    """Tests for Redis caching on /api/internal/insights/data-completeness."""
+    """Tests for Valkey caching on /api/internal/insights/data-completeness."""
 
-    def test_cache_hit_returns_cached(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
+    def test_cache_hit_returns_cached(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
         """Cache hit returns cached data without querying PostgreSQL."""
         cached = {"items": [{"entity_type": "artists", "total_count": 100}]}
-        mock_redis.get = AsyncMock(return_value=json.dumps(cached))
+        mock_valkey.get = AsyncMock(return_value=json.dumps(cached))
 
         with patch("api.routers.insights_compute.query_data_completeness") as mock_query:
             response = test_client.get("/api/internal/insights/data-completeness")
@@ -139,9 +139,9 @@ class TestDataCompletenessCache:
         assert response.json() == cached
         mock_query.assert_not_called()
 
-    def test_cache_miss_queries_and_caches(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
-        """Cache miss queries PostgreSQL and stores result in Redis."""
-        mock_redis.get = AsyncMock(return_value=None)
+    def test_cache_miss_queries_and_caches(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        """Cache miss queries PostgreSQL and stores result in Valkey."""
+        mock_valkey.get = AsyncMock(return_value=None)
         items = [{"entity_type": "artists", "total_count": 500, "completeness_pct": 85.0}]
 
         with patch("api.routers.insights_compute.query_data_completeness", new_callable=AsyncMock, return_value=items):
@@ -149,14 +149,14 @@ class TestDataCompletenessCache:
 
         assert response.status_code == 200
         assert response.json() == {"items": items}
-        mock_redis.setex.assert_called_once()
-        call_args = mock_redis.setex.call_args[0]
+        mock_valkey.setex.assert_called_once()
+        call_args = mock_valkey.setex.call_args[0]
         assert call_args[0] == "insights:data-completeness"
         assert call_args[1] == 21600  # 6h TTL
 
-    def test_cache_get_failure_falls_through(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
-        """Redis get failure falls through to PostgreSQL query."""
-        mock_redis.get = AsyncMock(side_effect=Exception("connection lost"))
+    def test_cache_get_failure_falls_through(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        """Valkey get failure falls through to PostgreSQL query."""
+        mock_valkey.get = AsyncMock(side_effect=Exception("connection lost"))
         items = [{"entity_type": "labels", "total_count": 200}]
 
         with patch("api.routers.insights_compute.query_data_completeness", new_callable=AsyncMock, return_value=items):
@@ -165,10 +165,10 @@ class TestDataCompletenessCache:
         assert response.status_code == 200
         assert response.json() == {"items": items}
 
-    def test_cache_set_failure_still_returns(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
-        """Redis set failure does not prevent response."""
-        mock_redis.get = AsyncMock(return_value=None)
-        mock_redis.setex = AsyncMock(side_effect=Exception("write failed"))
+    def test_cache_set_failure_still_returns(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        """Valkey set failure does not prevent response."""
+        mock_valkey.get = AsyncMock(return_value=None)
+        mock_valkey.setex = AsyncMock(side_effect=Exception("write failed"))
         items = [{"entity_type": "masters", "total_count": 300}]
 
         with patch("api.routers.insights_compute.query_data_completeness", new_callable=AsyncMock, return_value=items):
@@ -178,15 +178,15 @@ class TestDataCompletenessCache:
         assert response.json() == {"items": items}
 
 
-class TestDataCompletenessNoRedis:
-    """Tests for data-completeness when Redis is not configured."""
+class TestDataCompletenessNoValkey:
+    """Tests for data-completeness when Valkey is not configured."""
 
-    def test_no_redis_queries_directly(self, test_client: TestClient) -> None:
-        """When Redis is None, queries PostgreSQL directly."""
+    def test_no_valkey_queries_directly(self, test_client: TestClient) -> None:
+        """When Valkey is None, queries PostgreSQL directly."""
         import api.routers.insights_compute as mod
 
-        original_redis = mod._redis
-        mod._redis = None
+        original_valkey = mod._valkey
+        mod._valkey = None
         try:
             items = [{"entity_type": "releases", "total_count": 1000}]
             with patch("api.routers.insights_compute.query_data_completeness", new_callable=AsyncMock, return_value=items):
@@ -194,7 +194,7 @@ class TestDataCompletenessNoRedis:
             assert response.status_code == 200
             assert response.json() == {"items": items}
         finally:
-            mod._redis = original_redis
+            mod._valkey = original_valkey
 
 
 class TestDataCompletenessNotReady:
@@ -213,31 +213,31 @@ class TestDataCompletenessNotReady:
             mod._pool = original
 
 
-class TestConfigureWithRedis:
-    """Test configure() accepts redis parameter."""
+class TestConfigureWithValkey:
+    """Test configure() accepts valkey parameter."""
 
-    def test_configure_sets_redis(self) -> None:
-        """configure() stores redis reference."""
+    def test_configure_sets_valkey(self) -> None:
+        """configure() stores valkey reference."""
         import api.routers.insights_compute as mod
 
-        original = mod._redis
+        original = mod._valkey
         mock = AsyncMock()
         try:
-            mod.configure(AsyncMock(), AsyncMock(), redis=mock)
-            assert mod._redis is mock
+            mod.configure(AsyncMock(), AsyncMock(), valkey=mock)
+            assert mod._valkey is mock
         finally:
-            mod._redis = original
+            mod._valkey = original
 
-    def test_configure_without_redis(self) -> None:
-        """configure() without redis sets _redis to None."""
+    def test_configure_without_valkey(self) -> None:
+        """configure() without valkey sets _valkey to None."""
         import api.routers.insights_compute as mod
 
-        original = mod._redis
+        original = mod._valkey
         try:
             mod.configure(AsyncMock(), AsyncMock())
-            assert mod._redis is None
+            assert mod._valkey is None
         finally:
-            mod._redis = original
+            mod._valkey = original
 
 
 class TestRarityScoresEndpoint:

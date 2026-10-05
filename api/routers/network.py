@@ -22,17 +22,17 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/network", tags=["network"])
 
 _neo4j: Any = None
-_redis: Any = None
+_valkey: Any = None
 
 # Cache TTL for centrality and cluster results (1 hour — moderately expensive)
 _NETWORK_CACHE_TTL = 3600
 
 
-def configure(neo4j: Any, redis: Any = None) -> None:
+def configure(neo4j: Any, valkey: Any = None) -> None:
     """Configure the network router with database connections."""
-    global _neo4j, _redis
+    global _neo4j, _valkey
     _neo4j = neo4j
-    _redis = redis
+    _valkey = valkey
 
 
 @router.get("/artist/{artist_id}/collaborators")
@@ -99,11 +99,11 @@ async def artist_centrality(
     if not _neo4j:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
-    # Check Redis cache
+    # Check Valkey cache
     cache_key = f"network:centrality:{artist_id}"
-    if _redis:
+    if _valkey:
         try:
-            cached = await cache_get(_redis, cache_key, cache=CACHE_NETWORK_CENTRALITY)
+            cached = await cache_get(_valkey, cache_key, cache=CACHE_NETWORK_CENTRALITY)
             if cached:
                 return JSONResponse(content=json.loads(cached))
         except Exception:
@@ -135,9 +135,9 @@ async def artist_centrality(
         },
     }
 
-    if _redis:
+    if _valkey:
         try:
-            await _redis.setex(cache_key, _NETWORK_CACHE_TTL, json.dumps(response))
+            await _valkey.setex(cache_key, _NETWORK_CACHE_TTL, json.dumps(response))
         except Exception:
             logger.debug("⚠️ Network centrality cache set failed", key=cache_key)
 
@@ -159,11 +159,11 @@ async def artist_cluster(
     if not _neo4j:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
-    # Check Redis cache
+    # Check Valkey cache
     cache_key = f"network:cluster:{artist_id}:{limit}"
-    if _redis:
+    if _valkey:
         try:
-            cached = await cache_get(_redis, cache_key, cache=CACHE_NETWORK_CLUSTER)
+            cached = await cache_get(_valkey, cache_key, cache=CACHE_NETWORK_CLUSTER)
             if cached:
                 return JSONResponse(content=json.loads(cached))
         except Exception:
@@ -192,9 +192,9 @@ async def artist_cluster(
         "total_members": sum(c["size"] for c in clusters),
     }
 
-    if _redis:
+    if _valkey:
         try:
-            await _redis.setex(cache_key, _NETWORK_CACHE_TTL, json.dumps(response))
+            await _valkey.setex(cache_key, _NETWORK_CACHE_TTL, json.dumps(response))
         except Exception:
             logger.debug("⚠️ Network cluster cache set failed", key=cache_key)
 

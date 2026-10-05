@@ -31,7 +31,7 @@ from api.auth import (
 
 _security = HTTPBearer(auto_error=False)
 _jwt_secret: str | None = None
-_redis: Any = None
+_valkey: Any = None
 _pool: Any = None
 
 
@@ -43,17 +43,17 @@ class JwtKind(StrEnum):
     TWO_FACTOR_CHALLENGE = auto()
 
 
-def configure(jwt_secret: str | None, redis: Any = None, pool: Any = None) -> None:
-    global _jwt_secret, _redis, _pool
+def configure(jwt_secret: str | None, valkey: Any = None, pool: Any = None) -> None:
+    global _jwt_secret, _valkey, _pool
     _jwt_secret = jwt_secret
-    _redis = redis
+    _valkey = valkey
     _pool = pool
 
 
 async def validate_token(
     token: str,
     jwt_secret: str | None,
-    redis: Any = None,
+    valkey: Any = None,
     *,
     kind: JwtKind = JwtKind.ACCESS,
     expose_admin_mismatch: bool = False,
@@ -104,7 +104,7 @@ async def validate_token(
         detail = "Invalid challenge token" if kind is JwtKind.TWO_FACTOR_CHALLENGE else "Invalid token"
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail, headers={"WWW-Authenticate": "Bearer"})
 
-    reason = await token_revocation_reason(payload, redis)
+    reason = await token_revocation_reason(payload, valkey)
     if reason == REASON_REVOKED:
         detail = "Challenge invalidated by password change" if kind is JwtKind.TWO_FACTOR_CHALLENGE else "Token has been revoked"
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail, headers={"WWW-Authenticate": "Bearer"})
@@ -123,7 +123,7 @@ async def get_optional_user(
     if credentials is None or _jwt_secret is None:
         return None
     try:
-        return await validate_token(credentials.credentials, _jwt_secret, _redis)
+        return await validate_token(credentials.credentials, _jwt_secret, _valkey)
     except HTTPException:
         return None
 
@@ -135,7 +135,7 @@ async def require_user(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Personalized endpoints not enabled")
     if credentials is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required", headers={"WWW-Authenticate": "Bearer"})
-    return await validate_token(credentials.credentials, _jwt_secret, _redis, expose_admin_mismatch=True)
+    return await validate_token(credentials.credentials, _jwt_secret, _valkey, expose_admin_mismatch=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,7 +247,7 @@ async def require_admin(
         raise HTTPException(status_code=503, detail="Admin endpoints not configured")
     if credentials is None:
         raise HTTPException(status_code=401, detail="Authentication required")
-    payload = await validate_token(credentials.credentials, _jwt_secret, _redis, kind=JwtKind.ADMIN)
+    payload = await validate_token(credentials.credentials, _jwt_secret, _valkey, kind=JwtKind.ADMIN)
     # DB verification: confirm user exists and is_admin=True
     if _pool is not None:
         async with _pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:

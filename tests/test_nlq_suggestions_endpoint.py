@@ -15,7 +15,7 @@ async def test_suggestions_endpoint_returns_chips() -> None:
     from api.nlq.config import NLQConfig
     from api.routers import nlq as nlq_router
 
-    nlq_router.configure(NLQConfig(), engine=None, redis=None, jwt_secret=None)
+    nlq_router.configure(NLQConfig(), engine=None, valkey=None, jwt_secret=None)
     app = FastAPI()
     app.include_router(nlq_router.router)
 
@@ -28,18 +28,18 @@ async def test_suggestions_endpoint_returns_chips() -> None:
 
 
 @pytest.mark.asyncio
-async def test_suggestions_endpoint_uses_redis_cache() -> None:
+async def test_suggestions_endpoint_uses_valkey_cache() -> None:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
     from api.nlq.config import NLQConfig
     from api.routers import nlq as nlq_router
 
-    redis = AsyncMock()
-    redis.get = AsyncMock(return_value=None)
-    redis.setex = AsyncMock()
+    valkey = AsyncMock()
+    valkey.get = AsyncMock(return_value=None)
+    valkey.setex = AsyncMock()
 
-    nlq_router.configure(NLQConfig(), engine=None, redis=redis, jwt_secret=None)
+    nlq_router.configure(NLQConfig(), engine=None, valkey=valkey, jwt_secret=None)
     app = FastAPI()
     app.include_router(nlq_router.router)
 
@@ -47,15 +47,15 @@ async def test_suggestions_endpoint_uses_redis_cache() -> None:
         response = client.get("/api/nlq/suggestions", params={"pane": "explore", "focus": "Kraftwerk", "focus_type": "artist"})
         assert response.status_code == 200
 
-    redis.get.assert_awaited_once()
-    redis.setex.assert_awaited_once()
-    args = redis.setex.call_args.args
+    valkey.get.assert_awaited_once()
+    valkey.setex.assert_awaited_once()
+    args = valkey.setex.call_args.args
     assert 300 in args  # TTL is 5 minutes
 
 
 @pytest.mark.asyncio
 async def test_suggestions_endpoint_cache_hit_returns_cached_payload() -> None:
-    """When Redis has a cached payload, return it directly without calling build_suggestions."""
+    """When Valkey has a cached payload, return it directly without calling build_suggestions."""
     import json
 
     from fastapi import FastAPI
@@ -65,10 +65,10 @@ async def test_suggestions_endpoint_cache_hit_returns_cached_payload() -> None:
     from api.routers import nlq as nlq_router
 
     cached_payload = {"suggestions": ["cached suggestion 1", "cached suggestion 2"]}
-    redis = AsyncMock()
-    redis.get = AsyncMock(return_value=json.dumps(cached_payload))
+    valkey = AsyncMock()
+    valkey.get = AsyncMock(return_value=json.dumps(cached_payload))
 
-    nlq_router.configure(NLQConfig(), engine=None, redis=redis, jwt_secret=None)
+    nlq_router.configure(NLQConfig(), engine=None, valkey=valkey, jwt_secret=None)
     app = FastAPI()
     app.include_router(nlq_router.router)
 
@@ -79,23 +79,23 @@ async def test_suggestions_endpoint_cache_hit_returns_cached_payload() -> None:
 
     assert body == cached_payload
     # setex should NOT be called — we served from cache
-    redis.setex.assert_not_awaited()
+    valkey.setex.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_suggestions_endpoint_cache_read_failure_falls_through() -> None:
-    """When Redis.get raises, suggestions are still built and returned."""
+    """When Valkey.get raises, suggestions are still built and returned."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
     from api.nlq.config import NLQConfig
     from api.routers import nlq as nlq_router
 
-    redis = AsyncMock()
-    redis.get = AsyncMock(side_effect=RuntimeError("Redis down"))
-    redis.setex = AsyncMock()
+    valkey = AsyncMock()
+    valkey.get = AsyncMock(side_effect=RuntimeError("Valkey down"))
+    valkey.setex = AsyncMock()
 
-    nlq_router.configure(NLQConfig(), engine=None, redis=redis, jwt_secret=None)
+    nlq_router.configure(NLQConfig(), engine=None, valkey=valkey, jwt_secret=None)
     app = FastAPI()
     app.include_router(nlq_router.router)
 
@@ -110,18 +110,18 @@ async def test_suggestions_endpoint_cache_read_failure_falls_through() -> None:
 
 @pytest.mark.asyncio
 async def test_suggestions_endpoint_cache_write_failure_still_returns_payload() -> None:
-    """When Redis.setex raises, the response is still returned to the client."""
+    """When Valkey.setex raises, the response is still returned to the client."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
     from api.nlq.config import NLQConfig
     from api.routers import nlq as nlq_router
 
-    redis = AsyncMock()
-    redis.get = AsyncMock(return_value=None)
-    redis.setex = AsyncMock(side_effect=RuntimeError("Redis down"))
+    valkey = AsyncMock()
+    valkey.get = AsyncMock(return_value=None)
+    valkey.setex = AsyncMock(side_effect=RuntimeError("Valkey down"))
 
-    nlq_router.configure(NLQConfig(), engine=None, redis=redis, jwt_secret=None)
+    nlq_router.configure(NLQConfig(), engine=None, valkey=valkey, jwt_secret=None)
     app = FastAPI()
     app.include_router(nlq_router.router)
 
@@ -147,7 +147,7 @@ async def test_extract_user_id_returns_none_when_jwt_secret_is_none() -> None:
     mock_engine.run = AsyncMock(return_value=NLQResult(summary="ok", entities=[], tools_used=[]))
 
     # Configure with jwt_secret=None so the bearer-token branch returns None early
-    nlq_router.configure(NLQConfig(enabled=True, api_key="sk-test"), engine=mock_engine, redis=None, jwt_secret=None)
+    nlq_router.configure(NLQConfig(enabled=True, api_key="sk-test"), engine=mock_engine, valkey=None, jwt_secret=None)
     app = FastAPI()
     app.include_router(nlq_router.router)
 
@@ -205,7 +205,7 @@ async def test_extract_user_id_rejects_challenge_token() -> None:
     from api.routers import nlq as nlq_router
 
     secret = "test-nlq-secret"
-    nlq_router.configure(nlq_router.NLQConfig(), engine=None, redis=None, jwt_secret=secret)
+    nlq_router.configure(nlq_router.NLQConfig(), engine=None, valkey=None, jwt_secret=secret)
 
     challenge = _sign_jwt({"sub": "user-1", "email": "x@y.com", "exp": 9_999_999_999, "type": "2fa_challenge"}, secret)
     assert await nlq_router._extract_user_id(_fake_request(challenge)) is None  # type: ignore[arg-type]

@@ -45,20 +45,20 @@ logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 _pool: Any = None
-_redis: Any = None
+_valkey: Any = None
 _neo4j_driver: Any = None
 _config: ApiConfig | None = None
 
 
-def configure(pool: Any, redis: Any = None, neo4j: Any = None, config: ApiConfig | None = None) -> None:
+def configure(pool: Any, valkey: Any = None, neo4j: Any = None, config: ApiConfig | None = None) -> None:
     """Wire the three stores and the config the activity endpoints reach, from startup.
 
     The config is here for one reason: erasure re-authenticates with a TOTP code when the
     account has 2FA enabled, and decrypting the stored secret needs the master key.
     """
-    global _pool, _redis, _neo4j_driver, _config
+    global _pool, _valkey, _neo4j_driver, _config
     _pool = pool
-    _redis = redis
+    _valkey = valkey
     _neo4j_driver = neo4j
     _config = config
 
@@ -530,21 +530,21 @@ async def _erase_neo4j(user_id: str) -> str | None:
 _RECOMMENDATION_KEY_PATTERNS: tuple[str, ...] = ("recommend:explore:{user_id}:*", "recommend:enhanced:{user_id}")
 
 
-async def _surviving_recommendation_keys(redis: Any, user_id: str) -> int:
+async def _surviving_recommendation_keys(valkey: Any, user_id: str) -> int:
     """Count the per-user recommendation keys still present after the invalidation."""
     surviving = 0
     for pattern in _RECOMMENDATION_KEY_PATTERNS:
         cursor: str | int = "0"
         while True:
-            cursor, keys = await redis.scan(cursor=int(cursor), match=pattern.format(user_id=user_id), count=100)
+            cursor, keys = await valkey.scan(cursor=int(cursor), match=pattern.format(user_id=user_id), count=100)
             surviving += len(keys)
             if str(cursor) == "0":
                 break
     return surviving
 
 
-async def _erase_redis(user_id: str) -> str | None:
-    """Delete every per-user Redis key. Returns a failure description, or None.
+async def _erase_valkey(user_id: str) -> str | None:
+    """Delete every per-user Valkey key. Returns a failure description, or None.
 
     ADR 0010 deletes these rather than letting them expire: a 28-day recommendation cache
     outliving an erasure would mean the system still holds something keyed to the user.
@@ -555,25 +555,25 @@ async def _erase_redis(user_id: str) -> str | None:
     An erasure is not a request path, so the sweep is verified afterwards and a surviving
     key is a reported failure rather than a silent one.
     """
-    redis = _redis if _redis is not None else activity.redis_client()
-    if redis is None:
-        return "Redis is not configured; per-user cache keys were not removed"
+    valkey = _valkey if _valkey is not None else activity.valkey_client()
+    if valkey is None:
+        return "Valkey is not configured; per-user cache keys were not removed"
     try:
-        await RecommendCache(redis=redis).invalidate_user(user_id)
-        await redis.delete(
+        await RecommendCache(valkey=valkey).invalidate_user(user_id)
+        await valkey.delete(
             f"{SnapshotStore._USER_COUNT_KEY_PREFIX}{user_id}",
             f"sync:lock:{user_id}",
             f"sync:cooldown:{user_id}",
         )
-        surviving = await _surviving_recommendation_keys(redis, user_id)
+        surviving = await _surviving_recommendation_keys(valkey, user_id)
     except Exception as exc:
-        logger.error("❌ Erasure: Redis step failed", error_type=type(exc).__name__, exc_info=True)
-        return f"Redis deletion failed: {type(exc).__name__}"
+        logger.error("❌ Erasure: Valkey step failed", error_type=type(exc).__name__, exc_info=True)
+        return f"Valkey deletion failed: {type(exc).__name__}"
 
     if surviving:
-        logger.error("❌ Erasure: Redis keys survived the invalidation", surviving=surviving)
-        return f"Redis deletion incomplete: {surviving} recommendation key(s) survived"
-    logger.info("🧹 Erasure: Redis complete")
+        logger.error("❌ Erasure: Valkey keys survived the invalidation", surviving=surviving)
+        return f"Valkey deletion incomplete: {surviving} recommendation key(s) survived"
+    logger.info("🧹 Erasure: Valkey complete")
     return None
 
 
@@ -583,15 +583,15 @@ async def _revoke_caller_token(current_user: dict[str, Any]) -> None:
     The account is inactive after the soft-erase, so the token is already worthless at
     every site that re-reads the user; revoking it closes the window before that read.
     """
-    redis = _redis if _redis is not None else activity.redis_client()
+    valkey = _valkey if _valkey is not None else activity.valkey_client()
     jti = current_user.get("jti")
-    if redis is None or not jti:
+    if valkey is None or not jti:
         return
     expires_at = current_user.get("exp")
     now = int(datetime.now(UTC).timestamp())
     ttl = max(expires_at - now, 60) if expires_at else 3600
     with contextlib.suppress(Exception):
-        await redis.setex(f"revoked:jti:{jti}", ttl, "1")
+        await valkey.setex(f"revoked:jti:{jti}", ttl, "1")
 
 
 @router.post("/api/user/erasure", status_code=status.HTTP_202_ACCEPTED)
@@ -604,7 +604,7 @@ async def request_erasure(
     The procedure runs in the order ADR 0010 sets out, each step logged with its counts:
     one PostgreSQL transaction under the immutability bypass covering the activity rows,
     the subject link, the erasure record, every user-owned table, and the soft-erase of
-    the users row; then the Neo4j subgraph; then the per-user Redis keys; then the
+    the users row; then the Neo4j subgraph; then the per-user Valkey keys; then the
     caller's own token.
 
     `account.erasure_requested` is emitted *before* the procedure runs, and the procedure
@@ -619,7 +619,7 @@ async def request_erasure(
     account would be a credential the user handed out without meaning to hand that over.
     An app token presented here is not a first-party token and is rejected as a 401.
 
-    Returns 202 with the erasure id. A failed Neo4j or Redis step is reported in
+    Returns 202 with the erasure id. A failed Neo4j or Valkey step is reported in
     `incomplete` rather than hidden, because the relational half has already committed.
     """
     user_id = _caller_id(current_user)
@@ -641,7 +641,7 @@ async def request_erasure(
     # The pseudonym this process cached now names rows that no longer exist.
     activity.forget_subject(user_id)
 
-    incomplete = [failure for failure in (await _erase_neo4j(user_id), await _erase_redis(user_id)) if failure is not None]
+    incomplete = [failure for failure in (await _erase_neo4j(user_id), await _erase_valkey(user_id)) if failure is not None]
     await _revoke_caller_token(current_user)
 
     logger.info("🧹 Erasure complete", erasure_id=erasure_id, incomplete=len(incomplete))

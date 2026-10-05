@@ -18,14 +18,14 @@ logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 _pool: Any = None
-_redis: Any = None
+_valkey: Any = None
 
 
-def configure(pool: Any, redis: Any) -> None:
-    """Wire database pool and Redis client into the search router."""
-    global _pool, _redis
+def configure(pool: Any, valkey: Any) -> None:
+    """Wire database pool and Valkey client into the search router."""
+    global _pool, _valkey
     _pool = pool
-    _redis = redis
+    _valkey = valkey
 
 
 _VALID_TYPES = set(ALL_TYPES)
@@ -131,7 +131,7 @@ async def search(
     """Search across artists, labels, masters, and releases using PostgreSQL full-text search.
 
     Returns relevance-ranked results with facet counts and result highlighting.
-    Results are cached in Redis for 5 minutes.
+    Results are cached in Valkey for 5 minutes.
     Rate limited to 30 requests/minute.
     """
     if _pool is None:
@@ -179,7 +179,7 @@ async def search(
 
     result = await execute_search(
         pool=_pool,
-        redis=_redis,
+        valkey=_valkey,
         q=q,
         types=requested_types,
         genres=genre_list,

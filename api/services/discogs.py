@@ -2,7 +2,7 @@
 
 Implements Out-of-Band (OOB) OAuth flow:
 1. Backend requests a token from Discogs with callback_uri="oob"
-2. Request token is stored in Redis with a 10-minute TTL (CSRF protection)
+2. Request token is stored in Valkey with a 10-minute TTL (CSRF protection)
 3. User opens the Discogs authorization URL (in a popup or redirect)
 4. User pastes the verifier code shown by Discogs into the app
 5. Backend exchanges (request_token, verifier) for an access token + secret
@@ -27,8 +27,8 @@ DISCOGS_AUTHORIZE_URL = "https://www.discogs.com/oauth/authorize"
 DISCOGS_ACCESS_TOKEN_URL = "https://api.discogs.com/oauth/access_token"  # noqa: S105  # nosec B105
 DISCOGS_IDENTITY_URL = "https://api.discogs.com/oauth/identity"
 
-REDIS_OAUTH_STATE_TTL = 600  # 10 minutes in seconds
-REDIS_STATE_PREFIX = "discogs:oauth:state:"
+VALKEY_OAUTH_STATE_TTL = 600  # 10 minutes in seconds
+VALKEY_STATE_PREFIX = "discogs:oauth:state:"
 
 
 class DiscogsOAuthError(Exception):

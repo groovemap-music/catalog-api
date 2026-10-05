@@ -41,9 +41,9 @@ from api.queries.admin_queries import (
     get_audit_log,
     get_neo4j_storage,
     get_postgres_storage,
-    get_redis_storage,
     get_sync_activity,
     get_user_stats,
+    get_valkey_storage,
 )
 from api.queries.media_coverage_queries import DEFAULT_LIMIT, MAX_LIMIT, get_unmapped_media, known_providers
 from api.queries.metrics_queries import get_health_history, get_queue_history
@@ -56,7 +56,7 @@ router = APIRouter()
 
 # Module-level state (set via configure())
 _pool: Any = None
-_redis: Any = None
+_valkey: Any = None
 _config: ApiConfig | None = None
 _neo4j_driver: Any = None
 
@@ -74,11 +74,11 @@ for _dt in MUSICBRAINZ_DATA_TYPES:
     _VALID_DLQ_NAMES.add(dead_letter_queue_name("brainztableinator", _dt))
 
 
-def configure(pool: Any, redis: Any, config: ApiConfig, neo4j_driver: Any = None) -> None:
+def configure(pool: Any, valkey: Any, config: ApiConfig, neo4j_driver: Any = None) -> None:
     """Initialise module state — called once during app lifespan startup."""
-    global _pool, _redis, _config, _neo4j_driver
+    global _pool, _valkey, _config, _neo4j_driver
     _pool = pool
-    _redis = redis
+    _valkey = valkey
     _config = config
     _neo4j_driver = neo4j_driver
 
@@ -133,13 +133,13 @@ async def admin_logout(
     current_admin: Annotated[dict[str, Any], Depends(require_admin)],
 ) -> JSONResponse:
     """Logout and revoke the current admin JWT."""
-    if _redis:
+    if _valkey:
         jti: str | None = current_admin.get("jti")
         exp: int | None = current_admin.get("exp")
         if jti:
             now = int(datetime.now(UTC).timestamp())
             ttl = max((exp - now), 60) if exp else 3600
-            await _redis.setex(f"revoked:jti:{jti}", ttl, "1")
+            await _valkey.setex(f"revoked:jti:{jti}", ttl, "1")
     admin_email = current_admin.get("email", "unknown")
     if _pool is not None:
         await record_audit_entry(pool=_pool, admin_id=current_admin["sub"], action="admin.logout", target=admin_email)
@@ -272,11 +272,11 @@ async def admin_sync_activity(
 async def admin_storage(
     _admin: Annotated[dict[str, Any], Depends(require_admin)],
 ) -> JSONResponse:
-    """Storage utilization for Neo4j, PostgreSQL, and Redis."""
+    """Storage utilization for Neo4j, PostgreSQL, and Valkey."""
     results = await asyncio.gather(
         get_neo4j_storage(_neo4j_driver),
         get_postgres_storage(_pool),
-        get_redis_storage(_redis),
+        get_valkey_storage(_valkey),
         return_exceptions=True,
     )
 
@@ -286,11 +286,13 @@ async def admin_storage(
             return {"status": "error", "error": str(result)}
         return dict(result)
 
+    valkey_storage = _wrap(results[2], "valkey")
     return JSONResponse(
         content={
             "neo4j": _wrap(results[0], "neo4j"),
             "postgresql": _wrap(results[1], "postgresql"),
-            "redis": _wrap(results[2], "redis"),
+            "valkey": valkey_storage,
+            "redis": valkey_storage,  # One-release compatibility alias for operations-console.
         }
     )
 

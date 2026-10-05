@@ -162,23 +162,23 @@ class TestCentralityEndpoint:
             response = test_client.get("/api/network/artist/123/centrality")
         assert response.status_code == 504
 
-    def test_cache_hit(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
-        """Returns cached result on Redis hit."""
+    def test_cache_hit(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        """Returns cached result on Valkey hit."""
         cached = {
             "artist_id": "123",
             "artist_name": "Cached Artist",
             "centrality": {"degree": 100, "collaborator_count": 50, "collaboration_releases": 30, "group_count": 2, "alias_count": 0},
         }
-        mock_redis.get = AsyncMock(return_value=json.dumps(cached))
+        mock_valkey.get = AsyncMock(return_value=json.dumps(cached))
         with patch("api.queries.network_queries.get_artist_centrality") as mock_query:
             response = test_client.get("/api/network/artist/123/centrality")
         assert response.status_code == 200
         assert response.json() == cached
         mock_query.assert_not_called()
 
-    def test_cache_miss_stores_result(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
-        """Stores result in Redis on cache miss."""
-        mock_redis.get = AsyncMock(return_value=None)
+    def test_cache_miss_stores_result(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        """Stores result in Valkey on cache miss."""
+        mock_valkey.get = AsyncMock(return_value=None)
         result = {
             "artist_id": "123",
             "artist_name": "Miles Davis",
@@ -191,14 +191,14 @@ class TestCentralityEndpoint:
         with patch("api.queries.network_queries.get_artist_centrality", new_callable=AsyncMock, return_value=result):
             response = test_client.get("/api/network/artist/123/centrality")
         assert response.status_code == 200
-        mock_redis.setex.assert_called_once()
-        call_args = mock_redis.setex.call_args[0]
+        mock_valkey.setex.assert_called_once()
+        call_args = mock_valkey.setex.call_args[0]
         assert call_args[0] == "network:centrality:123"
         assert call_args[1] == 3600
 
-    def test_cache_get_failure_falls_through(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
-        """Redis get failure falls through to Neo4j query."""
-        mock_redis.get = AsyncMock(side_effect=Exception("connection lost"))
+    def test_cache_get_failure_falls_through(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        """Valkey get failure falls through to Neo4j query."""
+        mock_valkey.get = AsyncMock(side_effect=Exception("connection lost"))
         result = {
             "artist_id": "123",
             "artist_name": "Miles Davis",
@@ -213,10 +213,10 @@ class TestCentralityEndpoint:
         assert response.status_code == 200
         assert response.json()["artist_id"] == "123"
 
-    def test_cache_set_failure_still_returns(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
-        """Redis set failure does not prevent response."""
-        mock_redis.get = AsyncMock(return_value=None)
-        mock_redis.setex = AsyncMock(side_effect=Exception("write failed"))
+    def test_cache_set_failure_still_returns(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        """Valkey set failure does not prevent response."""
+        mock_valkey.get = AsyncMock(return_value=None)
+        mock_valkey.setex = AsyncMock(side_effect=Exception("write failed"))
         result = {
             "artist_id": "123",
             "artist_name": "Miles Davis",
@@ -243,12 +243,12 @@ class TestCentralityEndpoint:
             response = test_client.get("/api/network/artist/123/centrality")
         assert response.status_code == 500
 
-    def test_no_redis(self, test_client: TestClient) -> None:
-        """Works without Redis configured."""
+    def test_no_valkey(self, test_client: TestClient) -> None:
+        """Works without Valkey configured."""
         import api.routers.network as mod
 
-        original_redis = mod._redis
-        mod._redis = None
+        original_valkey = mod._valkey
+        mod._valkey = None
         try:
             result = {
                 "artist_id": "123",
@@ -263,7 +263,7 @@ class TestCentralityEndpoint:
                 response = test_client.get("/api/network/artist/123/centrality")
             assert response.status_code == 200
         finally:
-            mod._redis = original_redis
+            mod._valkey = original_valkey
 
 
 class TestClusterEndpoint:
@@ -348,8 +348,8 @@ class TestClusterEndpoint:
         assert data["total_clusters"] == 0
         assert data["total_members"] == 0
 
-    def test_cache_hit(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
-        """Returns cached result on Redis hit."""
+    def test_cache_hit(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        """Returns cached result on Valkey hit."""
         cached = {
             "artist_id": "123",
             "artist_name": "Cached",
@@ -357,16 +357,16 @@ class TestClusterEndpoint:
             "total_clusters": 0,
             "total_members": 0,
         }
-        mock_redis.get = AsyncMock(return_value=json.dumps(cached))
+        mock_valkey.get = AsyncMock(return_value=json.dumps(cached))
         with patch("api.queries.network_queries.get_artist_identity") as mock_id:
             response = test_client.get("/api/network/cluster/123")
         assert response.status_code == 200
         assert response.json() == cached
         mock_id.assert_not_called()
 
-    def test_cache_miss_stores_result(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
-        """Stores result in Redis on cache miss."""
-        mock_redis.get = AsyncMock(return_value=None)
+    def test_cache_miss_stores_result(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        """Stores result in Valkey on cache miss."""
+        mock_valkey.get = AsyncMock(return_value=None)
         identity = {"artist_id": "123", "artist_name": "Test"}
         clusters = [{"cluster_label": "Jazz", "members": [], "size": 0}]
         with (
@@ -375,14 +375,14 @@ class TestClusterEndpoint:
         ):
             response = test_client.get("/api/network/cluster/123")
         assert response.status_code == 200
-        mock_redis.setex.assert_called_once()
-        call_args = mock_redis.setex.call_args[0]
+        mock_valkey.setex.assert_called_once()
+        call_args = mock_valkey.setex.call_args[0]
         assert call_args[0] == "network:cluster:123:50"
         assert call_args[1] == 3600
 
-    def test_cache_get_failure_falls_through(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
-        """Redis get failure falls through to Neo4j query."""
-        mock_redis.get = AsyncMock(side_effect=Exception("connection lost"))
+    def test_cache_get_failure_falls_through(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        """Valkey get failure falls through to Neo4j query."""
+        mock_valkey.get = AsyncMock(side_effect=Exception("connection lost"))
         identity = {"artist_id": "123", "artist_name": "Test"}
         with (
             patch("api.queries.network_queries.get_artist_identity", new_callable=AsyncMock, return_value=identity),
@@ -391,10 +391,10 @@ class TestClusterEndpoint:
             response = test_client.get("/api/network/cluster/123")
         assert response.status_code == 200
 
-    def test_cache_set_failure_still_returns(self, test_client: TestClient, mock_redis: AsyncMock) -> None:
-        """Redis set failure does not prevent response."""
-        mock_redis.get = AsyncMock(return_value=None)
-        mock_redis.setex = AsyncMock(side_effect=Exception("write failed"))
+    def test_cache_set_failure_still_returns(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        """Valkey set failure does not prevent response."""
+        mock_valkey.get = AsyncMock(return_value=None)
+        mock_valkey.setex = AsyncMock(side_effect=Exception("write failed"))
         identity = {"artist_id": "123", "artist_name": "Test"}
         with (
             patch("api.queries.network_queries.get_artist_identity", new_callable=AsyncMock, return_value=identity),
@@ -611,30 +611,30 @@ class TestConfigure:
     """Tests for configure() function."""
 
     def test_configure_sets_state(self) -> None:
-        """configure() stores neo4j and redis references."""
+        """configure() stores neo4j and valkey references."""
         import api.routers.network as mod
 
         original_neo4j = mod._neo4j
-        original_redis = mod._redis
+        original_valkey = mod._valkey
         mock_neo4j = AsyncMock()
-        mock_redis = AsyncMock()
+        mock_valkey = AsyncMock()
         try:
-            mod.configure(mock_neo4j, mock_redis)
+            mod.configure(mock_neo4j, mock_valkey)
             assert mod._neo4j is mock_neo4j
-            assert mod._redis is mock_redis
+            assert mod._valkey is mock_valkey
         finally:
             mod._neo4j = original_neo4j
-            mod._redis = original_redis
+            mod._valkey = original_valkey
 
-    def test_configure_without_redis(self) -> None:
-        """configure() without redis sets _redis to None."""
+    def test_configure_without_valkey(self) -> None:
+        """configure() without valkey sets _valkey to None."""
         import api.routers.network as mod
 
         original_neo4j = mod._neo4j
-        original_redis = mod._redis
+        original_valkey = mod._valkey
         try:
             mod.configure(AsyncMock())
-            assert mod._redis is None
+            assert mod._valkey is None
         finally:
             mod._neo4j = original_neo4j
-            mod._redis = original_redis
+            mod._valkey = original_valkey

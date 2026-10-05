@@ -236,7 +236,7 @@ async def test_collection_ids_are_cached_under_a_key_the_sync_sweeps() -> None:
 
 
 @pytest.mark.asyncio
-async def test_collection_cache_key_matches_the_recommend_invalidation_pattern(mock_redis: AsyncMock) -> None:
+async def test_collection_cache_key_matches_the_recommend_invalidation_pattern(mock_valkey: AsyncMock) -> None:
     """``invalidate_user`` scans ``recommend:explore:{user}:*``, which this key is under."""
     from api.cache import RecommendCache
 
@@ -246,8 +246,8 @@ async def test_collection_cache_key_matches_the_recommend_invalidation_pattern(m
         scanned.append(match)
         return 0, []
 
-    mock_redis.scan = AsyncMock(side_effect=_scan)
-    await RecommendCache(redis=mock_redis).invalidate_user("user-1")
+    mock_valkey.scan = AsyncMock(side_effect=_scan)
+    await RecommendCache(valkey=mock_valkey).invalidate_user("user-1")
 
     import fnmatch
 
