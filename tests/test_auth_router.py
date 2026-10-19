@@ -198,14 +198,9 @@ class TestResetConfirm:
         test_client: TestClient,
         mock_valkey: AsyncMock,
     ) -> None:
-        mock_valkey.getdel = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "user_id": TEST_USER_ID,
-                    "email": TEST_USER_EMAIL,
-                }
-            )
-        )
+        token_payload = json.dumps({"user_id": TEST_USER_ID, "email": TEST_USER_EMAIL})
+        mock_valkey.get = AsyncMock(return_value=token_payload)
+        mock_valkey.getdel = AsyncMock(return_value=token_payload)
         response = test_client.post(
             "/api/auth/reset-confirm",
             json={"token": "valid-token", "new_password": "newpassword123"},
@@ -243,14 +238,9 @@ class TestResetConfirm:
         app tokens — the password_changed Valkey marker alone never covers
         them (it only gates JWTs and it TTLs out; app tokens carry no
         expiry)."""
-        mock_valkey.getdel = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "user_id": TEST_USER_ID,
-                    "email": TEST_USER_EMAIL,
-                }
-            )
-        )
+        token_payload = json.dumps({"user_id": TEST_USER_ID, "email": TEST_USER_EMAIL})
+        mock_valkey.get = AsyncMock(return_value=token_payload)
+        mock_valkey.getdel = AsyncMock(return_value=token_payload)
         response = test_client.post(
             "/api/auth/reset-confirm",
             json={"token": "valid-token", "new_password": "newpassword123"},
