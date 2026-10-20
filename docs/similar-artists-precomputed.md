@@ -74,8 +74,8 @@ reads after warm-up, via `tests/test_similar_precomputed_integration.py`:
 
 | What is timed | p50 | p95 |
 | --- | --- | --- |
-| Release + list read (`get_current_list`), a primary-key lookup | 1.26 ms | 1.92 ms |
-| Pure path (`alpha = 1.0`): that read plus one Neo4j lookup of the 50 names | 6.15 ms | 7.74 ms |
+| Release + list read (`get_current_list`), a primary-key lookup | 1.50 ms | 3.68 ms |
+| Pure path (`alpha = 1.0`): that read plus one Neo4j lookup of the 50 names | 5.57 ms | 7.31 ms |
 
 The second row excludes HTTP, auth, rate limiting, the identity check, and the alias lookup, so it
 is not the full-endpoint p95. The fused path additionally runs the heuristic's graph queries and
@@ -85,8 +85,6 @@ is dominated by them; it was not given a latency figure here.
 official PostgreSQL 19 GA image exists yet. The bead's p95 criterion is therefore open: re-measure
 on PG19 GA by pointing `POSTGRES_INTEGRATION_IMAGE` at it and rerunning `just test-integration`.
 
-The pinned `groovemap-database-schema` revision still declares the superseded
-one-row-per-neighbour tables (gm-database-schema-2xe0), not the compact per-artist contract
-(gm-database-schema-hqjp) this reads. The integration test installs the compact DDL itself and
-restores the pinned tables afterwards; bumping the pin retires that workaround. Because the image
+The tables come from the pinned `groovemap-database-schema` revision (the compact per-artist
+contract, gm-database-schema-hqjp), applied by `create_postgres_schema`. Because the image
 has no pgvector, the vector lookup used by fusion is covered by unit tests only.

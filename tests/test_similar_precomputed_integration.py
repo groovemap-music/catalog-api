@@ -7,13 +7,6 @@ lookup is covered by unit tests, and its absence is itself the "unreadable vecto
 
 The release and list tables are declared unconditionally by the schema, so the real
 primary-key read is exercised against real rows at a realistic list width (K=50).
-
-The database-schema revision this repository pins still declares the superseded
-one-row-per-neighbour contract (gm-database-schema-2xe0). The compact one-row-per-artist
-contract the endpoint reads (gm-database-schema-hqjp) is on database-schema main but not in
-the pin, so the fixture swaps the two tables for that DDL, copied from database-schema's
-docs/architecture.md ("Compact per-artist lists"), and restores the pinned tables afterwards.
-Bumping the pin retires `_COMPACT_DDL`.
 """
 
 from __future__ import annotations
@@ -38,34 +31,6 @@ ARTISTS = 100_000
 K = 50
 SAMPLES = 2_000
 MODEL_VERSION = "integration-fastrp-v1"
-
-
-_COMPACT_DDL = (
-    "DROP TABLE IF EXISTS public.artist_similar_artists, public.artist_embedding_releases CASCADE",
-    """
-    CREATE TABLE public.artist_embedding_releases (
-        release_id       INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-        model_version    TEXT UNIQUE NOT NULL,
-        source_dump_id   TEXT NOT NULL,
-        source_dump_date DATE NOT NULL,
-        k                SMALLINT NOT NULL CHECK (k >= 1),
-        artists          BIGINT NOT NULL DEFAULT 0 CHECK (artists >= 0),
-        published_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        is_current       BOOLEAN NOT NULL DEFAULT FALSE
-    )
-    """,
-    """
-    CREATE TABLE public.artist_similar_artists (
-        release_id         INTEGER NOT NULL REFERENCES public.artist_embedding_releases(release_id) ON DELETE CASCADE,
-        artist_id          TEXT NOT NULL,
-        similar_artist_ids TEXT[] NOT NULL,
-        scores             REAL[] NOT NULL,
-        PRIMARY KEY (release_id, artist_id),
-        CHECK (cardinality(similar_artist_ids) = cardinality(scores))
-    )
-    """,
-    "CREATE UNIQUE INDEX idx_artist_embedding_releases_is_current ON public.artist_embedding_releases (is_current) WHERE is_current",
-)
 
 
 def _required_env(name: str) -> str:
@@ -94,14 +59,12 @@ async def pool() -> AsyncIterator[AsyncPostgreSQLPool]:
     await pg_pool.initialize()
     assert await create_postgres_schema(pg_pool) == 0
     async with pg_pool.connection() as conn, conn.cursor() as cursor:
-        for statement in _COMPACT_DDL:
-            await cursor.execute(statement)
+        await cursor.execute("DELETE FROM public.artist_embedding_releases WHERE model_version = %s", (MODEL_VERSION,))
     try:
         yield pg_pool
     finally:
         async with pg_pool.connection() as conn, conn.cursor() as cursor:
-            await cursor.execute(_COMPACT_DDL[0])
-        assert await create_postgres_schema(pg_pool) == 0
+            await cursor.execute("DELETE FROM public.artist_embedding_releases WHERE model_version = %s", (MODEL_VERSION,))
         await pg_pool.close()
 
 
