@@ -1347,7 +1347,6 @@ class TestStorageEndpoint:
             assert data["neo4j"]["status"] == "ok"
             assert data["postgresql"]["status"] == "ok"
             assert data["valkey"]["status"] == "ok"
-            assert data["redis"] == data["valkey"]
 
     def test_partial_failure(self, test_client: TestClient) -> None:
         with (

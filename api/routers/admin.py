@@ -299,7 +299,6 @@ async def admin_storage(
             "neo4j": _wrap(results[0], "neo4j"),
             "postgresql": _wrap(results[1], "postgresql"),
             "valkey": valkey_storage,
-            "redis": valkey_storage,  # One-release compatibility alias for operations-console.
         }
     )
 

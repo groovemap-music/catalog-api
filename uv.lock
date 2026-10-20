@@ -7,7 +7,7 @@ exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for 
 exclude-newer-span = "P2D"
 
 [manifest]
-overrides = [{ name = "groovemap-runtime", extras = ["neo4j", "otel", "otel-http", "postgres"], git = "https://github.com/groovemap-music/python-libraries.git?rev=6c3802035e9c973c6598dadbd3e4377daee613d4" }]
+overrides = [{ name = "groovemap-runtime", extras = ["neo4j", "otel", "otel-http", "postgres"], git = "https://github.com/groovemap-music/python-libraries.git?rev=771515349b592ff569b1b3e5712f7bef936bab58" }]
 
 [[package]]
 name = "annotated-doc"
@@ -615,7 +615,7 @@ wheels = [
 [[package]]
 name = "groovemap-agent-tools"
 version = "0.1.0"
-source = { git = "https://github.com/groovemap-music/python-libraries.git?subdirectory=agent-tools&rev=6c3802035e9c973c6598dadbd3e4377daee613d4#6c3802035e9c973c6598dadbd3e4377daee613d4" }
+source = { git = "https://github.com/groovemap-music/python-libraries.git?subdirectory=agent-tools&rev=771515349b592ff569b1b3e5712f7bef936bab58#771515349b592ff569b1b3e5712f7bef936bab58" }
 dependencies = [
     { name = "groovemap-runtime", extra = ["neo4j", "otel", "otel-http", "postgres"] },
 ]
@@ -673,8 +673,8 @@ requires-dist = [
     { name = "cryptography", specifier = ">=50.0.1" },
     { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "fastapi", specifier = ">=0.141.1" },
-    { name = "groovemap-agent-tools", git = "https://github.com/groovemap-music/python-libraries.git?subdirectory=agent-tools&rev=6c3802035e9c973c6598dadbd3e4377daee613d4" },
-    { name = "groovemap-runtime", extras = ["neo4j", "otel", "otel-http", "postgres"], git = "https://github.com/groovemap-music/python-libraries.git?rev=6c3802035e9c973c6598dadbd3e4377daee613d4" },
+    { name = "groovemap-agent-tools", git = "https://github.com/groovemap-music/python-libraries.git?subdirectory=agent-tools&rev=771515349b592ff569b1b3e5712f7bef936bab58" },
+    { name = "groovemap-runtime", extras = ["neo4j", "otel", "otel-http", "postgres"], git = "https://github.com/groovemap-music/python-libraries.git?rev=771515349b592ff569b1b3e5712f7bef936bab58" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "neo4j-rust-ext", specifier = ">=6.3.0.0" },
     { name = "orjson", specifier = ">=3.12.0" },
@@ -723,7 +723,7 @@ dependencies = [
 [[package]]
 name = "groovemap-runtime"
 version = "0.1.0"
-source = { git = "https://github.com/groovemap-music/python-libraries.git?rev=6c3802035e9c973c6598dadbd3e4377daee613d4#6c3802035e9c973c6598dadbd3e4377daee613d4" }
+source = { git = "https://github.com/groovemap-music/python-libraries.git?rev=771515349b592ff569b1b3e5712f7bef936bab58#771515349b592ff569b1b3e5712f7bef936bab58" }
 dependencies = [
     { name = "orjson" },
     { name = "structlog" },
