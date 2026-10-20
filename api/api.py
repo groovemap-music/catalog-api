@@ -88,6 +88,7 @@ from api.services.discogs import (
 )
 from api.syncer import reconcile_stale_sync_history
 from api.telemetry import instrument_valkey
+from api.valkey_errors import valkey_write_guard
 
 
 logger = structlog.get_logger(__name__)
@@ -595,7 +596,14 @@ async def authorize_discogs(
     valkey_key = f"{VALKEY_STATE_PREFIX}{state}"
     # Store both the token secret and the initiating user_id to prevent cross-user OAuth binding
     state_data = json.dumps({"secret": token_data["oauth_token_secret"], "user_id": current_user.get("sub")})
-    await _valkey.setex(valkey_key, VALKEY_OAUTH_STATE_TTL, state_data)
+    # Without the stored state the verify step can never succeed, so a rejected
+    # write is a 503 rather than an authorize URL that is bound to fail.
+    with valkey_write_guard(
+        operation="discogs_oauth_state",
+        detail="Connecting Discogs is temporarily unavailable; please try again shortly",
+        user_id=current_user.get("sub"),
+    ):
+        await _valkey.setex(valkey_key, VALKEY_OAUTH_STATE_TTL, state_data)
 
     authorize_url = f"{DISCOGS_AUTHORIZE_URL}?oauth_token={state}"
     callback_mode = "callback" if _config.discogs_oauth_callback_url else "oob"

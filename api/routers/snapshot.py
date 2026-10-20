@@ -11,6 +11,7 @@ from api.dependencies import validate_token
 from api.limiter import bearer_token_key_func, limiter
 from api.models import SnapshotRequest, SnapshotResponse, SnapshotRestoreResponse
 from api.snapshot_store import SnapshotQuotaExceededError, SnapshotStore, SnapshotTooLargeError
+from api.valkey_errors import VALKEY_UNAVAILABLE_ERRORS, valkey_write_unavailable
 
 
 router = APIRouter()
@@ -18,6 +19,8 @@ _snapshot_store: SnapshotStore | None = None
 _security = HTTPBearer()
 _jwt_secret: str | None = None
 _valkey: aiovalkey.Valkey | None = None
+
+_SAVE_UNAVAILABLE_DETAIL = "Snapshot could not be saved right now; nothing was stored, please try again shortly"
 
 
 def configure(
@@ -56,6 +59,12 @@ async def save_snapshot(
     user_id = _current_user.get("sub")
     try:
         token, expires_at = await _snapshot_store.save(nodes, center, user_id=user_id)
+    except VALKEY_UNAVAILABLE_ERRORS as exc:
+        # SnapshotStore.save leaves the quota counter untouched on a rejected
+        # write, so the user can simply retry. Same body shape as this router's
+        # other errors.
+        unavailable = valkey_write_unavailable(exc, operation="snapshot_save", detail=_SAVE_UNAVAILABLE_DETAIL, user_id=user_id)
+        return JSONResponse(content={"error": unavailable.detail}, status_code=unavailable.status_code, headers=unavailable.headers)
     except SnapshotTooLargeError as exc:
         return JSONResponse(content={"error": str(exc)}, status_code=413)
     except SnapshotQuotaExceededError as exc:
