@@ -23,6 +23,7 @@ flowchart TD
 - [Logging](logging-guide.md)
 - [Log emoji conventions](emoji-guide.md)
 - [Database resilience](database-resilience.md)
+- [Valkey write rejection, verified against real servers](valkey-noeviction-verification.md)
 - [Performance](performance-guide.md)
 - [Coverage policy](coverage-policy.md)
 - [Query performance optimizations](query-performance-optimizations.md)
