@@ -144,6 +144,27 @@ async def _batch_artist_profiles(
     return profiles
 
 
+async def get_profiled_artists(driver: AsyncResilientNeo4jDriver, artist_ids: list[str], *, with_profiles: bool = True) -> list[dict[str, Any]]:
+    """Name, release count, and (by default) full profile for specific artists, in the candidate shape.
+
+    Used to score artists that arrived by id (a precomputed list) rather than by the
+    heuristic's own candidate query. Artists the graph does not know, or that carry no name,
+    are omitted -- the same rule ``compute_similar_artists`` applies to its candidates.
+    """
+    if not artist_ids:
+        return []
+    summary_cypher = """
+    MATCH (a:Artist) WHERE a.id IN $ids AND a.name IS NOT NULL
+    OPTIONAL MATCH (r:Release)-[:BY]->(a)
+    RETURN a.id AS artist_id, a.name AS artist_name, count(DISTINCT r) AS release_count
+    """
+    summaries = await run_query(driver, summary_cypher, ids=artist_ids)
+    if not with_profiles:
+        return list(summaries)
+    profiles = await _batch_artist_profiles(driver, [row["artist_id"] for row in summaries])
+    return [{**row, **profiles.get(row["artist_id"], {})} for row in summaries]
+
+
 async def get_candidate_artists(driver: AsyncResilientNeo4jDriver, artist_id: str) -> list[dict[str, Any]]:
     """Get candidate artists sharing genres with the target, with their full profiles.
 

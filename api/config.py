@@ -14,6 +14,7 @@ from common.config import (
 )
 
 
+DEFAULT_FUSION_ALPHA = 0.8  # gm-analytics-engine-8ts dev-selected weight on the embedding cosine
 DEFAULT_DISCOGS_USER_AGENT = "GrooveMap-catalog-api/1.0 +https://github.com/groovemap-music/catalog-api"
 
 
@@ -23,6 +24,20 @@ def _env_int(name: str, default: int) -> int:
         return int(getenv(name, str(default)))
     except ValueError:
         return default
+
+
+def _env_unit_float(name: str, default: float) -> float:
+    """Read a float in [0, 1]; an unset variable is the default and anything else invalid is an error."""
+    raw = getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be a number between 0 and 1, got {raw!r}") from None
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(f"{name} must be between 0 and 1, got {raw!r}")
+    return value
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -71,6 +86,8 @@ class ApiConfig:
     metrics_collection_interval: int = 300
     identity_auto_reattach_enabled: bool = False
     identity_auto_reattach_interval: int = 300
+    similar_artists_precomputed_enabled: bool = False
+    similar_artists_fusion_alpha: float = DEFAULT_FUSION_ALPHA
 
     @classmethod
     def from_env(cls) -> ApiConfig:
@@ -139,4 +156,6 @@ class ApiConfig:
             metrics_collection_interval=_env_int("METRICS_COLLECTION_INTERVAL", 300),
             identity_auto_reattach_enabled=_env_bool("IDENTITY_AUTO_REATTACH_ENABLED"),
             identity_auto_reattach_interval=max(1, _env_int("IDENTITY_AUTO_REATTACH_INTERVAL", 300)),
+            similar_artists_precomputed_enabled=_env_bool("SIMILAR_ARTISTS_PRECOMPUTED_ENABLED"),
+            similar_artists_fusion_alpha=_env_unit_float("SIMILAR_ARTISTS_FUSION_ALPHA", DEFAULT_FUSION_ALPHA),
         )

@@ -891,3 +891,48 @@ class TestScoreDiscoveries:
         discoveries = [{"id": None, "name": "Bossa Nova", "type": "style", "path_names": ["Start", "Bossa Nova"], "rel_types": ["IS"], "dist": 1}]
         result = score_discoveries(discoveries, {}, {"Bossa Nova"}, limit=10)
         assert result[0]["id"] == "Bossa Nova"
+
+
+# ---------------------------------------------------------------------------
+# get_profiled_artists (gm-catalog-api-2zsq.1)
+# ---------------------------------------------------------------------------
+
+
+class TestGetProfiledArtists:
+    @pytest.mark.asyncio
+    async def test_returns_candidate_shaped_rows_with_profiles(self) -> None:
+        from unittest.mock import patch
+
+        from api.queries.recommend_queries import get_profiled_artists
+
+        summary = [{"artist_id": "n1", "artist_name": "One", "release_count": 4}]
+        with (
+            patch("api.queries.recommend_queries.run_query", AsyncMock(return_value=summary)),
+            patch("api.queries.recommend_queries._batch_artist_profiles", AsyncMock(return_value={"n1": {"genres": [{"name": "Rock", "count": 2}]}})),
+        ):
+            rows = await get_profiled_artists(MagicMock(), ["n1", "gone"])
+        assert rows == [{"artist_id": "n1", "artist_name": "One", "release_count": 4, "genres": [{"name": "Rock", "count": 2}]}]
+
+    @pytest.mark.asyncio
+    async def test_names_only_skips_the_profile_queries(self) -> None:
+        from unittest.mock import patch
+
+        from api.queries.recommend_queries import get_profiled_artists
+
+        summary = [{"artist_id": "n1", "artist_name": "One", "release_count": 4}]
+        with (
+            patch("api.queries.recommend_queries.run_query", AsyncMock(return_value=summary)),
+            patch("api.queries.recommend_queries._batch_artist_profiles", AsyncMock()) as profiles,
+        ):
+            assert await get_profiled_artists(MagicMock(), ["n1"], with_profiles=False) == summary
+        profiles.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_ids_runs_no_query(self) -> None:
+        from unittest.mock import patch
+
+        from api.queries.recommend_queries import get_profiled_artists
+
+        with patch("api.queries.recommend_queries.run_query", AsyncMock()) as run:
+            assert await get_profiled_artists(MagicMock(), []) == []
+        run.assert_not_called()

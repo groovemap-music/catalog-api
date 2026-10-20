@@ -166,6 +166,7 @@ not exist.
 | Policy id | Endpoint |
 | --- | --- |
 | `similar_artist_weighted_cosine_v1` | `GET /api/recommend/similar/artist/{artist_id}` |
+| `similar_artist_precomputed_fused_v1` | the same endpoint, when `SIMILAR_ARTISTS_PRECOMPUTED_ENABLED` and a current list served the request |
 | `explore_personalized_v1` | `GET /api/recommend/explore/{entity_type}/{id}` |
 | `user_recommendations_artist_v1` | `GET /api/user/recommendations?strategy=artist` (default) |
 | `user_recommendations_multi_v1` | `GET /api/user/recommendations?strategy=multi` |

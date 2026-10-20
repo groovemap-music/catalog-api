@@ -282,7 +282,14 @@ def _configure_routers(
     _collection_router.configure(neo4j, pool, jwt_secret_for_neo4j)
     _credits_router.configure(neo4j, valkey)
     _label_dna_router.configure(neo4j, valkey)
-    _recommend_router.configure(neo4j, jwt_secret_for_neo4j, valkey)
+    _recommend_router.configure(
+        neo4j,
+        jwt_secret_for_neo4j,
+        valkey,
+        pg_pool=pool,
+        precomputed_enabled=config.similar_artists_precomputed_enabled,
+        fusion_alpha=config.similar_artists_fusion_alpha,
+    )
     _fit_router.configure(neo4j, pool, valkey)
     _search_router.configure(pool, valkey)
     _lookup_router.configure(pool)
