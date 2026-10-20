@@ -74,6 +74,9 @@ class SnapshotStore:
                 ``max_payload_bytes``.
             SnapshotQuotaExceededError: if *user_id* has already reached
                 ``max_per_user`` live snapshots.
+            valkey.exceptions.OutOfMemoryError (and other Valkey errors): if
+                Valkey rejects a write. The quota counter is left exactly as it
+                was and no unaccounted snapshot key survives.
         """
         if len(nodes) > self._max_nodes:
             raise ValueError(f"Too many nodes: {len(nodes)} exceeds maximum of {self._max_nodes}")
@@ -90,36 +93,52 @@ class SnapshotStore:
         if len(payload) > self._max_payload_bytes:
             raise SnapshotTooLargeError(f"Snapshot payload is {len(payload)} bytes, maximum is {self._max_payload_bytes}")
 
-        if user_id:
-            count_key = f"{self._USER_COUNT_KEY_PREFIX}{user_id}"
-            count = await self._valkey.incr(count_key)
-            # Self-healing TTL: `nx=True` means "set the TTL only if the key
-            # doesn't already have one." Normally a no-op after the first
-            # save. Previously this was gated on `count == 1` — a ONE-SHOT
-            # opportunity per key generation — so if that single EXPIRE call
-            # failed or the process died between incr and expire, the counter
-            # was left permanent (no TTL, never re-armed by any later save),
-            # silently converting "live snapshots in a 28-day window" into
-            # "lifetime saves, forever" and eventually locking the user out
-            # permanently (groovemap-7639). `nx=True` makes every save a
-            # chance to arm a missing TTL, not just the first.
-            await self._valkey.expire(count_key, self._ttl_seconds, nx=True)
-            if count > self._max_per_user:
-                await self._valkey.decr(count_key)
-                raise SnapshotQuotaExceededError(f"User already has {count - 1} snapshots, maximum is {self._max_per_user}")
+        snapshot_key = f"{self._KEY_PREFIX}{token}"
+        if not user_id:
+            await self._valkey.set(snapshot_key, payload, ex=self._ttl_seconds)
+            return token, expires_at
 
-            try:
-                await self._valkey.set(f"{self._KEY_PREFIX}{token}", payload, ex=self._ttl_seconds)
-            except Exception:
-                # Compensate: the save didn't happen, so the quota slot it
-                # reserved above must be freed — mirrors the decrement on the
-                # quota-exceeded path. Without this, a transient Valkey/network
-                # failure on this specific call permanently burns the user's
-                # quota with zero live snapshots to show for it.
-                await self._valkey.decr(count_key)
-                raise
-        else:
-            await self._valkey.set(f"{self._KEY_PREFIX}{token}", payload, ex=self._ttl_seconds)
+        count_key = f"{self._USER_COUNT_KEY_PREFIX}{user_id}"
+        # Write-free fast path for a user already at the cap: no slot is
+        # reserved and nothing needs undoing. The INCR below still enforces
+        # the cap under concurrency.
+        current = await self._valkey.get(count_key)
+        if current is not None and int(current) >= self._max_per_user:
+            raise SnapshotQuotaExceededError(f"User already has {int(current)} snapshots, maximum is {self._max_per_user}")
+
+        # Ordering matters under ``noeviction`` (gm-catalog-api-cmb6): SET and
+        # INCR/DECR are all rejected once Valkey is full, but DEL is not.
+        # The quota slot used to be reserved (INCR) before the SET and given
+        # back with a DECR when the SET failed — and at OOM that DECR is
+        # rejected too, leaking the slot until the counter's TTL. Writing the
+        # snapshot FIRST means a rejected SET has reserved nothing, and a
+        # rejected INCR is undone with a DEL, which Valkey always accepts.
+        await self._valkey.set(snapshot_key, payload, ex=self._ttl_seconds)
+        try:
+            count = await self._valkey.incr(count_key)
+        except Exception:
+            await self._valkey.delete(snapshot_key)
+            raise
+
+        # Self-healing TTL: `nx=True` means "set the TTL only if the key
+        # doesn't already have one." Normally a no-op after the first
+        # save. Previously this was gated on `count == 1` — a ONE-SHOT
+        # opportunity per key generation — so if that single EXPIRE call
+        # failed or the process died between incr and expire, the counter
+        # was left permanent (no TTL, never re-armed by any later save),
+        # silently converting "live snapshots in a 28-day window" into
+        # "lifetime saves, forever" and eventually locking the user out
+        # permanently (groovemap-7639). `nx=True` makes every save a
+        # chance to arm a missing TTL, not just the first.
+        await self._valkey.expire(count_key, self._ttl_seconds, nx=True)
+        if count > self._max_per_user:
+            # Lost a concurrent race for the last slot. DEL first (never
+            # rejected for memory) so no unaccounted snapshot survives; the
+            # DECR gives the over-count back and is the only write here that
+            # a full Valkey could still refuse.
+            await self._valkey.delete(snapshot_key)
+            await self._valkey.decr(count_key)
+            raise SnapshotQuotaExceededError(f"User already has {count - 1} snapshots, maximum is {self._max_per_user}")
 
         return token, expires_at
 

@@ -41,11 +41,15 @@ from api.models import (
     TwoFactorSetupResponse,
     TwoFactorVerifyModel,
 )
+from api.valkey_errors import valkey_write_guard
 
 
 logger = structlog.get_logger(__name__)
 
 router = APIRouter()
+
+_LOGIN_UNAVAILABLE_DETAIL = "Sign-in is temporarily unavailable; please try again shortly"
+_LOGOUT_UNAVAILABLE_DETAIL = "Logout could not be completed and your session is still active; please try again shortly"
 
 # Module-level state (set via configure())
 _pool: Any = None
@@ -201,8 +205,11 @@ async def login(request: Request, body: LoginRequest) -> JSONResponse:  # noqa: 
             issued_at=credential_issued_at,
             jti=jti,
         )
-        # Store challenge JTI in Valkey with 5 min TTL
-        await _valkey.setex(f"2fa_challenge:{jti}", 300, str(user["id"]))
+        # Store challenge JTI in Valkey with 5 min TTL. Without it the
+        # challenge can never be verified, so a rejected write is a 503 —
+        # nothing was issued and the user simply signs in again.
+        with valkey_write_guard(operation="login_2fa_challenge", detail=_LOGIN_UNAVAILABLE_DETAIL, user_id=str(user["id"])):
+            await _valkey.setex(f"2fa_challenge:{jti}", 300, str(user["id"]))
         return JSONResponse(
             content={
                 "requires_2fa": True,
@@ -234,7 +241,10 @@ async def logout(
         if jti:
             now = int(datetime.now(UTC).timestamp())
             ttl = max((exp - now), 60) if exp else 3600
-            await _valkey.setex(f"revoked:jti:{jti}", ttl, "1")
+            # Fail loud: if the revocation is not stored the token stays valid,
+            # so the client must not be told it was logged out.
+            with valkey_write_guard(operation="logout", detail=_LOGOUT_UNAVAILABLE_DETAIL, user_id=current_user.get("sub")):
+                await _valkey.setex(f"revoked:jti:{jti}", ttl, "1")
     return JSONResponse(content={"logged_out": True})
 
 
@@ -339,7 +349,6 @@ async def _process_reset_request(user: dict[str, Any] | None) -> None:
 _CREDENTIAL_CHANGE_UNAVAILABLE_DETAIL = (
     "Password could not be changed right now because session revocation is unavailable; nothing was changed, please try again shortly"
 )
-_CREDENTIAL_CHANGE_RETRY_AFTER = "30"
 
 
 async def _write_password_changed_marker(user_id: str) -> None:
@@ -398,22 +407,14 @@ async def _commit_password_change(user_id: str, hashed_password: str, *, operati
                 "UPDATE app_tokens SET revoked_at = NOW() WHERE user_id = %s::uuid AND revoked_at IS NULL",
                 (user_id,),
             )
-            try:
+            with valkey_write_guard(
+                operation=operation,
+                detail=_CREDENTIAL_CHANGE_UNAVAILABLE_DETAIL,
+                alert="password_changed_marker_write_failed",
+                event="❌ Session-revocation marker write rejected; password change rolled back",
+                user_id=user_id,
+            ):
                 await _write_password_changed_marker(user_id)
-            except ValkeyError as exc:
-                logger.error(
-                    "❌ Session-revocation marker write rejected; password change rolled back",
-                    alert="password_changed_marker_write_failed",
-                    operation=operation,
-                    user_id=user_id,
-                    error_type=type(exc).__name__,
-                    error=str(exc),
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail=_CREDENTIAL_CHANGE_UNAVAILABLE_DETAIL,
-                    headers={"Retry-After": _CREDENTIAL_CHANGE_RETRY_AFTER},
-                ) from exc
             # Atomically consume the token to prevent concurrent reuse (TOCTOU).
             if reset_token_key is not None and not await _valkey.getdel(reset_token_key):
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired reset token")

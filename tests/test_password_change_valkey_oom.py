@@ -24,55 +24,17 @@ import fakeredis as fake_store
 import pytest
 from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
-from valkey.exceptions import OutOfMemoryError
 
 import api.routers.auth as auth_router
 from api.auth import REASON_CREDENTIALS_CHANGED, token_revocation_reason
 from tests.conftest import TEST_USER_EMAIL, TEST_USER_ID, make_sample_user_row
+from tests.noeviction_valkey import NoEvictionValkey
 
 
-_OOM_MESSAGE = "command not allowed when used memory > 'maxmemory'."
 _RESET_TOKEN = "reset-token-abc"
 _RESET_KEY = f"reset:{_RESET_TOKEN}"
 _MARKER_KEY = f"password_changed:{TEST_USER_ID}"
 _ALERT_RESET_REQUEST = "password_reset_request_failed"
-
-
-class _NoEvictionValkey:
-    """FakeAsyncValkey proxy emulating a full ``noeviction`` Valkey.
-
-    While ``full`` is set, memory-adding commands raise the server's OOM
-    response error; reads, GETDEL and DEL pass through, exactly as verified
-    against valkey/valkey:9-alpine in the deployment write-site audit.
-    """
-
-    _WRITE_COMMANDS = frozenset({"set", "setex", "incr", "decr"})
-
-    def __init__(self, server: fakeredis.FakeServer, events: list[str]) -> None:
-        self._inner = fake_store.FakeAsyncValkey(server=server, decode_responses=True)
-        self._events = events
-        self.full = False
-        # Optional hook: flip `full` after the Nth successful write.
-        self.fill_after_writes: int | None = None
-        self._writes = 0
-
-    def __getattr__(self, name: str) -> Any:
-        attr = getattr(self._inner, name)
-        if name not in self._WRITE_COMMANDS:
-            return attr
-
-        async def _write(key: str, *args: Any, **kwargs: Any) -> Any:
-            if self.full:
-                self._events.append(f"{name}-rejected:{key}")
-                raise OutOfMemoryError(_OOM_MESSAGE)
-            result = await attr(key, *args, **kwargs)
-            self._events.append(f"{name}:{key}")
-            self._writes += 1
-            if self.fill_after_writes is not None and self._writes >= self.fill_after_writes:
-                self.full = True
-            return result
-
-        return _write
 
 
 @pytest.fixture
@@ -94,9 +56,9 @@ def oom_valkey(
     mock_cur: MagicMock,
     mock_transaction: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
-) -> _NoEvictionValkey:
+) -> NoEvictionValkey:
     """Wire the OOM-capable Valkey into the auth router and record PG events in order."""
-    valkey = _NoEvictionValkey(fake_valkey_server, events)
+    valkey = NoEvictionValkey(fake_valkey_server, events)
     monkeypatch.setattr(auth_router, "_valkey", valkey)
 
     async def _execute(query: str, *_args: Any, **_kwargs: Any) -> None:
@@ -154,7 +116,7 @@ class TestResetConfirmUnderOOM:
     def test_rejected_marker_rolls_back_and_keeps_token_usable(
         self,
         test_client: TestClient,
-        oom_valkey: _NoEvictionValkey,
+        oom_valkey: NoEvictionValkey,
         store: fakeredis.FakeValkey,
         events: list[str],
         fake_valkey_server: fakeredis.FakeServer,
@@ -186,7 +148,7 @@ class TestResetConfirmUnderOOM:
     def test_marker_is_written_before_commit(
         self,
         test_client: TestClient,
-        oom_valkey: _NoEvictionValkey,  # noqa: ARG002
+        oom_valkey: NoEvictionValkey,  # noqa: ARG002
         store: fakeredis.FakeValkey,
         events: list[str],
     ) -> None:
@@ -207,7 +169,7 @@ class TestResetConfirmUnderOOM:
     def test_post_commit_restamp_rejection_keeps_sessions_revoked(
         self,
         test_client: TestClient,
-        oom_valkey: _NoEvictionValkey,
+        oom_valkey: NoEvictionValkey,
         store: fakeredis.FakeValkey,
         events: list[str],
         fake_valkey_server: fakeredis.FakeServer,
@@ -230,7 +192,7 @@ class TestResetConfirmUnderOOM:
     def test_token_consumed_concurrently_rolls_back(
         self,
         test_client: TestClient,
-        oom_valkey: _NoEvictionValkey,
+        oom_valkey: NoEvictionValkey,
         store: fakeredis.FakeValkey,
         events: list[str],
         monkeypatch: pytest.MonkeyPatch,
@@ -248,7 +210,7 @@ class TestResetConfirmUnderOOM:
     def test_rejected_marker_is_logged_at_error_level(
         self,
         test_client: TestClient,
-        oom_valkey: _NoEvictionValkey,
+        oom_valkey: NoEvictionValkey,
         store: fakeredis.FakeValkey,
     ) -> None:
         _seed_reset_token(store)
@@ -269,7 +231,7 @@ class TestChangePasswordUnderOOM:
     def test_rejected_marker_rolls_back(
         self,
         test_client: TestClient,
-        oom_valkey: _NoEvictionValkey,
+        oom_valkey: NoEvictionValkey,
         store: fakeredis.FakeValkey,
         events: list[str],
         mock_cur: MagicMock,
@@ -314,7 +276,7 @@ class TestResetRequestUnderOOM:
     def test_rejected_token_write_is_logged_at_error_level(
         self,
         test_client: TestClient,
-        oom_valkey: _NoEvictionValkey,
+        oom_valkey: NoEvictionValkey,
         store: fakeredis.FakeValkey,
         mock_cur: MagicMock,
     ) -> None:
@@ -340,7 +302,7 @@ class TestResetRequestUnderOOM:
     def test_email_send_failure_is_logged_at_error_level(
         self,
         test_client: TestClient,
-        oom_valkey: _NoEvictionValkey,  # noqa: ARG002
+        oom_valkey: NoEvictionValkey,  # noqa: ARG002
         mock_cur: MagicMock,
     ) -> None:
         mock_cur.fetchone.return_value = make_sample_user_row()
@@ -358,7 +320,7 @@ class TestResetRequestUnderOOM:
     def test_healthy_path_logs_no_alert(
         self,
         test_client: TestClient,
-        oom_valkey: _NoEvictionValkey,  # noqa: ARG002
+        oom_valkey: NoEvictionValkey,  # noqa: ARG002
         store: fakeredis.FakeValkey,
         mock_cur: MagicMock,
     ) -> None:

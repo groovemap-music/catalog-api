@@ -48,6 +48,7 @@ from api.queries.admin_queries import (
 from api.queries.media_coverage_queries import DEFAULT_LIMIT, MAX_LIMIT, get_unmapped_media, known_providers
 from api.queries.metrics_queries import get_health_history, get_queue_history
 from api.reattach import apply_with_audit, run_reattachment
+from api.valkey_errors import valkey_write_guard
 
 
 logger = structlog.get_logger(__name__)
@@ -128,6 +129,9 @@ async def admin_login(request: Request, body: AdminLoginRequest) -> JSONResponse
     )
 
 
+_ADMIN_LOGOUT_UNAVAILABLE_DETAIL = "Logout could not be completed and your admin session is still active; please try again shortly"
+
+
 @router.post("/api/admin/auth/logout")
 async def admin_logout(
     current_admin: Annotated[dict[str, Any], Depends(require_admin)],
@@ -139,7 +143,10 @@ async def admin_logout(
         if jti:
             now = int(datetime.now(UTC).timestamp())
             ttl = max((exp - now), 60) if exp else 3600
-            await _valkey.setex(f"revoked:jti:{jti}", ttl, "1")
+            # Fail loud: an unstored revocation leaves the admin token valid, so
+            # neither the client nor the audit log may record a logout.
+            with valkey_write_guard(operation="admin_logout", detail=_ADMIN_LOGOUT_UNAVAILABLE_DETAIL, admin_id=current_admin.get("sub")):
+                await _valkey.setex(f"revoked:jti:{jti}", ttl, "1")
     admin_email = current_admin.get("email", "unknown")
     if _pool is not None:
         await record_audit_entry(pool=_pool, admin_id=current_admin["sub"], action="admin.logout", target=admin_email)
