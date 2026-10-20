@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 import api.activity as activity
 from api.cache import RecommendCache
+from api.config import DEFAULT_FUSION_ALPHA
 from api.dependencies import get_optional_user, require_user
 from api.identity import NativeIdCache, catalog_ref, native_ids_for, native_ids_for_pairs
 from api.limiter import limiter
@@ -26,7 +27,14 @@ from api.queries.recommend_queries import (
     get_artist_profile,
     get_candidate_artists,
     get_explore_traversal,
+    get_profiled_artists,
     score_discoveries,
+)
+from api.queries.similar_precomputed_queries import (
+    PrecomputedList,
+    fuse,
+    get_current_list,
+    get_embedding_cosines,
 )
 from api.queries.taste_queries import get_blind_spots, get_taste_heatmap
 
@@ -37,12 +45,30 @@ router = APIRouter()
 
 _neo4j_driver: Any = None
 _cache: RecommendCache | None = None
+_pg_pool: Any = None
+_precomputed_enabled: bool = False
+_fusion_alpha: float = DEFAULT_FUSION_ALPHA
 
 
-def configure(neo4j: Any, jwt_secret: str | None, valkey: Any | None) -> None:  # noqa: ARG001
-    """Configure the recommend router with Neo4j driver, JWT secret, and Valkey cache."""
-    global _neo4j_driver, _cache
+def configure(
+    neo4j: Any,
+    jwt_secret: str | None,  # noqa: ARG001
+    valkey: Any | None,
+    *,
+    pg_pool: Any = None,
+    precomputed_enabled: bool = False,
+    fusion_alpha: float = DEFAULT_FUSION_ALPHA,
+) -> None:
+    """Configure the recommend router with Neo4j driver, Valkey cache, and the precomputed-list switch.
+
+    ``precomputed_enabled`` defaults to off: the similar-artist endpoint serves the heuristic
+    until the maintainer flips it. ``fusion_alpha`` weights the embedding cosine.
+    """
+    global _neo4j_driver, _cache, _pg_pool, _precomputed_enabled, _fusion_alpha
     _neo4j_driver = neo4j
+    _pg_pool = pg_pool
+    _precomputed_enabled = precomputed_enabled
+    _fusion_alpha = fusion_alpha
     if valkey is not None:
         _cache = RecommendCache(valkey=valkey, default_ttl=3600)
 
@@ -53,14 +79,75 @@ _SIMILARITY_CACHE_TTL = 86400  # 24 hours
 _EXPLORE_CACHE_TTL = 3600  # 1 hour
 
 
-async def _record_similar_impressions(current_user: dict[str, Any] | None, similar: list[dict[str, Any]]) -> None:
-    """Record the similar-artist list as shown, keyed on its own similarity score."""
+async def _record_similar_impressions(
+    current_user: dict[str, Any] | None,
+    similar: list[dict[str, Any]],
+    precomputed: PrecomputedList | None = None,
+) -> None:
+    """Record the similar-artist list as shown, keyed on its own similarity score and ranking policy."""
     await activity.stamp_recommendation_impressions(
         (current_user or {}).get("sub", ""),
-        activity.POLICY_SIMILAR_ARTIST,
+        activity.POLICY_SIMILAR_ARTIST if precomputed is None else activity.POLICY_SIMILAR_ARTIST_PRECOMPUTED,
         similar,
         score_key="similarity",
     )
+
+
+def _similar_cache_key(artist_id: str, precomputed: PrecomputedList | None) -> str:
+    if precomputed is None:
+        return f"recommend:similar:artist:{artist_id}"
+    return f"recommend:similar:artist:{artist_id}:precomputed:{precomputed.model_version}:{_fusion_alpha}"
+
+
+async def _rank_precomputed(artist_id: str, precomputed: PrecomputedList) -> list[dict[str, Any]] | None:
+    """Rank the artist's precomputed neighbours, fused with the heuristic unless alpha is 1.0.
+
+    Returns ``None`` when the fusion cannot read the stored vectors it needs, so the caller
+    serves the heuristic rather than a ranking built on half the inputs.
+    """
+    neighbours = {i: score for i, score in precomputed.neighbours if i != artist_id}
+    alpha = _fusion_alpha
+
+    if alpha >= 1.0:
+        # The pure precomputed ranking: the batch's own order and cosine, names from the graph.
+        profiled = {row["artist_id"]: row for row in await get_profiled_artists(_neo4j_driver, list(neighbours), with_profiles=False)}
+        return [_ranked_row(profiled[i], score, cos=score, heuristic=None) for i, score in neighbours.items() if i in profiled]
+
+    target_profile, candidates = await asyncio.gather(
+        get_artist_profile(_neo4j_driver, artist_id),
+        get_candidate_artists(_neo4j_driver, artist_id),
+    )
+    heuristic = {row["artist_id"]: row for row in compute_similar_artists(target_profile, candidates, limit=50)}
+
+    # Precomputed neighbours the heuristic did not surface still need a heuristic score (and
+    # a name), so they are profiled and scored the same way rather than counted as zero.
+    extra = await get_profiled_artists(_neo4j_driver, [i for i in neighbours if i not in heuristic])
+    profiled = {row["artist_id"]: row for row in extra}
+    for row in compute_similar_artists(target_profile, extra, limit=len(extra)):
+        heuristic[row["artist_id"]] = row
+
+    heuristic_only = [i for i in heuristic if i not in neighbours]
+    cosines = await get_embedding_cosines(_pg_pool, precomputed.model_version, artist_id, heuristic_only)
+    if cosines is None:
+        return None
+
+    names = {**profiled, **heuristic}
+    fused = fuse(neighbours, heuristic, cosines, alpha=alpha)
+    return [_ranked_row(names[i], score, cos=cos, heuristic=heuristic.get(i)) for i, score, cos, _h in fused if i in names]
+
+
+def _ranked_row(source: dict[str, Any], score: float, *, cos: float, heuristic: dict[str, Any] | None) -> dict[str, Any]:
+    """A ``SimilarArtist``-shaped row; ``breakdown`` keeps the heuristic dimensions and adds ``embedding``."""
+    dims = dict(heuristic["breakdown"]) if heuristic else dict.fromkeys(("genre", "style", "label", "collaborator"), 0.0)
+    return {
+        "artist_id": source["artist_id"],
+        "artist_name": source["artist_name"],
+        "similarity": round(score, 4),
+        "breakdown": {**dims, "embedding": round(cos, 4)},
+        "release_count": source.get("release_count", 0),
+        "shared_genres": heuristic["shared_genres"] if heuristic else [],
+        "shared_labels": heuristic["shared_labels"] if heuristic else [],
+    }
 
 
 @router.get("/api/recommend/similar/artist/{artist_id}")
@@ -79,13 +166,16 @@ async def similar_artists(
     if not _neo4j_driver:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
-    # Check cache
-    cache_key = f"recommend:similar:artist:{artist_id}"
+    # The precomputed list is a primary-key read, so it is looked up before the cache: the
+    # cache key must name the model version and alpha that produced a body, or flipping the
+    # switch (or a monthly release) would keep serving the other path's cached answer.
+    precomputed = await get_current_list(_pg_pool, artist_id) if _precomputed_enabled else None
+    cache_key = _similar_cache_key(artist_id, precomputed)
     if _cache:
         cached = await _cache.get(cache_key)
         if cached is not None:
             cached["similar"] = cached["similar"][:limit]
-            await _record_similar_impressions(current_user, cached["similar"])
+            await _record_similar_impressions(current_user, cached["similar"], precomputed)
             return JSONResponse(content=cached)
 
     identity = await get_artist_identity(_neo4j_driver, artist_id)
@@ -98,12 +188,17 @@ async def similar_artists(
             status_code=422,
         )
 
-    target_profile, candidates = await asyncio.gather(
-        get_artist_profile(_neo4j_driver, artist_id),
-        get_candidate_artists(_neo4j_driver, artist_id),
-    )
-
-    ranked = compute_similar_artists(target_profile, candidates, limit=50)
+    ranked = await _rank_precomputed(artist_id, precomputed) if precomputed else None
+    if ranked is None:
+        # No list to serve (or the fusion could not read the vectors it needs): the
+        # heuristic path, under its own cache key.
+        precomputed = None
+        cache_key = _similar_cache_key(artist_id, None)
+        target_profile, candidates = await asyncio.gather(
+            get_artist_profile(_neo4j_driver, artist_id),
+            get_candidate_artists(_neo4j_driver, artist_id),
+        )
+        ranked = compute_similar_artists(target_profile, candidates, limit=50)
 
     # One alias lookup for the ranked page. The similarity itself is computed on the graph,
     # where identity is only a projection, so the native id comes from the alias table.
@@ -123,7 +218,7 @@ async def similar_artists(
         await _cache.set(cache_key, response_data, ttl=_SIMILARITY_CACHE_TTL)
 
     response_data["similar"] = response_data["similar"][:limit]
-    await _record_similar_impressions(current_user, response_data["similar"])
+    await _record_similar_impressions(current_user, response_data["similar"], precomputed)
     return JSONResponse(content=response_data)
 
 
