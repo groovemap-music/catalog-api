@@ -34,7 +34,7 @@ from psycopg import sql
 from psycopg.rows import dict_row
 
 from api.identity import native_ids_for_pairs
-from api.telemetry import CACHE_SEARCH, cache_get
+from api.telemetry import CACHE_SEARCH, cache_get, record_cache_write_failure
 
 
 logger = structlog.get_logger(__name__)
@@ -654,7 +654,7 @@ async def execute_search(
     if valkey is not None:
         try:
             await valkey.setex(key, _SEARCH_CACHE_TTL, json.dumps(response))
-        except Exception:
-            logger.debug("⚠️ Search cache write failed", key=key)
+        except Exception as exc:
+            record_cache_write_failure(CACHE_SEARCH, exc)
 
     return response

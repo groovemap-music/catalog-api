@@ -39,6 +39,7 @@ from api.syncer import run_full_sync
 
 
 CACHE_METRIC = "groovemap.api.cache"
+CACHE_WRITE_FAILURES = "groovemap.api.cache.write_failures"
 DB_DURATION = "db.client.operation.duration"
 NLQ_METRIC = "groovemap.api.nlq.requests"
 CLIENT_DURATION = "http.client.request.duration"
@@ -177,6 +178,50 @@ class TestCacheInstrument:
 
         assert len(labels) == len(set(labels))
         assert all(label.replace("_", "").isalnum() for label in labels)
+
+
+class TestCacheWriteFailures:
+    """groovemap.api.cache.write_failures — best-effort writes that failed are visible."""
+
+    @staticmethod
+    def _total(collector: Collector, cache: str) -> int:
+        metric = collector.metrics()[CACHE_WRITE_FAILURES]
+        return sum(int(p.value) for p in metric.data.data_points if p.attributes["cache"] == cache)
+
+    @pytest.mark.asyncio
+    async def test_failed_write_counts_with_cache_and_error_type_and_does_not_raise(self, collector: Collector) -> None:
+        valkey = AsyncMock()
+        valkey.set = AsyncMock(side_effect=OSError("OOM command not allowed when used memory > 'maxmemory'"))
+
+        await RecommendCache(valkey=valkey).set("recommend:k", {"a": 1})
+
+        assert collector.attributes(CACHE_WRITE_FAILURES) == [{"cache": "recommend", "error.type": "OSError"}]
+
+    @pytest.mark.asyncio
+    async def test_successful_write_records_nothing(self, collector: Collector) -> None:
+        await RecommendCache(valkey=fake_store.FakeAsyncValkey(decode_responses=True)).set("k", {"a": 1})
+
+        assert collector.attributes(CACHE_WRITE_FAILURES) == []
+
+    def test_warning_is_rate_limited_per_cache_but_every_failure_is_counted(self, collector: Collector, monkeypatch: pytest.MonkeyPatch) -> None:
+        from structlog.testing import capture_logs
+
+        clock = [1000.0]
+        monkeypatch.setattr(telemetry.time, "monotonic", lambda: clock[0])
+        exc = RuntimeError("secret-key-material")
+
+        with capture_logs() as logs:
+            for _ in range(5):
+                telemetry.record_cache_write_failure(telemetry.CACHE_SEARCH, exc)
+            telemetry.record_cache_write_failure(telemetry.CACHE_EXPLORE, exc)
+            clock[0] += telemetry.WRITE_FAILURE_LOG_INTERVAL_SECONDS
+            telemetry.record_cache_write_failure(telemetry.CACHE_SEARCH, exc)
+
+        warnings = [(e["cache"], e["suppressed"]) for e in logs if e["log_level"] == "warning"]
+        assert warnings == [("search", 0), ("explore", 0), ("search", 4)]
+        assert self._total(collector, "search") == 6
+        assert self._total(collector, "explore") == 1
+        assert all("secret-key-material" not in str(e) for e in logs)
 
 
 class TestValkeyOperationDuration:

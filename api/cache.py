@@ -9,7 +9,7 @@ from typing import Any
 
 import structlog
 
-from api.telemetry import CACHE_RECOMMEND, cache_get
+from api.telemetry import CACHE_RECOMMEND, cache_get, record_cache_write_failure
 
 
 logger = structlog.get_logger(__name__)
@@ -37,11 +37,11 @@ class RecommendCache:
             return None
 
     async def set(self, key: str, value: dict[str, Any], ttl: int | None = None) -> None:
-        """Cache a value with TTL. Silently fails if Valkey is down."""
+        """Cache a value with TTL. Best-effort: a failure is counted and warned about, never raised."""
         try:
             await self._valkey.set(key, json.dumps(value, default=str), ex=ttl or self._default_ttl)
-        except Exception:
-            logger.debug("⚠️ Cache set failed", key=key)
+        except Exception as exc:
+            record_cache_write_failure(self._cache, exc)
 
     async def invalidate_user(self, user_id: str) -> None:
         """Delete user-scoped recommendation cache keys via SCAN."""

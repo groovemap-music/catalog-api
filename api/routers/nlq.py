@@ -29,6 +29,7 @@ from api.telemetry import (
     SPAN_NLQ,
     api_span,
     cache_get,
+    record_cache_write_failure,
     record_nlq_request,
 )
 
@@ -121,8 +122,8 @@ async def nlq_suggestions(
     if _valkey is not None:
         try:
             await _valkey.setex(cache_key, _SUGGESTIONS_CACHE_TTL, json.dumps(payload))
-        except Exception:
-            logger.debug("⚠️ NLQ suggestions cache write failed", key=cache_key)
+        except Exception as exc:
+            record_cache_write_failure(CACHE_NLQ_SUGGESTIONS, exc)
 
     return JSONResponse(content=payload)
 
@@ -220,8 +221,8 @@ async def nlq_query(request: Request, body: NLQQueryRequest) -> Any:
             cache_k = _cache_key(body.query, body.context)
             try:
                 await _valkey.setex(cache_k, _nlq_config.cache_ttl, json.dumps(response_data))
-            except Exception:
-                logger.debug("⚠️ NLQ cache write failed", key=cache_k)
+            except Exception as exc:
+                record_cache_write_failure(CACHE_NLQ_QUERY, exc)
 
         return JSONResponse(content=response_data)
 
@@ -340,8 +341,8 @@ def _stream_response(
                     cache_k = _cache_key(query, context)
                     try:
                         await _valkey.setex(cache_k, _nlq_config.cache_ttl, json.dumps(response_data))
-                    except Exception:
-                        logger.debug("⚠️ NLQ cache write failed", key=cache_k)
+                    except Exception as exc:
+                        record_cache_write_failure(CACHE_NLQ_QUERY, exc)
 
                 yield {"event": "result", "data": json.dumps(response_data)}
             finally:

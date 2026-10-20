@@ -33,7 +33,7 @@ from api.queries.label_dna_queries import (
     get_label_identity,
     get_label_media_profile,
 )
-from api.telemetry import CACHE_LABEL_DNA, CACHE_LABEL_SIMILAR, cache_get
+from api.telemetry import CACHE_LABEL_DNA, CACHE_LABEL_SIMILAR, cache_get, record_cache_write_failure
 
 
 logger = structlog.get_logger(__name__)
@@ -166,8 +166,8 @@ async def _build_dna(label_id: str) -> tuple[LabelDNA | None, str]:
     if _valkey:
         try:
             await _valkey.setex(cache_key, _LABEL_DNA_CACHE_TTL, json.dumps(dna.model_dump(), default=str))
-        except Exception:
-            logger.debug("⚠️ Label DNA _build_dna cache set failed", key=cache_key)
+        except Exception as exc:
+            record_cache_write_failure(CACHE_LABEL_DNA, exc)
 
     return dna, "ok"
 
@@ -248,8 +248,8 @@ async def similar_labels(
     if _valkey:
         try:
             await _valkey.setex(cache_key, _LABEL_DNA_CACHE_TTL, json.dumps(response_data, default=str))
-        except Exception:
-            logger.debug("⚠️ Label similar cache set failed", key=cache_key)
+        except Exception as exc:
+            record_cache_write_failure(CACHE_LABEL_SIMILAR, exc)
 
     return JSONResponse(content=response_data)
 

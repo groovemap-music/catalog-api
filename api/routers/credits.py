@@ -36,7 +36,7 @@ from api.queries.credits_queries import (
     get_role_leaderboard,
     get_shared_credits,
 )
-from api.telemetry import CACHE_CREDITS_LEADERBOARD, CACHE_CREDITS_PERSON, cache_get
+from api.telemetry import CACHE_CREDITS_LEADERBOARD, CACHE_CREDITS_PERSON, cache_get, record_cache_write_failure
 
 
 logger = structlog.get_logger(__name__)
@@ -148,8 +148,8 @@ async def person_credits(
     if _valkey:
         try:
             await _valkey.setex(cache_key, _CREDITS_CACHE_TTL, json.dumps(response_data, default=str))
-        except Exception:
-            logger.debug("⚠️ Credits person cache set failed", key=cache_key)
+        except Exception as exc:
+            record_cache_write_failure(CACHE_CREDITS_PERSON, exc)
 
     return JSONResponse(content=response_data)
 
@@ -216,8 +216,8 @@ async def role_leaderboard(
     if _valkey:
         try:
             await _valkey.setex(cache_key, _CREDITS_CACHE_TTL, json.dumps(response_data, default=str))
-        except Exception:
-            logger.debug("⚠️ Credits leaderboard cache set failed", key=cache_key)
+        except Exception as exc:
+            record_cache_write_failure(CACHE_CREDITS_LEADERBOARD, exc)
 
     return JSONResponse(content=response_data)
 

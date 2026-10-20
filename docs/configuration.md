@@ -177,7 +177,14 @@ ever carries an identifier, a cache key, or free text.
 | `db.client.operation.duration` | `db.system.name` (`postgresql`, `neo4j`, or `valkey`), `db.operation.name`, `error.type` on failure |
 | `groovemap.api.sync.duration` | `outcome` (`completed`, `failed`, `cancelled`) |
 | `groovemap.api.cache` | `outcome` (`hit`, `miss`), `cache` (the logical Valkey cache) |
+| `groovemap.api.cache.write_failures` | `cache` (the logical Valkey cache), `error.type` (the exception class) |
 | `groovemap.api.nlq.requests` | `outcome` (`success`, `cached`, `error`, `invalid`, `unavailable`) |
+
+Cache writes are best-effort: a failed write never fails the request. Each one increments
+`groovemap.api.cache.write_failures` and logs a `Cache write failed` warning, at most once a
+minute per logical cache, carrying a `suppressed` count of the failures folded into the quiet
+period. A full or unreachable Valkey is therefore visible directly rather than only through
+the `ValkeyMemoryHigh` alert and a falling hit ratio.
 
 PostgreSQL and Neo4j report `db.client.operation.duration` through the `groovemap-runtime`
 resilient wrappers. Valkey is reached without one, so its client is wrapped at startup and

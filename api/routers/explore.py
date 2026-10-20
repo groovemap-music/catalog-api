@@ -35,7 +35,7 @@ from api.queries.neo4j_queries import (
     MAX_PATH_DEPTH as _MAX_PATH_DEPTH,
 )
 from api.queries.release_media_queries import get_release_catalog_blocks, get_release_media
-from api.telemetry import CACHE_EXPLORE, CACHE_TRENDS, cache_get
+from api.telemetry import CACHE_EXPLORE, CACHE_TRENDS, cache_get, record_cache_write_failure
 
 
 logger = structlog.get_logger(__name__)
@@ -168,8 +168,8 @@ async def explore(
         cache_key = f"explore:{entity_type}:{name}"
         try:
             await _valkey.setex(cache_key, _EXPLORE_CACHE_TTL, json.dumps(response))
-        except Exception:
-            logger.debug("⚠️ Explore cache set failed", key=cache_key)
+        except Exception as exc:
+            record_cache_write_failure(CACHE_EXPLORE, exc)
 
     return JSONResponse(content=response)
 
@@ -391,8 +391,8 @@ async def get_trends(
         cache_key = f"trends:{entity_type}:{name}"
         try:
             await _valkey.setex(cache_key, _TRENDS_CACHE_TTL, json.dumps(response))
-        except Exception:
-            logger.debug("⚠️ Trends cache set failed", key=cache_key)
+        except Exception as exc:
+            record_cache_write_failure(CACHE_TRENDS, exc)
 
     return JSONResponse(content=response)
 
