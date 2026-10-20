@@ -54,6 +54,12 @@ failure, collection-upsert preservation, query-helper result handling, invalid C
 real server-side query timeout. Pull-request CI supplies this command as the repository's
 separate integration lane; `just check` remains network-free.
 
+`just integration-valkey` is a separate opt-in check. It starts the production-pinned Valkey
+with a tiny `maxmemory` under `noeviction`, plus PostgreSQL, both as throwaway loopback
+containers. It fills Valkey and then exercises every write-rejection path against them: the
+503 mapping, the password-change rollback, the snapshot quota and the sync lock. It skips
+cleanly without Docker. See [docs/valkey-noeviction-verification.md](docs/valkey-noeviction-verification.md).
+
 Pull requests, pushes to `main`, the weekly schedule, and Dependabot pull requests all use
 the same required validation graph from the public `groovemap-music/automation` repository.
 The public Python-library source is pinned at an immutable revision and requires no GitHub App

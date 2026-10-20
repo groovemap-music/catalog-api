@@ -31,6 +31,11 @@ flowchart TD
   against them. Run it locally before submitting a change to the collection sync or to the
   native identity read paths; it is the only gate that proves those statements against the
   real tables rather than a mock.
+- `just integration-valkey` is opt-in and also outside `just check` and shared CI. It needs
+  Docker, fills a throwaway production-pinned Valkey under `noeviction` and checks the
+  write-rejection paths against it and a throwaway PostgreSQL. Run it before changing
+  `api/valkey_errors.py`, `tests/noeviction_valkey.py`, or a Valkey write site. See
+  [valkey-noeviction-verification.md](valkey-noeviction-verification.md).
 - `just secret-scan` is the narrow gitleaks capability used by both local and shared CI gates.
 - `just check` runs formatting, linting, type checks, the complete test suite, secret scans,
   wheel construction, installed-wheel smoke tests, dependency-license policy, and version checks.

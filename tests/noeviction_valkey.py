@@ -3,7 +3,10 @@
 Production Valkey runs ``maxmemory-policy noeviction``: once full, memory-adding
 commands (SET/SETEX/SET NX/INCR/DECR) fail with ``OOM command not allowed``
 while reads, GETDEL, DEL and EXPIRE keep working — verified against
-valkey/valkey:9-alpine in the deployment write-site audit (gm-deployment-u4e.4).
+valkey/valkey:9-alpine in the deployment write-site audit (gm-deployment-u4e.4),
+and the exact class, args and message re-verified against the production-pinned
+valkey/valkey:9.1.2-alpine by ``just integration-valkey`` (gm-catalog-api-u5i2,
+docs/valkey-noeviction-verification.md).
 Shared by the per-path OOM tests (gm-catalog-api-yf7b, gm-catalog-api-cmb6).
 """
 

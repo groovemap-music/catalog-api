@@ -173,6 +173,7 @@ markers = [
     "benchmark: performance regression benchmarks",
     "e2e: end-to-end tests requiring external services",
     "integration: tests requiring a live backing service",
+    "valkey_noeviction: opt-in write-rejection tests against throwaway real Valkey + PostgreSQL containers (just integration-valkey)",
 ]
 
 [tool.coverage.run]
