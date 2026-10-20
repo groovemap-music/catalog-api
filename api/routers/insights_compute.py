@@ -29,7 +29,7 @@ from api.queries.insights_neo4j_queries import (
 from api.queries.insights_pg_queries import query_data_completeness
 from api.queries.rarity_queries import fetch_all_rarity_signals
 from api.syncer import DISCOGS_API_BASE, MAX_RATE_LIMIT_RETRIES, SYNC_DELAY_SECONDS, _auth_header
-from api.telemetry import CACHE_INSIGHTS_COMPLETENESS, cache_get
+from api.telemetry import CACHE_INSIGHTS_COMPLETENESS, cache_get, record_cache_write_failure
 
 
 logger = structlog.get_logger(__name__)
@@ -181,8 +181,8 @@ async def data_completeness(request: Request) -> JSONResponse:  # noqa: ARG001
     if _valkey:
         try:
             await _valkey.setex(cache_key, _COMPLETENESS_CACHE_TTL, json.dumps(response))
-        except Exception:
-            logger.debug("⚠️ Data completeness cache set failed")
+        except Exception as exc:
+            record_cache_write_failure(CACHE_INSIGHTS_COMPLETENESS, exc)
 
     return JSONResponse(content=response)
 

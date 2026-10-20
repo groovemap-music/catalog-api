@@ -74,4 +74,7 @@ class ResendNotificationChannel:
                 response.raise_for_status()
             logger.info("📧 Password reset email sent")
         except Exception:
-            logger.exception("❌ Failed to send password reset email")
+            # Swallowed on purpose (runs in reset-request's background task, after the
+            # user was told a link was sent); the stable alert key is the same one
+            # auth._process_reset_request uses for its own failures.
+            logger.exception("❌ Failed to send password reset email", alert="password_reset_request_failed", stage="send_reset_email")

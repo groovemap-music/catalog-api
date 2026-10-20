@@ -66,6 +66,11 @@ CACHE_RECOMMEND = "recommend"
 CACHE_SEARCH = "search"
 CACHE_TRENDS = "trends"
 
+# A failing cache write is logged at warning level at most once per logical cache per this
+# many seconds, so a full Valkey rejecting every write cannot flood the logs. The counter
+# still records every failure; the log line carries how many it stood in for.
+WRITE_FAILURE_LOG_INTERVAL_SECONDS = 60.0
+
 # Why an activity write did not happen. ADR 0010 keeps observability thin: the event
 # tables are the analytical record and the metrics only say whether the writer is working,
 # so these are the whole closed vocabulary of the `outcome` attribute on the failure
@@ -105,6 +110,7 @@ class _Instruments:
     activity_events: Any
     activity_failures: Any
     cache: Any
+    cache_write_failures: Any
     db_operation_duration: Any
     nlq_requests: Any
     sync_duration: Any
@@ -113,6 +119,11 @@ class _Instruments:
 # Built on first use, after `setup_telemetry` has installed the real provider. Tests reset
 # this to rebuild against an in-memory reader.
 _instruments: _Instruments | None = None
+
+
+# Per logical cache: when its last cache-write warning was logged (monotonic seconds) and
+# how many failures have been counted since without a log line of their own.
+_write_failure_log: dict[str, tuple[float, int]] = {}
 
 
 def _build_instruments() -> _Instruments:
@@ -133,6 +144,11 @@ def _build_instruments() -> _Instruments:
             "groovemap.api.cache",
             unit="{event}",
             description="Valkey cache-aside lookups by logical cache and outcome",
+        ),
+        cache_write_failures=meter.create_counter(
+            "groovemap.api.cache.write_failures",
+            unit="{event}",
+            description="Valkey cache writes that failed, by logical cache and error type",
         ),
         db_operation_duration=meter.create_histogram(
             "db.client.operation.duration",
@@ -169,6 +185,7 @@ def reset_instruments() -> None:
     global _instruments
 
     _instruments = None
+    _write_failure_log.clear()
 
 
 # The domain span the current task is inside. Holding it here, rather than reading whatever
@@ -239,6 +256,27 @@ def record_activity_failure(outcome: str) -> None:
 def record_cache(cache: str, *, hit: bool) -> None:
     """Count one cache-aside lookup against a named Valkey cache."""
     instruments().cache.add(1, {"outcome": CACHE_HIT if hit else CACHE_MISS, "cache": cache})
+
+
+def record_cache_write_failure(cache: str, exc: BaseException) -> None:
+    """Make one failed best-effort cache write visible without failing the request.
+
+    Always counts the failure under ``cache`` and the exception class, then logs a warning
+    for it unless this cache already logged one within
+    :data:`WRITE_FAILURE_LOG_INTERVAL_SECONDS`; the next warning reports how many failures
+    were folded into the quiet period. ``exc`` contributes only its class name, never its
+    message, which can carry a key or a connection string.
+    """
+    error_type = type(exc).__name__
+    instruments().cache_write_failures.add(1, {"cache": cache, "error.type": error_type})
+
+    now = time.monotonic()
+    last, suppressed = _write_failure_log.get(cache, (None, 0))
+    if last is not None and now - last < WRITE_FAILURE_LOG_INTERVAL_SECONDS:
+        _write_failure_log[cache] = (last, suppressed + 1)
+        return
+    _write_failure_log[cache] = (now, 0)
+    logger.warning("⚠️ Cache write failed", cache=cache, error_type=error_type, suppressed=suppressed)
 
 
 def record_nlq_request(outcome: str) -> None:

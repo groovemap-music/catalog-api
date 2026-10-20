@@ -11,6 +11,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from psycopg.rows import dict_row
+from valkey.exceptions import ValkeyError
 
 from api.auth import (
     _DUMMY_HASH,
@@ -40,11 +41,15 @@ from api.models import (
     TwoFactorSetupResponse,
     TwoFactorVerifyModel,
 )
+from api.valkey_errors import valkey_write_guard
 
 
 logger = structlog.get_logger(__name__)
 
 router = APIRouter()
+
+_LOGIN_UNAVAILABLE_DETAIL = "Sign-in is temporarily unavailable; please try again shortly"
+_LOGOUT_UNAVAILABLE_DETAIL = "Logout could not be completed and your session is still active; please try again shortly"
 
 # Module-level state (set via configure())
 _pool: Any = None
@@ -200,8 +205,11 @@ async def login(request: Request, body: LoginRequest) -> JSONResponse:  # noqa: 
             issued_at=credential_issued_at,
             jti=jti,
         )
-        # Store challenge JTI in Valkey with 5 min TTL
-        await _valkey.setex(f"2fa_challenge:{jti}", 300, str(user["id"]))
+        # Store challenge JTI in Valkey with 5 min TTL. Without it the
+        # challenge can never be verified, so a rejected write is a 503 —
+        # nothing was issued and the user simply signs in again.
+        with valkey_write_guard(operation="login_2fa_challenge", detail=_LOGIN_UNAVAILABLE_DETAIL, user_id=str(user["id"])):
+            await _valkey.setex(f"2fa_challenge:{jti}", 300, str(user["id"]))
         return JSONResponse(
             content={
                 "requires_2fa": True,
@@ -233,7 +241,10 @@ async def logout(
         if jti:
             now = int(datetime.now(UTC).timestamp())
             ttl = max((exp - now), 60) if exp else 3600
-            await _valkey.setex(f"revoked:jti:{jti}", ttl, "1")
+            # Fail loud: if the revocation is not stored the token stays valid,
+            # so the client must not be told it was logged out.
+            with valkey_write_guard(operation="logout", detail=_LOGOUT_UNAVAILABLE_DETAIL, user_id=current_user.get("sub")):
+                await _valkey.setex(f"revoked:jti:{jti}", ttl, "1")
     return JSONResponse(content={"logged_out": True})
 
 
@@ -285,6 +296,9 @@ async def get_me(
 # ---------------------------------------------------------------------------
 
 
+_RESET_TOKEN_TTL_SECONDS = 900  # 15 min
+
+
 async def _process_reset_request(user: dict[str, Any] | None) -> None:
     """Mint the reset token, write it to Valkey, and send the email — OFF the request path.
 
@@ -295,20 +309,126 @@ async def _process_reset_request(user: dict[str, Any] | None) -> None:
     account existence — the Valkey `setex` and the outbound Resend HTTP call
     (the actual timing oracle) both happen after the client already has the
     response (groovemap-0lof).
+
+    Because the client has already been told "a reset link has been sent",
+    nothing raised here can reach the user. A failure (e.g. Valkey rejecting
+    the token write with OOM under ``noeviction``) would otherwise surface only
+    as Starlette's generic background-task traceback, so every failure is
+    logged here at error level under one stable event name
+    (``password_reset_request_failed``) with the failing stage, so it can be
+    alerted on (gm-catalog-api-yf7b).
     """
     if not user or _valkey is None or _config is None:
         return
-    token = secrets.token_urlsafe(32)
-    await _valkey.setex(
-        f"reset:{token}",
-        900,  # 15 min TTL
-        json.dumps({"user_id": str(user["id"]), "email": user["email"]}),
-    )
-    # Must be absolute: this link is emailed, and a mail client has no base
-    # URL to resolve a relative href against.
-    reset_url = f"{_config.app_base_url}/?reset_token={token}"
-    if _notification_channel:
-        await _notification_channel.send_password_reset(user["email"], reset_url)
+    user_id = str(user["id"])
+    stage = "store_reset_token"
+    try:
+        token = secrets.token_urlsafe(32)
+        await _valkey.setex(
+            f"reset:{token}",
+            _RESET_TOKEN_TTL_SECONDS,
+            json.dumps({"user_id": user_id, "email": user["email"]}),
+        )
+        # Must be absolute: this link is emailed, and a mail client has no base
+        # URL to resolve a relative href against.
+        reset_url = f"{_config.app_base_url}/?reset_token={token}"
+        if _notification_channel:
+            stage = "send_reset_email"
+            await _notification_channel.send_password_reset(user["email"], reset_url)
+    except Exception as exc:
+        logger.error(
+            "❌ Password reset request failed; user was told a link was sent but none will arrive",
+            alert="password_reset_request_failed",
+            stage=stage,
+            user_id=user_id,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+
+
+_CREDENTIAL_CHANGE_UNAVAILABLE_DETAIL = (
+    "Password could not be changed right now because session revocation is unavailable; nothing was changed, please try again shortly"
+)
+
+
+async def _write_password_changed_marker(user_id: str) -> None:
+    """Stamp ``password_changed:{user_id}`` with the current second.
+
+    Every JWT with ``iat <= marker`` is rejected by ``token_revocation_reason``.
+    """
+    if _valkey is None or _config is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
+    now_ts = int(datetime.now(UTC).timestamp())
+    await _valkey.setex(f"password_changed:{user_id}", _config.jwt_expire_minutes * 60, str(now_ts))
+
+
+async def _commit_password_change(user_id: str, hashed_password: str, *, operation: str, reset_token_key: str | None = None) -> None:
+    """Change the password, revoke app tokens and invalidate sessions — all or nothing.
+
+    The ``password_changed`` marker used to be written AFTER the Postgres
+    change committed, so a rejected Valkey write (OOM under ``noeviction``)
+    left the password changed, the reset token burned and every previously
+    issued session still valid (gm-catalog-api-yf7b). Ordering is now:
+
+    1. inside ONE Postgres transaction: update the password + revoke app tokens
+       (row lock held, nothing visible yet);
+    2. write the marker — if Valkey rejects it, raise 503 so the transaction
+       rolls back: the password is unchanged and (for a reset) the token was
+       never consumed, so the user can simply retry;
+    3. for a reset, atomically consume the token with GETDEL (never rejected
+       for memory) — losing a concurrent race rolls back with 400;
+    4. commit;
+    5. best-effort re-stamp the marker with a post-commit timestamp. Step 2's
+       marker already invalidates every pre-existing session; the re-stamp only
+       closes the commit-latency window in which a login could read the OLD
+       hash with an ``iat`` one second past the first stamp. Its failure is
+       logged, not raised — the change is committed and sessions are revoked.
+
+    If the commit itself fails after step 2, sessions are invalidated without a
+    password change — the fail-safe direction (users sign in again).
+    """
+    if _pool is None or _valkey is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
+    async with _pool.connection() as conn:
+        await conn.set_autocommit(False)
+        async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            await execute_sql(
+                cur,
+                "UPDATE users SET hashed_password = %s, password_changed_at = NOW(), updated_at = NOW() WHERE id = %s::uuid",
+                (hashed_password, user_id),
+            )
+            # Bulk-revoke third-party app tokens too. password_changed:{user_id} only
+            # gates JWT validation and TTLs out after jwt_expire_minutes, so it can
+            # never durably revoke app tokens (which carry no expiry by design) —
+            # revoking the rows themselves is the only correct fix
+            # (groovemap-ci4a).
+            await execute_sql(
+                cur,
+                "UPDATE app_tokens SET revoked_at = NOW() WHERE user_id = %s::uuid AND revoked_at IS NULL",
+                (user_id,),
+            )
+            with valkey_write_guard(
+                operation=operation,
+                detail=_CREDENTIAL_CHANGE_UNAVAILABLE_DETAIL,
+                alert="password_changed_marker_write_failed",
+                event="❌ Session-revocation marker write rejected; password change rolled back",
+                user_id=user_id,
+            ):
+                await _write_password_changed_marker(user_id)
+            # Atomically consume the token to prevent concurrent reuse (TOCTOU).
+            if reset_token_key is not None and not await _valkey.getdel(reset_token_key):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired reset token")
+
+    try:
+        await _write_password_changed_marker(user_id)
+    except ValkeyError as exc:
+        logger.warning(
+            "⚠️ Post-commit password_changed re-stamp failed; pre-commit marker still revokes prior sessions",
+            operation=operation,
+            user_id=user_id,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
 
 
 @router.post("/api/auth/reset-request")
@@ -335,35 +455,19 @@ async def reset_confirm(request: Request, body: ResetConfirmModel) -> JSONRespon
     if _pool is None or _valkey is None or _config is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
 
-    # Atomically consume the token to prevent concurrent reuse (TOCTOU)
-    raw = await _valkey.getdel(f"reset:{body.token}")
+    # Read (do NOT consume) the token: it is consumed with GETDEL only once the
+    # session-revocation marker is safely written, so a rejected marker write
+    # leaves the token usable for a retry (see _commit_password_change).
+    token_key = f"reset:{body.token}"
+    raw = await _valkey.get(token_key)
     if not raw:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired reset token")
 
     token_data = json.loads(raw)
     user_id = token_data["user_id"]
     hashed_password = _hash_password(body.new_password)
-    now_ts = int(datetime.now(UTC).timestamp())
 
-    async with _pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        await execute_sql(
-            cur,
-            "UPDATE users SET hashed_password = %s, password_changed_at = NOW(), updated_at = NOW() WHERE id = %s::uuid",
-            (hashed_password, user_id),
-        )
-        # Bulk-revoke third-party app tokens too. password_changed:{user_id} only
-        # gates JWT validation and TTLs out after jwt_expire_minutes, so it can
-        # never durably revoke app tokens (which carry no expiry by design) —
-        # revoking the rows themselves is the only correct fix
-        # (groovemap-ci4a).
-        await execute_sql(
-            cur,
-            "UPDATE app_tokens SET revoked_at = NOW() WHERE user_id = %s::uuid AND revoked_at IS NULL",
-            (user_id,),
-        )
-
-    # Invalidate all existing sessions
-    await _valkey.setex(f"password_changed:{user_id}", _config.jwt_expire_minutes * 60, str(now_ts))
+    await _commit_password_change(user_id, hashed_password, operation="reset_confirm", reset_token_key=token_key)
 
     logger.info("✅ Password reset completed", user_id=user_id)
     return JSONResponse(content={"message": "Password has been reset"})
@@ -397,25 +501,9 @@ async def change_password(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect current password")
 
     hashed_password = _hash_password(body.new_password)
-    now_ts = int(datetime.now(UTC).timestamp())
 
-    async with _pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        await execute_sql(
-            cur,
-            "UPDATE users SET hashed_password = %s, password_changed_at = NOW(), updated_at = NOW() WHERE id = %s::uuid",
-            (hashed_password, user_id),
-        )
-        # Bulk-revoke third-party app tokens too (same pattern as reset-confirm;
-        # see groovemap-ci4a for why the Valkey password_changed marker
-        # alone cannot cover app tokens).
-        await execute_sql(
-            cur,
-            "UPDATE app_tokens SET revoked_at = NOW() WHERE user_id = %s::uuid AND revoked_at IS NULL",
-            (user_id,),
-        )
-
-    # Invalidate all existing sessions (same pattern as reset-confirm)
-    await _valkey.setex(f"password_changed:{user_id}", _config.jwt_expire_minutes * 60, str(now_ts))
+    # Same all-or-nothing ordering as reset-confirm (see _commit_password_change).
+    await _commit_password_change(str(user_id), hashed_password, operation="change_password")
 
     logger.info("✅ Password changed", user_id=user_id)
     return JSONResponse(content={"message": "Password has been changed"})
