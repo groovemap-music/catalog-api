@@ -14,7 +14,7 @@ from neo4j.exceptions import ClientError as Neo4jClientError
 
 from api.limiter import limiter
 from api.queries import network_queries
-from api.telemetry import CACHE_NETWORK_CENTRALITY, CACHE_NETWORK_CLUSTER, cache_get
+from api.telemetry import CACHE_NETWORK_CENTRALITY, CACHE_NETWORK_CLUSTER, cache_get, record_cache_write_failure
 
 
 logger = structlog.get_logger(__name__)
@@ -138,8 +138,8 @@ async def artist_centrality(
     if _valkey:
         try:
             await _valkey.setex(cache_key, _NETWORK_CACHE_TTL, json.dumps(response))
-        except Exception:
-            logger.debug("⚠️ Network centrality cache set failed", key=cache_key)
+        except Exception as exc:
+            record_cache_write_failure(CACHE_NETWORK_CENTRALITY, exc)
 
     return JSONResponse(content=response)
 
@@ -195,7 +195,7 @@ async def artist_cluster(
     if _valkey:
         try:
             await _valkey.setex(cache_key, _NETWORK_CACHE_TTL, json.dumps(response))
-        except Exception:
-            logger.debug("⚠️ Network cluster cache set failed", key=cache_key)
+        except Exception as exc:
+            record_cache_write_failure(CACHE_NETWORK_CLUSTER, exc)
 
     return JSONResponse(content=response)
