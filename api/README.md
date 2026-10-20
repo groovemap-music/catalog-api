@@ -655,7 +655,8 @@ every served item on a ranked recommendation surface carries an `impression_id`,
 the response body is filled so a cached response never reuses an id across viewers; it is
 `null` when the candidate had no native id or the write failed. Report an outcome against it
 with `POST /api/activity/events` (see [Activity, Consent, Erasure, and Export](#activity-consent-erasure-and-export)).
-Each surface writes under its own policy id: `similar_artist_weighted_cosine_v1`,
+Each surface writes under its own policy id: `similar_artist_weighted_cosine_v1`
+(`similar_artist_precomputed_fused_v1` when served from precomputed lists),
 `explore_personalized_v1`, `user_recommendations_artist_v1` (`strategy=artist`, the default),
 and `user_recommendations_multi_v1` (`strategy=multi`).
 

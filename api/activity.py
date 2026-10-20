@@ -80,6 +80,7 @@ __all__ = [
     "POLICY_CRATEFIT",
     "POLICY_EXPLORE",
     "POLICY_SIMILAR_ARTIST",
+    "POLICY_SIMILAR_ARTIST_PRECOMPUTED",
     "POLICY_USER_RECOMMENDATIONS_ARTIST",
     "POLICY_USER_RECOMMENDATIONS_MULTI",
     "PRODUCER",
@@ -125,6 +126,7 @@ SURFACE_FIT: Final = "fit"
 # ranks is a new constant, never a redefinition of an old one: the policy id on a stored
 # impression is historical data the immutability trigger will not let anyone rewrite.
 POLICY_SIMILAR_ARTIST: Final = "similar_artist_weighted_cosine_v1"
+POLICY_SIMILAR_ARTIST_PRECOMPUTED: Final = "similar_artist_precomputed_fused_v1"
 POLICY_EXPLORE: Final = "explore_personalized_v1"
 POLICY_USER_RECOMMENDATIONS_ARTIST: Final = "user_recommendations_artist_v1"
 POLICY_USER_RECOMMENDATIONS_MULTI: Final = "user_recommendations_multi_v1"

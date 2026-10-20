@@ -28,6 +28,7 @@ flowchart TD
 - [Coverage policy](coverage-policy.md)
 - [Query performance optimizations](query-performance-optimizations.md)
 - [Offline evaluation harness](evaluation.md)
+- [Precomputed similar artists](similar-artists-precomputed.md)
 - [Transactional email decision](transactional-email-provider-decision.md)
 - [Architecture decisions](architecture-decisions.md)
 - [Release compliance](release-compliance.md)

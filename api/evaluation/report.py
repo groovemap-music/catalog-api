@@ -21,9 +21,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
 
+from api.config import DEFAULT_FUSION_ALPHA
 from api.evaluation.baseline import BaselineRun, run_baseline
 from api.evaluation.fixtures import EXPECTED_METRICS_FILE, GOLDEN_DIR, GoldenSet, load_golden_set
 from api.evaluation.metrics import rank_stability, rarity_metrics, recommendation_metrics, similar_artist_metrics
+from api.evaluation.precomputed import run_precomputed
 from api.evaluation.split import SPLIT_CUT, observed_graph, split_golden_set
 
 
@@ -40,6 +42,10 @@ METRICS_TOLERANCE: Final[float] = 1e-9
 #: The gm-catalog-api-tsmu.1 baseline's own committed snapshot, kept separate from
 #: ``EXPECTED_METRICS_PATH`` so registering it never touches ``heuristics-2026-09``'s bytes.
 SIMILAR_ARTIST_EXPECTED_METRICS_PATH: Final[Path] = GOLDEN_DIR / "expected-similar-artist-metrics.json"
+
+#: The precomputed-list candidate's snapshot (gm-catalog-api-2zsq.1), again separate so
+#: neither earlier snapshot's bytes move.
+PRECOMPUTED_EXPECTED_METRICS_PATH: Final[Path] = GOLDEN_DIR / "expected-precomputed-similar-artist-metrics.json"
 
 
 def evaluate(golden: GoldenSet | None = None) -> tuple[dict[str, Any], BaselineRun]:
@@ -184,6 +190,65 @@ def write_similar_artist_expected_metrics(report: dict[str, Any], path: Path = S
     """Overwrite the committed similar-artist-candidates snapshot from ``report``."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(serialize(similar_artist_metrics_snapshot(report)), encoding="utf-8")
+    return path
+
+
+# ── gm-catalog-api-2zsq.1: the precomputed-list candidate ───────────────
+#
+# Scores the precomputed-list path (pure, and fused at the endpoint's default alpha) against the
+# latest heuristic baseline -- the all-signals scope -- and the frozen one, on the identical split.
+# The embeddings and lists are synthetic (see ``api.evaluation.precomputed``).
+
+
+def evaluate_precomputed_similar_artists(golden: GoldenSet | None = None, *, alpha: float = DEFAULT_FUSION_ALPHA) -> dict[str, Any]:
+    """Score the precomputed-list similar-artist path against the heuristic baselines, same split."""
+    fixture = golden if golden is not None else load_golden_set()
+    splits = split_golden_set(fixture, SPLIT_CUT)
+    graph = observed_graph(fixture, SPLIT_CUT)
+    legacy_run = run_baseline(graph)
+    baseline_run = run_baseline(graph, similar_artist_candidates="all_signals")
+    pure_run = run_precomputed(graph, baseline_run, alpha=1.0)
+    fused_run = run_precomputed(graph, baseline_run, alpha=alpha)
+
+    return {
+        "baseline_version": baseline_run.version,
+        "candidate_versions": [pure_run.version, fused_run.version],
+        "fusion_alpha": alpha,
+        "synthetic_embeddings": True,
+        "golden_set": {"generator_version": fixture.generator_version, "seed": fixture.seed},
+        "split": {"cut": SPLIT_CUT.isoformat()},
+        "metrics": {
+            "similar_artist_precomputed": similar_artist_metrics(pure_run, splits, fixture),
+            "similar_artist_precomputed_fused": similar_artist_metrics(fused_run, splits, fixture),
+            "similar_artist_baseline": similar_artist_metrics(baseline_run, splits, fixture),
+            "similar_artist_legacy": similar_artist_metrics(legacy_run, splits, fixture),
+        },
+    }
+
+
+def precomputed_metrics_snapshot(report: dict[str, Any]) -> dict[str, Any]:
+    """Return the time-invariant slice of an ``evaluate_precomputed_similar_artists`` report."""
+    return {
+        "baseline_version": report["baseline_version"],
+        "candidate_versions": report["candidate_versions"],
+        "fusion_alpha": report["fusion_alpha"],
+        "synthetic_embeddings": report["synthetic_embeddings"],
+        "golden_set_generator_version": report["golden_set"]["generator_version"],
+        "split_cut": report["split"]["cut"],
+        "metrics": report["metrics"],
+    }
+
+
+def load_precomputed_expected_metrics(path: Path = PRECOMPUTED_EXPECTED_METRICS_PATH) -> dict[str, Any]:
+    """Load the committed precomputed-list snapshot."""
+    loaded: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    return loaded
+
+
+def write_precomputed_expected_metrics(report: dict[str, Any], path: Path = PRECOMPUTED_EXPECTED_METRICS_PATH) -> Path:
+    """Overwrite the committed precomputed-list snapshot from ``report``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(serialize(precomputed_metrics_snapshot(report)), encoding="utf-8")
     return path
 
 

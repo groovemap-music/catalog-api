@@ -92,6 +92,8 @@ origin in production so password-reset links do not point at localhost.
 | `METRICS_COLLECTION_INTERVAL` | `300` | Metrics collection interval in seconds |
 | `IDENTITY_AUTO_REATTACH_ENABLED` | `false` | Run the catalog re-attachment then the `gm_id` projection after each completed Discogs extraction (see `api/README.md`) |
 | `IDENTITY_AUTO_REATTACH_INTERVAL` | `300` | How often that watcher polls `loader_extraction_latch`, in seconds |
+| `SIMILAR_ARTISTS_PRECOMPUTED_ENABLED` | `false` | Serve `/api/recommend/similar/artist/{id}` from the current release of the precomputed `artist_similar_artists` lists; the heuristic path serves whenever this is off or no list is usable (see `docs/similar-artists-precomputed.md`) |
+| `SIMILAR_ARTISTS_FUSION_ALPHA` | `0.8` | Weight on the embedding cosine in `alpha * cosine + (1 - alpha) * heuristic`; `1.0` ranks by the precomputed list alone. Must be within 0 and 1 |
 
 The internal Analytics secret and RabbitMQ credentials support their corresponding `_FILE`
 forms. [`discogs-ingestion`](https://github.com/groovemap-music/discogs-ingestion) and

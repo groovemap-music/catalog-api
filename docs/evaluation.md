@@ -219,6 +219,10 @@ candidates diluted the top-10 with weak matches. With the floor restored, recall
 from 0.44507 (legacy) to 0.53614 (new), and every reported media family improves at k=10 and
 k=25, on this synthetic fixture.
 
+The precomputed-list path (gm-catalog-api-2zsq.1) is registered the same way, as a candidate
+scored against `similar-artist-all-signals-2026-09`; see
+[Precomputed similar artists](similar-artists-precomputed.md). Its embeddings are synthetic.
+
 Round 3 tried an overall cap on how many ranked candidates are profiled and scored, to bring
 endpoint latency back within budget; round 4 found that reading did not hold up under more
 rigorous measurement, and round 5 (the maintainer's decision) kept the all-signal query out of
