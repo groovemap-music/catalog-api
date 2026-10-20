@@ -38,6 +38,10 @@ test:
 test-integration:
     bash scripts/test-integration.sh
 
+# Opt-in: write-rejection paths against throwaway real Valkey (noeviction) + PostgreSQL containers.
+integration-valkey *args:
+    bash scripts/test-integration-valkey.sh {{ args }}
+
 coverage: test
 
 # Run the offline evaluation harness against the committed golden set.
