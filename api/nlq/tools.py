@@ -624,7 +624,7 @@ class NLQToolRunner:
 
         return await agent_tools.search(
             pool=self._pool,
-            redis=self._valkey,  # Pinned shared agent-tools public keyword; store/client are Valkey.
+            valkey=self._valkey,
             q=params.get("q", ""),
             types=params.get("types", ["artist", "label", "master", "release"]),
             genres=params.get("genres", []),

@@ -54,22 +54,6 @@ The API uses valkey-py with its libvalkey parser and constructs a `valkey://` UR
 database 0 from these component settings. Passwords are percent-quoted and never
 printed in the startup log; that log reports the host only.
 
-During the transition, unset host and port settings fall back to their deprecated
-`REDIS_HOST` and `REDIS_PORT` counterparts. Either Valkey password setting selects
-the Valkey namespace, including an explicitly empty value; otherwise the deprecated
-`REDIS_PASSWORD` / `REDIS_PASSWORD_FILE` namespace is used. Within the selected
-namespace, a nonempty password-file path wins over the plain password. An empty
-file disables authentication, and an unreadable file raises an error without
-fallback. Each selected legacy variable logs a warning once per process, naming
-only the variable. These aliases remain temporary and require separate cleanup
-after all consumers and the live service have migrated.
-
-The admin storage response now exposes statistics under `valkey` and duplicates
-that object under the legacy `redis` key for one release so an older operations
-console remains compatible. The internal shared agent-tools search adapter still
-uses its pinned public `redis=` keyword with a Valkey client. Release publication
-and live cutover remain separately verified operations.
-
 Use `neo4j+s://...` in `NEO4J_HOST` for a managed Neo4j endpoint that already expresses its
 TLS policy. Deployment-specific certificate and network guidance belongs in `deployment`.
 

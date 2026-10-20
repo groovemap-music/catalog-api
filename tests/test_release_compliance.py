@@ -11,7 +11,7 @@ from api.config import DEFAULT_DISCOGS_USER_AGENT, ApiConfig
 
 ROOT = Path(__file__).parent.parent
 AUTOMATION_REVISION = "833cb464507678c38ab78bd4718ce697399463e9"
-PYTHON_LIBRARIES_REVISION = "6c3802035e9c973c6598dadbd3e4377daee613d4"
+PYTHON_LIBRARIES_REVISION = "771515349b592ff569b1b3e5712f7bef936bab58"
 
 
 def _workflow(name: str) -> dict[str, object]:

@@ -9,7 +9,7 @@ with min/avg/max/p95 statistics per endpoint.
 
 ## What It Tests
 
-The runner covers the following public read paths that exercise Neo4j, PostgreSQL, Redis, or the
+The runner covers the following public read paths that exercise Neo4j, PostgreSQL, Valkey, or the
 analytics proxy. `performance/run_perftest.py` is the executable source of truth; this is not an
 exhaustive inventory of every Catalog API route.
 
@@ -26,7 +26,7 @@ exhaustive inventory of every Catalog API route.
 | `GET /api/insights/label-longevity`                 | Neo4j (via insights proxy)      |
 | `GET /api/insights/this-month`                      | Neo4j (via insights proxy)      |
 | `GET /api/insights/data-completeness`               | PostgreSQL (via insights proxy) |
-| `GET /api/insights/status`                          | Redis (via insights proxy)      |
+| `GET /api/insights/status`                          | Valkey (via insights proxy)     |
 | `GET /api/enrichment/status`                        | Neo4j + PostgreSQL              |
 
 ### Parameterized Endpoints (driven by config)
