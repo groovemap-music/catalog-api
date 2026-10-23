@@ -4,14 +4,15 @@ import asyncio
 import json
 import time
 from collections import OrderedDict
-from typing import Any
+from typing import Annotated, Any
 
 import structlog
 from common.media import legacy_format_names_to_media
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from neo4j.exceptions import ClientError as Neo4jClientError
 
+from api.dependencies import get_optional_user
 from api.limiter import limiter
 from api.models import PathNode, PathResponse
 from api.queries import collaborator_queries, genre_tree_queries
@@ -35,6 +36,8 @@ from api.queries.neo4j_queries import (
     MAX_PATH_DEPTH as _MAX_PATH_DEPTH,
 )
 from api.queries.release_media_queries import get_release_catalog_blocks, get_release_media
+from api.queries.strata_queries import get_shared_personnel, get_strata_catalog, get_strata_labels, get_strata_marks, get_strata_root
+from api.strata import DEFAULT_BUDGET, Budget, BudgetError, FocusNotFoundError, Mark, apply_labels, build_strata, label_targets
 from api.telemetry import CACHE_EXPLORE, CACHE_TRENDS, cache_get, record_cache_write_failure
 
 
@@ -224,6 +227,68 @@ async def genre_emergence(
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     result = await get_genre_emergence(_neo4j_driver, before_year)
     return JSONResponse(content=result)
+
+
+async def _anonymous_marks() -> dict[str, Mark] | None:
+    return None
+
+
+# Shared-personnel edges returned per drawn master, at most: the renderer draws only
+# neighbours within one credit and lists the rest in its panel, so the strongest few suffice.
+_STRATA_EDGES_PER_MASTER = 4
+
+
+@router.get("/api/explore/strata")
+@limiter.limit("60/minute")
+async def strata(
+    request: Request,  # noqa: ARG001 — required by slowapi rate limiter
+    current_user: Annotated[dict[str, Any] | None, Depends(get_optional_user)],
+    artist_id: str = Query(..., min_length=1, max_length=64),
+    budget: str = Query(f"{DEFAULT_BUDGET.credits}/{DEFAULT_BUDGET.masters}/{DEFAULT_BUDGET.releases}", max_length=16),
+    focus: str | None = Query(None, min_length=1, max_length=256),
+    page: int = Query(0, ge=0, le=1_000_000),
+) -> JSONResponse:
+    """One artist's discography as credit, master, and release planes inside a node budget.
+
+    The rule lives in :mod:`api.strata`. A signed-in caller also gets their collector state
+    from the ``COLLECTED`` and ``WANTS`` edges the Discogs sync writes; an anonymous caller
+    gets none.
+    """
+    if not _neo4j_driver:
+        return JSONResponse(content={"error": "Service not ready"}, status_code=503)
+    try:
+        plane_budget = Budget.parse(budget)
+    except BudgetError as exc:
+        return JSONResponse(content={"error": str(exc)}, status_code=400)
+    user_id = (current_user or {}).get("sub") or None
+
+    try:
+        root = await get_strata_root(_neo4j_driver, artist_id)
+        if root is None:
+            return JSONResponse(content={"error": f"Artist '{artist_id}' not found"}, status_code=404)
+        # The catalog side depends on the root alone; the caller's marks start from their own
+        # edges. Neither waits on the other.
+        catalog, marks = await asyncio.gather(
+            get_strata_catalog(_neo4j_driver, _pg_pool, artist_id, root["name"]),
+            get_strata_marks(_neo4j_driver, user_id, artist_id) if user_id else _anonymous_marks(),
+        )
+        try:
+            payload = build_strata(catalog, plane_budget, focus=focus, page=page, marks=marks)
+        except FocusNotFoundError as exc:
+            return JSONResponse(content={"error": str(exc)}, status_code=404)
+        release_ids, master_ids, artist_ids = label_targets(payload)
+        (release_titles, master_titles, artist_names), edges = await asyncio.gather(
+            get_strata_labels(_neo4j_driver, release_ids, master_ids, artist_ids),
+            get_shared_personnel(_neo4j_driver, master_ids, limit=_STRATA_EDGES_PER_MASTER * len(master_ids)),
+        )
+    except Neo4jClientError as exc:
+        if "TransactionTimedOut" in str(exc):
+            logger.warning("⏱️ Strata query timed out", artist_id=artist_id)
+            return JSONResponse(content={"error": "Strata query timed out — try again later"}, status_code=504)
+        raise
+
+    apply_labels(payload, release_titles=release_titles, master_titles=master_titles, artist_names=artist_names, edges=edges)
+    return JSONResponse(content=payload)
 
 
 @router.get("/api/collaborators/{artist_id}")
