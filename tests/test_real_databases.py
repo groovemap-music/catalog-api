@@ -14,11 +14,16 @@ import pytest_asyncio
 import respx
 from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver, parse_postgres_host_port
 from groovemap_schema.postgres import create_postgres_schema
+from neo4j.exceptions import ClientError as Neo4jClientError
 from neo4j.exceptions import Neo4jError
+from psycopg.errors import QueryCanceled
 from psycopg.rows import dict_row
 
+from api.queries import strata_queries
 from api.queries.credits_queries import get_person_connections
 from api.queries.helpers import run_count, run_query, run_single
+from api.queries.strata_queries import get_shared_personnel, get_strata_catalog, get_strata_labels, get_strata_marks, get_strata_root
+from api.strata import MAX_ROOT_RELEASES, Budget, apply_labels, build_strata, label_targets
 from api.syncer import DISCOGS_API_BASE, sync_collection, sync_wantlist
 
 
@@ -78,7 +83,7 @@ async def postgres_pool() -> AsyncIterator[AsyncPostgreSQLPool]:
 
     The schema comes from ``groovemap_schema.postgres.create_postgres_schema``, pinned as
     a dev dependency on database-schema revision
-    ``ee6f101cdaa7c50ca20b7af824ea0e9a32da7dbf`` — the same producer revision
+    ``f21b3e1482a0f74f79d7802c7fcd7b22e074b7cd`` — the same producer revision
     ``contracts/persistence/v1/source.json`` records this repository as tested against.
     Applying the producer's own DDL is what keeps the fixture from drifting behind the
     tables the syncer, identity, and projection paths read; a hand-rolled subset is what
@@ -359,3 +364,239 @@ async def test_date_added_survives_a_sync_that_omits_it_and_still_updates(
 
     await sync_both(later)
     assert await read_stores() == expected(later)
+
+
+# A small discography written the way the enrichers write it. Master 501 has no year, and
+# no `(:Master {id: '0'})` exists: masterless releases simply have no DERIVED_FROM edge, as
+# discogs-graph-enricher writes them since the sentinel fix.
+_STRATA_GRAPH = """
+CREATE (root:Artist {id: '1', name: 'Strata Root'}),
+       (guest:Artist {id: '2', name: 'Strata Guest'}),
+       (m500:Master {id: '500', title: 'Master A', year: 1971}),
+       (m501:Master {id: '501', title: 'Master B', year: 0}),
+       (r10:Release {id: '10', title: 'A, first press', year: 1971}),
+       (r11:Release {id: '11', title: 'A, undated press', year: 0}),
+       (r12:Release {id: '12', title: 'B, joint', year: 1980}),
+       (r13:Release {id: '13', title: 'No master, dated', year: 1985}),
+       (r14:Release {id: '14', title: 'No master, undated', year: 0}),
+       (r10)-[:BY]->(root), (r11)-[:BY]->(root), (r13)-[:BY]->(root), (r14)-[:BY]->(root),
+       (r12)-[:BY]->(root), (r12)-[:BY]->(guest),
+       (r10)-[:DERIVED_FROM]->(m500), (r11)-[:DERIVED_FROM]->(m500), (r12)-[:DERIVED_FROM]->(m501),
+       (p:Person {name: 'Shared Producer'}),
+       (p)-[:CREDITED_ON {role: 'Producer [Assistant]', category: 'Production'}]->(r10),
+       (p)-[:CREDITED_ON {role: 'Producer', category: 'Production'}]->(r12),
+       (u:User {id: $user_id}),
+       (u)-[:COLLECTED {instance_id: 1, date_added: '2019-05-01T12:00:00-07:00'}]->(r10),
+       (u)-[:COLLECTED {instance_id: 2, date_added: '2021-01-01T00:00:00-08:00'}]->(r10),
+       (u)-[:WANTS {date_added: '2018-02-03T04:05:06-08:00'}]->(r10),
+       (u)-[:WANTS {date_added: '2020-06-07T08:09:10-07:00'}]->(r14)
+"""
+
+
+async def test_strata_read_on_a_seeded_graph(
+    postgres_pool: AsyncPostgreSQLPool,
+    neo4j_driver: AsyncResilientNeo4jDriver,
+) -> None:
+    """The strata reads compile on the real engines and fold the seeded ladder correctly.
+
+    Covers a masterless credit lane, an undated release and master, the master-year
+    fallback, a MusicBrainz-only release joined by native id and one joined by release-group
+    siblings, shared personnel keyed on category across differing raw roles, and the
+    caller's collector state with the recorded time.
+    """
+    user_id = str(TEST_USER_ID)
+    await _consume(neo4j_driver, _STRATA_GRAPH, user_id=user_id)
+    async with postgres_pool.connection() as conn, conn.cursor() as cursor:
+        await cursor.execute("TRUNCATE musicbrainz.releases, musicbrainz.release_groups")
+        await cursor.execute(
+            """
+            INSERT INTO musicbrainz.release_groups (mbid, name, discogs_master_id) VALUES
+                ('00000000-0000-0000-0000-00000000a500', 'Group A', 500),
+                ('00000000-0000-0000-0000-00000000b501', 'Group B', NULL),
+                ('00000000-0000-0000-0000-00000000c999', 'Elsewhere', 999)
+            """
+        )
+        await cursor.execute(
+            """
+            INSERT INTO musicbrainz.releases (mbid, name, release_group_mbid, discogs_release_id, data) VALUES
+                ('00000000-0000-0000-0000-0000000000a1', 'A, MusicBrainz reissue',
+                 '00000000-0000-0000-0000-00000000a500', NULL,
+                 '{"release_events": [{"date": "2003-04"}, {"date": "1999-01-01"}]}'),
+                ('00000000-0000-0000-0000-0000000000b1', 'B, linked sibling',
+                 '00000000-0000-0000-0000-00000000b501', 12, '{}'),
+                ('00000000-0000-0000-0000-0000000000b2', 'B, MusicBrainz only',
+                 '00000000-0000-0000-0000-00000000b501', NULL, '{"release_events": []}'),
+                ('00000000-0000-0000-0000-0000000000c1', 'Not this artist',
+                 '00000000-0000-0000-0000-00000000c999', NULL, '{}')
+            """
+        )
+
+    root = await get_strata_root(neo4j_driver, "1")
+    assert root == {"id": "1", "name": "Strata Root", "releases": 5}
+    assert await get_strata_root(neo4j_driver, "404") is None
+    catalog = await get_strata_catalog(neo4j_driver, postgres_pool, "1", root["name"])
+    marks = await get_strata_marks(neo4j_driver, user_id, "1")
+
+    assert {(r.provider, r.id, r.master_id, r.year) for r in catalog.releases} == {
+        ("discogs", "10", "500", 1971),
+        ("discogs", "11", "500", None),
+        ("discogs", "12", "501", 1980),
+        ("discogs", "13", None, 1985),
+        ("discogs", "14", None, None),
+        ("musicbrainz", "00000000-0000-0000-0000-0000000000a1", "500", 1999),
+        ("musicbrainz", "00000000-0000-0000-0000-0000000000b2", "501", None),
+    }
+    assert dict(catalog.master_years) == {"500": 1971, "501": None}
+    assert marks["10"].state == "wanted_owned"
+    assert (marks["10"].owned_at, marks["10"].wanted_at) == ("2019-05-01T12:00:00-07:00", "2018-02-03T04:05:06-08:00")
+    assert marks["14"].state == "wanted"
+
+    payload = build_strata(catalog, Budget(3, 12, 16), marks=marks)
+    release_ids, master_ids, artist_ids = label_targets(payload)
+    release_titles, master_titles, artist_names = await get_strata_labels(neo4j_driver, release_ids, master_ids, artist_ids)
+    edges = await get_shared_personnel(neo4j_driver, master_ids, limit=8)
+    assert edges == [{"source": "500", "target": "501", "categories": ["Production"], "people": 1}]
+    apply_labels(payload, release_titles=release_titles, master_titles=master_titles, artist_names=artist_names, edges=edges)
+
+    credits, masters, releases = payload["planes"]
+    assert [(node["id"], [a["name"] for a in node["artists"]]) for node in credits["nodes"]] == [
+        ("c:1", ["Strata Root"]),
+        ("c:1+2", ["Strata Root", "Strata Guest"]),
+    ]
+    assert {node["id"]: (node["parent"], node["title"], node["year"], node["undated"]) for node in masters["nodes"]} == {
+        "m:500": ("c:1", "Master A", 1971, False),
+        "m:501": ("c:1+2", "Master B", 1980, False),
+    }
+    lane = masters["aggregates"]
+    assert [(agg["id"], agg["kind"], agg["releases"], agg["undated_releases"]) for agg in lane] == [("nm:c:1", "no_master", 2, 1)]
+    assert masters["edges"] == [{"source": "m:500", "target": "m:501", "kind": "shared_personnel", "categories": ["Production"], "people": 1}]
+
+    nodes = {node["id"]: node for node in releases["nodes"]}
+    assert releases["aggregates"] == []
+    assert (nodes["r:10"]["title"], nodes["r:10"]["state"]) == ("A, first press", "wanted_owned")
+    assert nodes["r:10"]["recorded_at"] == {"owned": "2019-05-01T12:00:00-07:00", "wanted": "2018-02-03T04:05:06-08:00"}
+    assert (nodes["r:11"]["year"], nodes["r:11"]["year_source"]) == (1971, "master")
+    assert (nodes["r:14"]["parent"], nodes["r:14"]["undated"], nodes["r:14"]["state"]) == ("nm:c:1", True, "wanted")
+    assert nodes["r:13"]["parent"] == "nm:c:1"
+    reissue = nodes["mb:00000000-0000-0000-0000-0000000000a1"]
+    assert (reissue["parent"], reissue["title"], reissue["year"], reissue["state"]) == ("m:500", "A, MusicBrainz reissue", 1999, None)
+    sibling_joined = nodes["mb:00000000-0000-0000-0000-0000000000b2"]
+    # No release event and a master with no year: the MusicBrainz release lands in the undated lane.
+    assert (sibling_joined["parent"], sibling_joined["year"], sibling_joined["undated"], sibling_joined["state"]) == ("m:501", None, True, None)
+    assert payload["totals"] == {
+        "credits": 2,
+        "masters": 2,
+        "releases": 7,
+        "masterless_releases": 2,
+        "undated_releases": 2,
+        "musicbrainz_releases": 2,
+    }
+
+    anonymous = build_strata(catalog, Budget(3, 12, 16))
+    assert anonymous["signed_in"] is False
+    assert "state" not in anonymous["planes"][2]["nodes"][0]
+
+
+async def _root_db_hits(driver: AsyncResilientNeo4jDriver, artist_id: str) -> tuple[int, set[str]]:
+    """Total db hits and operator names of the strata root read, from a real PROFILE."""
+    async with driver.session(database="neo4j") as session:
+        result = await session.run(f"PROFILE {strata_queries._ROOT}", {"artist_id": artist_id})
+        summary = await result.consume()
+    assert summary.profile is not None
+    hits, operators, stack = 0, set(), [summary.profile]
+    while stack:
+        plan = stack.pop()
+        hits += plan.get("dbHits", 0)
+        operators.add(plan["operatorType"].split("@")[0])
+        stack.extend(plan.get("children", []))
+    return hits, operators
+
+
+async def test_a_root_above_the_strata_ceiling_is_sized_without_reading_its_releases(
+    neo4j_driver: AsyncResilientNeo4jDriver,
+) -> None:
+    """The size check the route refuses on costs the same for one release as for 134,052.
+
+    A root one past MAX_ROOT_RELEASES is seeded for real. Its BY degree comes back exact,
+    and the root read's db hits match a five-release root's, so the check reads the node's
+    degree count and never walks the root's releases.
+    """
+    above = MAX_ROOT_RELEASES + 1
+    await _consume(neo4j_driver, "CREATE (:Artist {id: 'big', name: 'Placeholder'}), (:Artist {id: 'small', name: 'Small'})")
+    await _consume(
+        neo4j_driver,
+        """
+        UNWIND range(1, $count) AS i
+        CALL (i) {
+            MATCH (a:Artist {id: 'big'})
+            CREATE (:Release {id: 'big-' + toString(i)})-[:BY]->(a)
+        } IN TRANSACTIONS OF 20000 ROWS
+        """,
+        count=above,
+    )
+    await _consume(
+        neo4j_driver,
+        "MATCH (a:Artist {id: 'small'}) UNWIND range(1, 5) AS i CREATE (:Release {id: 'small-' + toString(i)})-[:BY]->(a)",
+    )
+
+    try:
+        started = perf_counter()
+        root = await get_strata_root(neo4j_driver, "big")
+        elapsed = perf_counter() - started
+
+        assert root == {"id": "big", "name": "Placeholder", "releases": above}
+        assert root["releases"] > MAX_ROOT_RELEASES
+        assert elapsed < 1.0
+        big_hits, operators = await _root_db_hits(neo4j_driver, "big")
+        small_hits, _ = await _root_db_hits(neo4j_driver, "small")
+        assert big_hits == small_hits
+        assert not {"Expand(All)", "Expand(Into)", "OptionalExpand(All)"} & operators
+    finally:
+        # The neo4j_driver fixture clears the graph in one transaction, which a 134,052-node
+        # root would push past the integration container's 256 MB heap.
+        await _consume(
+            neo4j_driver,
+            "MATCH (:Artist {id: 'big'})<-[:BY]-(r:Release) CALL (r) { DETACH DELETE r } IN TRANSACTIONS OF 20000 ROWS",
+        )
+
+
+async def test_strata_read_bounds_surface_as_the_errors_the_route_maps_to_504(
+    postgres_pool: AsyncPostgreSQLPool,
+    neo4j_driver: AsyncResilientNeo4jDriver,
+) -> None:
+    """A graph read past its timeout and a PostgreSQL read past its statement bound both fail fast.
+
+    The route turns a Neo4j ClientError naming TransactionTimedOut, and a QueryCanceled,
+    into a 504. The statement bound is transaction-local, so it never leaks onto the
+    pooled connection.
+    """
+    started = perf_counter()
+    with pytest.raises(Neo4jClientError, match="TransactionTimedOut"):
+        await run_query(neo4j_driver, "UNWIND range(1, $upper) AS value RETURN sum(toFloat(value)) AS total", timeout=0.05, upper=100_000_000)
+    assert perf_counter() - started < 2.0
+
+    async with postgres_pool.connection() as conn:
+        default = await (await conn.execute("SHOW statement_timeout")).fetchone()
+        started = perf_counter()
+        with pytest.raises(QueryCanceled):
+            async with conn.transaction(), conn.cursor() as cursor:
+                await cursor.execute(strata_queries._STATEMENT_TIMEOUT, {"timeout": "50ms"})
+                await cursor.execute("SELECT pg_sleep(5)")
+        assert perf_counter() - started < 2.0
+        assert await (await conn.execute("SHOW statement_timeout")).fetchone() == default
+
+
+async def test_the_pinned_schema_indexes_the_strata_release_group_join(postgres_pool: AsyncPostgreSQLPool) -> None:
+    """database-schema f21b3e1 indexes musicbrainz.releases (release_group_mbid), and the sibling read uses it."""
+    async with postgres_pool.connection() as conn, conn.cursor() as cursor:
+        await cursor.execute("SELECT indexdef FROM pg_indexes WHERE schemaname = 'musicbrainz' AND indexname = 'idx_mb_releases_release_group_mbid'")
+        assert await cursor.fetchone() == (
+            "CREATE INDEX idx_mb_releases_release_group_mbid ON musicbrainz.releases USING btree (release_group_mbid)",
+        )
+        async with conn.transaction():
+            # The fixture's tables are nearly empty, so a sequential scan would win on cost;
+            # disabling it shows the index is one the sibling read can use at all.
+            await cursor.execute("SET LOCAL enable_seqscan = off")
+            await cursor.execute(f"EXPLAIN {strata_queries._MB_SIBLINGS}", {"group_mbids": ["00000000-0000-0000-0000-00000000b501"]})
+            plan = "\n".join(row[0] for row in await cursor.fetchall())
+    assert "idx_mb_releases_release_group_mbid" in plan

@@ -552,6 +552,25 @@ curl "http://localhost:8004/api/expand?node_id=Miles%20Davis&type=artist&categor
 curl "http://localhost:8004/api/node/1?type=artist"
 ```
 
+### Discography Strata
+
+```bash
+# Credit, master, and release planes for one artist at the default 3/12/16 budget
+curl "http://localhost:8004/api/explore/strata?artist_id=1"
+
+# A wider credit plane
+curl "http://localhost:8004/api/explore/strata?artist_id=1&budget=6/12/16"
+
+# Page into an aggregate: pass its id as focus, then step the page
+curl "http://localhost:8004/api/explore/strata?artist_id=1&focus=ra:m:500&page=1"
+
+# With your collector state and recorded times
+curl -H "Authorization: Bearer $TOKEN" "http://localhost:8004/api/explore/strata?artist_id=1"
+
+# A root above 134,051 releases is refused with a 422 that carries its size
+curl "http://localhost:8004/api/explore/strata?artist_id=$LARGE_ROOT_ID"
+```
+
 ### Trend Analysis
 
 ```bash

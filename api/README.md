@@ -398,6 +398,136 @@ unrecoverable release with no formats data gets an empty-but-valid block. The de
 `formats` list (see [Deprecations](#deprecations)) is still returned alongside it. Non-release
 node responses (`artist`, `genre`, `label`, `style`) are unaffected and carry no `media` key.
 
+### Discography Strata
+
+One artist's discography as three planes: artist credits, masters, and releases, folded
+into a per-plane node budget for graph-explorer's strata view (concept A). The rule is in
+[`api/strata.py`](strata.py) and follows design spikes gm-design-1h2l (Recommendation 2)
+and gm-design-on0x (Recommendation 7).
+
+| Method | Path                  | Auth Required | Rate Limit | Description                                       |
+| ------ | --------------------- | ------------- | ---------- | ------------------------------------------------- |
+| GET    | `/api/explore/strata` | Optional      | 60/min     | Credit, master, and release planes for one artist |
+
+**Query parameters:**
+
+- `artist_id` (required): the root artist's id, as `/api/node/{node_id}` takes it.
+- `budget` (default `3/12/16`): the most entries per plane, nodes plus aggregates, as
+  `credits/masters/releases`. It needs at least 3 credits, at least twice as many masters
+  as credits, and more releases than credits; the ceilings are 48/500/500. Anything else
+  is a 400.
+- `focus`: an aggregate's `id` (or a master node's `id`) from an earlier response. The
+  response then draws one page of that aggregate's members.
+- `page` (default 0): which page of `focus`. Pages wrap.
+
+**Response:** `root`, `budget`, `focus` (`null`, or `{id, plane, page, pages, page_size,
+members}`), `signed_in`, `totals` (`credits`, `masters`, `releases`,
+`masterless_releases`, `undated_releases`, `musicbrainz_releases`), and `planes`: three
+objects with `level`, `kind` (`credit`, `master`, `release`), `nodes`, and `aggregates`.
+The master plane also carries `edges`.
+
+- **Credits** are the distinct release-level `BY` sets that hold the root, keyed
+  `c:<artist ids joined by +>`. The root's own credit comes first. Credits past the budget
+  fold whole into `c:other`, which counts their masters and releases; nothing of a folded
+  credit is drawn on the planes below.
+- **Masters** (`m:<id>`) hang under the credit of their earliest dated release. Past the
+  budget they fold into `ma:<credit>:<decade>` buckets, then `ma:<credit>:all`. Masters
+  holding the caller's collector state fold last.
+- **Releases** (`r:<id>`, or `mb:<mbid>` for MusicBrainz-only) hang under their master or
+  under their credit's no-master lane. Past the budget each master keeps its earliest
+  release and its stateful releases and folds the rest into `ra:m:<id>`.
+- **Two lanes are part of the contract.** Releases with no master form one aggregate per
+  drawn credit, `nm:<credit>` (`kind: "no_master"`), which never folds into a master
+  bucket; its releases fold into `ra:nm:<credit>:<decade>` or `ra:nm:<credit>`. A release
+  with no year of its own takes its master's year (`year_source: "master"`); one with
+  neither is undated: `year: null`, `undated: true`, and counted in every aggregate's
+  `undated_releases`. Undated decade buckets are named `undated`.
+- **Every entry is conserved.** Each credit, master, and release is drawn or held by
+  exactly one aggregate, and every entry names a drawn `parent` on the plane above.
+- **Focus cursors.** Every aggregate `id` names a fixed member set. A focused response
+  draws 8 members per page (fewer only when the budget cannot hold 8), keeps the rest in
+  one aggregate under the same `id`, and folds the other planes further to make room.
+  Paging a focus visits each member once. An unknown cursor is a 404.
+- **Edges** link two drawn masters when one person holds the same `CREDITED_ON.category`
+  on releases of both (`kind: "shared_personnel"`, with `categories` and `people`). They
+  never key on raw role strings.
+- **MusicBrainz-only releases** come from PostgreSQL and join a master through the release
+  group's `discogs_master_id` first, then through linked sibling releases that derive from
+  exactly one master. They carry `provider: "musicbrainz"` and never carry collector state.
+  Without PostgreSQL the planes hold Discogs releases only.
+
+**Collector state** appears only for a signed-in caller (a first-party bearer token). It
+comes from the caller's `COLLECTED` and `WANTS` edges, the ones `/api/user/collection` and
+`/api/user/wantlist` read. A release carries `state` (`none`, `wanted`, `owned`, or
+`wanted_owned`; Discogs keeps a want after a purchase) and `recorded_at` (`{owned,
+wanted}`, the collector's own Discogs `date_added`, the earliest copy's for `owned`).
+Masters and credits carry a rolled-up `state` (owned, else wanted, else none), and
+aggregates carry `states` counts. Every transition is observed from a Discogs sync; this
+route changes nothing. An anonymous caller, or an invalid token, gets none of these fields.
+
+**Caching.** The catalog side of a read (the root's ladder and its MusicBrainz-only
+releases) depends on the root alone, so it is cached the way `/api/explore` caches: in
+Valkey under `explore:strata:<artist_id>`, for the same 24 hours, because the catalog
+changes only on import. Nothing else invalidates it. One entry serves every caller and
+every `budget`, `focus`, and `page`, since the fold runs on each request. The caller's
+`COLLECTED` and `WANTS` edges are read on every request and never cached, so the shared
+entry holds no caller id, state, or recorded time. A hit skips the root, ladder, and
+PostgreSQL reads; drawn labels and shared-personnel edges are still read, bounded by the
+budget. When Valkey is down or not configured, or an entry was written in an older cached
+form, the read goes to the graph and the response is the same. A failed cache write is
+counted under the `strata` cache and does not fail the request.
+
+**Large roots.** A root with more than **134,051** releases (its `BY` degree) is refused
+with a 422 before its ladder is read:
+
+```json
+{"error": "Artist '<artist_id>' has 1356055 releases; strata draws at most 134051", "releases": 1356055, "max_releases": 134051}
+```
+
+The size check reads the root's degree count, so it costs the same for 5 releases as for
+1,356,055 (`tests/test_real_databases.py` seeds a root one past the ceiling and compares
+PROFILE db hits). Why a refusal and why 134,051, from design spike gm-design-1h2l section
+5 (measured server-side on the predecessor graph) and ADR 0016 section 3:
+
+- Under 10,000 releases (2,882,089 of 2,882,133 artists) a strata read costs at most 50 ms
+  warm at p95. From 10,000 releases it costs 541 ms warm at p95 and up to 2,455 ms on a
+  first run, so the spike calls it GO with a cache, which this route now has. The largest
+  ten roots read their ladder in 779.5 ms warm at p95.
+- 134,051 releases is the largest root that was ever measured. Above it the verdict is
+  DEFER: nothing was measured and nothing is extrapolated. ADR 0016 leaves the choice to
+  this route: a precomputed per-artist summary, or refusing or capping those roots.
+- The ceiling refuses one sampled root: GrooveMap's rank 1, a placeholder credit for
+  compilations at 1,356,055 releases and 174,943 masters, ten times the largest measured
+  root. Rank 2, a placeholder at 87,683, and every other sampled root (the largest at
+  58,801) are served and cached.
+- A refusal, not a cap. A capped ladder would break the rule that every credit, master,
+  and release of the root is drawn or held by an aggregate, and its totals would be
+  wrong without saying so. A refusal says what it did and why.
+- Not a summary, yet. A per-artist master summary needs a precompute job and a table in
+  other repositories, to serve one placeholder root whose discography is every
+  compilation in the catalog. If the first-deployment check shows real demand for it, or
+  shows that a root under the ceiling is too slow, that is the evidence to build one.
+- On a cache hit, a root at the ceiling still costs about 0.6 s of CPU: 0.12 s to decode
+  the 4.2 MB entry and 0.50 s to fold it (a synthetic 134,051-release catalog on one
+  Apple-silicon core). The fold runs off the event loop.
+
+**Bounded reads.** No caller waits on an unbounded read. Every strata graph read carries a
+10 s server-side transaction timeout, and the MusicBrainz read sets a transaction-local
+10 s `statement_timeout`. That is four times the slowest read the spike measured, with
+room for the Bolt transfer it did not time. Either bound running out is a 504, and nothing
+is cached for that root.
+
+**Latency check on first deployment.** The numbers above come from the predecessor graph,
+which holds the placeholder roots at a tenth of their size. The strata program's
+[first-deployment checks](https://github.com/groovemap-music/design/blob/main/docs/programs/strata.md#first-deployment-checks)
+re-run the gm-design-1h2l latency harness against the first deployed catalog. That result
+confirms or moves the 134,051 ceiling and the 10 s bound, and decides whether a per-artist
+summary is needed.
+
+Errors: 400 for a bad budget, 404 for an unknown artist or focus, 422 for a root above the
+release ceiling (or a malformed parameter), 503 when Neo4j is not configured, and 504 when
+a graph or PostgreSQL read runs past its bound.
+
 ### Collection Sync
 
 | Method | Path               | Auth Required | Rate Limit | Description                     |

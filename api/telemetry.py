@@ -64,6 +64,7 @@ CACHE_NLQ_QUERY = "nlq_query"
 CACHE_NLQ_SUGGESTIONS = "nlq_suggestions"
 CACHE_RECOMMEND = "recommend"
 CACHE_SEARCH = "search"
+CACHE_STRATA = "strata"
 CACHE_TRENDS = "trends"
 
 # A failing cache write is logged at warning level at most once per logical cache per this
