@@ -93,6 +93,12 @@ def configure(event_recorder: EventRecorder | None = None) -> None:
 # record about an item they hold".
 COLLECTION_TRACKED_FIELDS: Final[tuple[str, ...]] = ("folder_id", "rating", "date_added")
 
+# `date_added` is the collector's recorded time from Discogs. A payload that
+# omits it means "unknown here", not "erased": every write keeps the stored
+# value (COALESCE in the upserts, the owned-copy mint and the graph edges), so
+# a value that went from present to NULL is never a user change.
+_KEEP_WHEN_MISSING: Final[frozenset[str]] = frozenset({"date_added"})
+
 # The two page upserts. `COALESCE(EXCLUDED.gm_item_id, ...)` on both so a page
 # whose resolve came back short can never blank an id a previous run wrote.
 _UPSERT_COLLECTION: Final = """
@@ -113,7 +119,7 @@ _UPSERT_COLLECTION: Final = """
         formats = COALESCE(EXCLUDED.formats, user_collections.formats),
         label = EXCLUDED.label,
         rating = EXCLUDED.rating,
-        date_added = EXCLUDED.date_added,
+        date_added = COALESCE(EXCLUDED.date_added, user_collections.date_added),
         metadata = COALESCE(EXCLUDED.metadata, user_collections.metadata),
         media = EXCLUDED.media,
         gm_item_id = COALESCE(EXCLUDED.gm_item_id, user_collections.gm_item_id),
@@ -137,7 +143,7 @@ _UPSERT_WANTLIST: Final = """
         format = EXCLUDED.format,
         rating = EXCLUDED.rating,
         notes = EXCLUDED.notes,
-        date_added = EXCLUDED.date_added,
+        date_added = COALESCE(EXCLUDED.date_added, user_wantlists.date_added),
         media = EXCLUDED.media,
         gm_item_id = COALESCE(EXCLUDED.gm_item_id, user_wantlists.gm_item_id),
         updated_at = EXCLUDED.updated_at
@@ -168,9 +174,12 @@ _MINT_OWNED_COPIES: Final = """
     SELECT %s::uuid, minted.item_id, minted.row_id, minted.acquired_at
     FROM unnest(%s::uuid[], %s::uuid[], %s::timestamptz[]) AS minted(item_id, row_id, acquired_at)
     ON CONFLICT (collection_row_id) WHERE collection_row_id IS NOT NULL
-    DO UPDATE SET item_id = EXCLUDED.item_id, acquired_at = EXCLUDED.acquired_at, updated_at = NOW()
+    DO UPDATE SET
+        item_id = EXCLUDED.item_id,
+        acquired_at = COALESCE(EXCLUDED.acquired_at, owned_copies.acquired_at),
+        updated_at = NOW()
     WHERE owned_copies.item_id IS DISTINCT FROM EXCLUDED.item_id
-       OR owned_copies.acquired_at IS DISTINCT FROM EXCLUDED.acquired_at
+       OR (EXCLUDED.acquired_at IS NOT NULL AND owned_copies.acquired_at IS DISTINCT FROM EXCLUDED.acquired_at)
 """
 
 # The back-link. `IS DISTINCT FROM` keeps an unchanged row untouched, and the
@@ -320,7 +329,9 @@ def _collection_page_events(
         if previous is None:
             events.append(("collection.item_added", payload))
             continue
-        changed = [field for field in COLLECTION_TRACKED_FIELDS if previous[field] != row[field]]
+        changed = [
+            field for field in COLLECTION_TRACKED_FIELDS if previous[field] != row[field] and not (field in _KEEP_WHEN_MISSING and row[field] is None)
+        ]
         if changed:
             events.append(("collection.item_updated", {**payload, "changed_fields": changed}))
     return events
@@ -616,7 +627,7 @@ async def sync_collection(
             MERGE (u)-[c:COLLECTED {instance_id: rel.instance_id}]->(r)
             SET c.rating = rel.rating,
                 c.folder_id = rel.folder_id,
-                c.date_added = rel.date_added,
+                c.date_added = coalesce(rel.date_added, c.date_added),
                 c.synced_at = $synced_at,
                 r += rel.metadata
             """
@@ -864,7 +875,7 @@ async def sync_wantlist(
             MATCH (r:Release {id: toString(w.release_id)})
             MERGE (u)-[wnt:WANTS]->(r)
             SET wnt.rating = w.rating,
-                wnt.date_added = w.date_added,
+                wnt.date_added = coalesce(w.date_added, wnt.date_added),
                 wnt.synced_at = $synced_at,
                 r += w.metadata
             """
