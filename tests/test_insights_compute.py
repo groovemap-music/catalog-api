@@ -76,6 +76,76 @@ class TestGenreTrendsEndpoint:
             mod._neo4j = original
 
 
+_CONTRACT = Path(__file__).parents[1] / "api/contracts/internal-insights/v1/openapi.yaml"
+
+
+def test_style_year_counts_contract_publishes_the_producer_read_budget() -> None:
+    """The processing budget consumers pin is the server-side timeout the producer enforces."""
+    from api.queries.insights_neo4j_queries import STYLE_YEAR_QUERY_TIMEOUT_SECONDS
+
+    contract = yaml.safe_load(_CONTRACT.read_text(encoding="utf-8"))
+    operation = contract["paths"]["/api/internal/insights/style-year-counts"]["get"]
+    assert operation["x-groovemap-max-processing-seconds"] == STYLE_YEAR_QUERY_TIMEOUT_SECONDS
+    assert contract["info"]["version"] == "1.2.0"
+
+
+_STYLE_YEAR_RESULT = {
+    "style_years": [{"style": "Bop", "year": 1959, "release_count": 4, "master_count": 3}],
+    "style_parents": [{"style": "Bop", "genre": "Jazz", "release_count": 4, "style_release_count": 5, "share": 0.8}],
+}
+
+
+class TestStyleYearCountsEndpoint:
+    """Tests for GET /api/internal/insights/style-year-counts."""
+
+    def test_success_matches_the_published_schema_fields(self, test_client: TestClient) -> None:
+        """Returns 200 and exactly the fields the contract requires, nothing extra."""
+        with patch("api.routers.insights_compute.query_style_year_counts", new_callable=AsyncMock, return_value=_STYLE_YEAR_RESULT):
+            response = test_client.get("/api/internal/insights/style-year-counts")
+        assert response.status_code == 200
+        body = response.json()
+        assert body == _STYLE_YEAR_RESULT
+
+        schemas = yaml.safe_load(_CONTRACT.read_text(encoding="utf-8"))["components"]["schemas"]
+        for key, schema in (("style_years", "StyleYearCount"), ("style_parents", "StyleParentShare")):
+            assert set(body[key][0]) == set(schemas[schema]["required"]) == set(schemas[schema]["properties"])
+
+    def test_not_ready(self, test_client: TestClient) -> None:
+        """Returns 503 when Neo4j is not configured."""
+        import api.routers.insights_compute as mod
+
+        original = mod._neo4j
+        mod._neo4j = None
+        try:
+            response = test_client.get("/api/internal/insights/style-year-counts")
+            assert response.status_code == 503
+        finally:
+            mod._neo4j = original
+
+    def test_503_on_transaction_timeout(self, test_client: TestClient) -> None:
+        """The server-side read budget expiring is a retryable 503, not a 500."""
+        err = _neo4j_error("Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration", "transaction timed out")
+        with patch("api.routers.insights_compute.query_style_year_counts", new=AsyncMock(side_effect=err)):
+            response = test_client.get("/api/internal/insights/style-year-counts")
+        assert response.status_code == 503
+        assert response.json()["code"] == "Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration"
+
+    def test_503_when_the_timeout_arrives_inside_a_task_group(self, test_client: TestClient) -> None:
+        """The query runs its reads in a task group, which wraps failures in an ExceptionGroup."""
+        err = _neo4j_error("Neo.ClientError.Transaction.TransactionTimedOut", "transaction timed out")
+        group = ExceptionGroup("unhandled errors in a TaskGroup", [err])
+        with patch("api.routers.insights_compute.query_style_year_counts", new=AsyncMock(side_effect=group)):
+            response = test_client.get("/api/internal/insights/style-year-counts")
+        assert response.status_code == 503
+
+    def test_non_retryable_error_is_not_masked_as_503(self, test_client: TestClient) -> None:
+        """A genuine query bug still surfaces as a server error."""
+        err = _neo4j_error("Neo.ClientError.Statement.SyntaxError", "invalid syntax")
+        with patch("api.routers.insights_compute.query_style_year_counts", new=AsyncMock(side_effect=err)):
+            response = test_client.get("/api/internal/insights/style-year-counts")
+        assert response.status_code == 500
+
+
 class TestLabelLongevityEndpoint:
     """Tests for GET /api/internal/insights/label-longevity."""
 
@@ -339,6 +409,7 @@ class TestInternalInsightsAuth:
     _PROTECTED_PATHS = (
         "/api/internal/insights/artist-centrality",
         "/api/internal/insights/genre-trends",
+        "/api/internal/insights/style-year-counts",
         "/api/internal/insights/label-longevity",
         "/api/internal/insights/anniversaries?year=2025&month=3",
         "/api/internal/insights/data-completeness",
