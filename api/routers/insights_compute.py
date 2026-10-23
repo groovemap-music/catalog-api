@@ -25,6 +25,7 @@ from api.queries.insights_neo4j_queries import (
     query_genre_trends,
     query_label_longevity,
     query_monthly_anniversaries,
+    query_style_year_counts,
 )
 from api.queries.insights_pg_queries import query_data_completeness
 from api.queries.rarity_queries import fetch_all_rarity_signals
@@ -126,6 +127,25 @@ async def genre_trends(request: Request) -> JSONResponse:  # noqa: ARG001
     return JSONResponse(content={"items": results})
 
 
+@router.get("/style-year-counts")
+@limiter.limit("5/minute")
+async def style_year_counts(request: Request) -> JSONResponse:  # noqa: ARG001
+    """Return release and master counts per style and release year, with each style's genre shares.
+
+    Raw input for analytics-engine's style lifecycle and atlas layout. The read scans every
+    release-style tag, so it runs under a long internal budget (see
+    ``STYLE_YEAR_QUERY_TIMEOUT_SECONDS``) and is published with that processing budget in the
+    internal-insights contract.
+    """
+    if not _neo4j:
+        return JSONResponse(content={"error": "Service not ready"}, status_code=503)
+    try:
+        result = await query_style_year_counts(_neo4j)
+    except (TransientError, ClientError, BaseExceptionGroup) as exc:
+        return _retryable_unavailable(exc, "Style-year computation")
+    return JSONResponse(content=result)
+
+
 @router.get("/label-longevity")
 @limiter.limit("5/minute")
 async def label_longevity(request: Request, limit: int = Query(50, ge=1, le=500)) -> JSONResponse:  # noqa: ARG001
@@ -225,6 +245,23 @@ def _find_retryable_neo4j_error(exc: BaseException) -> Neo4jError | None:
     return None
 
 
+def _retryable_unavailable(exc: BaseException, computation: str) -> JSONResponse:
+    """Map a retryable Neo4j failure to a 503 response, re-raising anything else.
+
+    TransientError (e.g. MemoryPoolOutOfMemoryError under DB pressure) and a transaction
+    timeout (see TRANSACTION_TIMEOUT_CODES) are not server bugs. A 503 lets the caller log a
+    meaningful, retryable failure instead of a bare 500.
+    """
+    retryable = _find_retryable_neo4j_error(exc)
+    if retryable is None:
+        raise exc
+    logger.warning(f"⚠️ {computation} hit a retryable Neo4j error", code=retryable.code, exc_info=True)
+    return JSONResponse(
+        content={"error": "Neo4j temporarily unavailable (retryable error)", "code": retryable.code},
+        status_code=503,
+    )
+
+
 @router.get("/rarity-scores")
 @limiter.limit("5/minute")
 async def rarity_scores(request: Request) -> JSONResponse:  # noqa: ARG001
@@ -234,22 +271,7 @@ async def rarity_scores(request: Request) -> JSONResponse:  # noqa: ARG001
     try:
         results = await fetch_all_rarity_signals(_neo4j, _pool)
     except (TransientError, ClientError, BaseExceptionGroup) as exc:
-        # TransientError: e.g. MemoryPoolOutOfMemoryError under DB pressure.
-        # ClientError: a transaction timeout (see TRANSACTION_TIMEOUT_CODES).
-        # Neither is a server bug — return 503 so the caller logs a meaningful,
-        # retryable failure instead of a bare 500.
-        retryable = _find_retryable_neo4j_error(exc)
-        if retryable is None:
-            raise
-        logger.warning(
-            "⚠️ Rarity computation hit a retryable Neo4j error",
-            code=retryable.code,
-            exc_info=True,
-        )
-        return JSONResponse(
-            content={"error": "Neo4j temporarily unavailable (retryable error)", "code": retryable.code},
-            status_code=503,
-        )
+        return _retryable_unavailable(exc, "Rarity computation")
     return JSONResponse(content={"items": results})
 
 

@@ -4,6 +4,7 @@ Each function takes an AsyncResilientNeo4jDriver (or compatible async driver),
 executes a Cypher query, and returns a list of dicts.
 """
 
+import asyncio
 from typing import Any
 
 import structlog
@@ -12,6 +13,14 @@ from api.queries.helpers import run_query
 
 
 logger = structlog.get_logger(__name__)
+
+# Server-side budget for each style-year read. The aggregation scans every release-style tag
+# (about 30 s on the full graph, logged tail to 110 s on the predecessor), so it runs under a
+# long internal budget rather than any public route budget. It stays well under Neo4j's
+# db.transaction.timeout (600 s in production), so a pathological run fails fast with a
+# retryable timeout. The internal-insights contract publishes the same figure as
+# ``x-groovemap-max-processing-seconds`` on this operation.
+STYLE_YEAR_QUERY_TIMEOUT_SECONDS = 300.0
 
 
 async def query_artist_centrality(driver: Any, limit: int = 100) -> list[dict[str, Any]]:
@@ -58,6 +67,71 @@ async def query_genre_trends(driver: Any, genre: str | None = None) -> list[dict
         results = await run_query(driver, cypher, database="neo4j")
     logger.info("🔍 Genre trends query complete", count=len(results), genre=genre)
     return results
+
+
+# Release-year cells. The year is the release's own, never its master's: the lifecycle stage
+# flips for 0.54% of styles between dumps on release year against 1.69% on master year
+# (gm-design-4804 B4). ``DISTINCT`` keeps a release or master counted once per cell even if
+# the graph carries a duplicate edge; a masterless release adds no master.
+_STYLE_YEAR_CYPHER = """
+MATCH (r:Release)-[:IS]->(s:Style)
+WHERE r.year IS NOT NULL AND r.year > 0
+OPTIONAL MATCH (r)-[:DERIVED_FROM]->(m:Master)
+WITH s.name AS style, r.year AS year,
+     count(DISTINCT r) AS release_count, count(DISTINCT m) AS master_count
+ORDER BY style, year
+RETURN style, year, release_count, master_count
+"""
+
+# Co-tag counts: how many of a style's releases also carry each genre. The denominator is
+# every release tagged with the style, dated or not, because genre membership does not
+# depend on when a release came out.
+_STYLE_GENRE_CYPHER = """
+MATCH (r:Release)-[:IS]->(s:Style)
+MATCH (r)-[:IS]->(g:Genre)
+WITH s.name AS style, g.name AS genre, count(DISTINCT r) AS release_count
+ORDER BY style, genre
+RETURN style, genre, release_count
+"""
+
+_STYLE_TOTAL_CYPHER = """
+MATCH (r:Release)-[:IS]->(s:Style)
+WITH s.name AS style, count(DISTINCT r) AS style_release_count
+RETURN style, style_release_count
+"""
+
+
+async def query_style_year_counts(driver: Any) -> dict[str, list[dict[str, Any]]]:
+    """Query release and master counts per style and release year, plus each style's genres.
+
+    Returns ``style_years`` (one row per style and release year with ``release_count`` and
+    ``master_count``) and ``style_parents`` (one row per style and genre it co-occurs with, with
+    the co-tagged ``release_count``, the style's total ``style_release_count`` and the raw
+    ``share`` of the style's releases that carry the genre).
+
+    Shares are not floored: the 0.20 parent rule is the consumer's to apply. The three reads
+    run concurrently, each under :data:`STYLE_YEAR_QUERY_TIMEOUT_SECONDS`.
+    """
+    # A task group, not gather: when one read fails the others are cancelled rather than left
+    # scanning the graph for a response nobody will read.
+    async with asyncio.TaskGroup() as group:
+        years_read = group.create_task(run_query(driver, _STYLE_YEAR_CYPHER, database="neo4j", timeout=STYLE_YEAR_QUERY_TIMEOUT_SECONDS))
+        genre_read = group.create_task(run_query(driver, _STYLE_GENRE_CYPHER, database="neo4j", timeout=STYLE_YEAR_QUERY_TIMEOUT_SECONDS))
+        totals_read = group.create_task(run_query(driver, _STYLE_TOTAL_CYPHER, database="neo4j", timeout=STYLE_YEAR_QUERY_TIMEOUT_SECONDS))
+    years, genre_cells, totals = years_read.result(), genre_read.result(), totals_read.result()
+    style_totals = {row["style"]: row["style_release_count"] for row in totals}
+    parents = [
+        {
+            "style": row["style"],
+            "genre": row["genre"],
+            "release_count": row["release_count"],
+            "style_release_count": style_totals[row["style"]],
+            "share": row["release_count"] / style_totals[row["style"]],
+        }
+        for row in genre_cells
+    ]
+    logger.info("🔍 Style-year counts query complete", cells=len(years), parent_pairs=len(parents))
+    return {"style_years": years, "style_parents": parents}
 
 
 async def query_label_longevity(driver: Any, limit: int = 50) -> list[dict[str, Any]]:

@@ -1,7 +1,7 @@
 """Tests for insights Neo4j query functions."""
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -95,6 +95,63 @@ class TestQueryGenreTrends:
         result = await query_genre_trends(driver, genre="Jazz")
         assert len(result) == 1
         assert result[0]["genre"] == "Jazz"
+
+
+class TestQueryStyleYearCounts:
+    """Tests for query_style_year_counts."""
+
+    @staticmethod
+    def _run_query_for(years: list[dict[str, Any]], cells: list[dict[str, Any]], totals: list[dict[str, Any]]) -> AsyncMock:
+        """A run_query stand-in that answers each of the three reads by its Cypher."""
+
+        async def run_query(_driver: Any, cypher: str, **_params: Any) -> list[dict[str, Any]]:
+            if "OPTIONAL MATCH (r)-[:DERIVED_FROM]" in cypher:
+                return years
+            if "(g:Genre)" in cypher:
+                return cells
+            return totals
+
+        return AsyncMock(side_effect=run_query)
+
+    @pytest.mark.asyncio
+    async def test_shares_are_raw_fractions_of_the_style_total(self) -> None:
+        """Every co-tagged genre is returned with release_count / style total, unfloored."""
+        from api.queries.insights_neo4j_queries import query_style_year_counts
+
+        years = [{"style": "Bop", "year": 1959, "release_count": 4, "master_count": 3}]
+        cells = [
+            {"style": "Bop", "genre": "Jazz", "release_count": 99, "style_release_count": 0},
+            {"style": "Bop", "genre": "Funk / Soul", "release_count": 1},
+        ]
+        totals = [{"style": "Bop", "style_release_count": 100}]
+        with patch("api.queries.insights_neo4j_queries.run_query", self._run_query_for(years, cells, totals)):
+            result = await query_style_year_counts(AsyncMock())
+
+        assert result["style_years"] == years
+        assert result["style_parents"] == [
+            {"style": "Bop", "genre": "Jazz", "release_count": 99, "style_release_count": 100, "share": 0.99},
+            {"style": "Bop", "genre": "Funk / Soul", "release_count": 1, "style_release_count": 100, "share": 0.01},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_each_read_carries_the_long_internal_timeout(self) -> None:
+        """All three reads run under the style-year server-side budget, not the driver default."""
+        from api.queries.insights_neo4j_queries import STYLE_YEAR_QUERY_TIMEOUT_SECONDS, query_style_year_counts
+
+        run_query = self._run_query_for([], [], [])
+        with patch("api.queries.insights_neo4j_queries.run_query", run_query):
+            await query_style_year_counts(AsyncMock())
+
+        assert run_query.await_count == 3
+        assert {call.kwargs["timeout"] for call in run_query.await_args_list} == {STYLE_YEAR_QUERY_TIMEOUT_SECONDS}
+        assert STYLE_YEAR_QUERY_TIMEOUT_SECONDS > 30.0  # the genre-tree route budget
+
+    def test_buckets_by_release_year_not_master_year(self) -> None:
+        """The year cell groups on the release's own year; the master is only counted."""
+        from api.queries.insights_neo4j_queries import _STYLE_YEAR_CYPHER
+
+        assert "r.year AS year" in _STYLE_YEAR_CYPHER
+        assert "m.year" not in _STYLE_YEAR_CYPHER
 
 
 class TestQueryLabelLongevity:
