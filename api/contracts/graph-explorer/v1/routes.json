@@ -29,6 +29,7 @@
     "credits_timeline": {"method": "GET", "path": "/api/credits/person/{name}/timeline"},
     "expand": {"method": "GET", "path": "/api/expand"},
     "explore": {"method": "GET", "path": "/api/explore"},
+    "explore_strata": {"method": "GET", "path": "/api/explore/strata", "parameters": ["artist_id", "budget", "focus", "page"]},
     "fit_release": {"method": "GET", "path": "/api/fit/release/{release_id}"},
     "genre_emergence": {"method": "GET", "path": "/api/explore/genre-emergence"},
     "genre_tree": {"method": "GET", "path": "/api/genre-tree"},
