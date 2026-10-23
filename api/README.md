@@ -854,6 +854,7 @@ PostgreSQL query results.
 | ------ | --------------------------------- | ------------- | ----------------------------------- |
 | GET    | `/api/insights/top-artists`       | No            | Top artists by release count        |
 | GET    | `/api/insights/genre-trends`      | No            | Genre popularity trends over time   |
+| GET    | `/api/insights/style-atlas`       | No            | Style lifecycle stages and atlas layout |
 | GET    | `/api/insights/label-longevity`   | No            | Label longevity rankings            |
 | GET    | `/api/insights/this-month`        | No            | Releases and trends for this month  |
 | GET    | `/api/insights/data-completeness` | No            | Data quality and completeness stats |
