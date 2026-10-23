@@ -23,6 +23,7 @@ from api.queries.taste_queries import (
     get_obscurity_score,
     get_taste_drift,
     get_taste_heatmap,
+    get_taste_projection,
     get_top_labels,
 )
 from api.taste_card import render_taste_card
@@ -35,6 +36,9 @@ router = APIRouter()
 _neo4j_driver: Any = None
 
 _MIN_COLLECTION_ITEMS = 10
+
+# Personal responses: a shared cache must not keep one caller's projection for another.
+_NO_STORE = {"Cache-Control": "no-store", "Vary": "Authorization"}
 
 
 def configure(neo4j: Any, jwt_secret: str | None) -> None:  # noqa: ARG001
@@ -154,6 +158,34 @@ async def taste_blindspots(
             )
         raise
     return JSONResponse(content={"blind_spots": [BlindSpot(**b).model_dump() for b in spots]})
+
+
+@router.get("/api/user/taste-projection")
+async def taste_projection(
+    current_user: Annotated[dict[str, Any], Depends(require_user)],
+) -> JSONResponse:
+    """Return the caller's collection and wantlist as genre, style, and master aggregates.
+
+    Feeds graph-explorer's Taste Strata (concept C'). Personal data for the authenticated
+    caller only: it is read on every request, never cached across users, and marked
+    ``no-store`` so no shared cache or shareable snapshot holds it. There is no minimum
+    collection size, because a projection of a small collection is still honest.
+    """
+    if not _neo4j_driver:
+        return JSONResponse(content={"error": "Service not ready"}, status_code=503)
+    user_id: str = current_user.get("sub", "")
+    try:
+        projection = await get_taste_projection(_neo4j_driver, user_id)
+    except Neo4jClientError as exc:
+        if "TransactionTimedOut" in str(exc):
+            logger.warning("⏱️ Taste projection query timed out", user_id=user_id)
+            return JSONResponse(
+                content={"error": "Taste projection query timed out — collection may be too large"},
+                status_code=504,
+                headers=_NO_STORE,
+            )
+        raise
+    return JSONResponse(content=projection, headers=_NO_STORE)
 
 
 @router.get("/api/user/taste/card")

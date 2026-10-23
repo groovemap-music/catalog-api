@@ -70,6 +70,7 @@
     "user_status": {"method": "GET", "path": "/api/user/status"},
     "user_taste_card": {"method": "GET", "path": "/api/user/taste/card"},
     "user_taste_fingerprint": {"method": "GET", "path": "/api/user/taste/fingerprint"},
+    "user_taste_projection": {"method": "GET", "path": "/api/user/taste-projection"},
     "user_wantlist": {"method": "GET", "path": "/api/user/wantlist"},
     "year_range": {"method": "GET", "path": "/api/explore/year-range"}
   },

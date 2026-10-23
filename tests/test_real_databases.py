@@ -24,6 +24,7 @@ from api.queries.credits_queries import get_person_connections
 from api.queries.helpers import run_count, run_query, run_single
 from api.queries.insights_neo4j_queries import query_style_year_counts
 from api.queries.strata_queries import get_shared_personnel, get_strata_catalog, get_strata_labels, get_strata_marks, get_strata_root
+from api.queries.taste_queries import get_taste_projection
 from api.strata import MAX_ROOT_RELEASES, Budget, apply_labels, build_strata, label_targets
 from api.syncer import DISCOGS_API_BASE, sync_collection, sync_wantlist
 
@@ -496,6 +497,82 @@ async def test_strata_read_on_a_seeded_graph(
     anonymous = build_strata(catalog, Budget(3, 12, 16))
     assert anonymous["signed_in"] is False
     assert "state" not in anonymous["planes"][2]["nodes"][0]
+
+
+# Two collectors over one catalog. The first owns release 10 twice (two copies) and wants it,
+# wants 12, owns 13 (genre only, no master) and wants 14 (no genre, no master). The second
+# collector holds a release the first never touches, so any read that leaked across users
+# would show in the first one's totals.
+_TASTE_GRAPH = """
+CREATE (m500:Master {id: '500', title: 'Master A', year: 1971}),
+       (m501:Master {id: '501', title: 'Master B', year: 0}),
+       (rock:Genre {name: 'Rock'}), (jazz:Genre {name: 'Jazz'}), (elec:Genre {name: 'Electronic'}),
+       (prog:Style {name: 'Prog Rock'}), (fusion:Style {name: 'Fusion'}),
+       (r10:Release {id: '10'}), (r11:Release {id: '11'}), (r12:Release {id: '12'}),
+       (r13:Release {id: '13'}), (r14:Release {id: '14'}), (r15:Release {id: '15'}),
+       (r10)-[:DERIVED_FROM]->(m500), (r11)-[:DERIVED_FROM]->(m500), (r12)-[:DERIVED_FROM]->(m501),
+       (r10)-[:IS]->(rock), (r10)-[:IS]->(prog), (r11)-[:IS]->(rock), (r11)-[:IS]->(prog),
+       (r12)-[:IS]->(jazz), (r12)-[:IS]->(rock), (r12)-[:IS]->(fusion), (r13)-[:IS]->(elec),
+       (r15)-[:IS]->(elec),
+       (u:User {id: $user_id}), (other:User {id: $other_id}),
+       (u)-[:COLLECTED {instance_id: 1, date_added: '2019-05-01T12:00:00-07:00'}]->(r10),
+       (u)-[:COLLECTED {instance_id: 2, date_added: '2021-01-01T00:00:00-08:00'}]->(r10),
+       (u)-[:WANTS {date_added: '2018-02-03T04:05:06-08:00'}]->(r10),
+       (u)-[:WANTS {date_added: '2020-06-07T08:09:10-07:00'}]->(r12),
+       (u)-[:COLLECTED {instance_id: 3}]->(r13),
+       (u)-[:WANTS {date_added: '2022-02-02T00:00:00Z'}]->(r14),
+       (other)-[:COLLECTED {instance_id: 4, date_added: '2024-01-01T00:00:00Z'}]->(r11),
+       (other)-[:WANTS {date_added: '2024-01-02T00:00:00Z'}]->(r15)
+"""
+
+
+async def test_taste_projection_on_a_seeded_graph(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    """The projection read compiles on the real engine and folds one collector's items alone.
+
+    Covers a release owned in two copies and also wanted (one item), a want, an owned release
+    with a genre and no style or master, a want with neither, a master with no year, the
+    recorded span per state, and a second collector whose items never reach the first's.
+    """
+    user_id, other_id = str(TEST_USER_ID), "00000000-0000-0000-0000-000000000043"
+    await _consume(neo4j_driver, _TASTE_GRAPH, user_id=user_id, other_id=other_id)
+
+    mine = await get_taste_projection(neo4j_driver, user_id)
+
+    assert mine["totals"] == {
+        "items": 4,
+        "owned": 2,
+        "wanted": 3,
+        "wanted_owned": 1,
+        "masterless_items": 2,
+        "genre_only_items": 1,
+        "unplaced_items": 1,
+    }
+    assert mine["recorded_at"] == {
+        "owned": {"first": "2019-05-01T12:00:00-07:00", "last": "2021-01-01T00:00:00-08:00", "undated": 1},
+        "wanted": {"first": "2018-02-03T04:05:06-08:00", "last": "2022-02-02T00:00:00Z", "undated": 0},
+    }
+    assert [(g["id"], g["items"], g["owned"], g["wanted"], g["state"]) for g in mine["genres"]] == [
+        ("Rock", 2, 1, 2, "wanted_owned"),
+        ("Electronic", 1, 1, 0, "owned"),
+        ("Jazz", 1, 0, 1, "wanted"),
+    ]
+    assert [(s["id"], s["items"], s["state"]) for s in mine["styles"]] == [("Fusion", 1, "wanted"), ("Prog Rock", 1, "wanted_owned")]
+    master_a, master_b = mine["masters"]
+    assert (master_a["id"], master_a["year"], master_a["state"], master_a["genres"], master_a["styles"]) == (
+        "500",
+        1971,
+        "wanted_owned",
+        ["Rock"],
+        ["Prog Rock"],
+    )
+    assert master_a["recorded_at"]["owned"] == {"first": "2019-05-01T12:00:00-07:00", "last": "2021-01-01T00:00:00-08:00", "undated": 0}
+    assert (master_b["id"], master_b["year"], master_b["state"], master_b["genres"]) == ("501", None, "wanted", ["Jazz", "Rock"])
+
+    theirs = await get_taste_projection(neo4j_driver, other_id)
+    assert theirs["totals"]["items"] == 2
+    assert [m["id"] for m in theirs["masters"]] == ["500"]
+    assert [g["id"] for g in theirs["genres"]] == ["Electronic", "Rock"]
+    assert (await get_taste_projection(neo4j_driver, "nobody"))["totals"]["items"] == 0
 
 
 async def _root_db_hits(driver: AsyncResilientNeo4jDriver, artist_id: str) -> tuple[int, set[str]]:
