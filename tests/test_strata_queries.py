@@ -10,6 +10,7 @@ import pytest
 
 from api.queries import strata_queries
 from api.queries.strata_queries import (
+    STRATA_READ_TIMEOUT_SECONDS,
     get_musicbrainz_only_releases,
     get_shared_personnel,
     get_strata_catalog,
@@ -45,6 +46,11 @@ class TestQueryText:
         assert "credit.category" in strata_queries._SHARED_PERSONNEL
         assert ".role" not in strata_queries._SHARED_PERSONNEL
 
+    async def test_the_root_counts_its_releases_from_the_degree_alone(self) -> None:
+        # No label or property on the far side, so the planner reads the node's degree
+        # instead of expanding a 1,356,055-release root before the size check.
+        assert "COUNT { (a)<-[:BY]-() } AS releases" in strata_queries._ROOT
+
     async def test_marks_read_the_callers_collected_and_wants_edges(self) -> None:
         assert "(:User {id: $user_id})-[edge:COLLECTED|WANTS]->" in strata_queries._MARKS
         assert "date_added" in strata_queries._MARKS
@@ -52,9 +58,10 @@ class TestQueryText:
 
 async def test_root_reads_the_artist_by_id() -> None:
     driver = MagicMock()
-    with patch.object(strata_queries, "run_single", new=AsyncMock(return_value={"id": "1", "name": "Root"})) as run:
-        assert await get_strata_root(driver, "1") == {"id": "1", "name": "Root"}
-    run.assert_awaited_once_with(driver, strata_queries._ROOT, artist_id="1")
+    root = {"id": "1", "name": "Root", "releases": 3}
+    with patch.object(strata_queries, "run_single", new=AsyncMock(return_value=root)) as run:
+        assert await get_strata_root(driver, "1") == root
+    run.assert_awaited_once_with(driver, strata_queries._ROOT, timeout=STRATA_READ_TIMEOUT_SECONDS, artist_id="1")
 
 
 async def test_ladder_rows_become_releases_and_master_years() -> None:
@@ -84,7 +91,7 @@ async def test_marks_fold_both_edge_kinds_and_their_recorded_times() -> None:
         "10": Mark(owned=True, wanted=True, owned_at="2019-05-01T12:00:00-07:00", wanted_at="2018-01-01T00:00:00-08:00"),
         "12": Mark(wanted=True),
     }
-    assert run.await_args.kwargs == {"user_id": "user-1", "artist_id": "1"}
+    assert run.await_args.kwargs == {"timeout": STRATA_READ_TIMEOUT_SECONDS, "user_id": "user-1", "artist_id": "1"}
 
 
 async def test_labels_are_keyed_by_id_and_tolerate_no_row() -> None:
@@ -101,7 +108,7 @@ async def test_shared_personnel_skips_the_read_below_two_masters() -> None:
         assert await get_shared_personnel(MagicMock(), ["500"], limit=8) == []
         run.assert_not_awaited()
         assert await get_shared_personnel(MagicMock(), ["500", "501"], limit=8) == edges
-    assert run.await_args.kwargs == {"master_ids": ["500", "501"], "limit": 8}
+    assert run.await_args.kwargs == {"timeout": STRATA_READ_TIMEOUT_SECONDS, "master_ids": ["500", "501"], "limit": 8}
 
 
 class TestCatalog:
@@ -173,17 +180,42 @@ class TestMusicBrainzOnly:
             Release("a", "500", 1972, (), "musicbrainz", "T"),
             Release("c", "500", None, (), "musicbrainz", "T"),
         ]
-        first, second = mock_cur.execute.await_args_list
+        bound, first, second = mock_cur.execute.await_args_list
+        assert bound.args == (strata_queries._STATEMENT_TIMEOUT, {"timeout": "10000ms"})
         assert sorted(first.args[1]["master_ids"]) == [500, 501]
         assert first.args[1]["release_ids"] == [10, 11, 12]
         assert second.args[1] == {"group_mbids": ["g-alone", "g-ambiguous", "g-masterless", "g-siblings"]}
         # Only siblings outside the root's own releases are read back from the graph.
-        assert run.await_args.kwargs == {"release_ids": ["77", "88"]}
+        assert run.await_args.kwargs == {"timeout": STRATA_READ_TIMEOUT_SECONDS, "release_ids": ["77", "88"]}
 
     async def test_no_unlinked_group_reads_no_siblings(self, mock_pool: MagicMock, mock_cur: MagicMock) -> None:
         mock_cur.fetchall.side_effect = [[_candidate("a", "g", 500, None)]]
         with patch.object(strata_queries, "run_query", new=AsyncMock()) as run:
             attached = await get_musicbrainz_only_releases(MagicMock(), mock_pool, [Release("10", "500", 1971, ("1",))], {"500"})
         assert attached == [Release("a", "500", None, (), "musicbrainz", "T")]
-        assert mock_cur.execute.await_count == 1
+        assert mock_cur.execute.await_count == 2
         run.assert_not_awaited()
+
+
+async def test_every_graph_read_is_bounded_by_the_strata_timeout() -> None:
+    reads = {
+        "ladder": lambda driver: get_strata_ladder(driver, "1"),
+        "marks": lambda driver: get_strata_marks(driver, "user-1", "1"),
+        "personnel": lambda driver: get_shared_personnel(driver, ["500", "501"], limit=8),
+    }
+    for name, read in reads.items():
+        with patch.object(strata_queries, "run_query", new=AsyncMock(return_value=[])) as run:
+            await read(MagicMock())
+        assert run.await_args.kwargs["timeout"] == STRATA_READ_TIMEOUT_SECONDS, name
+    with patch.object(strata_queries, "run_single", new=AsyncMock(return_value=None)) as run:
+        await get_strata_labels(MagicMock(), ["10"], ["500"], ["1"])
+    assert run.await_args.kwargs["timeout"] == STRATA_READ_TIMEOUT_SECONDS
+
+
+async def test_the_musicbrainz_read_bounds_its_own_transaction(mock_pool: MagicMock, mock_conn: MagicMock, mock_cur: MagicMock) -> None:
+    mock_cur.fetchall.side_effect = [[]]
+    await get_musicbrainz_only_releases(MagicMock(), mock_pool, [Release("10", "500", 1971, ("1",))], {"500"})
+    # set_config(..., true) is transaction-local, so the bound never leaks onto the pooled connection.
+    mock_conn.transaction.assert_called_once()
+    assert mock_cur.execute.await_args_list[0].args == (strata_queries._STATEMENT_TIMEOUT, {"timeout": "10000ms"})
+    assert strata_queries._STATEMENT_TIMEOUT.endswith("true)")

@@ -63,6 +63,7 @@ so it carries ``"state": null`` and is left out of every ``states`` count.
 
 from __future__ import annotations
 
+import json
 import math
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
@@ -80,6 +81,13 @@ PAGE_SIZE: Final = 8
 MAX_CREDITS: Final = 48
 MAX_MASTERS: Final = 500
 MAX_RELEASES: Final = 500
+
+# The largest root a strata read serves, counted as the root's BY edges. gm-design-1h2l
+# section 5 timed the strata read on roots up to 134,051 releases (the predecessor graph's
+# largest) and nothing above, so a larger root is refused rather than read at a size whose
+# cost is unknown. Of the roots that spike sampled from GrooveMap's catalog, only rank 1, a
+# placeholder credit at 1,356,055 releases, is refused; rank 2, at 87,683, is served.
+MAX_ROOT_RELEASES: Final = 134_051
 
 OTHER_CREDITS: Final = "c:other"
 UNDATED: Final = "undated"
@@ -199,6 +207,51 @@ def id_key(value: str) -> tuple[int, int, str]:
 
 def decade(year: int | None) -> str:
     return UNDATED if year is None else f"{year // 10 * 10}s"
+
+
+# Bumped whenever the cached form of a Catalog changes, so an entry written by an older
+# build reads as a miss instead of as a wrong ladder.
+CATALOG_FORMAT: Final = 1
+
+
+def encode_catalog(catalog: Catalog) -> str:
+    """The cached form of a catalog: compact JSON with each distinct credit stored once.
+
+    A release row is ``[id, master_id, year, credit_index]``, plus ``provider`` and
+    ``title`` for a MusicBrainz-only release. Most of a root's releases share a handful of
+    credits, so the credit table keeps a 134,051-release root to a few megabytes.
+    """
+    credits: dict[Credit, int] = {}
+    rows: list[list[Any]] = []
+    for release in catalog.releases:
+        row: list[Any] = [release.id, release.master_id, release.year, credits.setdefault(release.credit, len(credits))]
+        if release.provider != "discogs" or release.title is not None:
+            row += [release.provider, release.title]
+        rows.append(row)
+    return json.dumps(
+        {
+            "format": CATALOG_FORMAT,
+            "root_id": catalog.root_id,
+            "root_name": catalog.root_name,
+            "credits": [list(credit) for credit in credits],
+            "releases": rows,
+            "master_years": dict(catalog.master_years),
+        },
+        separators=(",", ":"),
+    )
+
+
+def decode_catalog(text: str | bytes) -> Catalog | None:
+    """The catalog :func:`encode_catalog` wrote, or ``None`` for an entry this build cannot read."""
+    try:
+        data = json.loads(text)
+        if data["format"] != CATALOG_FORMAT:
+            return None
+        credits = [tuple(credit) for credit in data["credits"]]
+        releases = tuple(Release(row[0], row[1], row[2], credits[row[3]], *row[4:]) for row in data["releases"])
+        return Catalog(data["root_id"], data["root_name"], releases, data["master_years"])
+    except ValueError, TypeError, KeyError, IndexError:
+        return None
 
 
 @dataclass(frozen=True, slots=True)

@@ -14,13 +14,16 @@ import pytest_asyncio
 import respx
 from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver, parse_postgres_host_port
 from groovemap_schema.postgres import create_postgres_schema
+from neo4j.exceptions import ClientError as Neo4jClientError
 from neo4j.exceptions import Neo4jError
+from psycopg.errors import QueryCanceled
 from psycopg.rows import dict_row
 
+from api.queries import strata_queries
 from api.queries.credits_queries import get_person_connections
 from api.queries.helpers import run_count, run_query, run_single
 from api.queries.strata_queries import get_shared_personnel, get_strata_catalog, get_strata_labels, get_strata_marks, get_strata_root
-from api.strata import Budget, apply_labels, build_strata, label_targets
+from api.strata import MAX_ROOT_RELEASES, Budget, apply_labels, build_strata, label_targets
 from api.syncer import DISCOGS_API_BASE, sync_collection, sync_wantlist
 
 
@@ -80,7 +83,7 @@ async def postgres_pool() -> AsyncIterator[AsyncPostgreSQLPool]:
 
     The schema comes from ``groovemap_schema.postgres.create_postgres_schema``, pinned as
     a dev dependency on database-schema revision
-    ``ee6f101cdaa7c50ca20b7af824ea0e9a32da7dbf`` — the same producer revision
+    ``f21b3e1482a0f74f79d7802c7fcd7b22e074b7cd`` — the same producer revision
     ``contracts/persistence/v1/source.json`` records this repository as tested against.
     Applying the producer's own DDL is what keeps the fixture from drifting behind the
     tables the syncer, identity, and projection paths read; a hand-rolled subset is what
@@ -429,7 +432,7 @@ async def test_strata_read_on_a_seeded_graph(
         )
 
     root = await get_strata_root(neo4j_driver, "1")
-    assert root == {"id": "1", "name": "Strata Root"}
+    assert root == {"id": "1", "name": "Strata Root", "releases": 5}
     assert await get_strata_root(neo4j_driver, "404") is None
     catalog = await get_strata_catalog(neo4j_driver, postgres_pool, "1", root["name"])
     marks = await get_strata_marks(neo4j_driver, user_id, "1")
@@ -492,3 +495,108 @@ async def test_strata_read_on_a_seeded_graph(
     anonymous = build_strata(catalog, Budget(3, 12, 16))
     assert anonymous["signed_in"] is False
     assert "state" not in anonymous["planes"][2]["nodes"][0]
+
+
+async def _root_db_hits(driver: AsyncResilientNeo4jDriver, artist_id: str) -> tuple[int, set[str]]:
+    """Total db hits and operator names of the strata root read, from a real PROFILE."""
+    async with driver.session(database="neo4j") as session:
+        result = await session.run(f"PROFILE {strata_queries._ROOT}", {"artist_id": artist_id})
+        summary = await result.consume()
+    assert summary.profile is not None
+    hits, operators, stack = 0, set(), [summary.profile]
+    while stack:
+        plan = stack.pop()
+        hits += plan.get("dbHits", 0)
+        operators.add(plan["operatorType"].split("@")[0])
+        stack.extend(plan.get("children", []))
+    return hits, operators
+
+
+async def test_a_root_above_the_strata_ceiling_is_sized_without_reading_its_releases(
+    neo4j_driver: AsyncResilientNeo4jDriver,
+) -> None:
+    """The size check the route refuses on costs the same for one release as for 134,052.
+
+    A root one past MAX_ROOT_RELEASES is seeded for real. Its BY degree comes back exact,
+    and the root read's db hits match a five-release root's, so the check reads the node's
+    degree count and never walks the root's releases.
+    """
+    above = MAX_ROOT_RELEASES + 1
+    await _consume(neo4j_driver, "CREATE (:Artist {id: 'big', name: 'Placeholder'}), (:Artist {id: 'small', name: 'Small'})")
+    await _consume(
+        neo4j_driver,
+        """
+        UNWIND range(1, $count) AS i
+        CALL (i) {
+            MATCH (a:Artist {id: 'big'})
+            CREATE (:Release {id: 'big-' + toString(i)})-[:BY]->(a)
+        } IN TRANSACTIONS OF 20000 ROWS
+        """,
+        count=above,
+    )
+    await _consume(
+        neo4j_driver,
+        "MATCH (a:Artist {id: 'small'}) UNWIND range(1, 5) AS i CREATE (:Release {id: 'small-' + toString(i)})-[:BY]->(a)",
+    )
+
+    try:
+        started = perf_counter()
+        root = await get_strata_root(neo4j_driver, "big")
+        elapsed = perf_counter() - started
+
+        assert root == {"id": "big", "name": "Placeholder", "releases": above}
+        assert root["releases"] > MAX_ROOT_RELEASES
+        assert elapsed < 1.0
+        big_hits, operators = await _root_db_hits(neo4j_driver, "big")
+        small_hits, _ = await _root_db_hits(neo4j_driver, "small")
+        assert big_hits == small_hits
+        assert not {"Expand(All)", "Expand(Into)", "OptionalExpand(All)"} & operators
+    finally:
+        # The neo4j_driver fixture clears the graph in one transaction, which a 134,052-node
+        # root would push past the integration container's 256 MB heap.
+        await _consume(
+            neo4j_driver,
+            "MATCH (:Artist {id: 'big'})<-[:BY]-(r:Release) CALL (r) { DETACH DELETE r } IN TRANSACTIONS OF 20000 ROWS",
+        )
+
+
+async def test_strata_read_bounds_surface_as_the_errors_the_route_maps_to_504(
+    postgres_pool: AsyncPostgreSQLPool,
+    neo4j_driver: AsyncResilientNeo4jDriver,
+) -> None:
+    """A graph read past its timeout and a PostgreSQL read past its statement bound both fail fast.
+
+    The route turns a Neo4j ClientError naming TransactionTimedOut, and a QueryCanceled,
+    into a 504. The statement bound is transaction-local, so it never leaks onto the
+    pooled connection.
+    """
+    started = perf_counter()
+    with pytest.raises(Neo4jClientError, match="TransactionTimedOut"):
+        await run_query(neo4j_driver, "UNWIND range(1, $upper) AS value RETURN sum(toFloat(value)) AS total", timeout=0.05, upper=100_000_000)
+    assert perf_counter() - started < 2.0
+
+    async with postgres_pool.connection() as conn:
+        default = await (await conn.execute("SHOW statement_timeout")).fetchone()
+        started = perf_counter()
+        with pytest.raises(QueryCanceled):
+            async with conn.transaction(), conn.cursor() as cursor:
+                await cursor.execute(strata_queries._STATEMENT_TIMEOUT, {"timeout": "50ms"})
+                await cursor.execute("SELECT pg_sleep(5)")
+        assert perf_counter() - started < 2.0
+        assert await (await conn.execute("SHOW statement_timeout")).fetchone() == default
+
+
+async def test_the_pinned_schema_indexes_the_strata_release_group_join(postgres_pool: AsyncPostgreSQLPool) -> None:
+    """database-schema f21b3e1 indexes musicbrainz.releases (release_group_mbid), and the sibling read uses it."""
+    async with postgres_pool.connection() as conn, conn.cursor() as cursor:
+        await cursor.execute("SELECT indexdef FROM pg_indexes WHERE schemaname = 'musicbrainz' AND indexname = 'idx_mb_releases_release_group_mbid'")
+        assert await cursor.fetchone() == (
+            "CREATE INDEX idx_mb_releases_release_group_mbid ON musicbrainz.releases USING btree (release_group_mbid)",
+        )
+        async with conn.transaction():
+            # The fixture's tables are nearly empty, so a sequential scan would win on cost;
+            # disabling it shows the index is one the sibling read can use at all.
+            await cursor.execute("SET LOCAL enable_seqscan = off")
+            await cursor.execute(f"EXPLAIN {strata_queries._MB_SIBLINGS}", {"group_mbids": ["00000000-0000-0000-0000-00000000b501"]})
+            plan = "\n".join(row[0] for row in await cursor.fetchall())
+    assert "idx_mb_releases_release_group_mbid" in plan

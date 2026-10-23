@@ -566,6 +566,9 @@ curl "http://localhost:8004/api/explore/strata?artist_id=1&focus=ra:m:500&page=1
 
 # With your collector state and recorded times
 curl -H "Authorization: Bearer $TOKEN" "http://localhost:8004/api/explore/strata?artist_id=1"
+
+# A root above 134,051 releases is refused with a 422 that carries its size
+curl "http://localhost:8004/api/explore/strata?artist_id=$LARGE_ROOT_ID"
 ```
 
 ### Trend Analysis
