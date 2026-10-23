@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator
+from datetime import datetime
 from time import perf_counter
 from uuid import UUID
 
@@ -18,7 +19,7 @@ from psycopg.rows import dict_row
 
 from api.queries.credits_queries import get_person_connections
 from api.queries.helpers import run_count, run_query, run_single
-from api.syncer import DISCOGS_API_BASE, sync_collection
+from api.syncer import DISCOGS_API_BASE, sync_collection, sync_wantlist
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -267,3 +268,94 @@ async def test_z7d3_collection_upsert_preserves_existing_optional_values(
     assert route.call_count == 2
     assert stored == {"formats": formats, "metadata": {"catalog_number": "CAT-001"}}
     assert neo4j_release == {"catalog_number": "CAT-001"}
+
+
+def _dated_collection_payload(date_added: str | None) -> dict[str, object]:
+    payload = _collection_payload(labels=[{"name": "Integration Label"}], formats=[])
+    (release,) = payload["releases"]  # type: ignore[misc]
+    if date_added is None:
+        del release["date_added"]
+    else:
+        release["date_added"] = date_added
+    return payload
+
+
+def _dated_wantlist_payload(date_added: str | None) -> dict[str, object]:
+    want: dict[str, object] = {
+        "id": TEST_RELEASE_ID,
+        "rating": 0,
+        "notes": "integration want",
+        "basic_information": {
+            "title": "Integration Record",
+            "year": 2026,
+            "artists": [{"name": "Integration Artist"}],
+            "formats": [{"name": "Vinyl", "qty": "1"}],
+        },
+    }
+    if date_added is not None:
+        want["date_added"] = date_added
+    return {"wants": [want], "pagination": {"page": 1, "pages": 1}}
+
+
+async def test_date_added_survives_a_sync_that_omits_it_and_still_updates(
+    postgres_pool: AsyncPostgreSQLPool,
+    neo4j_driver: AsyncResilientNeo4jDriver,
+) -> None:
+    """A stored date_added is kept when a re-sync lacks it, and replaced when it differs.
+
+    Covers every store the field is written to: ``user_collections``, ``user_wantlists``,
+    ``owned_copies.acquired_at``, and the Neo4j ``COLLECTED`` and ``WANTS`` edges.
+    """
+    await _consume(neo4j_driver, "CREATE (:Release {id: $release_id})", release_id=str(TEST_RELEASE_ID))
+    first, later = "2026-01-02T03:04:05Z", "2026-03-04T05:06:07Z"
+    collection_url = f"{DISCOGS_API_BASE}/users/integration-user/collection/folders/0/releases"
+    wantlist_url = f"{DISCOGS_API_BASE}/users/integration-user/wants"
+    credentials = ("consumer-key", "consumer-secret", "access-token", "token-secret", "catalog-api-integration-test")
+
+    async def read_stores() -> dict[str, object]:
+        async with postgres_pool.connection() as conn, conn.cursor(row_factory=dict_row) as cursor:
+            await cursor.execute("SELECT date_added FROM user_collections WHERE user_id = %s", (TEST_USER_ID,))
+            collection = [row["date_added"] for row in await cursor.fetchall()]
+            await cursor.execute("SELECT date_added FROM user_wantlists WHERE user_id = %s", (TEST_USER_ID,))
+            wantlist = [row["date_added"] for row in await cursor.fetchall()]
+            await cursor.execute("SELECT acquired_at FROM owned_copies WHERE user_id = %s", (TEST_USER_ID,))
+            copies = [row["acquired_at"] for row in await cursor.fetchall()]
+        collected = await run_query(
+            neo4j_driver,
+            "MATCH (:User {id: $user_id})-[c:COLLECTED]->(:Release {id: $release_id}) RETURN c.date_added AS date_added",
+            user_id=str(TEST_USER_ID),
+            release_id=str(TEST_RELEASE_ID),
+        )
+        wants = await run_query(
+            neo4j_driver,
+            "MATCH (:User {id: $user_id})-[w:WANTS]->(:Release {id: $release_id}) RETURN w.date_added AS date_added",
+            user_id=str(TEST_USER_ID),
+            release_id=str(TEST_RELEASE_ID),
+        )
+        return {
+            "collection": collection,
+            "wantlist": wantlist,
+            "owned_copies": copies,
+            "collected": [row["date_added"] for row in collected],
+            "wants": [row["date_added"] for row in wants],
+        }
+
+    async def sync_both(date_added: str | None) -> None:
+        with respx.mock(assert_all_called=True) as router:
+            router.get(collection_url).respond(200, json=_dated_collection_payload(date_added))
+            router.get(wantlist_url).respond(200, json=_dated_wantlist_payload(date_added))
+            await sync_collection(TEST_USER_ID, "integration-user", *credentials, postgres_pool, neo4j_driver)
+            await sync_wantlist(TEST_USER_ID, "integration-user", *credentials, postgres_pool, neo4j_driver)
+
+    def expected(iso: str) -> dict[str, object]:
+        moment = datetime.fromisoformat(iso)
+        return {"collection": [moment], "wantlist": [moment], "owned_copies": [moment], "collected": [iso], "wants": [iso]}
+
+    await sync_both(first)
+    assert await read_stores() == expected(first)
+
+    await sync_both(None)
+    assert await read_stores() == expected(first)
+
+    await sync_both(later)
+    assert await read_stores() == expected(later)
