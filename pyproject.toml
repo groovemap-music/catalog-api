@@ -85,7 +85,10 @@ dev = [
 packages = ["api"]
 
 [tool.uv]
-exclude-newer = "2 days"
+exclude-newer = "7 days"
+# Security exception: certifi 2026.10.19 fixes PYSEC-2026-4320 and is inside the
+# 7-day window. Remove after 2026-10-27T02:24:17Z, when the window covers it.
+exclude-newer-package = { certifi = "2026-10-20T02:24:17Z" }
 # The schema dev dependency retains an older direct runtime URL. Resolve every
 # runtime edge to the independently reviewed Valkey helper commit, not two sources.
 override-dependencies = [
