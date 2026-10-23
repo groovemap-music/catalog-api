@@ -465,8 +465,68 @@ Masters and credits carry a rolled-up `state` (owned, else wanted, else none), a
 aggregates carry `states` counts. Every transition is observed from a Discogs sync; this
 route changes nothing. An anonymous caller, or an invalid token, gets none of these fields.
 
-Errors: 400 for a bad budget, 404 for an unknown artist or focus, 503 when Neo4j is not
-configured, and 504 when the graph read times out. The response is not cached yet.
+**Caching.** The catalog side of a read (the root's ladder and its MusicBrainz-only
+releases) depends on the root alone, so it is cached the way `/api/explore` caches: in
+Valkey under `explore:strata:<artist_id>`, for the same 24 hours, because the catalog
+changes only on import. Nothing else invalidates it. One entry serves every caller and
+every `budget`, `focus`, and `page`, since the fold runs on each request. The caller's
+`COLLECTED` and `WANTS` edges are read on every request and never cached, so the shared
+entry holds no caller id, state, or recorded time. A hit skips the root, ladder, and
+PostgreSQL reads; drawn labels and shared-personnel edges are still read, bounded by the
+budget. When Valkey is down or not configured, or an entry was written in an older cached
+form, the read goes to the graph and the response is the same. A failed cache write is
+counted under the `strata` cache and does not fail the request.
+
+**Large roots.** A root with more than **134,051** releases (its `BY` degree) is refused
+with a 422 before its ladder is read:
+
+```json
+{"error": "Artist '<artist_id>' has 1356055 releases; strata draws at most 134051", "releases": 1356055, "max_releases": 134051}
+```
+
+The size check reads the root's degree count, so it costs the same for 5 releases as for
+1,356,055 (`tests/test_real_databases.py` seeds a root one past the ceiling and compares
+PROFILE db hits). Why a refusal and why 134,051, from design spike gm-design-1h2l section
+5 (measured server-side on the predecessor graph) and ADR 0016 section 3:
+
+- Under 10,000 releases (2,882,089 of 2,882,133 artists) a strata read costs at most 50 ms
+  warm at p95. From 10,000 releases it costs 541 ms warm at p95 and up to 2,455 ms on a
+  first run, so the spike calls it GO with a cache, which this route now has. The largest
+  ten roots read their ladder in 779.5 ms warm at p95.
+- 134,051 releases is the largest root that was ever measured. Above it the verdict is
+  DEFER: nothing was measured and nothing is extrapolated. ADR 0016 leaves the choice to
+  this route: a precomputed per-artist summary, or refusing or capping those roots.
+- The ceiling refuses one sampled root: GrooveMap's rank 1, a placeholder credit for
+  compilations at 1,356,055 releases and 174,943 masters, ten times the largest measured
+  root. Rank 2, a placeholder at 87,683, and every other sampled root (the largest at
+  58,801) are served and cached.
+- A refusal, not a cap. A capped ladder would break the rule that every credit, master,
+  and release of the root is drawn or held by an aggregate, and its totals would be
+  wrong without saying so. A refusal says what it did and why.
+- Not a summary, yet. A per-artist master summary needs a precompute job and a table in
+  other repositories, to serve one placeholder root whose discography is every
+  compilation in the catalog. If the first-deployment check shows real demand for it, or
+  shows that a root under the ceiling is too slow, that is the evidence to build one.
+- On a cache hit, a root at the ceiling still costs about 0.6 s of CPU: 0.12 s to decode
+  the 4.2 MB entry and 0.50 s to fold it (a synthetic 134,051-release catalog on one
+  Apple-silicon core). The fold runs off the event loop.
+
+**Bounded reads.** No caller waits on an unbounded read. Every strata graph read carries a
+10 s server-side transaction timeout, and the MusicBrainz read sets a transaction-local
+10 s `statement_timeout`. That is four times the slowest read the spike measured, with
+room for the Bolt transfer it did not time. Either bound running out is a 504, and nothing
+is cached for that root.
+
+**Latency check on first deployment.** The numbers above come from the predecessor graph,
+which holds the placeholder roots at a tenth of their size. The strata program's
+[first-deployment checks](https://github.com/groovemap-music/design/blob/main/docs/programs/strata.md#first-deployment-checks)
+re-run the gm-design-1h2l latency harness against the first deployed catalog. That result
+confirms or moves the 134,051 ceiling and the 10 s bound, and decides whether a per-artist
+summary is needed.
+
+Errors: 400 for a bad budget, 404 for an unknown artist or focus, 422 for a root above the
+release ceiling (or a malformed parameter), 503 when Neo4j is not configured, and 504 when
+a graph or PostgreSQL read runs past its bound.
 
 ### Collection Sync
 
