@@ -80,7 +80,7 @@ async def postgres_pool() -> AsyncIterator[AsyncPostgreSQLPool]:
 
     The schema comes from ``groovemap_schema.postgres.create_postgres_schema``, pinned as
     a dev dependency on database-schema revision
-    ``ee6f101cdaa7c50ca20b7af824ea0e9a32da7dbf`` — the same producer revision
+    ``f21b3e1482a0f74f79d7802c7fcd7b22e074b7cd`` — the same producer revision
     ``contracts/persistence/v1/source.json`` records this repository as tested against.
     Applying the producer's own DDL is what keeps the fixture from drifting behind the
     tables the syncer, identity, and projection paths read; a hand-rolled subset is what
