@@ -101,15 +101,29 @@ RETURN style, style_release_count
 """
 
 
+# Genre release-year cells, bucketed on the release's own year exactly as the style cells are,
+# with undated releases excluded the same way. The consumer derives genre emergence years from
+# these. ``DISTINCT`` keeps a release counted once per cell even if the graph carries a
+# duplicate edge.
+_GENRE_YEAR_CYPHER = """
+MATCH (r:Release)-[:IS]->(g:Genre)
+WHERE r.year IS NOT NULL AND r.year > 0
+WITH g.name AS genre, r.year AS year, count(DISTINCT r) AS release_count
+ORDER BY genre, year
+RETURN genre, year, release_count
+"""
+
+
 async def query_style_year_counts(driver: Any) -> dict[str, list[dict[str, Any]]]:
     """Query release and master counts per style and release year, plus each style's genres.
 
     Returns ``style_years`` (one row per style and release year with ``release_count`` and
-    ``master_count``) and ``style_parents`` (one row per style and genre it co-occurs with, with
+    ``master_count``), ``style_parents`` (one row per style and genre it co-occurs with, with
     the co-tagged ``release_count``, the style's total ``style_release_count`` and the raw
-    ``share`` of the style's releases that carry the genre).
+    ``share`` of the style's releases that carry the genre) and ``genre_years`` (one row per
+    genre and release year with ``release_count``).
 
-    Shares are not floored: the 0.20 parent rule is the consumer's to apply. The three reads
+    Shares are not floored: the 0.20 parent rule is the consumer's to apply. The four reads
     run concurrently, each under :data:`STYLE_YEAR_QUERY_TIMEOUT_SECONDS`.
     """
     # A task group, not gather: when one read fails the others are cancelled rather than left
@@ -118,7 +132,9 @@ async def query_style_year_counts(driver: Any) -> dict[str, list[dict[str, Any]]
         years_read = group.create_task(run_query(driver, _STYLE_YEAR_CYPHER, database="neo4j", timeout=STYLE_YEAR_QUERY_TIMEOUT_SECONDS))
         genre_read = group.create_task(run_query(driver, _STYLE_GENRE_CYPHER, database="neo4j", timeout=STYLE_YEAR_QUERY_TIMEOUT_SECONDS))
         totals_read = group.create_task(run_query(driver, _STYLE_TOTAL_CYPHER, database="neo4j", timeout=STYLE_YEAR_QUERY_TIMEOUT_SECONDS))
+        genre_years_read = group.create_task(run_query(driver, _GENRE_YEAR_CYPHER, database="neo4j", timeout=STYLE_YEAR_QUERY_TIMEOUT_SECONDS))
     years, genre_cells, totals = years_read.result(), genre_read.result(), totals_read.result()
+    genre_years = genre_years_read.result()
     style_totals = {row["style"]: row["style_release_count"] for row in totals}
     parents = [
         {
@@ -130,8 +146,8 @@ async def query_style_year_counts(driver: Any) -> dict[str, list[dict[str, Any]]
         }
         for row in genre_cells
     ]
-    logger.info("🔍 Style-year counts query complete", cells=len(years), parent_pairs=len(parents))
-    return {"style_years": years, "style_parents": parents}
+    logger.info("🔍 Style-year counts query complete", cells=len(years), parent_pairs=len(parents), genre_cells=len(genre_years))
+    return {"style_years": years, "style_parents": parents, "genre_years": genre_years}
 
 
 async def query_label_longevity(driver: Any, limit: int = 50) -> list[dict[str, Any]]:

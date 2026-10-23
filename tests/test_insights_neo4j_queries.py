@@ -101,12 +101,19 @@ class TestQueryStyleYearCounts:
     """Tests for query_style_year_counts."""
 
     @staticmethod
-    def _run_query_for(years: list[dict[str, Any]], cells: list[dict[str, Any]], totals: list[dict[str, Any]]) -> AsyncMock:
-        """A run_query stand-in that answers each of the three reads by its Cypher."""
+    def _run_query_for(
+        years: list[dict[str, Any]],
+        cells: list[dict[str, Any]],
+        totals: list[dict[str, Any]],
+        genre_years: list[dict[str, Any]] | None = None,
+    ) -> AsyncMock:
+        """A run_query stand-in that answers each of the four reads by its Cypher."""
 
         async def run_query(_driver: Any, cypher: str, **_params: Any) -> list[dict[str, Any]]:
             if "OPTIONAL MATCH (r)-[:DERIVED_FROM]" in cypher:
                 return years
+            if "r.year AS year" in cypher and "(g:Genre)" in cypher:
+                return genre_years or []
             if "(g:Genre)" in cypher:
                 return cells
             return totals
@@ -128,21 +135,33 @@ class TestQueryStyleYearCounts:
             result = await query_style_year_counts(AsyncMock())
 
         assert result["style_years"] == years
+        assert result["genre_years"] == []
         assert result["style_parents"] == [
             {"style": "Bop", "genre": "Jazz", "release_count": 99, "style_release_count": 100, "share": 0.99},
             {"style": "Bop", "genre": "Funk / Soul", "release_count": 1, "style_release_count": 100, "share": 0.01},
         ]
 
     @pytest.mark.asyncio
+    async def test_genre_years_are_passed_through_as_published_rows(self) -> None:
+        """The genre-year read is returned as-is beside the style cells."""
+        from api.queries.insights_neo4j_queries import query_style_year_counts
+
+        genre_years = [{"genre": "Jazz", "year": 1959, "release_count": 5}, {"genre": "Jazz", "year": 1960, "release_count": 1}]
+        with patch("api.queries.insights_neo4j_queries.run_query", self._run_query_for([], [], [], genre_years)):
+            result = await query_style_year_counts(AsyncMock())
+
+        assert result["genre_years"] == genre_years
+
+    @pytest.mark.asyncio
     async def test_each_read_carries_the_long_internal_timeout(self) -> None:
-        """All three reads run under the style-year server-side budget, not the driver default."""
+        """All four reads run under the style-year server-side budget, not the driver default."""
         from api.queries.insights_neo4j_queries import STYLE_YEAR_QUERY_TIMEOUT_SECONDS, query_style_year_counts
 
         run_query = self._run_query_for([], [], [])
         with patch("api.queries.insights_neo4j_queries.run_query", run_query):
             await query_style_year_counts(AsyncMock())
 
-        assert run_query.await_count == 3
+        assert run_query.await_count == 4
         assert {call.kwargs["timeout"] for call in run_query.await_args_list} == {STYLE_YEAR_QUERY_TIMEOUT_SECONDS}
         assert STYLE_YEAR_QUERY_TIMEOUT_SECONDS > 30.0  # the genre-tree route budget
 
@@ -152,6 +171,14 @@ class TestQueryStyleYearCounts:
 
         assert "r.year AS year" in _STYLE_YEAR_CYPHER
         assert "m.year" not in _STYLE_YEAR_CYPHER
+
+    def test_genre_years_bucket_by_release_year_and_exclude_undated(self) -> None:
+        """The genre cell groups on the release's own year and drops undated releases like the style cell."""
+        from api.queries.insights_neo4j_queries import _GENRE_YEAR_CYPHER
+
+        assert "r.year AS year" in _GENRE_YEAR_CYPHER
+        assert "r.year IS NOT NULL AND r.year > 0" in _GENRE_YEAR_CYPHER
+        assert "count(DISTINCT r)" in _GENRE_YEAR_CYPHER
 
 
 class TestQueryLabelLongevity:

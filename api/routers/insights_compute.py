@@ -132,6 +132,9 @@ async def genre_trends(request: Request) -> JSONResponse:  # noqa: ARG001
 async def style_year_counts(request: Request) -> JSONResponse:  # noqa: ARG001
     """Return release and master counts per style and release year, with each style's genre shares.
 
+    Also returns the release count per genre and release year, from which the consumer derives
+    genre emergence years.
+
     Raw input for analytics-engine's style lifecycle and atlas layout. The read scans every
     release-style tag, so it runs under a long internal budget (see
     ``STYLE_YEAR_QUERY_TIMEOUT_SECONDS``) and is published with that processing budget in the
