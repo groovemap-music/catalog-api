@@ -86,12 +86,13 @@ def test_style_year_counts_contract_publishes_the_producer_read_budget() -> None
     contract = yaml.safe_load(_CONTRACT.read_text(encoding="utf-8"))
     operation = contract["paths"]["/api/internal/insights/style-year-counts"]["get"]
     assert operation["x-groovemap-max-processing-seconds"] == STYLE_YEAR_QUERY_TIMEOUT_SECONDS
-    assert contract["info"]["version"] == "1.2.0"
+    assert contract["info"]["version"] == "1.3.0"
 
 
 _STYLE_YEAR_RESULT = {
     "style_years": [{"style": "Bop", "year": 1959, "release_count": 4, "master_count": 3}],
     "style_parents": [{"style": "Bop", "genre": "Jazz", "release_count": 4, "style_release_count": 5, "share": 0.8}],
+    "genre_years": [{"genre": "Jazz", "year": 1959, "release_count": 5}],
 }
 
 
@@ -107,7 +108,7 @@ class TestStyleYearCountsEndpoint:
         assert body == _STYLE_YEAR_RESULT
 
         schemas = yaml.safe_load(_CONTRACT.read_text(encoding="utf-8"))["components"]["schemas"]
-        for key, schema in (("style_years", "StyleYearCount"), ("style_parents", "StyleParentShare")):
+        for key, schema in (("style_years", "StyleYearCount"), ("style_parents", "StyleParentShare"), ("genre_years", "GenreYearCount")):
             assert set(body[key][0]) == set(schemas[schema]["required"]) == set(schemas[schema]["properties"])
 
     def test_not_ready(self, test_client: TestClient) -> None:

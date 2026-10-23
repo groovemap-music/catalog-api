@@ -629,7 +629,7 @@ async def test_style_year_counts_on_a_seeded_graph(neo4j_driver: AsyncResilientN
     """Counts bucket on release year and shares are raw fractions, on the real engine.
 
     The Cypher runs under the long server-side timeout, so this also proves the engine accepts
-    the ``Query(..., timeout=...)`` wrapper for the three style-year reads.
+    the ``Query(..., timeout=...)`` wrapper for the four style-year reads.
     """
     await _consume(neo4j_driver, _STYLE_YEAR_GRAPH)
 
@@ -640,6 +640,13 @@ async def test_style_year_counts_on_a_seeded_graph(neo4j_driver: AsyncResilientN
         {"style": "Bop", "year": 1960, "release_count": 1, "master_count": 0},
         {"style": "Cool", "year": 1959, "release_count": 1, "master_count": 1},
         {"style": "Cool", "year": 1960, "release_count": 1, "master_count": 0},
+    ]
+    # Genre cells bucket on release year too. The year-0 release (r5) is excluded, and r6/r8 join the
+    # 1959 Jazz cell from outside Bop: r1, r2, r3, r6, r8.
+    assert result["genre_years"] == [
+        {"genre": "Funk / Soul", "year": 1959, "release_count": 1},
+        {"genre": "Jazz", "year": 1959, "release_count": 5},
+        {"genre": "Jazz", "year": 1960, "release_count": 1},
     ]
     parents = {(row["style"], row["genre"]): row for row in result["style_parents"]}
     assert set(parents) == {("Bop", "Jazz"), ("Bop", "Funk / Soul"), ("Cool", "Jazz")}
