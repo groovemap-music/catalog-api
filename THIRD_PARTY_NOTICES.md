@@ -14,7 +14,7 @@ copyright holders; it does not change any third-party license.
 
 ## Reciprocal-license runtime dependencies
 
-- `certifi` 2026.7.22 is licensed under `MPL-2.0` and is included through the HTTP
+- `certifi` 2026.10.19 is licensed under `MPL-2.0` and is included through the HTTP
   clients. Source: <https://github.com/certifi/python-certifi>.
 - `orjson` 3.13.0 declares `MPL-2.0 AND (Apache-2.0 OR MIT)` and is a direct runtime
   dependency. Source: <https://github.com/ijl/orjson>.
