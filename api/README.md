@@ -444,10 +444,22 @@ The master plane also carries `edges`.
   `undated_releases`. Undated decade buckets are named `undated`.
 - **Every entry is conserved.** Each credit, master, and release is drawn or held by
   exactly one aggregate, and every entry names a drawn `parent` on the plane above.
-- **Focus cursors.** Every aggregate `id` names a fixed member set. A focused response
-  draws 8 members per page (fewer only when the budget cannot hold 8), keeps the rest in
-  one aggregate under the same `id`, and folds the other planes further to make room.
-  Paging a focus visits each member once. An unknown cursor is a 404.
+- **Focus cursors.** Every aggregate `id` names a fixed member set, independent of the
+  budget and of the response it came from. Aggregates carry counts, not member lists, so
+  drilling into one always takes a focus request. `focus=<id>&page=<n>` returns a full
+  view, the same three planes as an unfocused read, not a list of members:
+  - That page's members are drawn as ordinary nodes on their own plane. The rest of the
+    set stays in one aggregate with the same `id`, so the next page is requested with the
+    same cursor.
+  - The other planes fold further to make room, credits included, so every drawn member's
+    parents are drawn.
+  - The page size is the server's: 8, fewer only when the budget cannot hold 8 or the set
+    has fewer than 8 members. It depends on the focus and the budget alone, so it is the
+    same on every page of a focus and the pages partition the set: paging visits each
+    member exactly once. Pages wrap, so `page` past the last starts over.
+  - `focus` in the response reports `{id, plane, page, pages, page_size, members}`, with
+    `page` already wrapped. A master node's `id` (`m:<id>`) is accepted and resolves to its
+    releases' cursor, `ra:m:<id>`. An unknown cursor is a 404.
 - **Edges** link two drawn masters when one person holds the same `CREDITED_ON.category`
   on releases of both (`kind: "shared_personnel"`, with `categories` and `people`). They
   never key on raw role strings.
@@ -468,8 +480,10 @@ route changes nothing. An anonymous caller, or an invalid token, gets none of th
 **Caching.** The catalog side of a read (the root's ladder and its MusicBrainz-only
 releases) depends on the root alone, so it is cached the way `/api/explore` caches: in
 Valkey under `explore:strata:<artist_id>`, for the same 24 hours, because the catalog
-changes only on import. Nothing else invalidates it. One entry serves every caller and
-every `budget`, `focus`, and `page`, since the fold runs on each request. The caller's
+changes only on import. Nothing else invalidates it. The key holds no `budget`, `focus`,
+or `page` because the entry is the root's unfolded catalog, not a response: the fold
+that applies them runs on every request, so one entry serves every caller and every
+view of that root. The caller's
 `COLLECTED` and `WANTS` edges are read on every request and never cached, so the shared
 entry holds no caller id, state, or recorded time. A hit skips the root, ladder, and
 PostgreSQL reads; drawn labels and shared-personnel edges are still read, bounded by the
