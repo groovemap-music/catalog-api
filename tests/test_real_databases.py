@@ -22,6 +22,7 @@ from psycopg.rows import dict_row
 from api.queries import strata_queries
 from api.queries.credits_queries import get_person_connections
 from api.queries.helpers import run_count, run_query, run_single
+from api.queries.insights_neo4j_queries import query_style_year_counts
 from api.queries.strata_queries import get_shared_personnel, get_strata_catalog, get_strata_labels, get_strata_marks, get_strata_root
 from api.strata import MAX_ROOT_RELEASES, Budget, apply_labels, build_strata, label_targets
 from api.syncer import DISCOGS_API_BASE, sync_collection, sync_wantlist
@@ -600,3 +601,57 @@ async def test_the_pinned_schema_indexes_the_strata_release_group_join(postgres_
             await cursor.execute(f"EXPLAIN {strata_queries._MB_SIBLINGS}", {"group_mbids": ["00000000-0000-0000-0000-00000000b501"]})
             plan = "\n".join(row[0] for row in await cursor.fetchall())
     assert "idx_mb_releases_release_group_mbid" in plan
+
+
+# Two styles over two genres. Bop has one master shared by two 1959 releases, a second 1959 master,
+# a masterless 1960 release, and an undated release. Cool's only 1959 release derives from a master
+# dated 1970, so a master-year bucket would put it in the wrong cell. A genre-only release and an
+# unrelated style must not leak into either style's cells.
+_STYLE_YEAR_GRAPH = """
+CREATE (jazz:Genre {name: 'Jazz'}), (funk:Genre {name: 'Funk / Soul'}),
+       (bop:Style {name: 'Bop'}), (cool:Style {name: 'Cool'}),
+       (m1:Master {id: 'm1', year: 1959}), (m2:Master {id: 'm2', year: 1959}), (m3:Master {id: 'm3', year: 1970}),
+       (r1:Release {id: 'r1', year: 1959}), (r2:Release {id: 'r2', year: 1959}), (r3:Release {id: 'r3', year: 1959}),
+       (r4:Release {id: 'r4', year: 1960}), (r5:Release {id: 'r5', year: 0}),
+       (r6:Release {id: 'r6', year: 1959}), (r7:Release {id: 'r7', year: 1960}),
+       (r8:Release {id: 'r8', year: 1959}),
+       (r1)-[:IS]->(bop), (r2)-[:IS]->(bop), (r3)-[:IS]->(bop), (r4)-[:IS]->(bop), (r5)-[:IS]->(bop),
+       (r1)-[:IS]->(jazz), (r2)-[:IS]->(jazz), (r3)-[:IS]->(jazz), (r4)-[:IS]->(jazz), (r5)-[:IS]->(jazz),
+       (r3)-[:IS]->(funk),
+       (r1)-[:DERIVED_FROM]->(m1), (r2)-[:DERIVED_FROM]->(m1), (r3)-[:DERIVED_FROM]->(m2),
+       (r6)-[:IS]->(cool), (r6)-[:IS]->(jazz), (r6)-[:DERIVED_FROM]->(m3),
+       (r7)-[:IS]->(cool),
+       (r8)-[:IS]->(jazz)
+"""
+
+
+async def test_style_year_counts_on_a_seeded_graph(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    """Counts bucket on release year and shares are raw fractions, on the real engine.
+
+    The Cypher runs under the long server-side timeout, so this also proves the engine accepts
+    the ``Query(..., timeout=...)`` wrapper for the three style-year reads.
+    """
+    await _consume(neo4j_driver, _STYLE_YEAR_GRAPH)
+
+    result = await query_style_year_counts(neo4j_driver)
+
+    assert result["style_years"] == [
+        {"style": "Bop", "year": 1959, "release_count": 3, "master_count": 2},
+        {"style": "Bop", "year": 1960, "release_count": 1, "master_count": 0},
+        {"style": "Cool", "year": 1959, "release_count": 1, "master_count": 1},
+        {"style": "Cool", "year": 1960, "release_count": 1, "master_count": 0},
+    ]
+    parents = {(row["style"], row["genre"]): row for row in result["style_parents"]}
+    assert set(parents) == {("Bop", "Jazz"), ("Bop", "Funk / Soul"), ("Cool", "Jazz")}
+    # The undated release counts toward membership: Bop has five releases, not four.
+    assert parents["Bop", "Jazz"] == {"style": "Bop", "genre": "Jazz", "release_count": 5, "style_release_count": 5, "share": 1.0}
+    # Below the lifecycle rule's 0.20 floor or exactly on it, nothing is dropped here.
+    assert parents["Bop", "Funk / Soul"] == {
+        "style": "Bop",
+        "genre": "Funk / Soul",
+        "release_count": 1,
+        "style_release_count": 5,
+        "share": 0.2,
+    }
+    # r7 carries the style and no genre, so Jazz covers one of Cool's two releases.
+    assert parents["Cool", "Jazz"] == {"style": "Cool", "genre": "Jazz", "release_count": 1, "style_release_count": 2, "share": 0.5}
