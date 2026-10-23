@@ -228,6 +228,36 @@ class TestCache:
         assert focused.json()["focus"]["id"] == "ra:m:500"
         reads["get_strata_catalog"].assert_awaited_once()
 
+    def test_every_focus_page_is_folded_from_the_one_cached_catalog(
+        self, test_client: TestClient, reads: dict[str, AsyncMock], valkey_store: dict[str, str]
+    ) -> None:
+        # The key holds no focus or page: the entry is the unfolded catalog, and each page is
+        # folded from it on request. Every page matches the same request read uncached.
+        import api.routers.explore as explore_module
+
+        pressings = tuple(Release(str(100 + i), "600", 1990 + i, ("1",)) for i in range(20))
+        reads["get_strata_catalog"].return_value = Catalog("1", "Root", (*CATALOG.releases, *pressings), {**CATALOG.master_years, "600": 1990})
+        urls = ["/api/explore/strata?artist_id=1"] + [f"/api/explore/strata?artist_id=1&focus=ra:m:600&page={page}" for page in range(4)]
+
+        cached = [test_client.get(url).json() for url in urls]
+        assert list(valkey_store) == ["explore:strata:1"]
+        reads["get_strata_catalog"].assert_awaited_once()
+        original = explore_module._valkey
+        explore_module._valkey = None
+        try:
+            uncached = [test_client.get(url).json() for url in urls]
+        finally:
+            explore_module._valkey = original
+        assert cached == uncached
+
+        focused = cached[1:]
+        assert [payload["focus"]["page"] for payload in focused] == [0, 1, 2, 0]
+        assert {payload["focus"]["pages"] for payload in focused} == {3}
+        drawn = [{node["release_id"] for node in payload["planes"][2]["nodes"] if node["parent"] == "m:600"} for payload in focused]
+        assert drawn[0].isdisjoint(drawn[1]) and drawn[1].isdisjoint(drawn[2]) and drawn[0].isdisjoint(drawn[2])
+        assert drawn[0] | drawn[1] | drawn[2] == {release.id for release in pressings}
+        assert drawn[3] == drawn[0]
+
     def test_marks_are_read_per_caller_and_never_cached(
         self, test_client: TestClient, reads: dict[str, AsyncMock], valkey_store: dict[str, str]
     ) -> None:

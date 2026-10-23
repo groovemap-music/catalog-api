@@ -55,6 +55,16 @@ async def proxy_genre_trends(request: Request) -> JSONResponse:
         return JSONResponse(content={"error": "Insights service unavailable"}, status_code=503)
 
 
+@router.get("/api/insights/style-atlas")
+async def proxy_style_atlas(request: Request) -> JSONResponse:
+    """Proxy style atlas endpoint (lifecycle stages plus layout)."""
+    try:
+        return await _forward(request, "/api/insights/style-atlas")
+    except Exception:
+        logger.exception("❌ Insights service unavailable")
+        return JSONResponse(content={"error": "Insights service unavailable"}, status_code=503)
+
+
 @router.get("/api/insights/label-longevity")
 async def proxy_label_longevity(request: Request) -> JSONResponse:
     """Proxy label longevity endpoint."""

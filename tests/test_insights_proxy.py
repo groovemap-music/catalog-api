@@ -51,6 +51,14 @@ class TestInsightsProxySuccess:
         assert response.status_code == 200
         assert response.json() == mock_data
 
+    def test_proxy_style_atlas_success(self, test_client: TestClient) -> None:
+        """proxy_style_atlas returns 200 with data on success."""
+        mock_data = {"styles": [{"style": "House", "stage": "mature"}], "layout": []}
+        with patch("api.routers.insights._forward", new=AsyncMock(return_value=mock_data)):
+            response = test_client.get("/api/insights/style-atlas")
+        assert response.status_code == 200
+        assert response.json() == mock_data
+
     def test_proxy_label_longevity_success(self, test_client: TestClient) -> None:
         """Line 71: proxy_label_longevity returns 200 with data on success."""
         mock_data = {"labels": [{"name": "Blue Note", "years": 80}]}
@@ -152,6 +160,37 @@ class TestForwardWithQueryString:
         mock_client.get.assert_awaited_once_with("http://insights:8008/api/insights/genre-trends?genre=Jazz")
 
 
+class TestStyleAtlasForwarding:
+    """The style atlas proxy reaches the analytics-engine route and relays its payload."""
+
+    def test_style_atlas_forwards_to_upstream_path(self, test_client: TestClient) -> None:
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"styles": []}
+        mock_response.status_code = 200
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("api.routers.insights.httpx.AsyncClient", return_value=mock_client):
+            response = test_client.get("/api/insights/style-atlas")
+        assert response.status_code == 200
+        assert response.json() == {"styles": []}
+        mock_client.get.assert_awaited_once_with("http://insights:8008/api/insights/style-atlas")
+
+    def test_style_atlas_503_when_upstream_connection_fails(self, test_client: TestClient) -> None:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=OSError("Connection refused"))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("api.routers.insights.httpx.AsyncClient", return_value=mock_client):
+            response = test_client.get("/api/insights/style-atlas")
+        assert response.status_code == 503
+        assert response.json() == {"error": "Insights service unavailable"}
+
+
 class TestInsightsProxy:
     def test_proxy_top_artists_503_when_unavailable(self, test_client: TestClient) -> None:
         """Verify /api/insights/top-artists returns 503 when insights service is down."""
@@ -162,6 +201,11 @@ class TestInsightsProxy:
     def test_proxy_genre_trends_503_when_unavailable(self, test_client: TestClient) -> None:
         with patch("api.routers.insights._forward", side_effect=Exception("Connection refused")):
             response = test_client.get("/api/insights/genre-trends?genre=Jazz")
+        assert response.status_code == 503
+
+    def test_proxy_style_atlas_503_when_unavailable(self, test_client: TestClient) -> None:
+        with patch("api.routers.insights._forward", side_effect=Exception("Connection refused")):
+            response = test_client.get("/api/insights/style-atlas")
         assert response.status_code == 503
 
     def test_proxy_label_longevity_503_when_unavailable(self, test_client: TestClient) -> None:

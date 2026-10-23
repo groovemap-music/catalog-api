@@ -36,6 +36,7 @@
     "insights_completeness": {"method": "GET", "path": "/api/insights/data-completeness"},
     "insights_genre_trends": {"method": "GET", "path": "/api/insights/genre-trends"},
     "insights_status": {"method": "GET", "path": "/api/insights/status"},
+    "insights_style_atlas": {"method": "GET", "path": "/api/insights/style-atlas"},
     "insights_this_month": {"method": "GET", "path": "/api/insights/this-month"},
     "insights_top_artists": {"method": "GET", "path": "/api/insights/top-artists"},
     "lookup": {"method": "GET", "path": "/api/lookup/{provider}/{value}"},
