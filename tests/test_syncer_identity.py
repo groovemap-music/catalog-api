@@ -573,6 +573,159 @@ class TestUnresolvedItems:
         assert events_of(recorder) == []
 
 
+class TestMissingDateAddedKeepsStoredValue:
+    """`date_added` is the collector's recorded time from Discogs. A payload
+    that omits it means "unknown here", so every store keeps what it holds; a
+    present, different value still updates, and a first sync invents nothing.
+
+    The scripted cursor cannot execute SQL, so the stores are checked by the
+    statement text the sync sends and the params it binds; the event rule is
+    exercised through the sync's own before/after diff.
+    """
+
+    @staticmethod
+    def graph_cypher(neo4j: MagicMock, fragment: str) -> tuple[str, dict[str, Any]]:
+        calls = [call.args for call in neo4j._mock_session.run.await_args_list if fragment in call.args[0] and "synced_at" in call.args[1]]
+        assert len(calls) == 1
+        return calls[0][0], calls[0][1]
+
+    @pytest.mark.asyncio
+    async def test_collection_upsert_coalesces_and_binds_none_when_missing(self, mock_neo4j: MagicMock) -> None:
+        cursor = ScriptedCursor()
+
+        await run_collection(scripted_pool(cursor), mock_neo4j, [collection_page([release_item(1, date_added=None)])], {})
+
+        upsert_sql, batch = cursor.executed_many[0]
+        assert "date_added = COALESCE(EXCLUDED.date_added, user_collections.date_added)" in upsert_sql
+        assert "date_added = EXCLUDED.date_added" not in upsert_sql
+        # Nothing is invented: the absent value reaches the upsert as NULL, so a
+        # first sync stores NULL and a re-sync falls through to the stored value.
+        assert batch[0][10] is None
+
+    @pytest.mark.asyncio
+    async def test_collection_upsert_binds_a_present_date_added(self, mock_neo4j: MagicMock) -> None:
+        cursor = ScriptedCursor()
+
+        await run_collection(scripted_pool(cursor), mock_neo4j, [collection_page([release_item(1, date_added="2025-06-01T00:00:00Z")])], {})
+
+        _, batch = cursor.executed_many[0]
+        assert batch[0][10] == "2025-06-01T00:00:00Z"
+
+    @pytest.mark.asyncio
+    async def test_wantlist_upsert_coalesces_and_binds_none_when_missing(self, mock_neo4j: MagicMock) -> None:
+        cursor = ScriptedCursor({WANT_ROWS: [[]]})
+        want = want_item(456)
+        del want["date_added"]
+
+        await run_wantlist(scripted_pool(cursor), mock_neo4j, [wantlist_page([want])], {})
+
+        upsert_sql, batch = cursor.executed_many[0]
+        assert "date_added = COALESCE(EXCLUDED.date_added, user_wantlists.date_added)" in upsert_sql
+        assert "date_added = EXCLUDED.date_added" not in upsert_sql
+        assert batch[0][8] is None
+
+    @pytest.mark.asyncio
+    async def test_wantlist_upsert_binds_a_present_date_added(self, mock_neo4j: MagicMock) -> None:
+        cursor = ScriptedCursor({WANT_ROWS: [[]]})
+
+        await run_wantlist(scripted_pool(cursor), mock_neo4j, [wantlist_page([want_item(456)])], {})
+
+        _, batch = cursor.executed_many[0]
+        assert batch[0][8] == "2025-02-01T00:00:00Z"
+
+    @pytest.mark.asyncio
+    async def test_owned_copy_mint_keeps_acquired_at_and_ignores_a_null_in_its_guard(self, mock_neo4j: MagicMock) -> None:
+        cursor = ScriptedCursor({PAGE_ROWS: [[], [collection_row(1, ROW_1, ITEM_1)]]})
+
+        await run_collection(scripted_pool(cursor), mock_neo4j, [collection_page([release_item(1, date_added=None)])], {})
+
+        mint_sql, _ = cursor.only(MINT_COPIES)
+        assert "acquired_at = COALESCE(EXCLUDED.acquired_at, owned_copies.acquired_at)" in mint_sql
+        # A NULL payload is not a change, so it must not rewrite the copy; a
+        # different present value, or a different item, still does.
+        assert "OR (EXCLUDED.acquired_at IS NOT NULL AND owned_copies.acquired_at IS DISTINCT FROM EXCLUDED.acquired_at)" in mint_sql
+        assert "owned_copies.item_id IS DISTINCT FROM EXCLUDED.item_id" in mint_sql
+
+    @pytest.mark.asyncio
+    async def test_collected_edge_keeps_its_date_added(self, mock_neo4j: MagicMock) -> None:
+        cursor = ScriptedCursor()
+
+        await run_collection(scripted_pool(cursor), mock_neo4j, [collection_page([release_item(1, date_added=None)])], {})
+
+        cypher, params = self.graph_cypher(mock_neo4j, "COLLECTED")
+        assert "c.date_added = coalesce(rel.date_added, c.date_added)" in cypher
+        assert params["releases"][0]["date_added"] is None
+
+    @pytest.mark.asyncio
+    async def test_wants_edge_keeps_its_date_added(self, mock_neo4j: MagicMock) -> None:
+        cursor = ScriptedCursor({WANT_ROWS: [[]]})
+        want = want_item(456)
+        del want["date_added"]
+
+        await run_wantlist(scripted_pool(cursor), mock_neo4j, [wantlist_page([want])], {})
+
+        cypher, params = self.graph_cypher(mock_neo4j, "WANTS")
+        assert "wnt.date_added = coalesce(w.date_added, wnt.date_added)" in cypher
+        assert params["wants"][0]["date_added"] is None
+
+    @pytest.mark.asyncio
+    async def test_missing_date_added_emits_no_update_event(self, mock_neo4j: MagicMock, recorder: AsyncMock) -> None:
+        """The stored value survives the upsert, so the after-state still holds it."""
+        held = collection_row(1, ROW_1, ITEM_1, owned_copy_id=COPY_1)
+        cursor = ScriptedCursor({PAGE_ROWS: [[held], [dict(held)]], SNAPSHOT_COPIES: [[(COPY_1,)]]})
+
+        await run_collection(scripted_pool(cursor), mock_neo4j, [collection_page([release_item(1, date_added=None)])], {})
+
+        assert events_of(recorder) == []
+
+    def test_a_date_added_that_went_missing_is_never_a_changed_field(self) -> None:
+        key = (1, 1001)
+        before = {key: collection_row(1, ROW_1, ITEM_1, owned_copy_id=COPY_1)}
+        after = {key: {**before[key], "date_added": None}}
+
+        assert syncer._collection_page_events([key], before, after, {ROW_1: COPY_1}) == []
+
+    def test_a_missing_date_added_does_not_hide_other_changes(self) -> None:
+        key = (1, 1001)
+        before = {key: collection_row(1, ROW_1, ITEM_1, owned_copy_id=COPY_1, rating=3)}
+        after = {key: {**before[key], "date_added": None, "rating": 5}}
+
+        events = syncer._collection_page_events([key], before, after, {ROW_1: COPY_1})
+
+        assert [(kind, payload["changed_fields"]) for kind, payload in events] == [("collection.item_updated", ["rating"])]
+
+    @pytest.mark.asyncio
+    async def test_a_different_date_added_still_updates_and_names_the_field(self, mock_neo4j: MagicMock, recorder: AsyncMock) -> None:
+        before = collection_row(1, ROW_1, ITEM_1, owned_copy_id=COPY_1)
+        after = collection_row(1, ROW_1, ITEM_1, owned_copy_id=COPY_1, date_added=datetime(2025, 6, 1, tzinfo=UTC))
+        cursor = ScriptedCursor({PAGE_ROWS: [[before], [after]], SNAPSHOT_COPIES: [[(COPY_1,)]]})
+
+        await run_collection(scripted_pool(cursor), mock_neo4j, [collection_page([release_item(1, date_added="2025-06-01T00:00:00Z")])], {})
+
+        assert events_of(recorder) == [
+            (
+                "collection.item_updated",
+                {"item_id": str(ITEM_1), "artifact_id": None, "owned_copy_id": str(COPY_1), "changed_fields": ["date_added"]},
+            )
+        ]
+        # ...and the copy is handed the new acquired_at to update.
+        _, mint_params = cursor.only(MINT_COPIES)
+        assert mint_params[3] == [datetime(2025, 6, 1, tzinfo=UTC)]
+
+    @pytest.mark.asyncio
+    async def test_first_sync_without_date_added_stores_null(self, mock_neo4j: MagicMock, recorder: AsyncMock) -> None:
+        added = collection_row(1, ROW_1, ITEM_1, date_added=None)  # type: ignore[arg-type]
+        cursor = ScriptedCursor({PAGE_ROWS: [[], [added]], LINK_COPIES: [[{"id": ROW_1, "owned_copy_id": COPY_1}]], SNAPSHOT_COPIES: [[(COPY_1,)]]})
+
+        await run_collection(scripted_pool(cursor), mock_neo4j, [collection_page([release_item(1, date_added=None)])], {})
+
+        _, batch = cursor.executed_many[0]
+        assert batch[0][10] is None
+        _, mint_params = cursor.only(MINT_COPIES)
+        assert mint_params[3] == [None]
+        assert [kind for kind, _ in events_of(recorder)] == ["collection.item_added"]
+
+
 class TestRecorderWiring:
     """The recorder is injected, optional, and never able to fail a sync."""
 
