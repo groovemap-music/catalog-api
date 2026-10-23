@@ -162,7 +162,7 @@ async def get_strata_catalog(driver: AsyncResilientNeo4jDriver, pg_pool: Any, ar
     """
     releases, master_years = await get_strata_ladder(driver, artist_id)
     if pg_pool is not None and master_years:
-        releases += await get_musicbrainz_only_releases(driver, pg_pool, releases, set(master_years))
+        releases = releases + await get_musicbrainz_only_releases(driver, pg_pool, releases, set(master_years))
     return Catalog(artist_id, artist_name, tuple(releases), master_years)
 
 
