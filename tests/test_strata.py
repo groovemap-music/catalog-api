@@ -24,6 +24,8 @@ from api.strata import (
     apply_labels,
     build_strata,
     decade,
+    decode_catalog,
+    encode_catalog,
     label_targets,
 )
 
@@ -609,3 +611,41 @@ class TestLabels:
         entries = sum(len(_entries(payload, level)) for level in range(3))
         assert entries <= 31
         assert len(json.dumps(payload, separators=(",", ":"))) < 12_000
+
+
+class TestCachedForm:
+    """The catalog survives the cache unchanged, and an entry this build cannot read is a miss."""
+
+    @pytest.mark.parametrize("seed", range(5))
+    def test_a_catalog_round_trips_and_folds_the_same(self, seed: int) -> None:
+        catalog, marks = random_catalog(seed, masters=40, masterless=25, musicbrainz=12)
+        catalog = Catalog(catalog.root_id, "Root", (*catalog.releases, Release("99", None, None, (ROOT,), "discogs", "Titled")), catalog.master_years)
+
+        decoded = decode_catalog(encode_catalog(catalog))
+
+        assert decoded is not None
+        assert decoded.releases == catalog.releases
+        assert dict(decoded.master_years) == dict(catalog.master_years)
+        assert (decoded.root_id, decoded.root_name) == (catalog.root_id, catalog.root_name)
+        for budget in (DEFAULT_BUDGET, Budget(6, 12, 21)):
+            assert build_strata(decoded, budget, marks=marks) == build_strata(catalog, budget, marks=marks)
+
+    def test_each_credit_is_stored_once(self) -> None:
+        releases = tuple(Release(str(10 + i), None, 1990, (ROOT,)) for i in range(100))
+        stored = json.loads(encode_catalog(Catalog(ROOT, None, releases, {})))
+        assert stored["credits"] == [[ROOT]]
+        assert stored["releases"][0] == ["10", None, 1990, 0]
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "",
+            "not json",
+            "[]",
+            '{"format": 0}',
+            '{"format": 1}',
+            '{"format": 1, "root_id": "1", "root_name": null, "credits": [], "releases": [["10", null, null, 3]], "master_years": {}}',
+        ],
+    )
+    def test_an_unreadable_entry_is_none(self, text: str) -> None:
+        assert decode_catalog(text) is None

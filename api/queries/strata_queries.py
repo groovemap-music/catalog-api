@@ -25,7 +25,7 @@ otherwise through linked sibling releases that derive from exactly one master.
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any
+from typing import Any, Final
 
 from common import AsyncResilientNeo4jDriver
 from common.query_debug import execute_sql
@@ -35,7 +35,19 @@ from api.queries.helpers import run_query, run_single
 from api.strata import Catalog, Mark, Release, id_key
 
 
-_ROOT = "MATCH (a:Artist {id: $artist_id}) RETURN a.id AS id, a.name AS name"
+# Every strata read carries a server-side timeout, so no caller waits on an unbounded read,
+# even for a root whose real cost exceeds what gm-design-1h2l measured. The slowest read
+# measured there took 2,455 ms (strata_ladder, run 0, 10,000+ band); 10 s is four times that
+# and leaves room for the Bolt transfer the spike did not time. A read that runs out is a 504.
+STRATA_READ_TIMEOUT_SECONDS: Final = 10.0
+
+# ``releases`` is the root's BY degree, which the route checks against MAX_ROOT_RELEASES
+# before it reads the ladder. The pattern names no label or property on the far side, so
+# Neo4j answers it from the node's degree count rather than by walking the relationships.
+_ROOT = """
+MATCH (a:Artist {id: $artist_id})
+RETURN a.id AS id, a.name AS name, COUNT { (a)<-[:BY]-() } AS releases
+"""
 
 # One row per release of the root. Titles are left out: only the few dozen entries a
 # response draws need one, and get_strata_labels fetches those by id.
@@ -129,6 +141,8 @@ JOIN musicbrainz.releases r ON r.release_group_mbid = rg.mbid
 WHERE r.discogs_release_id IS NULL
 """
 
+_STATEMENT_TIMEOUT = "SELECT set_config('statement_timeout', %(timeout)s, true)"
+
 _MB_SIBLINGS = """
 SELECT release_group_mbid::text AS group_mbid, array_agg(DISTINCT discogs_release_id) AS release_ids
 FROM musicbrainz.releases
@@ -138,12 +152,12 @@ GROUP BY release_group_mbid
 
 
 async def get_strata_root(driver: AsyncResilientNeo4jDriver, artist_id: str) -> dict[str, Any] | None:
-    return await run_single(driver, _ROOT, artist_id=artist_id)
+    return await run_single(driver, _ROOT, timeout=STRATA_READ_TIMEOUT_SECONDS, artist_id=artist_id)
 
 
 async def get_strata_ladder(driver: AsyncResilientNeo4jDriver, artist_id: str) -> tuple[list[Release], dict[str, int | None]]:
     """Every release of the root with its master, year, and credit, plus each master's year."""
-    rows = await run_query(driver, _LADDER, artist_id=artist_id)
+    rows = await run_query(driver, _LADDER, timeout=STRATA_READ_TIMEOUT_SECONDS, artist_id=artist_id)
     releases: list[Release] = []
     master_years: dict[str, int | None] = {}
     for row in rows:
@@ -168,7 +182,7 @@ async def get_strata_catalog(driver: AsyncResilientNeo4jDriver, pg_pool: Any, ar
 
 async def get_strata_marks(driver: AsyncResilientNeo4jDriver, user_id: str, artist_id: str) -> dict[str, Mark]:
     """The caller's collector state on the root's releases, keyed by Discogs release id."""
-    rows = await run_query(driver, _MARKS, user_id=user_id, artist_id=artist_id)
+    rows = await run_query(driver, _MARKS, timeout=STRATA_READ_TIMEOUT_SECONDS, user_id=user_id, artist_id=artist_id)
     found: dict[str, dict[str, Any]] = defaultdict(dict)
     for row in rows:
         found[str(row["id"])][row["kind"]] = _recorded(row["recorded_at"])
@@ -195,7 +209,9 @@ async def get_strata_labels(
     driver: AsyncResilientNeo4jDriver, release_ids: list[str], master_ids: list[str], artist_ids: list[str]
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Titles and names for the entries a response draws, by id."""
-    row = await run_single(driver, _LABELS, release_ids=release_ids, master_ids=master_ids, artist_ids=artist_ids)
+    row = await run_single(
+        driver, _LABELS, timeout=STRATA_READ_TIMEOUT_SECONDS, release_ids=release_ids, master_ids=master_ids, artist_ids=artist_ids
+    )
     if row is None:
         return {}, {}, {}
     return (
@@ -209,7 +225,7 @@ async def get_shared_personnel(driver: AsyncResilientNeo4jDriver, master_ids: li
     """Pairs of the given masters that share credited people, keyed on ``CREDITED_ON.category``."""
     if len(master_ids) < 2:
         return []
-    return await run_query(driver, _SHARED_PERSONNEL, master_ids=master_ids, limit=limit)
+    return await run_query(driver, _SHARED_PERSONNEL, timeout=STRATA_READ_TIMEOUT_SECONDS, master_ids=master_ids, limit=limit)
 
 
 async def get_musicbrainz_only_releases(
@@ -225,7 +241,9 @@ async def get_musicbrainz_only_releases(
     """
     release_ids = [int(r.id) for r in releases if r.id.isdigit()]
     numeric_masters = [int(m) for m in master_ids if m.isdigit()]
-    async with pg_pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+    async with pg_pool.connection() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        # The same bound as the graph reads, scoped to this transaction (a QueryCanceled past it).
+        await cur.execute(_STATEMENT_TIMEOUT, {"timeout": f"{int(STRATA_READ_TIMEOUT_SECONDS * 1000)}ms"})
         await execute_sql(cur, _MB_CANDIDATES, {"master_ids": numeric_masters, "release_ids": release_ids})
         candidates: list[dict[str, Any]] = await cur.fetchall()
         unlinked = sorted({row["group_mbid"] for row in candidates if row["group_master_id"] is None})
@@ -238,7 +256,7 @@ async def get_musicbrainz_only_releases(
     sibling_masters: dict[str, set[str]] = {}
     unknown = sorted({rid for ids in siblings.values() for rid in ids if rid not in known}, key=id_key)
     if unknown:
-        for row in await run_query(driver, _SIBLING_MASTERS, release_ids=unknown):
+        for row in await run_query(driver, _SIBLING_MASTERS, timeout=STRATA_READ_TIMEOUT_SECONDS, release_ids=unknown):
             sibling_masters[str(row["id"])] = {str(m) for m in row["masters"]}
     for rid, known_master in known.items():
         sibling_masters[rid] = {known_master} if known_master is not None else set()
