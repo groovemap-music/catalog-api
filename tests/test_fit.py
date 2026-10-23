@@ -13,6 +13,8 @@ collector cannot check against their own shelves is not an explanation.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 from api.fit import (
@@ -232,7 +234,7 @@ def test_depth_evidence_names_the_thread_and_the_holding() -> None:
 
 def test_depth_of_an_empty_collection_is_zero() -> None:
     """There is no thread to deepen."""
-    assert score_depth(empty_collection(), _context()) == {"score": 0.0, "evidence": [], "evidence_items": []}
+    assert score_depth(empty_collection(), _context()) == {"score": 0.0, "evidence": [], "evidence_items": [], "evidence_entries": []}
 
 
 def test_depth_takes_the_maximum_thread_not_the_sum() -> None:
@@ -388,7 +390,7 @@ def test_redundancy_matches_a_held_title_case_insensitively() -> None:
 
 def test_redundancy_of_an_unheld_record_is_zero() -> None:
     """Nothing held, nothing duplicated."""
-    assert score_redundancy(empty_collection(), _context()) == {"score": 0.0, "evidence": [], "evidence_items": []}
+    assert score_redundancy(empty_collection(), _context()) == {"score": 0.0, "evidence": [], "evidence_items": [], "evidence_entries": []}
 
 
 def test_redundancy_ignores_a_sibling_the_collector_does_not_hold() -> None:
@@ -630,3 +632,291 @@ def test_every_evidence_sentence_is_rendered_from_its_own_entry() -> None:
             assert len(component["evidence_items"]) == len(component["evidence"])
             for sentence, item in zip(component["evidence"], component["evidence_items"], strict=True):
                 assert _render_entry(item) == sentence
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# evidence_entries — uncapped, with ids, for the Strata atlas
+# ──────────────────────────────────────────────────────────────────────────────
+
+_LEGACY_EVIDENCE = Path(__file__).parent / "fixtures" / "fit_legacy_evidence.json"
+
+
+def _legacy_scenarios() -> dict[str, tuple[dict[str, Any], dict[str, Any]]]:
+    """The scenarios `fixtures/fit_legacy_evidence.json` was recorded from, before ids existed.
+
+    One per evidence kind and redundancy case, plus the two caps: affinity's and novelty's.
+    """
+    sibling = {"id": "1", "title": "Moanin'"}
+    return {
+        "exact_duplicate": (_jazz_collection(), _context(release_id="1")),
+        "same_master_same_family": (_jazz_collection(), _context(release_id="999", siblings=[{**sibling, "media_families": ["grooved"]}])),
+        "same_master_other_family": (_jazz_collection(), _context(release_id="999", siblings=[{**sibling, "media_families": ["digital"]}])),
+        "same_artist_and_title": (
+            fold_collection([_row("1", "Blue Train", artists=["a-coltrane"], labels=["l-blue-note"], genres=["Jazz"])]),
+            _context(release_id="999", master_id=None),
+        ),
+        "bridge_two_regions": (_two_region_collection(), _context(genres=["Jazz", "Electronic"], styles=[])),
+        "bridge_comma_genre": (_comma_genre_collection(), _context(genres=["Folk, World, & Country", "Jazz", "Rock"], styles=[])),
+        "jazz_candidate": (_jazz_collection(), _context()),
+        "empty_collection": (empty_collection(), _context()),
+        "capped_affinity": (
+            fold_collection(
+                [
+                    _row(str(index), f"LP {index}", artists=[f"a-{index}"], labels=["l-blue-note"], genres=["Jazz"], styles=["Hard Bop"])
+                    for index in range(6)
+                ]
+            ),
+            _context(artists=[("a-0", "One"), ("a-1", "Two"), ("a-2", "Three"), ("a-3", "Four")], genres=["Jazz"], styles=["Hard Bop"]),
+        ),
+        "novelty_cap_hides_style": (_jazz_collection(), _modal_candidate()),
+    }
+
+
+def _comma_genre_collection() -> dict[str, Any]:
+    """Three separate regions, one of them a Discogs genre whose name contains commas."""
+    return fold_collection(
+        [
+            _row("1", "A", artists=["a-1"], labels=["l-1"], genres=["Folk, World, & Country"]),
+            _row("2", "B", artists=["a-2"], labels=["l-2"], genres=["Jazz"]),
+            _row("3", "C", artists=["a-3"], labels=["l-3"], genres=["Rock"]),
+        ]
+    )
+
+
+def _modal_candidate() -> dict[str, Any]:
+    """Three unheld artists and an unheld label sort ahead of the one unheld style."""
+    return _context(
+        artists=[("a-x", "Xavier"), ("a-y", "Yusef"), ("a-z", "Zoot")],
+        labels=[("l-impulse", "Impulse!")],
+        genres=["Jazz"],
+        styles=["Modal"],
+    )
+
+
+def test_evidence_and_evidence_items_are_byte_identical_to_before_entries_existed() -> None:
+    """The capped lists existing consumers read did not change by a byte.
+
+    The fixture was recorded from the scoring as it stood before `evidence_entries` and
+    its ids were added, so a new key leaking into `evidence_items`, a reordered entry, or a
+    reworded sentence fails here.
+    """
+    actual = {
+        name: {
+            component_name: {"evidence": component["evidence"], "evidence_items": component["evidence_items"]}
+            for component_name, component in compute_fit(collection, candidate)["components"].items()
+        }
+        for name, (collection, candidate) in _legacy_scenarios().items()
+    }
+
+    assert json.dumps(actual, indent=2, ensure_ascii=False) + "\n" == _LEGACY_EVIDENCE.read_text(encoding="utf-8")
+
+
+def test_evidence_items_are_the_leading_entries_without_the_new_keys() -> None:
+    """Below the cap, entry `i` is item `i` plus ids, so the two never disagree on a fact."""
+    for collection, candidate in _legacy_scenarios().values():
+        for component in compute_fit(collection, candidate)["components"].values():
+            entries = component["evidence_entries"]
+            assert len(entries) >= len(component["evidence_items"])
+            for item, entry in zip(component["evidence_items"], entries, strict=False):
+                assert {key: value for key, value in entry.items() if key in item} == item
+                assert set(entry) - set(item) <= {"entity_type", "entity_id", "genres", "master_id", "drawable"}
+
+
+def test_every_entry_naming_one_entity_carries_its_type_and_id() -> None:
+    """Artists and labels by Discogs id, genres and styles by name, releases by id.
+
+    The type is stated on the entry, never left to be inferred from the shape of the id:
+    a Discogs id and a genre name are both strings. The bridge names several genres (its
+    `genres`) and the caveat names none, so neither carries a type or an id.
+    """
+    seen: set[tuple[str, str]] = set()
+    for collection, candidate in _legacy_scenarios().values():
+        for component in compute_fit(collection, candidate)["components"].values():
+            for entry in component["evidence_entries"]:
+                if entry["kind"] in {"bridge", "heuristic"}:
+                    assert "entity_type" not in entry
+                    assert "entity_id" not in entry
+                    continue
+                assert entry["entity_id"], entry
+                seen.add((entry["kind"], entry["entity_type"]))
+
+    assert seen == {
+        ("shared", "artist"),
+        ("shared", "label"),
+        ("shared", "genre"),
+        ("shared", "style"),
+        ("unheld", "artist"),
+        ("unheld", "label"),
+        ("unheld", "genre"),
+        ("unheld", "style"),
+        ("thread", "artist"),
+        ("thread", "label"),
+        ("duplicate", "release"),
+        ("duplicate_title", "release"),
+    }
+
+
+def test_artist_and_label_entries_carry_their_discogs_ids_not_their_names() -> None:
+    """The display name stays in `entity`; the id a consumer links on is beside it."""
+    profile = compute_fit(_jazz_collection(), _context())
+
+    affinity = profile["components"]["affinity"]["evidence_entries"]
+    novelty = profile["components"]["novelty"]["evidence_entries"]
+    depth = profile["components"]["depth"]["evidence_entries"]
+    assert {
+        "dimension": "label",
+        "entity": "Blue Note",
+        "kind": "shared",
+        "count": 3,
+        "entity_type": "label",
+        "entity_id": "l-blue-note",
+        "drawable": False,
+    } in affinity
+    assert {
+        "dimension": "genre",
+        "entity": "Jazz",
+        "kind": "shared",
+        "count": 3,
+        "entity_type": "genre",
+        "entity_id": "Jazz",
+        "drawable": True,
+    } in affinity
+    assert novelty == [
+        {"dimension": "artist", "entity": "John Coltrane", "kind": "unheld", "entity_type": "artist", "entity_id": "a-coltrane", "drawable": False}
+    ]
+    assert depth == [
+        {
+            "dimension": "label",
+            "entity": "Blue Note",
+            "kind": "thread",
+            "count": 3,
+            "entity_type": "label",
+            "entity_id": "l-blue-note",
+            "drawable": False,
+        }
+    ]
+
+
+def test_two_artists_sharing_a_name_keep_their_own_ids() -> None:
+    """The case ids exist for: two distinct artists a name alone would merge."""
+    candidate = _context(artists=[("a-1", "Sun Ra"), ("a-2", "Sun Ra")])
+
+    novelty = score_novelty(empty_collection(), candidate)["evidence_entries"]
+
+    assert [entry["entity_id"] for entry in novelty if entry["dimension"] == "artist"] == ["a-1", "a-2"]
+
+
+def test_graph_ids_are_stringified_the_way_strata_and_explore_return_them() -> None:
+    """An integer node id comes out as its string, so a client can join on the Strata ids."""
+    candidate = _context(artists=[(1001, "John Coltrane")], labels=[(2002, "Impulse!")])  # type: ignore[list-item]
+
+    novelty = score_novelty(empty_collection(), candidate)["evidence_entries"]
+
+    assert {(entry["entity_type"], entry["entity_id"]) for entry in novelty} >= {("artist", "1001"), ("label", "2002")}
+
+
+def test_bridge_entry_carries_its_genres_as_a_list() -> None:
+    """A genre name with commas in it survives, which the rendered sentence cannot promise."""
+    component = score_bridge(_comma_genre_collection(), _context(genres=["Folk, World, & Country", "Jazz", "Rock"], styles=[]))
+
+    bridge, caveat = component["evidence_entries"]
+    assert bridge["genres"] == ["Folk, World, & Country", "Jazz", "Rock"]
+    assert bridge["entity"] == "Folk, World, & Country, Jazz and Rock"
+    assert bridge["drawable"] is True
+    assert "entity_type" not in bridge
+    assert "entity_id" not in bridge
+    assert caveat == {"dimension": "bridge", "entity": "v0 heuristic", "kind": "heuristic", "drawable": False}
+
+
+def test_the_novelty_cap_hides_a_drawable_style_that_entries_still_carry() -> None:
+    """The 5.9% case: three unheld artists fill the cap and the unheld style is cut."""
+    component = score_novelty(_jazz_collection(), _modal_candidate())
+
+    assert [item["dimension"] for item in component["evidence_items"]] == ["artist", "artist", "artist"]
+    assert not any(item["dimension"] == "style" for item in component["evidence_items"])
+    drawable = [entry for entry in component["evidence_entries"] if entry["drawable"]]
+    assert drawable == [{"dimension": "style", "entity": "Modal", "kind": "unheld", "entity_type": "style", "entity_id": "Modal", "drawable": True}]
+    assert len(component["evidence_entries"]) == 5
+
+
+def test_affinity_entries_are_uncapped() -> None:
+    """Seven shared facets are all in `evidence_entries`; three are in `evidence_items`."""
+    collection, candidate = _legacy_scenarios()["capped_affinity"]
+
+    component = score_affinity(collection, candidate)
+
+    assert len(component["evidence_items"]) == int(FIT_CONSTANTS["evidence_limit"])
+    assert len(component["evidence_entries"]) == 7
+    assert {entry["entity_id"] for entry in component["evidence_entries"] if entry["drawable"]} == {"Jazz", "Hard Bop"}
+
+
+def test_redundancy_duplicates_carry_the_release_and_the_master() -> None:
+    """The atlas draws a duplicate as the held release under the candidate's master."""
+    exact = score_redundancy(_jazz_collection(), _context(release_id="1"))["evidence_entries"]
+    sibling = score_redundancy(
+        _jazz_collection(), _context(release_id="999", siblings=[{"id": "1", "title": "Moanin'", "media_families": ["digital"]}])
+    )["evidence_entries"]
+
+    assert exact == [
+        {
+            "dimension": "release",
+            "entity": "1",
+            "kind": "duplicate",
+            "release_id": "1",
+            "entity_type": "release",
+            "entity_id": "1",
+            "master_id": "m-blue-train",
+            "drawable": True,
+        }
+    ]
+    assert sibling == [
+        {
+            "dimension": "release",
+            "entity": "Moanin'",
+            "kind": "duplicate",
+            "release_id": "1",
+            "detail": "digital",
+            "entity_type": "release",
+            "entity_id": "1",
+            "master_id": "m-blue-train",
+            "drawable": True,
+        }
+    ]
+
+
+def test_a_held_masterless_release_is_not_drawable() -> None:
+    """With no master there is no L2 slot to put the duplicate in."""
+    entries = score_redundancy(_jazz_collection(), _context(release_id="1", master_id=None))["evidence_entries"]
+
+    assert entries == [
+        {"dimension": "release", "entity": "1", "kind": "duplicate", "release_id": "1", "entity_type": "release", "entity_id": "1", "drawable": False}
+    ]
+
+
+def test_a_title_only_duplicate_names_the_held_release_id_but_is_not_drawable() -> None:
+    """No master links the two, so the held record is listed rather than placed."""
+    collection = fold_collection(
+        [
+            _row("7", "Blue Train", artists=["a-coltrane"]),
+            _row("4", "BLUE TRAIN", artists=["a-coltrane"]),
+        ]
+    )
+
+    entries = score_redundancy(collection, _context(release_id="999", master_id=None))["evidence_entries"]
+
+    assert entries[0]["kind"] == "duplicate_title"
+    assert entries[0]["entity_type"] == "release"
+    assert entries[0]["entity_id"] == "4"
+    assert entries[0]["drawable"] is False
+
+
+def test_a_title_only_duplicate_from_a_collection_cached_before_ids_has_no_id() -> None:
+    """A fold cached before `held_title_releases` existed still scores; the id is just absent."""
+    collection = fold_collection([_row("1", "Blue Train", artists=["a-coltrane"])])
+    del collection["held_title_releases"]
+
+    component = score_redundancy(collection, _context(release_id="999", master_id=None))
+
+    assert component["score"] == FIT_CONSTANTS["redundancy_same_artist_and_title"]
+    assert "entity_id" not in component["evidence_entries"][0]
+    assert "entity_type" not in component["evidence_entries"][0]

@@ -158,6 +158,7 @@ def empty_collection() -> dict[str, Any]:
         "genre_labels": {},
         "genre_styles": {},
         "held_titles": {},
+        "held_title_releases": {},
     }
 
 
@@ -194,6 +195,7 @@ def fold_collection(rows: list[dict[str, Any]]) -> dict[str, Any]:
     genre_labels: dict[str, set[str]] = {}
     genre_styles: dict[str, set[str]] = {}
     held_titles: dict[str, str] = {}
+    held_title_releases: dict[str, str] = {}
 
     for row in rows:
         release_id = row.get("release_id")
@@ -228,7 +230,10 @@ def fold_collection(rows: list[dict[str, Any]]) -> dict[str, Any]:
         title = row.get("title")
         if title:
             for artist_id in row_artists:
-                held_titles[held_title_key(artist_id, str(title))] = str(title)
+                key = held_title_key(artist_id, str(title))
+                held_titles[key] = str(title)
+                # The lowest id, so a title held twice names the same release every fold.
+                held_title_releases[key] = min(held_title_releases.get(key, str(release_id)), str(release_id))
 
     folded["release_ids"] = sorted(release_ids)
     folded["master_ids"] = sorted(master_ids)
@@ -244,6 +249,7 @@ def fold_collection(rows: list[dict[str, Any]]) -> dict[str, Any]:
     folded["genre_labels"] = {genre: sorted(values) for genre, values in sorted(genre_labels.items())}
     folded["genre_styles"] = {genre: sorted(values) for genre, values in sorted(genre_styles.items())}
     folded["held_titles"] = dict(sorted(held_titles.items()))
+    folded["held_title_releases"] = dict(sorted(held_title_releases.items()))
     return folded
 
 

@@ -47,7 +47,7 @@ will eventually replace the guesses with learned weights.
 | Field | Meaning |
 | --- | --- |
 | `fit` | `affinity + novelty + bridge + depth − redundancy`, clipped to `[0, 1]`. Unweighted |
-| `components` | The five dimensions, each `{score, evidence, evidence_items}`. Always all five |
+| `components` | The five dimensions, each `{score, evidence, evidence_items}`, plus `evidence_entries` for a first-party session. Always all five |
 | `confidence` | How the candidate was **identified**, not how good the fit is. See below |
 | `policy_id` / `fit_version` | The decision procedure that produced the score. The same string |
 | `impression_id` | The showing this response was, to report an outcome against. `null` when the release has no native id |
@@ -123,6 +123,70 @@ own kind because its sentence names an artist rather than a shared media family)
 An evidence item never claims more than its own sentence does: `evidence` and
 `evidence_items` are two readings of one fact, not two facts that happen to agree.
 
+## Evidence entries, uncapped and with ids
+
+`evidence_entries` is every entry behind a component's score, with no cap, in the same
+order as `evidence_items`. Only a first-party session receives it; an app token never does
+(see [Delegated access](#delegated-access)). Below the cap, entry `i` is item `i` with keys added, so the
+two lists never state different facts. `evidence` and `evidence_items` are unchanged by
+it, byte for byte, and `tests/fixtures/fit_legacy_evidence.json` pins them.
+
+It exists for the Strata atlas (design ADR 0016, concept C′). The atlas draws every
+entry it can place and lists the rest beside the map. The cap of three suits a person
+reading sentences, but it can hide a drawable unheld style behind three unheld artists
+and labels, which happens in 5.9% of scored novelty cases.
+
+```json
+"novelty": {
+  "score": 0.6,
+  "evidence": ["Xavier is an artist your collection has never held", "…", "…"],
+  "evidence_items": [{"dimension": "artist", "entity": "Xavier", "kind": "unheld"}, "…", "…"],
+  "evidence_entries": [
+    {"dimension": "artist", "entity": "Xavier",   "kind": "unheld", "entity_type": "artist", "entity_id": "1001",  "drawable": false},
+    {"dimension": "artist", "entity": "Yusef",    "kind": "unheld", "entity_type": "artist", "entity_id": "1002",  "drawable": false},
+    {"dimension": "artist", "entity": "Zoot",     "kind": "unheld", "entity_type": "artist", "entity_id": "1003",  "drawable": false},
+    {"dimension": "label",  "entity": "Impulse!", "kind": "unheld", "entity_type": "label",  "entity_id": "2001",  "drawable": false},
+    {"dimension": "style",  "entity": "Modal",    "kind": "unheld", "entity_type": "style",  "entity_id": "Modal", "drawable": true}
+  ]
+},
+"bridge": {
+  "evidence_entries": [
+    {"dimension": "genre", "entity": "Electronic and Jazz", "kind": "bridge", "count": 2,
+     "genres": ["Electronic", "Jazz"], "drawable": true},
+    {"dimension": "bridge", "entity": "v0 heuristic", "kind": "heuristic", "drawable": false}
+  ]
+}
+```
+
+An entry carries every `evidence_items` field, and also:
+
+| Field | Meaning |
+| --- | --- |
+| `entity_type` | What `entity_id` names: `artist`, `label`, `genre`, `style`, or `release`. Read this rather than inferring the type from the id, because a Discogs id and a genre name are both strings. Present exactly when `entity_id` is |
+| `entity_id` | The graph id of `entity`, in the same form `/api/explore` and `/api/explore/strata` return, so a client can join on it. An artist, label, or release is its graph node id as a string (the Discogs id). A genre or style is its name, because the graph keys them by name. Absent on bridge entries, which name several genres (see `genres`), and on the heuristic caveat |
+| `genres` | Bridge only: the bridged regions as a list, in the order the sentence names them. Read this, not the sentence, because a genre name can contain commas (`Folk, World, & Country`) |
+| `master_id` | Redundancy `duplicate` only: the master the held release hangs under, when the candidate has one |
+| `drawable` | Always present. Whether the atlas can place the claim |
+
+`drawable` is decided per component. The atlas has no plane for artists or labels, so
+their entries are always listed beside the map rather than drawn on it.
+
+| Component | Drawable (`true`) | Listed beside the map (`false`) |
+| --- | --- | --- |
+| Affinity | A shared genre or style, as its node | A shared artist or label |
+| Novelty | An unheld genre or style, as its node | An unheld artist or label |
+| Bridge | The bridge entry, as the edge between the genre hulls in `genres` | The heuristic caveat |
+| Depth | Nothing | Every entry. Depth threads are artists and labels only |
+| Redundancy | A `duplicate` when the candidate has a master, as the held release in that master's slot (`master_id`) | A `duplicate` of a masterless release, and every `duplicate_title`. Neither has a master to sit under |
+
+A title-only duplicate's `entity_id` is the lowest id among the held releases with that
+artist and title.
+
+For up to ten minutes after the deploy that adds these fields, a collection folded before
+it is still cached, and a title-only duplicate then lacks its `entity_id` and
+`entity_type`. The session profile is cached under a key of its own, so it never comes
+from a body cached before `evidence_entries` existed.
+
 ## What is a v0 heuristic, and why bridge is the loudest one
 
 The real bridge question is whether a record joins two *communities* of a collector's
@@ -189,6 +253,12 @@ The endpoint takes a first-party session **or** an app token carrying `fit:read`
 `fit:read` is deliberately not folded into `collection:read`. The two authorise very
 different things: a kiosk scoring a record in a shop needs to *use* the collection to
 answer, and has no business listing what is in it.
+
+For the same reason an app token never receives `evidence_entries`, whatever scopes it
+carries. Uncapped, the entries name held releases and every held facet the candidate
+touches, which is close to a listing. An app token gets the capped profile, byte for byte
+as it was before the field existed, and it is cached under a separate key from the session
+profile so the cache cannot cross the two.
 
 ## The impression
 
