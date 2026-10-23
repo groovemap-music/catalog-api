@@ -29,7 +29,7 @@ The ladder
   ``no_master`` aggregate per drawn credit (``nm:<credit>``), which never folds into a master
   bucket. Releases with no year after the master-year fallback are *undated*: they carry
   ``"undated": true`` and ``"year": null``, aggregates count them, and the decade buckets
-  name them ``undated``.
+  name them ``undated``. Every node and aggregate counts its ``undated_releases``.
 
 Folding
 -------
@@ -65,7 +65,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter, defaultdict
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
@@ -460,20 +460,21 @@ class _Ladder:
 
     # -- Fitting ---------------------------------------------------------------------
 
-    def _credit_levels(self, budget: Budget, focus: _Focus | None) -> Iterator[tuple[list[Credit], list[Credit]]]:
+    def _credit_levels(self, budget: Budget, focus: _Focus | None) -> list[tuple[list[Credit], list[Credit]]]:
         """Credit planes from the finest to the coarsest the view can fall back to."""
         if focus is not None and focus.level == 0:
-            yield [self.root, *focus.page_members], list(focus.rest)
-            return
+            return [([self.root, *focus.page_members], list(focus.rest))]
         base = [self.root]
         if focus is not None and focus.credit is not None and focus.credit != self.root:
             base.append(focus.credit)
         rest = [c for c in self.credit_order if c not in base]
         # Everything fits, or the tail folds into `c:other`, which takes one slot itself.
         most = len(rest) if len(base) + len(rest) <= budget.credits else budget.credits - len(base) - 1
+        levels = []
         for extra in range(most, -1, -1):
             shown = set(base) | set(rest[:extra])
-            yield [c for c in self.credit_order if c in shown], rest[extra:]
+            levels.append(([c for c in self.credit_order if c in shown], rest[extra:]))
+        return levels
 
     def _release_floor(self, pinned: Sequence[str], lanes: Sequence[Credit], focus: _Focus | None) -> int:
         """The fewest release-plane entries the drawn masters and lanes can take."""
@@ -606,8 +607,8 @@ class _Ladder:
         y0, y1 = _span(items)
         counts: dict[str, Any] = {
             "releases": len(items),
-            "musicbrainz": sum(1 for item in items if item.release.provider == "musicbrainz"),
-            "undated": sum(1 for item in items if item.year is None),
+            "undated_releases": sum(1 for item in items if item.year is None),
+            "musicbrainz_releases": sum(1 for item in items if item.release.provider == "musicbrainz"),
             "y0": y0,
             "y1": y1,
         }
