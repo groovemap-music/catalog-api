@@ -969,6 +969,45 @@ Personalized taste analysis endpoints based on the authenticated user's synced c
 
 - `limit` — Number of blind spots to return (1–20, default: 5)
 
+### Taste Projection
+
+The caller's collection and wantlist folded to atlas ids for graph-explorer's Taste Strata
+(concept C', ADR 0016 sections 4 to 6). The rule is in [`api/taste_projection.py`](taste_projection.py).
+
+| Method | Path                         | Auth Required | Description                                                         |
+| ------ | ---------------------------- | ------------- | ------------------------------------------------------------------- |
+| GET    | `/api/user/taste-projection` | Yes           | Genre, style, and master aggregates of the caller's items, by state |
+
+The route takes no parameters and has no minimum collection size. It reads only the caller's
+own `COLLECTED` and `WANTS` edges (the ones `/api/user/collection` and `/api/user/wantlist`
+read) and refuses an anonymous or invalid token with a 401. It is part of the
+graph-explorer contract under `"version": 1`, because it only adds a route.
+
+**Response:**
+
+- `totals`: `items` (distinct releases held), `owned`, `wanted`, `wanted_owned` (in both
+  lists), `masterless_items`, `genre_only_items` (a genre and no style, so L0 only), and
+  `unplaced_items` (no genre at all).
+- `recorded_at`: `{owned, wanted}`, each `null` when nothing is in that state, else
+  `{first, last, undated}`.
+- `genres` (L0) and `styles` (L1): `{id, items, owned, wanted, state, recorded_at}`, the
+  most held first. `id` is the node name, as `/api/node/{node_id}` takes it.
+- `masters` (L2): the same fields plus `year` (`null` when the master has none), `genres`,
+  and `styles`, ordered by id. Graph-explorer places each master inside its dominant style
+  cell with the atlas layout, so the response carries the inputs and never a position.
+
+An item is counted once on every genre, style, and master it carries, never at a centroid, so
+genre and style `items` do not add up to `totals.items`. An item with no master is counted in
+`totals.masterless_items` and has no `masters` entry: it belongs to concept A's "no master"
+container. `state` is `owned`, `wanted`, or `wanted_owned`, rolled up from the items (a want
+is kept after a purchase). `recorded_at` holds the earliest and latest Discogs `date_added` of
+that state, compared as instants; `undated` counts the edges Discogs recorded no time for. A
+release owned in several copies is one item, with every copy's time in the `owned` span.
+
+**Caching.** Never cached. The read runs on every request, the response is
+`Cache-Control: no-store` with `Vary: Authorization`, and a projection is personal data that
+never enters a snapshot (`POST /api/snapshot` stores only the nodes a client sends).
+
 ### Collection Timeline
 
 Temporal analysis of the authenticated user's collection, showing how their taste has evolved over time.

@@ -802,6 +802,14 @@ curl "http://localhost:8004/api/user/taste/card" \
   -o taste-card.svg
 ```
 
+### Taste Projection (requires JWT authentication)
+
+```bash
+# Your collection and wantlist as genre, style, and master aggregates with states and recorded times
+curl "http://localhost:8004/api/user/taste-projection" \
+  -H "Authorization: Bearer <your-jwt-token>"
+```
+
 ### Collaboration Network
 
 ```bash

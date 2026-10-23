@@ -10,6 +10,8 @@ from typing import Any
 from common import AsyncResilientNeo4jDriver
 
 from api.queries.helpers import run_count, run_query
+from api.queries.strata_queries import _recorded
+from api.taste_projection import HeldItem, build_taste_projection
 
 
 async def get_collection_count(driver: AsyncResilientNeo4jDriver, user_id: str) -> int:
@@ -152,3 +154,61 @@ async def get_top_labels(
     LIMIT $limit
     """
     return await run_query(driver, cypher, timeout=120, user_id=user_id, limit=limit)
+
+
+# The most a taste projection read may run. A collection is bounded by what Discogs holds for
+# one account, and the read walks each held release's master, genres, and styles once.
+TASTE_PROJECTION_TIMEOUT_SECONDS = 30.0
+
+# One row per held release and edge type, so a release in both lists is two rows that
+# get_taste_projection folds into one item. ``recorded`` holds the ``date_added`` of every edge
+# that has one (a release owned in several copies has an edge per copy). The master read takes
+# the lowest id when a release derives from more than one, as the strata ladder does, and no
+# query here filters the Discogs ``"0"`` master sentinel: it is dropped at its source.
+_TASTE_PROJECTION = """
+MATCH (:User {id: $user_id})-[edge:COLLECTED|WANTS]->(r:Release)
+WITH r, type(edge) AS kind, count(edge) AS edges, collect(edge.date_added) AS recorded
+CALL (r) {
+    OPTIONAL MATCH (r)-[:DERIVED_FROM]->(m:Master)
+    RETURN m.id AS master_id, CASE WHEN m.year > 0 THEN m.year END AS master_year
+    ORDER BY master_id
+    LIMIT 1
+}
+CALL (r) {
+    OPTIONAL MATCH (r)-[:IS]->(g:Genre)
+    RETURN collect(DISTINCT g.name) AS genres
+}
+CALL (r) {
+    OPTIONAL MATCH (r)-[:IS]->(s:Style)
+    RETURN collect(DISTINCT s.name) AS styles
+}
+RETURN r.id AS id, kind, edges, recorded, master_id, master_year, genres, styles
+"""
+
+
+async def get_taste_projection(driver: AsyncResilientNeo4jDriver, user_id: str) -> dict[str, Any]:
+    """The caller's collection and wantlist folded to genre, style, and master aggregates.
+
+    Reads only the caller's own ``COLLECTED`` and ``WANTS`` edges. See :mod:`api.taste_projection`
+    for what is counted and how.
+    """
+    rows = await run_query(driver, _TASTE_PROJECTION, timeout=TASTE_PROJECTION_TIMEOUT_SECONDS, user_id=user_id)
+    held: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        entry = held.setdefault(
+            str(row["id"]),
+            {
+                "master_id": None if row["master_id"] is None else str(row["master_id"]),
+                "master_year": row["master_year"],
+                "genres": row["genres"],
+                "styles": row["styles"],
+                "owned_edges": 0,
+                "wanted_edges": 0,
+                "owned_at": [],
+                "wanted_at": [],
+            },
+        )
+        state = "owned" if row["kind"] == "COLLECTED" else "wanted"
+        entry[f"{state}_edges"] += row["edges"]
+        entry[f"{state}_at"].extend(text for text in map(_recorded, row["recorded"]) if text is not None)
+    return build_taste_projection(HeldItem(release_id, **fields) for release_id, fields in held.items())
