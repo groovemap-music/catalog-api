@@ -10,7 +10,10 @@ The catalog read is split from the caller's read on purpose. :func:`get_strata_c
 depends on the root alone, so it is the part a cache can hold; :func:`get_strata_marks`
 starts from the caller's own ``COLLECTED`` and ``WANTS`` edges, the same edges
 ``/api/user/collection`` and ``/api/user/wantlist`` read, so it costs the size of one
-collection rather than one discography.
+collection rather than one discography. The owned copy ids come from PostgreSQL
+(``user_collections.owned_copy_id``, minted by the collection sync), for the releases that
+read found owned and for nothing else; they belong to the caller, so they never enter the
+catalog cache.
 
 No query here filters the Discogs ``"0"`` master sentinel. It was removed at its source
 (discogs-graph-enricher) on 2026-10-23, so a release with no master has no
@@ -27,12 +30,16 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any, Final
 
+import structlog
 from common import AsyncResilientNeo4jDriver
 from common.query_debug import execute_sql
 from psycopg.rows import dict_row
 
 from api.queries.helpers import run_query, run_single
 from api.strata import Catalog, Mark, Release, id_key
+
+
+logger = structlog.get_logger(__name__)
 
 
 # Every strata read carries a server-side timeout, so no caller waits on an unbounded read,
@@ -141,6 +148,17 @@ JOIN musicbrainz.releases r ON r.release_group_mbid = rg.mbid
 WHERE r.discogs_release_id IS NULL
 """
 
+# Every copy the sync minted for the caller's rows on the given releases, earliest acquired
+# first: one row per Discogs instance, so a release held twice has two copies.
+_OWNED_COPIES = """
+SELECT release_id, owned_copy_id::text AS owned_copy_id
+FROM user_collections
+WHERE user_id = %(user_id)s::uuid
+  AND owned_copy_id IS NOT NULL
+  AND release_id = ANY(%(release_ids)s::bigint[])
+ORDER BY release_id, date_added NULLS LAST, owned_copy_id
+"""
+
 _STATEMENT_TIMEOUT = "SELECT set_config('statement_timeout', %(timeout)s, true)"
 
 _MB_SIBLINGS = """
@@ -180,21 +198,50 @@ async def get_strata_catalog(driver: AsyncResilientNeo4jDriver, pg_pool: Any, ar
     return Catalog(artist_id, artist_name, tuple(releases), master_years)
 
 
-async def get_strata_marks(driver: AsyncResilientNeo4jDriver, user_id: str, artist_id: str) -> dict[str, Mark]:
-    """The caller's collector state on the root's releases, keyed by Discogs release id."""
+async def get_strata_marks(driver: AsyncResilientNeo4jDriver, user_id: str, artist_id: str, pg_pool: Any = None) -> dict[str, Mark]:
+    """The caller's collector state on the root's releases, keyed by Discogs release id.
+
+    ``pg_pool`` may be ``None``, and then the owned releases carry no copy ids.
+    """
     rows = await run_query(driver, _MARKS, timeout=STRATA_READ_TIMEOUT_SECONDS, user_id=user_id, artist_id=artist_id)
     found: dict[str, dict[str, Any]] = defaultdict(dict)
     for row in rows:
         found[str(row["id"])][row["kind"]] = _recorded(row["recorded_at"])
+    owned = [release_id for release_id, kinds in found.items() if "COLLECTED" in kinds]
+    copies = await get_owned_copy_ids(pg_pool, user_id, owned) if pg_pool is not None else {}
     return {
         release_id: Mark(
             owned="COLLECTED" in kinds,
             wanted="WANTS" in kinds,
             owned_at=kinds.get("COLLECTED"),
             wanted_at=kinds.get("WANTS"),
+            owned_copy_ids=tuple(copies.get(release_id, ())),
         )
         for release_id, kinds in found.items()
     }
+
+
+async def get_owned_copy_ids(pg_pool: Any, user_id: str, release_ids: list[str]) -> dict[str, list[str]]:
+    """The caller's owned copy ids by Discogs release id, earliest acquired first.
+
+    A copy id is an additive field, so a failed read leaves the releases without one and
+    logs a warning rather than failing the response.
+    """
+    numeric = [int(release_id) for release_id in release_ids if release_id.isdigit()]
+    if not numeric:
+        return {}
+    try:
+        async with pg_pool.connection() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(_STATEMENT_TIMEOUT, {"timeout": f"{int(STRATA_READ_TIMEOUT_SECONDS * 1000)}ms"})
+            await execute_sql(cur, _OWNED_COPIES, {"user_id": user_id, "release_ids": numeric})
+            rows: list[dict[str, Any]] = await cur.fetchall()
+    except Exception:
+        logger.warning("⚠️ Strata owned copy lookup failed; owned releases degrade to no copy id", release_count=len(numeric), exc_info=True)
+        return {}
+    copies: dict[str, list[str]] = defaultdict(list)
+    for row in rows:
+        copies[str(row["release_id"])].append(row["owned_copy_id"])
+    return dict(copies)
 
 
 def _recorded(value: Any) -> str | None:

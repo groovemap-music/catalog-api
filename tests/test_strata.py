@@ -413,7 +413,7 @@ class TestCollectorState:
         payload = build_strata(self._catalog(), marks=None)
         assert payload["signed_in"] is False
         for entry in _walk(payload):
-            assert not {"state", "states", "recorded_at"} & set(entry)
+            assert not {"state", "states", "recorded_at", "owned_copy_ids"} & set(entry)
 
     def test_signed_in_callers_get_state_and_the_recorded_time(self) -> None:
         marks = {
@@ -434,6 +434,30 @@ class TestCollectorState:
         credit = payload["planes"][0]["nodes"][0]
         assert credit["state"] == "owned"
         assert credit["states"] == {"wanted_owned": 1, "none": 2, "wanted": 1}
+
+    def test_signed_in_callers_get_the_copy_ids_of_what_they_own(self) -> None:
+        marks = {
+            "10": Mark(owned=True, owned_copy_ids=("copy-a", "copy-b")),
+            "11": Mark(owned=True),
+            "12": Mark(wanted=True),
+        }
+        payload = build_strata(self._catalog(), marks=marks)
+        nodes = {node["release_id"]: node for node in payload["planes"][2]["nodes"]}
+        assert nodes["10"]["owned_copy_ids"] == ["copy-a", "copy-b"]
+        # Owned with no copy minted yet, wanted only, and unmarked all carry the empty form.
+        for release_id in ("11", "12", "13"):
+            assert nodes[release_id]["owned_copy_ids"] == []
+        # Copy ids ride on release nodes only.
+        for level in (0, 1):
+            for entry in _walk(payload["planes"][level]):
+                assert "owned_copy_ids" not in entry
+
+    def test_a_musicbrainz_only_release_has_no_copy(self) -> None:
+        catalog = Catalog(ROOT, "Root", (Release("10", "500", 1971, (ROOT,)), Release("mb-1", "500", 1999, (), "musicbrainz", "T")), {"500": 1971})
+        payload = build_strata(catalog, marks={"10": Mark(owned=True, owned_copy_ids=("copy-a",))})
+        nodes = {node["id"]: node for node in payload["planes"][2]["nodes"]}
+        assert nodes["r:10"]["owned_copy_ids"] == ["copy-a"]
+        assert nodes["mb:mb-1"]["owned_copy_ids"] == []
 
     def test_signed_in_without_marks_is_all_none(self) -> None:
         payload = build_strata(self._catalog(), marks={})
@@ -550,6 +574,10 @@ class TestPaging:
         [
             "",
             "x:1",
+            "r:404",
+            "r:",
+            "mb:404",
+            "R:10",
             "m:404",
             "ra:m:404",
             "nm:c:9",
@@ -567,6 +595,122 @@ class TestPaging:
         catalog = Catalog(ROOT, "Root", (Release("10", "500", 1971, (ROOT,)),), {"500": 1971})
         with pytest.raises(FocusNotFoundError):
             build_strata(catalog, focus=cursor or "?")
+
+
+def _node_ids(payload: dict[str, Any]) -> set[str]:
+    return {node["id"] for node in payload["planes"][2]["nodes"]}
+
+
+class TestPressingCursor:
+    """``r:<id>`` and ``mb:<mbid>`` resolve to the aggregate cursor and the page that hold the pressing."""
+
+    def _deep(self) -> Catalog:
+        # One master of 400 pressings in release order, plus a second master and a no-master lane.
+        deep = [Release(str(1000 + k), "500", 1950 + k // 8, (ROOT,)) for k in range(400)]
+        other = [Release("90", "501", 1980, (ROOT,)), Release("91", "501", 1981, (ROOT, "2"))]
+        lane = [Release(str(3000 + k), None, 1960 + k, (ROOT,)) for k in range(30)]
+        guest_lane = [Release(str(4000 + k), None, 1990 + k, (ROOT, "2")) for k in range(12)]
+        mb = [Release("mb-deep", "500", 1999, (), "musicbrainz", "MB deep")]
+        return Catalog(ROOT, "Root", tuple(deep + other + lane + guest_lane + mb), {"500": 1950, "501": 1980})
+
+    def test_a_deep_pressing_in_a_large_master_opens_on_its_page(self) -> None:
+        catalog = self._deep()
+        payload = build_strata(catalog, focus="r:1270")
+        # 270 pressings in: page 33 of 8, the same page a client would reach by paging.
+        assert payload["focus"] == {"id": "ra:m:500", "plane": "release", "page": 33, "pages": 51, "page_size": 8, "members": 401}
+        assert "r:1270" in _node_ids(payload)
+        assert payload["planes"][2]["nodes"][0]["parent"] == "m:500"
+        assert payload == build_strata(catalog, focus="ra:m:500", page=33)
+        assert_invariants(payload, DEFAULT_BUDGET)
+
+    def test_the_page_is_the_index_in_the_masters_own_order_over_the_page_size(self) -> None:
+        catalog = self._deep()
+        for budget in (DEFAULT_BUDGET, Budget(6, 12, 16), Budget(3, 6, 4)):
+            for release_id in ("1000", "1007", "1008", "1399", "1270"):
+                payload = build_strata(catalog, budget, focus=f"r:{release_id}")
+                focus = payload["focus"]
+                expected = build_strata(catalog, budget, focus="ra:m:500", page=focus["page"])
+                assert f"r:{release_id}" in _node_ids(payload)
+                assert payload == expected
+                assert_invariants(payload, budget)
+
+    def test_a_pressing_in_the_no_master_lane_opens_its_lane(self) -> None:
+        catalog = self._deep()
+        payload = build_strata(catalog, focus="r:3017")
+        assert payload["focus"] == {"id": "ra:nm:c:1", "plane": "release", "page": 2, "pages": 4, "page_size": 8, "members": 30}
+        assert "r:3017" in _node_ids(payload)
+        assert {node["parent"] for node in payload["planes"][2]["nodes"] if node["id"] == "r:3017"} == {"nm:c:1"}
+        assert payload == build_strata(catalog, focus="ra:nm:c:1", page=2)
+        assert_invariants(payload, DEFAULT_BUDGET)
+
+    def test_a_pressing_in_another_credits_lane_draws_that_credit(self) -> None:
+        catalog = self._deep()
+        payload = build_strata(catalog, focus="r:4009")
+        assert payload["focus"]["id"] == "ra:nm:c:1+2"
+        assert payload["focus"]["page"] == 1
+        assert "r:4009" in _node_ids(payload)
+        assert "c:1+2" in {node["id"] for node in payload["planes"][0]["nodes"]}
+        assert_invariants(payload, DEFAULT_BUDGET)
+
+    def test_a_musicbrainz_only_pressing_opens_on_the_page_of_its_master(self) -> None:
+        catalog = self._deep()
+        payload = build_strata(catalog, focus="mb:mb-deep")
+        assert payload["focus"]["id"] == "ra:m:500"
+        assert "mb:mb-deep" in _node_ids(payload)
+        # A MusicBrainz release sorts after the Discogs releases of its year (1999 is the last one here).
+        assert payload["focus"]["page"] == payload["focus"]["pages"] - 1
+        assert payload == build_strata(catalog, focus="ra:m:500", page=payload["focus"]["page"])
+        assert payload == build_strata(catalog, focus="mb:MB-DEEP")
+        assert_invariants(payload, DEFAULT_BUDGET)
+
+    def test_a_pressing_the_artist_does_not_hold_is_not_found(self) -> None:
+        catalog = self._deep()
+        for cursor in ("r:999999", "mb:not-here", "r:ra:m:500", "mb:", "r:1000:x"):
+            with pytest.raises(FocusNotFoundError):
+                build_strata(catalog, focus=cursor)
+
+    def test_a_musicbrainz_release_that_joins_no_master_is_not_on_this_ladder(self) -> None:
+        catalog = Catalog(ROOT, "Root", (Release("10", "500", 1971, (ROOT,)), Release("mb-x", "999", 1990, (), "musicbrainz", "T")), {"500": 1971})
+        with pytest.raises(FocusNotFoundError):
+            build_strata(catalog, focus="mb:mb-x")
+
+    def test_the_request_page_is_ignored_for_a_pressing(self) -> None:
+        catalog = self._deep()
+        assert build_strata(catalog, focus="r:1270", page=7) == build_strata(catalog, focus="r:1270")
+
+    def test_the_pressing_cursor_is_the_one_a_client_would_page_to(self) -> None:
+        # Walking the master's cursor page by page draws the pressing on exactly the page the
+        # pressing cursor names, and on no other.
+        catalog = self._deep()
+        cursor_page = build_strata(catalog, focus="r:1123")["focus"]["page"]
+        pages = build_strata(catalog, focus="ra:m:500")["focus"]["pages"]
+        holding = [page for page in range(pages) if "r:1123" in _node_ids(build_strata(catalog, focus="ra:m:500", page=page))]
+        assert holding == [cursor_page]
+
+    def test_conservation_holds_across_the_page(self) -> None:
+        catalog = self._deep()
+        payload = build_strata(catalog, focus="r:1270")
+        credits, masters, releases = payload["planes"]
+        assert payload["totals"]["releases"] == len(catalog.releases)
+        assert sum(entry["releases"] for entry in credits["nodes"] + credits["aggregates"]) == len(catalog.releases)
+        deep = next(node for node in masters["nodes"] if node["master_id"] == "500")
+        drawn = [node for node in releases["nodes"] if node["parent"] == "m:500"]
+        rest = [agg for agg in releases["aggregates"] if agg["parent"] == "m:500"]
+        assert len(drawn) + sum(agg["releases"] for agg in rest) == deep["releases"] == 401
+        assert [agg["id"] for agg in rest] == ["ra:m:500"]
+
+    @pytest.mark.parametrize("budget", [DEFAULT_BUDGET, Budget(6, 12, 16), Budget(3, 6, 4), Budget(5, 10, 6)])
+    @pytest.mark.parametrize("seed", [1, 2, 3])
+    def test_every_pressing_is_drawn_by_its_own_cursor(self, budget: Budget, seed: int) -> None:
+        catalog, marks = random_catalog(seed, masters=25, masterless=40, collaborators=6, musicbrainz=10)
+        built = build_strata(catalog, budget, marks=marks)
+        for release in catalog.releases:
+            node_id = f"r:{release.id}" if release.provider == "discogs" else f"mb:{release.id}"
+            payload = build_strata(catalog, budget, focus=node_id, marks=marks)
+            assert node_id in _node_ids(payload), node_id
+            assert payload["focus"]["plane"] == "release"
+            assert_invariants(payload, budget)
+        assert built["focus"] is None
 
 
 class TestLabels:
