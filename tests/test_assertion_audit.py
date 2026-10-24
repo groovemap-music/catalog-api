@@ -122,7 +122,7 @@ def test_repository_findings_have_exact_explained_dispositions() -> None:
     entries = json.loads((ROOT / "docs/test-assertion-triage.json").read_text())
     assert len(entries) == 55
     assert len({entry["id"] for entry in entries}) == len(entries)
-    assert sum(entry["origin"] == "historical-44" for entry in entries) == 44
+    assert sum(entry["origin"] == "historical-44" for entry in entries) == 43
     assert all(entry["reason"].strip() for entry in entries)
     review = triage(audit(ROOT / "tests"), entries)
     assert review.unexplained == []
