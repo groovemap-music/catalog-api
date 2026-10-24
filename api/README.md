@@ -1247,6 +1247,87 @@ $ curl -H "Authorization: Bearer $ADMIN_JWT" \
 - `unmapped_rate` — `releases_with_unmapped / media_tagged_releases`, rounded to 4 places, `0.0`
   when nothing is tagged yet
 
+### The Identity Ledger
+
+Admin-only, read-only history of catalog identity:
+[ADR 0016](https://github.com/groovemap-music/design/blob/main/docs/adr/0016-strata-graph-view.md)
+section 7 (concept D) and its 2026-10-24 amendment. These are PostgreSQL reads, not Neo4j
+ones, because the history lives only in `provider_aliases`, `catalog_item_supersessions`, and
+`identity_link_events`; ADR 0016 section 3 records the exception. Each request runs in one
+`REPEATABLE READ, READ ONLY` transaction. The rules are ported from design spike
+`gm-design-loj9` (`api/identity_ledger.py`, `api/queries/identity_ledger_queries.py`).
+
+| Method | Path                                         | Auth Required | Description                                                  |
+| ------ | -------------------------------------------- | ------------- | ------------------------------------------------------------ |
+| GET    | `/api/admin/identity/ledger/works`           | Admin JWT     | Works whose editions carry identity events, latest event first |
+| GET    | `/api/admin/identity/ledger/works/{work_id}` | Admin JWT     | One work's editions, states, evidence, and events at `as_of`   |
+| GET    | `/api/admin/identity/ledger/density`         | Admin JWT     | Identity events per UTC month, by type and `dated_from`        |
+
+**Vocabulary.** A *work* is a master-kind native item (a Discogs master or a MusicBrainz release
+group). An *edition* is a release-kind native item, resolved one hop through an open
+supersession. An edition is `not_recorded`, `discogs_only`, `musicbrainz_only`, `unresolved`,
+`split`, or `linked`. Its events are `minted`, `linked_at_ingest`, `evidence_attached`,
+`alias_closed`, `reattached`, `promoted`, `reverted`, and the dated link changes `link_added`,
+`link_changed`, and `link_removed`. Each event carries the `rule` that produces it.
+
+**Provenance.** Every event carries `dated_from`. `musicbrainz_fullexport` marks a link change
+the one-time backfill dated from the MusicBrainz full export (see
+[Backfilling the Identity Ledger from the MusicBrainz Full Export](#backfilling-the-identity-ledger-from-the-musicbrainz-full-export)). About 9% of those dates belong to
+an older link MusicBrainz replaced, so read them as "dated from the full export", not as
+recorded. `groovemap` marks GrooveMap's own tables and the link changes
+`musicbrainz-sql-loader` records at load.
+
+**Works list.** `page` and `page_size` (at most 100) page like the audit log, with no default
+window. `event` (any type but `minted`), `since` (inclusive), and `until` (exclusive, both RFC
+3339 with an offset) narrow the counted events. Each row has `gm_id`, the work's current
+`providers`, `editions`, `evented_editions`, `repaired_editions` (re-attached, promoted, or
+reverted), `work_disagreements` (editions with two work parents), and `first_event` and
+`last_event`. The evented counts and the two times cover the matching events only.
+
+**One work.** A superseded `work_id` answers `200` as its survivor with `requested_id`. An id
+that is not a work is `404`, and a malformed one `422`. `as_of` (RFC 3339) reads states,
+evidence, and events as recorded at that transaction time; omitted means now. A MusicBrainz row
+keeps no history of its Discogs link, so a past `unresolved` or `split` state reads today's link.
+`edition_limit` (default 100, at most 500) caps `editions`, while `edition_count` and
+`truncated` report the whole. An edition with two work parents lists its Discogs master's work
+first as `primary_work`, and sets `work_disagreement`.
+
+```console
+$ curl -H "Authorization: Bearer $ADMIN_JWT" \
+    "http://localhost:8004/api/admin/identity/ledger/works/<work-id>?as_of=2026-09-03T00:00:00Z&edition_limit=1"
+```
+
+```json
+{
+  "work": {"gm_id": "…0101", "state": "linked", "providers": [{"provider": "discogs", "external_id": "900101",
+           "valid_from": "2026-08-01T02:00:00Z", "valid_to": null}], "events": []},
+  "as_of": "2026-09-03T00:00:00Z",
+  "editions": [{
+    "gm_id": "…0001", "state": "linked", "primary_work": "…0101", "works": ["…0101"], "work_disagreement": false,
+    "provider_rows": [{"provider": "discogs", "external_id": "900001"},
+                      {"provider": "musicbrainz", "external_id": "…9000-…0001", "names_discogs_release": "900001"}],
+    "former_items": [],
+    "evidence": [{"provider": "discogs", "external_id": "900001", "source": "catalog", "held_by": "…0001",
+                  "valid_from": "2026-08-01T02:00:00Z", "valid_to": null, "opened_by": "mint", "closed_by": null}],
+    "events": [
+      {"at": "2025-11-14T00:00:00Z", "type": "link_added", "provider": "musicbrainz", "external_id": "…9000-…0001",
+       "discogs_id_before": null, "discogs_id_after": "900001", "source_ref": "20261024-001001",
+       "decision_ref": "…", "dated_from": "musicbrainz_fullexport", "rule": "…"},
+      {"at": "2026-08-01T02:00:00Z", "type": "minted", "item": "…0001", "providers": ["discogs"],
+       "dated_from": "groovemap", "rule": "…"}
+    ]
+  }],
+  "edition_count": 5,
+  "truncated": true
+}
+```
+
+**Density.** `kind` is `release` (default), `master`, `artist`, or `label`. Each bucket is
+`{month, type, dated_from, events}`, so a console can draw backfilled and recorded months apart.
+
+The list and the density strip aggregate over the whole alias table, since `provider_aliases`
+has no index on its validity times; expect them to cost a scan at catalog scale.
+
 ### Internal analytics computation
 
 Internal endpoints called by `analytics-engine` over HTTP to fetch raw query results. These wire
