@@ -1,4 +1,4 @@
-"""Admin router — login, logout, extraction history, trigger, gm_id projection, catalog re-attachment, and DLQ purge."""
+"""Admin router — login, logout, session introspection, extraction history, trigger, gm_id projection, catalog re-attachment, and DLQ purge."""
 
 import asyncio
 import json
@@ -23,10 +23,11 @@ from api.catalog_contract import (
 )
 from api.config import ApiConfig
 from api.dependencies import require_admin
-from api.limiter import limiter
+from api.limiter import bearer_token_key_func, limiter
 from api.models import (
     AdminLoginRequest,
     AdminLoginResponse,
+    AdminSessionResponse,
     AuditLogEntry,
     AuditLogResponse,
     DlqPurgeResponse,
@@ -127,6 +128,26 @@ async def admin_login(request: Request, body: AdminLoginRequest) -> JSONResponse
     return JSONResponse(
         content=AdminLoginResponse(access_token=access_token, expires_in=expires_in).model_dump(),
     )
+
+
+@router.get("/api/admin/auth/session")
+@limiter.limit("120/minute", key_func=bearer_token_key_func)
+async def admin_session(
+    request: Request,  # noqa: ARG001
+    current_admin: Annotated[dict[str, Any], Depends(require_admin)],
+) -> JSONResponse:
+    """Report the live admin session behind the bearer token.
+
+    ``require_admin`` already applied signature, expiry, revocation, password-change
+    and is_admin checks, so reaching this body means the session is live. Read-only:
+    no audit row and no state change, because the console polls it as an auth gate.
+    """
+    session = AdminSessionResponse(
+        admin_id=str(current_admin["sub"]),
+        email=str(current_admin.get("email", "")),
+        expires_at=datetime.fromtimestamp(int(current_admin["exp"]), UTC),
+    )
+    return JSONResponse(content=session.model_dump(mode="json"))
 
 
 _ADMIN_LOGOUT_UNAVAILABLE_DETAIL = "Logout could not be completed and your admin session is still active; please try again shortly"
