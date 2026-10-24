@@ -394,6 +394,13 @@ class TestExtractionTriggerSourceRouting:
         assert admin_mod._extractor_base_url(explicit, "discogs") == "http://dg:9200"
         assert admin_mod._extractor_base_url(explicit, "musicbrainz") == "http://mb:9300"
 
+    def test_extractor_base_url_rejects_unknown_source(self) -> None:
+        import api.routers.admin as admin_mod
+        from api.config import ApiConfig
+
+        with pytest.raises(ValueError, match="Unknown extraction source"):
+            admin_mod._extractor_base_url(ApiConfig.from_env(), "bandcamp")
+
     @pytest.mark.asyncio
     async def test_status_read_is_per_source(self) -> None:
         import api.routers.admin as admin_mod
@@ -1016,7 +1023,7 @@ class TestTrackExtraction:
             mock_client_instance.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client_instance
 
-            await admin_mod._track_extraction(extraction_id)
+            await admin_mod._track_extraction(extraction_id, "discogs")
 
         # Tracker must write the observed status verbatim — not map "completed" elsewhere.
         executed = [call.args for call in mock_cur.execute.await_args_list]
@@ -1083,7 +1090,7 @@ class TestTrackExtraction:
             mock_client_instance.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client_instance
 
-            await admin_mod._track_extraction(extraction_id)
+            await admin_mod._track_extraction(extraction_id, "discogs")
 
         # Assert the terminal UPDATE wrote "waiting" verbatim — not "completed".
         executed = [call.args for call in mock_cur.execute.await_args_list]
@@ -1147,7 +1154,7 @@ class TestTrackExtraction:
             mock_client_instance.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client_instance
 
-            await admin_mod._track_extraction(extraction_id)
+            await admin_mod._track_extraction(extraction_id, "discogs")
 
         executed = [call.args for call in mock_cur.execute.await_args_list]
         terminal_calls = [args for args in executed if "completed_at = NOW()" in args[0]]
@@ -1207,7 +1214,7 @@ class TestTrackExtraction:
             mock_client_instance.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client_instance
 
-            await admin_mod._track_extraction(extraction_id)
+            await admin_mod._track_extraction(extraction_id, "discogs")
 
         executed = [call.args for call in mock_cur.execute.await_args_list]
         terminal_calls = [args for args in executed if "completed_at = NOW()" in args[0]]
@@ -1279,7 +1286,7 @@ class TestTrackExtraction:
             mock_client_instance.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client_instance
 
-            await admin_mod._track_extraction(extraction_id)
+            await admin_mod._track_extraction(extraction_id, "discogs")
 
         admin_mod._pool = original_pool
         admin_mod._config = original_config
@@ -1326,7 +1333,7 @@ class TestTrackExtraction:
             mock_client_instance.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client_instance
 
-            await admin_mod._track_extraction(extraction_id)
+            await admin_mod._track_extraction(extraction_id, "discogs")
 
         admin_mod._pool = original_pool
         admin_mod._config = original_config
@@ -1374,7 +1381,7 @@ class TestTrackExtraction:
             mock_client_instance.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client_instance
 
-            await admin_mod._track_extraction(extraction_id)
+            await admin_mod._track_extraction(extraction_id, "discogs")
 
         admin_mod._pool = original_pool
         admin_mod._config = original_config
@@ -1412,7 +1419,7 @@ class TestTrackExtraction:
         admin_mod._tracking_tasks[extraction_id] = MagicMock()
 
         with patch("api.routers.admin.asyncio.sleep", side_effect=asyncio.CancelledError):
-            await admin_mod._track_extraction(extraction_id)
+            await admin_mod._track_extraction(extraction_id, "discogs")
 
         assert extraction_id not in admin_mod._tracking_tasks
 
@@ -1426,7 +1433,7 @@ class TestTrackExtraction:
         original_pool = admin_mod._pool
         admin_mod._pool = None
 
-        await admin_mod._track_extraction("fake-id")
+        await admin_mod._track_extraction("fake-id", "discogs")
 
         admin_mod._pool = original_pool
 
@@ -1477,7 +1484,7 @@ class TestTrackExtraction:
             mock_client_instance.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client_instance
 
-            await admin_mod._track_extraction(extraction_id)
+            await admin_mod._track_extraction(extraction_id, "discogs")
 
         # Verify the extraction was marked as failed due to timeout
         calls = mock_cur.execute.call_args_list
@@ -2083,7 +2090,7 @@ class TestTrackExtractionResilience:
                 mock_client.__aexit__ = AsyncMock(return_value=False)
                 mock_client_cls.return_value = mock_client
 
-                await admin_mod._track_extraction(str(uuid4()))
+                await admin_mod._track_extraction(str(uuid4()), "discogs")
         finally:
             admin_mod._pool, admin_mod._config = original_pool, original_config
 
@@ -2126,7 +2133,7 @@ class TestTrackExtractionResilience:
                 mock_client_cls.return_value = mock_client
 
                 # Must not raise — the safety net swallows and records the crash.
-                await admin_mod._track_extraction(str(uuid4()))
+                await admin_mod._track_extraction(str(uuid4()), "discogs")
         finally:
             admin_mod._pool, admin_mod._config = original_pool, original_config
 
@@ -2166,7 +2173,7 @@ class TestTrackExtractionResilience:
                 mock_client_cls.return_value = mock_client
 
                 # Must not raise even though every recovery write fails.
-                await admin_mod._track_extraction(str(uuid4()))
+                await admin_mod._track_extraction(str(uuid4()), "discogs")
         finally:
             admin_mod._pool, admin_mod._config = original_pool, original_config
 

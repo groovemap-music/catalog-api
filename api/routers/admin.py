@@ -33,6 +33,7 @@ from api.models import (
     DlqPurgeResponse,
     ExtractionHistoryResponse,
     ExtractionListResponse,
+    ExtractionSource,
     ExtractionTriggerRequest,
     ExtractionTriggerResponse,
     ProjectionTriggerResponse,
@@ -394,12 +395,14 @@ def _run_has_started(health: dict[str, Any], tracked_seconds: float) -> bool:
 
 def _extractor_base_url(config: ApiConfig, source: str) -> str:
     """Base URL of the extractor that owns ``source`` (ADR 0005: one producer per source)."""
+    if source == "discogs":
+        return f"http://{config.extractor_discogs_host}:{config.extractor_discogs_port}"
     if source == "musicbrainz":
         return f"http://{config.extractor_musicbrainz_host}:{config.extractor_musicbrainz_port}"
-    return f"http://{config.extractor_discogs_host}:{config.extractor_discogs_port}"
+    raise ValueError(f"Unknown extraction source: {source!r}")
 
 
-async def _track_extraction(extraction_id: str, source: str = "discogs") -> None:
+async def _track_extraction(extraction_id: str, source: ExtractionSource) -> None:
     """Background task: poll the source's extractor /health and update extraction record."""
     if _pool is None or _config is None:
         return
