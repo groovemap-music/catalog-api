@@ -10,7 +10,8 @@ from api.config import DEFAULT_DISCOGS_USER_AGENT, ApiConfig
 
 
 ROOT = Path(__file__).parent.parent
-AUTOMATION_REVISION = "833cb464507678c38ab78bd4718ce697399463e9"
+AUTOMATION_CI_REVISION = "dbf22ed83d486e9484fc8c6385c7c3e5995700e4"
+AUTOMATION_RELEASE_REVISION = "833cb464507678c38ab78bd4718ce697399463e9"
 PYTHON_LIBRARIES_REVISION = "771515349b592ff569b1b3e5712f7bef936bab58"
 
 
@@ -26,10 +27,10 @@ def _dependabot() -> dict[str, object]:
     return document
 
 
-def _assert_full_automation_pin(reference: object, workflow: str) -> None:
-    expected = f"groovemap-music/automation/.github/workflows/{workflow}@{AUTOMATION_REVISION}"
+def _assert_full_automation_pin(reference: object, workflow: str, revision: str) -> None:
+    expected = f"groovemap-music/automation/.github/workflows/{workflow}@{revision}"
     assert reference == expected
-    assert re.fullmatch(r"[0-9a-f]{40}", AUTOMATION_REVISION)
+    assert re.fullmatch(r"[0-9a-f]{40}", revision)
 
 
 def _indexed_document_paths() -> tuple[Path, ...]:
@@ -74,7 +75,7 @@ def test_ci_uses_one_immutable_graph_for_every_trigger() -> None:
     assert set(jobs) == {"required"}
     required = jobs["required"]
     assert isinstance(required, dict)
-    _assert_full_automation_pin(required["uses"], "reusable-ci.yml")
+    _assert_full_automation_pin(required["uses"], "reusable-ci.yml", AUTOMATION_CI_REVISION)
     assert "if" not in required
 
     inputs = required["with"]
@@ -127,7 +128,7 @@ def test_release_callers_pin_distinct_artifacts_and_repository_named_images() ->
     ):
         job = jobs[name]
         assert isinstance(job, dict)
-        _assert_full_automation_pin(job["uses"], "reusable-release.yml")
+        _assert_full_automation_pin(job["uses"], "reusable-release.yml", AUTOMATION_RELEASE_REVISION)
         inputs = job["with"]
         assert isinstance(inputs, dict)
         assert inputs["repository-name"] == "catalog-api"
