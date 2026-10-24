@@ -1,6 +1,6 @@
 {
-  "binding_sha256": "9651ff4ee0a67080e8e7a5d16cf67958bd444f4da235a340b77b6cb2950ee1fd",
-  "contract_sha256": "9063fa89d8d112d4c0240f0acab625c328d9e1c79bae1b505a3a232063355e35",
-  "contract_version": "1.4.0",
+  "binding_sha256": "30c0a4e1e660d1e7d13feadcb8d2ecddbb6e52bf4a3726eacefc0e3dd613e917",
+  "contract_sha256": "cd667d5c88f51771e205bf7472e5e522462df6bf873fdc8ff020cb714d4344b8",
+  "contract_version": "1.5.0",
   "producer_repository": "https://github.com/groovemap-music/catalog-api"
 }

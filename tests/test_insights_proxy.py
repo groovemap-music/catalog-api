@@ -191,6 +191,58 @@ class TestStyleAtlasForwarding:
         assert response.json() == {"error": "Insights service unavailable"}
 
 
+class TestStyleAtlasCotagsForwarding:
+    """The co-tag proxy reaches the analytics-engine route with its style and relays the payload."""
+
+    def test_cotags_forward_the_style_to_the_upstream_path(self, test_client: TestClient) -> None:
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"style": "Bop", "cotags": []}
+        mock_response.status_code = 200
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("api.routers.insights.httpx.AsyncClient", return_value=mock_client):
+            response = test_client.get("/api/insights/style-atlas/cotags", params={"style": "Hard Bop"})
+        assert response.status_code == 200
+        assert response.json() == {"style": "Bop", "cotags": []}
+        mock_client.get.assert_awaited_once_with("http://insights:8008/api/insights/style-atlas/cotags?style=Hard+Bop")
+
+    def test_cotags_relay_an_upstream_status(self, test_client: TestClient) -> None:
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"error": "Unknown style"}
+        mock_response.status_code = 404
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("api.routers.insights.httpx.AsyncClient", return_value=mock_client):
+            response = test_client.get("/api/insights/style-atlas/cotags", params={"style": "Nope"})
+        assert response.status_code == 404
+        assert response.json() == {"error": "Unknown style"}
+
+    def test_cotags_503_when_upstream_connection_fails(self, test_client: TestClient) -> None:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=OSError("Connection refused"))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("api.routers.insights.httpx.AsyncClient", return_value=mock_client):
+            response = test_client.get("/api/insights/style-atlas/cotags", params={"style": "Bop"})
+        assert response.status_code == 503
+        assert response.json() == {"error": "Insights service unavailable"}
+
+    def test_cotags_require_a_style(self, test_client: TestClient) -> None:
+        """A request without ``style`` is rejected before anything is forwarded."""
+        with patch("api.routers.insights._forward", side_effect=AssertionError("must not forward")):
+            assert test_client.get("/api/insights/style-atlas/cotags").status_code == 422
+            assert test_client.get("/api/insights/style-atlas/cotags", params={"style": ""}).status_code == 422
+
+
 class TestInsightsProxy:
     def test_proxy_top_artists_503_when_unavailable(self, test_client: TestClient) -> None:
         """Verify /api/insights/top-artists returns 503 when insights service is down."""

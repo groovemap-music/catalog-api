@@ -31,6 +31,15 @@ STYLE_LANDMARK_QUERY_TIMEOUT_SECONDS = 300.0
 # Masters kept per style. Concept B draws the top 25 masters of each style as landmarks.
 LANDMARKS_PER_STYLE = 25
 
+# Server-side budget for the co-tag read. It expands every release into its style pairs and
+# counts them, a scan at least the size of the style-year read, so it gets the same long
+# internal budget. The internal-insights contract publishes this figure as
+# ``x-groovemap-max-processing-seconds`` on the style-cotags operation.
+STYLE_COTAG_QUERY_TIMEOUT_SECONDS = 300.0
+
+# Co-tagged styles kept per style. Concept B draws the top 25 lateral neighbours of each style.
+COTAGS_PER_STYLE = 25
+
 
 async def query_artist_centrality(driver: Any, limit: int = 100) -> list[dict[str, Any]]:
     """Query top artists by total edge count (degree centrality).
@@ -266,3 +275,41 @@ async def query_monthly_anniversaries(
         year=current_year,
     )
     return results
+
+
+# Style co-tags: per style, the other styles that most releases carry alongside it. A pair counts
+# a release once (``DISTINCT``) however many duplicate edges the graph carries, and a style never
+# pairs with itself. Counts are symmetric, so each pair appears under both of its styles, and each
+# style keeps its own top ``$limit`` by release_count descending, then the other style's name
+# ascending (string order), which makes the cut at the cap deterministic when styles tie. The
+# slice happens per style inside the query so only the kept rows leave Neo4j.
+_STYLE_COTAG_CYPHER = """
+MATCH (r:Release)-[:IS]->(a:Style)
+MATCH (r)-[:IS]->(b:Style)
+WHERE a.name <> b.name
+WITH a.name AS style, b.name AS other, count(DISTINCT r) AS release_count
+ORDER BY style, release_count DESC, other
+WITH style, collect({other: other, release_count: release_count}) AS ranked
+UNWIND ranked[0..$limit] AS cotag
+RETURN style, cotag.other AS other, cotag.release_count AS release_count
+ORDER BY style, release_count DESC, other
+"""
+
+
+async def query_style_cotags(driver: Any) -> dict[str, list[dict[str, Any]]]:
+    """Query the co-tagged styles of every style.
+
+    Returns ``cotags``: up to :data:`COTAGS_PER_STYLE` rows per style, each with the ``other``
+    style and the ``release_count`` of releases tagged with both. Rows are ordered by style, then
+    ``release_count`` descending, then ``other``. Runs under
+    :data:`STYLE_COTAG_QUERY_TIMEOUT_SECONDS`.
+    """
+    cotags = await run_query(
+        driver,
+        _STYLE_COTAG_CYPHER,
+        database="neo4j",
+        timeout=STYLE_COTAG_QUERY_TIMEOUT_SECONDS,
+        limit=COTAGS_PER_STYLE,
+    )
+    logger.info("🔍 Style co-tags query complete", cotags=len(cotags))
+    return {"cotags": cotags}

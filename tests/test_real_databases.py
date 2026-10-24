@@ -23,7 +23,13 @@ from psycopg.rows import dict_row
 from api.queries import strata_queries
 from api.queries.credits_queries import get_person_connections
 from api.queries.helpers import run_count, run_query, run_single
-from api.queries.insights_neo4j_queries import LANDMARKS_PER_STYLE, query_style_landmarks, query_style_year_counts
+from api.queries.insights_neo4j_queries import (
+    COTAGS_PER_STYLE,
+    LANDMARKS_PER_STYLE,
+    query_style_cotags,
+    query_style_landmarks,
+    query_style_year_counts,
+)
 from api.queries.strata_queries import get_shared_personnel, get_strata_catalog, get_strata_labels, get_strata_marks, get_strata_root
 from api.queries.taste_queries import get_taste_projection
 from api.strata import MAX_ROOT_RELEASES, Budget, apply_labels, build_strata, label_targets
@@ -855,3 +861,77 @@ async def test_style_landmarks_rank_tie_break_and_cap_on_a_seeded_graph(neo4j_dr
     assert {row["master_id"]: row["year"] for row in cool} == {"c10": 1962, "c9": 1961, "a01": 1949, "cn": None, "cz": None}
     # A style whose only release has no master has no landmarks.
     assert {row["style"] for row in landmarks} == {"Bop", "Cool"}
+
+
+# Co-tags. Hub is co-tagged with 27 partner styles P01..P27: P01 on 5 releases, P02 on 3, P03 on 2 (one
+# of them written with duplicate edges to both styles, so counting without DISTINCT would give P03 five
+# and rank it above P02), and the 24 others on one each. The top 25 keep P01, P02, P03 and the first 22
+# single-release partners by name, so P26 and P27 fall off Hub's list, yet each still lists Hub under
+# its own cap. A lone Hub-only release must not pair Hub with itself. Tri is tagged with P01 and P02 on
+# one three-style release, which pairs all three ways. Solo has only a release of its own.
+_COTAG_STYLES = """
+UNWIND range(1, 27) AS n
+CREATE (:Style {name: 'P' + CASE WHEN n < 10 THEN '0' ELSE '' END + toString(n)})
+"""
+
+_COTAG_NAMED_STYLES = "CREATE (:Style {name: 'Hub'}), (:Style {name: 'Tri'}), (:Style {name: 'Solo'})"
+
+_COTAG_HUB = """
+MATCH (hub:Style {name: 'Hub'})
+UNWIND range(1, 27) AS n
+WITH hub, n, 'P' + CASE WHEN n < 10 THEN '0' ELSE '' END + toString(n) AS name
+MATCH (p:Style {name: name})
+CREATE (r:Release {id: 'h-' + name}), (r)-[:IS]->(hub), (r)-[:IS]->(p)
+"""
+
+_COTAG_HUB_EXTRA = """
+MATCH (hub:Style {name: 'Hub'})
+UNWIND [['P01', 4], ['P02', 2]] AS spec
+MATCH (p:Style {name: spec[0]})
+UNWIND range(1, spec[1]) AS k
+CREATE (r:Release {id: 'x' + toString(k) + '-' + spec[0]}), (r)-[:IS]->(hub), (r)-[:IS]->(p)
+"""
+
+_COTAG_EDGE_CASES = """
+MATCH (hub:Style {name: 'Hub'}), (p03:Style {name: 'P03'}), (p01:Style {name: 'P01'}), (p02:Style {name: 'P02'}),
+      (tri:Style {name: 'Tri'}), (solo:Style {name: 'Solo'})
+CREATE (dup:Release {id: 'dup'}), (dup)-[:IS]->(hub), (dup)-[:IS]->(hub), (dup)-[:IS]->(p03), (dup)-[:IS]->(p03)
+CREATE (hub_only:Release {id: 'hub-only'}), (hub_only)-[:IS]->(hub)
+CREATE (three:Release {id: 'three'}), (three)-[:IS]->(tri), (three)-[:IS]->(p01), (three)-[:IS]->(p02)
+CREATE (lone:Release {id: 'solo-r'}), (lone)-[:IS]->(solo)
+"""
+
+
+async def test_style_cotags_count_tie_break_cap_and_self_pairs_on_a_seeded_graph(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    """Co-tags count shared releases once, break ties by name, cap per style, and never pair a style with itself.
+
+    The Cypher runs under the long server-side timeout, so this also proves the engine accepts the
+    ``Query(..., timeout=...)`` wrapper and the ``$limit`` slice for the co-tag read.
+    """
+    for cypher in (_COTAG_STYLES, _COTAG_NAMED_STYLES, _COTAG_HUB, _COTAG_HUB_EXTRA, _COTAG_EDGE_CASES):
+        await _consume(neo4j_driver, cypher)
+
+    cotags = (await query_style_cotags(neo4j_driver))["cotags"]
+
+    def listed(style: str) -> list[tuple[str, int]]:
+        return [(row["other"], row["release_count"]) for row in cotags if row["style"] == style]
+
+    assert COTAGS_PER_STYLE == 25
+    # Counting: Hub's duplicate-edge release counts once, so P03 stays below P02. Ties: the single-release
+    # partners follow by name. Cap: 25 kept, P26 and P27 fall off.
+    singles = [(f"P{n:02d}", 1) for n in range(4, 26)]
+    assert listed("Hub") == [("P01", 5), ("P02", 3), ("P03", 2), *singles]
+    assert len(listed("Hub")) == COTAGS_PER_STYLE
+
+    # Each pair appears under both of its styles with the same count, and a style past Hub's cap still lists Hub.
+    assert listed("P01") == [("Hub", 5), ("P02", 1), ("Tri", 1)]
+    assert listed("P26") == [("Hub", 1)]
+    assert listed("Tri") == [("P01", 1), ("P02", 1)]
+
+    # Self pairs: the Hub-only release adds nothing, and no row pairs a style with itself.
+    assert all(row["style"] != row["other"] for row in cotags)
+    # A style whose only release carries no other style has no co-tags.
+    assert "Solo" not in {row["style"] for row in cotags}
+    assert set(cotags[0]) == {"style", "other", "release_count"}
+    # Rows come back grouped by style, count descending, then name.
+    assert [row["style"] for row in cotags] == sorted(row["style"] for row in cotags)

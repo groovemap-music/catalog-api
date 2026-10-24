@@ -6,7 +6,7 @@ running on port 8008.
 
 import httpx
 import structlog
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
 
@@ -60,6 +60,16 @@ async def proxy_style_atlas(request: Request) -> JSONResponse:
     """Proxy style atlas endpoint (lifecycle stages plus layout)."""
     try:
         return await _forward(request, "/api/insights/style-atlas")
+    except Exception:
+        logger.exception("❌ Insights service unavailable")
+        return JSONResponse(content={"error": "Insights service unavailable"}, status_code=503)
+
+
+@router.get("/api/insights/style-atlas/cotags")
+async def proxy_style_atlas_cotags(request: Request, style: str = Query(..., min_length=1)) -> JSONResponse:  # noqa: ARG001
+    """Proxy the co-tagged styles of one style (lateral edges of the style atlas)."""
+    try:
+        return await _forward(request, "/api/insights/style-atlas/cotags")
     except Exception:
         logger.exception("❌ Insights service unavailable")
         return JSONResponse(content={"error": "Insights service unavailable"}, status_code=503)

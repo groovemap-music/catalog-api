@@ -222,6 +222,46 @@ class TestQueryStyleLandmarks:
         assert "ranked[0..$limit]" in _STYLE_LANDMARK_CYPHER
 
 
+class TestQueryStyleCotags:
+    """Tests for query_style_cotags."""
+
+    @pytest.mark.asyncio
+    async def test_rows_are_returned_as_published_cotags(self) -> None:
+        """The ranked rows are wrapped under ``cotags`` unchanged."""
+        from api.queries.insights_neo4j_queries import query_style_cotags
+
+        rows = [{"style": "Bop", "other": "Cool", "release_count": 4}]
+        with patch("api.queries.insights_neo4j_queries.run_query", AsyncMock(return_value=rows)):
+            assert await query_style_cotags(AsyncMock()) == {"cotags": rows}
+
+    @pytest.mark.asyncio
+    async def test_read_carries_the_cap_and_the_long_internal_timeout(self) -> None:
+        """The read passes the per-style cap as a parameter and runs under the co-tag budget."""
+        from api.queries.insights_neo4j_queries import (
+            COTAGS_PER_STYLE,
+            STYLE_COTAG_QUERY_TIMEOUT_SECONDS,
+            query_style_cotags,
+        )
+
+        run_query = AsyncMock(return_value=[])
+        with patch("api.queries.insights_neo4j_queries.run_query", run_query):
+            await query_style_cotags(AsyncMock())
+
+        run_query.assert_awaited_once()
+        assert run_query.await_args.kwargs["timeout"] == STYLE_COTAG_QUERY_TIMEOUT_SECONDS
+        assert run_query.await_args.kwargs["limit"] == COTAGS_PER_STYLE == 25
+        assert STYLE_COTAG_QUERY_TIMEOUT_SECONDS > 30.0  # the genre-tree route budget
+
+    def test_pairs_count_releases_once_exclude_self_and_tie_break_on_name(self) -> None:
+        """Self pairs are filtered, releases are counted distinct, and ties sort by the other style's name."""
+        from api.queries.insights_neo4j_queries import _STYLE_COTAG_CYPHER
+
+        assert "WHERE a.name <> b.name" in _STYLE_COTAG_CYPHER
+        assert "count(DISTINCT r)" in _STYLE_COTAG_CYPHER
+        assert "ORDER BY style, release_count DESC, other" in _STYLE_COTAG_CYPHER
+        assert "ranked[0..$limit]" in _STYLE_COTAG_CYPHER
+
+
 class TestQueryLabelLongevity:
     @pytest.mark.asyncio
     async def test_returns_ranked_labels(self) -> None:
