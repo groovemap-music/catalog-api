@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import AsyncIterator
 from datetime import datetime
@@ -394,6 +395,35 @@ CREATE (root:Artist {id: '1', name: 'Strata Root'}),
 """
 
 
+async def _seed_strata_copies(postgres_pool: AsyncPostgreSQLPool, user_id: str) -> dict[str, str]:
+    """Two owned copies of release 10 (minted latest-acquired first), a stray copy, and another account's copy."""
+    other_user = "00000000-0000-0000-0000-000000000043"
+    async with postgres_pool.connection() as conn, conn.cursor(row_factory=dict_row) as cursor:
+        await cursor.execute(_SEED_USER, (other_user, "other-strata@example.test", "integration-fixture-not-a-hash"))
+
+        async def copy(owner: str, release_id: int, instance_id: int, date_added: str) -> str:
+            await cursor.execute("INSERT INTO catalog_items (kind) VALUES ('release') RETURNING id")
+            item = (await cursor.fetchone())["id"]
+            await cursor.execute(
+                "INSERT INTO user_collections (user_id, release_id, instance_id, date_added) VALUES (%s, %s, %s, %s) RETURNING id",
+                (owner, release_id, instance_id, date_added),
+            )
+            row = (await cursor.fetchone())["id"]
+            await cursor.execute(
+                "INSERT INTO owned_copies (user_id, item_id, collection_row_id, acquired_at) VALUES (%s, %s, %s, %s) RETURNING id",
+                (owner, item, row, date_added),
+            )
+            minted = (await cursor.fetchone())["id"]
+            await cursor.execute("UPDATE user_collections SET owned_copy_id = %s WHERE id = %s", (minted, row))
+            return str(minted)
+
+        second = await copy(user_id, 10, 2, "2021-01-01T00:00:00-08:00")
+        first = await copy(user_id, 10, 1, "2019-05-01T12:00:00-07:00")
+        await copy(user_id, 12, 1, "2020-01-01T00:00:00-08:00")
+        await copy(other_user, 10, 1, "2018-01-01T00:00:00-08:00")
+    return {"first": first, "second": second}
+
+
 async def test_strata_read_on_a_seeded_graph(
     postgres_pool: AsyncPostgreSQLPool,
     neo4j_driver: AsyncResilientNeo4jDriver,
@@ -432,11 +462,13 @@ async def test_strata_read_on_a_seeded_graph(
             """
         )
 
+    copies = await _seed_strata_copies(postgres_pool, user_id)
+
     root = await get_strata_root(neo4j_driver, "1")
     assert root == {"id": "1", "name": "Strata Root", "releases": 5}
     assert await get_strata_root(neo4j_driver, "404") is None
     catalog = await get_strata_catalog(neo4j_driver, postgres_pool, "1", root["name"])
-    marks = await get_strata_marks(neo4j_driver, user_id, "1")
+    marks = await get_strata_marks(neo4j_driver, user_id, "1", postgres_pool)
 
     assert {(r.provider, r.id, r.master_id, r.year) for r in catalog.releases} == {
         ("discogs", "10", "500", 1971),
@@ -451,6 +483,12 @@ async def test_strata_read_on_a_seeded_graph(
     assert marks["10"].state == "wanted_owned"
     assert (marks["10"].owned_at, marks["10"].wanted_at) == ("2019-05-01T12:00:00-07:00", "2018-02-03T04:05:06-08:00")
     assert marks["14"].state == "wanted"
+    # Both copies of release 10, earliest acquired first (which is not the order they were minted in).
+    # Release 12's mint is a stray row for a release the caller does not own, 14 is only wanted, and
+    # another account's copy of release 10 is not theirs: none of those may appear.
+    assert marks["10"].owned_copy_ids == (copies["first"], copies["second"])
+    assert marks["14"].owned_copy_ids == ()
+    assert set(marks) == {"10", "14"}
 
     payload = build_strata(catalog, Budget(3, 12, 16), marks=marks)
     release_ids, master_ids, artist_ids = label_targets(payload)
@@ -493,9 +531,19 @@ async def test_strata_read_on_a_seeded_graph(
         "musicbrainz_releases": 2,
     }
 
+    assert nodes["r:10"]["owned_copy_ids"] == [copies["first"], copies["second"]]
+    assert nodes["r:14"]["owned_copy_ids"] == []
+
     anonymous = build_strata(catalog, Budget(3, 12, 16))
     assert anonymous["signed_in"] is False
     assert "state" not in anonymous["planes"][2]["nodes"][0]
+    assert "owned_copy" not in json.dumps(anonymous)
+
+    # A pressing opens on its own page, however it is reached, with the same pressing drawn.
+    deep = build_strata(catalog, Budget(3, 12, 16), focus="mb:00000000-0000-0000-0000-0000000000a1", marks=marks)
+    assert deep["focus"]["id"] == "ra:m:500"
+    assert "mb:00000000-0000-0000-0000-0000000000a1" in {node["id"] for node in deep["planes"][2]["nodes"]}
+    assert "r:14" in {node["id"] for node in build_strata(catalog, Budget(3, 12, 16), focus="r:14", marks=marks)["planes"][2]["nodes"]}
 
 
 async def _root_db_hits(driver: AsyncResilientNeo4jDriver, artist_id: str) -> tuple[int, set[str]]:

@@ -51,6 +51,15 @@ in one aggregate that keeps the same id. Pages wrap. The other planes fold furth
 room, credits included, so the drawn members always have their parents drawn. An
 aggregate's counts are the members of its set that are not drawn in that response.
 
+A pressing is a cursor too: ``focus=r:<release_id>`` for a Discogs release and
+``focus=mb:<mbid>`` for a MusicBrainz-only one. It resolves to the member set the pressing
+belongs to, ``ra:m:<master>`` or, with no master, its credit's whole no-master lane
+``ra:nm:<credit>``, and to the page of that set which holds it: the pressing's index in the
+set's own order, divided by the page size. The request's ``page`` is ignored, because the
+pressing names its page; the response's ``focus`` reports the resolved aggregate id and page,
+and the pressing is drawn as a node. A pressing this root does not hold is as unknown as any
+other cursor.
+
 Collector state
 ---------------
 
@@ -59,6 +68,11 @@ or ``wanted_owned`` (Discogs does not clear a want on purchase), with the collec
 recorded ``date_added`` for each side. Every transition is observed from a Discogs sync;
 GrooveMap authors none of them. A MusicBrainz-only release has no collector state at all,
 so it carries ``"state": null`` and is left out of every ``states`` count.
+
+A signed-in caller's release nodes also carry ``owned_copy_ids``, every physical copy the
+sync minted for the release, earliest acquired first and empty when there is none. They come
+from the caller's own read and never from the catalog, so they are absent for an anonymous
+caller and never enter the catalog cache.
 """
 
 from __future__ import annotations
@@ -179,13 +193,16 @@ class Mark:
 
     ``owned_at`` is the earliest ``date_added`` over the caller's copies and ``wanted_at``
     the want's ``date_added``: the collector's own recorded time, kept by Discogs. Either can
-    be ``None`` while the edge exists, because Discogs may omit the field.
+    be ``None`` while the edge exists, because Discogs may omit the field. ``owned_copy_ids``
+    are the physical copies the sync minted for the caller's collection rows, earliest
+    acquired first; empty when none has been minted yet.
     """
 
     owned: bool = False
     wanted: bool = False
     owned_at: str | None = None
     wanted_at: str | None = None
+    owned_copy_ids: tuple[str, ...] = ()
 
     @property
     def state(self) -> str:
@@ -398,6 +415,7 @@ class _Ladder:
         for group in (*self.items_by_master.values(), *self.masterless.values()):
             group.sort(key=lambda item: item.sort_key)
         self.items = items
+        self.by_node_id: dict[str, _Item] = {item.node_id: item for item in items}
 
         self.master_credit = master_credit
         self.master_year: dict[str, int | None] = {}
@@ -442,7 +460,8 @@ class _Ladder:
         The page size depends only on the focus and the budget, never on the page index,
         so the pages partition the members.
         """
-        parsed = self._parse_focus(focus_id)
+        pressing = self._pressing(focus_id)
+        parsed = self._parse_focus(self._pressing_cursor(pressing) if pressing is not None else focus_id)
         if parsed is None:
             raise FocusNotFoundError(f"focus '{focus_id}' names nothing under this artist")
         canonical, level, members, credit, master, lane, label = parsed
@@ -470,7 +489,22 @@ class _Ladder:
             room = budget.releases - lanes
             size = _page_size(len(members), without_rest=room, with_rest=room - 1)
         pages = math.ceil(len(members) / size)
+        if pressing is not None:
+            page = next(index for index, member in enumerate(members) if member is pressing) // size
         return _Focus(canonical, level, tuple(members), credit, master, lane, label, page % pages, size)
+
+    def _pressing(self, focus_id: str) -> _Item | None:
+        """The release a ``r:<id>`` or ``mb:<mbid>`` cursor names, if this root holds it."""
+        if focus_id.startswith("mb:"):
+            return self.by_node_id.get(focus_id.lower())
+        return self.by_node_id.get(focus_id) if focus_id.startswith("r:") else None
+
+    @staticmethod
+    def _pressing_cursor(item: _Item) -> str:
+        """The aggregate cursor whose member set holds the pressing: its master, else its credit's lane."""
+        if item.release.master_id is not None:
+            return f"ra:m:{item.release.master_id}"
+        return f"ra:nm:{credit_id(item.credit)}"
 
     def _parse_focus(self, focus_id: str) -> tuple[str, int, list[Any], Credit | None, str | None, Credit | None, str | None] | None:
         if focus_id == OTHER_CREDITS:
@@ -683,6 +717,8 @@ class _Ladder:
         if self.signed_in:
             node["state"] = item.state
             node["recorded_at"] = None if item.mark is None else {"owned": item.mark.owned_at, "wanted": item.mark.wanted_at}
+            copies = () if item.mark is None else item.mark.owned_copy_ids
+            node["owned_copy_ids"] = list(copies)
         return node
 
     def render(self, budget: Budget, focus: _Focus | None) -> dict[str, Any]:

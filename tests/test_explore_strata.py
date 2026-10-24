@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -96,12 +97,30 @@ def test_signed_in_callers_get_their_state_and_recorded_time(
     payload = response.json()
     assert payload["signed_in"] is True
     reads["get_strata_marks"].assert_awaited_once()
-    assert reads["get_strata_marks"].await_args.args[1:] == (TEST_USER_ID, "1")
+    assert reads["get_strata_marks"].await_args.args[1:3] == (TEST_USER_ID, "1")
     nodes = {node["id"]: node for node in payload["planes"][2]["nodes"]}
     assert nodes["r:10"]["state"] == "owned"
     assert nodes["r:10"]["recorded_at"] == {"owned": "2020-01-01T00:00:00Z", "wanted": None}
     assert nodes["r:11"]["state"] == "none"
     assert nodes["mb:mb-1"]["state"] is None
+
+
+def test_signed_in_callers_get_their_owned_copy_ids_and_anonymous_callers_never_do(
+    test_client: TestClient, reads: dict[str, AsyncMock], auth_headers: dict[str, str]
+) -> None:
+    reads["get_strata_marks"].return_value = {"10": Mark(owned=True, owned_copy_ids=("copy-1", "copy-2")), "11": Mark(wanted=True)}
+
+    signed_in = test_client.get("/api/explore/strata?artist_id=1", headers=auth_headers).json()
+    anonymous = test_client.get("/api/explore/strata?artist_id=1").json()
+
+    nodes = {node["id"]: node for node in signed_in["planes"][2]["nodes"]}
+    assert nodes["r:10"]["owned_copy_ids"] == ["copy-1", "copy-2"]
+    assert nodes["r:11"]["owned_copy_ids"] == []
+    assert nodes["mb:mb-1"]["owned_copy_ids"] == []
+    # The list is the whole contract: there is no scalar copy field beside it.
+    assert all("owned_copy_id" not in node for node in nodes.values())
+    assert "owned_copy" not in json.dumps(anonymous)
+    assert anonymous["signed_in"] is False
 
 
 def test_an_invalid_token_is_served_as_anonymous(test_client: TestClient, reads: dict[str, AsyncMock]) -> None:
@@ -138,6 +157,32 @@ def test_unknown_artist_is_a_404(test_client: TestClient, reads: dict[str, Async
     assert response.status_code == 404
     assert response.json() == {"error": "Artist '404' not found"}
     reads["get_strata_catalog"].assert_not_awaited()
+
+
+def test_a_pressing_focus_returns_the_page_that_holds_it(test_client: TestClient, reads: dict[str, AsyncMock]) -> None:
+    pressings = tuple(Release(str(100 + i), "600", 1990 + i, ("1",)) for i in range(20))
+    reads["get_strata_catalog"].return_value = Catalog("1", "Root", (*CATALOG.releases, *pressings), {**CATALOG.master_years, "600": 1990})
+
+    response = test_client.get("/api/explore/strata?artist_id=1&focus=r:117&page=9")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["focus"] == {"id": "ra:m:600", "plane": "release", "page": 2, "pages": 3, "page_size": 8, "members": 20}
+    assert "r:117" in {node["id"] for node in payload["planes"][2]["nodes"]}
+    musicbrainz = test_client.get("/api/explore/strata?artist_id=1&focus=mb:mb-1").json()
+    assert musicbrainz["focus"]["id"] == "ra:m:500"
+    assert "mb:mb-1" in {node["id"] for node in musicbrainz["planes"][2]["nodes"]}
+    lane = test_client.get("/api/explore/strata?artist_id=1&focus=r:13").json()
+    assert lane["focus"]["id"] == "ra:nm:c:1"
+
+
+@pytest.mark.parametrize("focus", ["r:999", "mb:other-artists-pressing", "r:", "mb:"])
+def test_a_pressing_of_another_artist_is_a_404(test_client: TestClient, reads: dict[str, AsyncMock], focus: str) -> None:
+    response = test_client.get(f"/api/explore/strata?artist_id=1&focus={focus}")
+
+    assert response.status_code == 404
+    assert focus in response.json()["error"]
+    reads["get_strata_labels"].assert_not_awaited()
 
 
 def test_unknown_focus_is_a_404(test_client: TestClient, reads: dict[str, AsyncMock]) -> None:
@@ -198,6 +243,39 @@ def valkey_store(mock_valkey: AsyncMock) -> dict[str, str]:
 
 class TestCache:
     """The catalog side is cached like /api/explore; the caller's marks never are."""
+
+    def test_the_cache_holds_no_copy_id_and_a_signed_in_read_does_not_leak_into_it(
+        self,
+        test_client: TestClient,
+        reads: dict[str, AsyncMock],
+        valkey_store: dict[str, str],
+        auth_headers: dict[str, str],
+    ) -> None:
+        reads["get_strata_marks"].return_value = {"10": Mark(owned=True, owned_copy_ids=("copy-secret",))}
+
+        signed_in = test_client.get("/api/explore/strata?artist_id=1", headers=auth_headers)
+        anonymous = test_client.get("/api/explore/strata?artist_id=1")
+
+        assert "copy-secret" in signed_in.text
+        assert "copy-secret" not in anonymous.text
+        assert "owned_copy" not in anonymous.text
+        assert list(valkey_store) == ["explore:strata:1"]
+        assert "copy-secret" not in valkey_store["explore:strata:1"]
+        assert "owned_copy" not in valkey_store["explore:strata:1"]
+        # The second read was served from the cache and still asked for the caller's own marks.
+        reads["get_strata_catalog"].assert_awaited_once()
+        reads["get_strata_marks"].assert_awaited_once()
+
+    def test_a_pressing_focus_is_folded_from_the_one_cached_catalog(
+        self, test_client: TestClient, reads: dict[str, AsyncMock], valkey_store: dict[str, str]
+    ) -> None:
+        test_client.get("/api/explore/strata?artist_id=1")
+        focused = test_client.get("/api/explore/strata?artist_id=1&focus=r:11")
+
+        assert focused.status_code == 200
+        assert focused.json()["focus"]["id"] == "ra:m:500"
+        assert list(valkey_store) == ["explore:strata:1"]
+        reads["get_strata_catalog"].assert_awaited_once()
 
     def test_a_second_read_is_served_from_the_cache(
         self, test_client: TestClient, reads: dict[str, AsyncMock], mock_valkey: AsyncMock, valkey_store: dict[str, str]
@@ -262,7 +340,7 @@ class TestCache:
         self, test_client: TestClient, reads: dict[str, AsyncMock], valkey_store: dict[str, str]
     ) -> None:
         other_user = "00000000-0000-0000-0000-000000000002"
-        reads["get_strata_marks"].side_effect = lambda _driver, user_id, _artist: (
+        reads["get_strata_marks"].side_effect = lambda _driver, user_id, _artist, _pool: (
             {"10": Mark(owned=True, owned_at="2020-01-01T00:00:00Z")} if user_id == TEST_USER_ID else {"11": Mark(wanted=True)}
         )
 

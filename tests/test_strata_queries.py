@@ -94,6 +94,50 @@ async def test_marks_fold_both_edge_kinds_and_their_recorded_times() -> None:
     assert run.await_args.kwargs == {"timeout": STRATA_READ_TIMEOUT_SECONDS, "user_id": "user-1", "artist_id": "1"}
 
 
+class TestOwnedCopies:
+    async def test_the_owned_releases_carry_their_copy_ids_in_acquired_order(self, mock_pool: MagicMock, mock_cur: MagicMock) -> None:
+        rows = [
+            {"id": "10", "kind": "COLLECTED", "recorded_at": "2019-05-01T12:00:00-07:00"},
+            {"id": "10", "kind": "WANTS", "recorded_at": None},
+            {"id": "11", "kind": "WANTS", "recorded_at": None},
+            {"id": "12", "kind": "COLLECTED", "recorded_at": None},
+        ]
+        mock_cur.fetchall.side_effect = [[{"release_id": 10, "owned_copy_id": "copy-a"}, {"release_id": 10, "owned_copy_id": "copy-b"}]]
+        with patch.object(strata_queries, "run_query", new=AsyncMock(return_value=rows)):
+            marks = await get_strata_marks(MagicMock(), "user-1", "1", mock_pool)
+        assert marks["10"].owned_copy_ids == ("copy-a", "copy-b")
+        assert marks["11"] == Mark(wanted=True)
+        # Owned, but the sync has not minted a copy for it.
+        assert marks["12"] == Mark(owned=True)
+        # One read, for the caller's owned releases only: a want-only release is not asked about.
+        assert mock_cur.execute.await_args_list[0].args == (strata_queries._STATEMENT_TIMEOUT, {"timeout": "10000ms"})
+        sql, params = mock_cur.execute.await_args_list[1].args
+        assert "FROM user_collections" in sql
+        assert params == {"user_id": "user-1", "release_ids": [10, 12]}
+
+    async def test_the_copy_read_is_scoped_to_the_caller(self) -> None:
+        sql = strata_queries._OWNED_COPIES
+        assert "user_id = %(user_id)s::uuid" in sql
+        assert "owned_copy_id IS NOT NULL" in sql
+        assert "date_added NULLS LAST" in sql
+
+    async def test_without_postgres_or_owned_releases_nothing_is_read(self, mock_pool: MagicMock, mock_cur: MagicMock) -> None:
+        wants = [{"id": "11", "kind": "WANTS", "recorded_at": None}]
+        with patch.object(strata_queries, "run_query", new=AsyncMock(return_value=wants)):
+            assert await get_strata_marks(MagicMock(), "user-1", "1", mock_pool) == {"11": Mark(wanted=True)}
+        mock_cur.execute.assert_not_awaited()
+        owned = [{"id": "10", "kind": "COLLECTED", "recorded_at": None}]
+        with patch.object(strata_queries, "run_query", new=AsyncMock(return_value=owned)):
+            assert await get_strata_marks(MagicMock(), "user-1", "1") == {"10": Mark(owned=True)}
+        mock_cur.execute.assert_not_awaited()
+
+    async def test_a_failed_copy_read_degrades_to_no_copy_ids(self, mock_pool: MagicMock, mock_cur: MagicMock) -> None:
+        mock_cur.execute.side_effect = RuntimeError("connection reset")
+        owned = [{"id": "10", "kind": "COLLECTED", "recorded_at": None}]
+        with patch.object(strata_queries, "run_query", new=AsyncMock(return_value=owned)):
+            assert await get_strata_marks(MagicMock(), "user-1", "1", mock_pool) == {"10": Mark(owned=True)}
+
+
 async def test_labels_are_keyed_by_id_and_tolerate_no_row() -> None:
     row = {"releases": [[10, "First"]], "masters": [["500", "Master"]], "artists": [["1", "Root"]]}
     with patch.object(strata_queries, "run_single", new=AsyncMock(return_value=row)):
