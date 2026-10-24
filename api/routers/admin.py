@@ -1,4 +1,4 @@
-"""Admin router — login, logout, session introspection, extraction history, trigger, gm_id projection, catalog re-attachment, and DLQ purge."""
+"""Admin router — login, logout, session introspection, extraction history, trigger, gm_id projection, catalog re-attachment, the identity ledger, and DLQ purge."""
 
 import asyncio
 import json
@@ -12,6 +12,7 @@ from common import describe_exception
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
+from pydantic import AwareDatetime
 
 from api.admin_auth import create_admin_token, verify_admin_password
 from api.audit_log import record_audit_entry
@@ -23,6 +24,7 @@ from api.catalog_contract import (
 )
 from api.config import ApiConfig
 from api.dependencies import require_admin
+from api.identity_ledger import DEFAULT_EDITION_LIMIT, EVENT_TYPES, KINDS, MAX_EDITION_LIMIT
 from api.limiter import bearer_token_key_func, limiter
 from api.models import (
     AdminLoginRequest,
@@ -48,6 +50,7 @@ from api.queries.admin_queries import (
     get_user_stats,
     get_valkey_storage,
 )
+from api.queries.identity_ledger_queries import get_ledger_density, get_ledger_work, get_ledger_works
 from api.queries.media_coverage_queries import DEFAULT_LIMIT, MAX_LIMIT, get_unmapped_media, known_providers
 from api.reattach import apply_with_audit, run_reattachment
 from api.valkey_errors import valkey_write_guard
@@ -774,6 +777,73 @@ async def trigger_catalog_reattach(
         content=ReattachTriggerResponse(id=UUID(job_id), status="running", apply=apply).model_dump(mode="json"),
         status_code=status.HTTP_202_ACCEPTED,
     )
+
+
+# ---------------------------------------------------------------------------
+# Identity ledger (ADR 0016 section 7, concept D): read-only PostgreSQL
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/admin/identity/ledger/works")
+async def list_identity_ledger_works(
+    _admin: Annotated[dict[str, Any], Depends(require_admin)],
+    page: int = 1,
+    page_size: int = 50,
+    event: Annotated[str | None, Query(description=f"Keep only this event type: {', '.join(EVENT_TYPES)}.")] = None,
+    since: Annotated[AwareDatetime | None, Query(description="Events at or after this RFC 3339 instant.")] = None,
+    until: Annotated[AwareDatetime | None, Query(description="Events before this RFC 3339 instant.")] = None,
+) -> JSONResponse:
+    """Works whose editions carry identity events, most recent event first.
+
+    Paged like the audit log (page_size at most 100), but with no default window: the
+    ledger's history spans every month, including the full-export backfill's.
+    """
+    if _pool is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
+    if event is not None and event not in EVENT_TYPES:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=f"Unknown event type: {event}")
+
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), 100)
+
+    data = await get_ledger_works(_pool, event=event, since=since, until=until, page=page, page_size=page_size)
+    return JSONResponse(content=data)
+
+
+@router.get("/api/admin/identity/ledger/works/{work_id}")
+async def get_identity_ledger_work(
+    work_id: UUID,
+    _admin: Annotated[dict[str, Any], Depends(require_admin)],
+    as_of: Annotated[AwareDatetime | None, Query(description="Transaction time to read the ledger at (RFC 3339); omitted means now.")] = None,
+    edition_limit: Annotated[int, Query(ge=1, le=MAX_EDITION_LIMIT, description="How many editions to return.")] = DEFAULT_EDITION_LIMIT,
+) -> JSONResponse:
+    """One work's works, editions, and evidence planes at ``as_of``.
+
+    A superseded work id answers 200 as its survivor, with ``requested_id``; an id that is not
+    a work is 404. There are no redirects.
+    """
+    if _pool is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
+
+    data = await get_ledger_work(_pool, str(work_id), as_of=as_of, edition_limit=edition_limit)
+    if data is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work not found")
+    return JSONResponse(content=data)
+
+
+@router.get("/api/admin/identity/ledger/density")
+async def get_identity_ledger_density(
+    _admin: Annotated[dict[str, Any], Depends(require_admin)],
+    kind: Annotated[str, Query(description=f"Catalog kind whose events to count: {', '.join(KINDS)}.")] = "release",
+) -> JSONResponse:
+    """Identity events per UTC month, by type and by where their dates come from."""
+    if _pool is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
+    if kind not in KINDS:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=f"Unknown catalog kind: {kind}")
+
+    data = await get_ledger_density(_pool, kind)
+    return JSONResponse(content=data)
 
 
 # ---------------------------------------------------------------------------

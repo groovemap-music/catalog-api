@@ -1,11 +1,17 @@
 """Producer-side compatibility tests for operations-console proxy routes."""
 
+import asyncio
 import importlib.util
 import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from api.api import app
+from api.identity_ledger import EVENT_TYPES, KINDS, LINK_DATED_FROM, LedgerRows, build_work
+from api.queries.identity_ledger_queries import get_ledger_density, get_ledger_works
+from tests.fake_postgres import FakePool
 
 
 CONTRACT = Path(__file__).parents[1] / "api/contracts/operations-console/v1/routes.json"
@@ -81,3 +87,62 @@ def test_extraction_history_declares_nullable_source() -> None:
     source = app.openapi()["components"]["schemas"]["ExtractionHistoryResponse"]["properties"]["source"]
     assert {"type": "null"} in source["anyOf"]
     assert "ExtractionHistoryResponse" in app.openapi()["components"]["schemas"]
+
+
+_DATED_FROM = ["groovemap", "musicbrainz_fullexport"]
+
+_LEDGER_OPERATIONS = {
+    "admin_identity_ledger_works": {
+        "method": "GET",
+        "path": "/api/admin/identity/ledger/works",
+        "query": ["event", "page", "page_size", "since", "until"],
+        "events": list(EVENT_TYPES),
+        "response_fields": ["page", "page_size", "total", "works"],
+    },
+    "admin_identity_ledger_work": {
+        "method": "GET",
+        "path": "/api/admin/identity/ledger/works/{work_id}",
+        "query": ["as_of", "edition_limit"],
+        "dated_from": _DATED_FROM,
+        "response_fields": ["as_of", "edition_count", "editions", "truncated", "work"],
+    },
+    "admin_identity_ledger_density": {
+        "method": "GET",
+        "path": "/api/admin/identity/ledger/density",
+        "query": ["kind"],
+        "kinds": list(KINDS),
+        "dated_from": _DATED_FROM,
+        "response_fields": ["buckets", "kind"],
+    },
+}
+
+
+@pytest.mark.parametrize("name", sorted(_LEDGER_OPERATIONS))
+def test_identity_ledger_routes_are_declared(name: str) -> None:
+    """The console's Ledger tab reads these three; each is pinned with its binding constants."""
+    operation = json.loads(CONTRACT.read_text())["operations"][name]
+    assert operation == _LEDGER_OPERATIONS[name]
+
+    binding = _load_binding()
+    assert operation["method"] == getattr(binding, f"{name.upper()}_METHOD")
+    assert operation["path"] == getattr(binding, f"{name.upper()}_PATH")
+
+    mounted = app.openapi()["paths"][operation["path"]]["get"]
+    assert sorted(p["name"] for p in mounted.get("parameters", []) if p["in"] == "query") == operation["query"]
+
+
+def test_identity_ledger_vocabularies_match_the_producer() -> None:
+    """The provenance labels the contract declares are exactly the ones events carry."""
+    assert sorted(set(LINK_DATED_FROM.values())) == _DATED_FROM
+
+
+def test_identity_ledger_response_fields_match_the_payloads() -> None:
+    """Each declared response field set is exactly what the producer returns."""
+    operations = json.loads(CONTRACT.read_text())["operations"]
+    work = build_work(LedgerRows(aliases=[], supersessions=[]), "00000000-0000-4000-8000-000000000101", [])
+    works = asyncio.run(get_ledger_works(FakePool([[], [(0, None, None, None, None, None)]])))
+    density = asyncio.run(get_ledger_density(FakePool([[], []])))
+
+    assert sorted(work) == operations["admin_identity_ledger_work"]["response_fields"]
+    assert sorted(works) == operations["admin_identity_ledger_works"]["response_fields"]
+    assert sorted(density) == operations["admin_identity_ledger_density"]["response_fields"]
