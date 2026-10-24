@@ -47,7 +47,6 @@ from api.queries.admin_queries import (
     get_valkey_storage,
 )
 from api.queries.media_coverage_queries import DEFAULT_LIMIT, MAX_LIMIT, get_unmapped_media, known_providers
-from api.queries.metrics_queries import get_health_history, get_queue_history
 from api.reattach import apply_with_audit, run_reattachment
 from api.valkey_errors import valkey_write_guard
 
@@ -322,41 +321,6 @@ async def admin_storage(
             "valkey": valkey_storage,
         }
     )
-
-
-# ---------------------------------------------------------------------------
-# Phase 3 — Queue Health Trends & System Health
-# ---------------------------------------------------------------------------
-
-
-@router.get("/api/admin/queues/history")
-async def admin_queue_history(
-    _admin: Annotated[dict[str, Any], Depends(require_admin)],
-    range: str = "24h",
-) -> JSONResponse:
-    """Queue depth time-series for the given range."""
-    if _pool is None:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
-    try:
-        data = await get_queue_history(_pool, range)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
-    return JSONResponse(content=data)
-
-
-@router.get("/api/admin/health/history")
-async def admin_health_history(
-    _admin: Annotated[dict[str, Any], Depends(require_admin)],
-    range: str = "24h",
-) -> JSONResponse:
-    """Service health and API endpoint metrics for the given range."""
-    if _pool is None:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
-    try:
-        data = await get_health_history(_pool, range)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
-    return JSONResponse(content=data)
 
 
 # ---------------------------------------------------------------------------

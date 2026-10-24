@@ -84,13 +84,10 @@ origin in production so password-reset links do not point at localhost.
 | `EXTRACTOR_HEALTH_PORT` | `8000` | Discogs trigger and health port |
 | `DISCOGS_DATA_ROOT` | unset | Mounted Discogs validation-result root exposed by extraction-analysis routes |
 | `MUSICBRAINZ_DATA_ROOT` | unset | Mounted MusicBrainz validation-result root exposed by extraction-analysis routes |
-| `RABBITMQ_PROMETHEUS_URL` | `http://rabbitmq:15692` | RabbitMQ Prometheus endpoint; queue history reads `/metrics/detailed` here and derives publish/ack rates from counter deltas |
 | `RABBITMQ_MANAGEMENT_HOST` | `RABBITMQ_HOST` or `rabbitmq` | RabbitMQ management endpoint host; used only for DLQ purge |
 | `RABBITMQ_MANAGEMENT_PORT` | `15672` | RabbitMQ management endpoint port; used only for DLQ purge |
 | `RABBITMQ_USERNAME` | `groovemap` | RabbitMQ management login; used only for DLQ purge |
 | `RABBITMQ_PASSWORD` | `groovemap` | RabbitMQ management password; used only for DLQ purge |
-| `METRICS_RETENTION_DAYS` | `366` | API metrics retention window |
-| `METRICS_COLLECTION_INTERVAL` | `300` | Metrics collection interval in seconds |
 | `IDENTITY_AUTO_REATTACH_ENABLED` | `false` | Run the catalog re-attachment then the `gm_id` projection after each completed Discogs extraction (see `api/README.md`) |
 | `IDENTITY_AUTO_REATTACH_INTERVAL` | `300` | How often that watcher polls `loader_extraction_latch`, in seconds |
 | `SIMILAR_ARTISTS_PRECOMPUTED_ENABLED` | `false` | Serve `/api/recommend/similar/artist/{id}` from the current release of the precomputed `artist_similar_artists` lists; the heuristic path serves whenever this is off or no list is usable (see `docs/similar-artists-precomputed.md`) |
@@ -223,9 +220,6 @@ above arrives from an instrumentor or a shared wrapper without a call site here.
 `outcome` is written by the same call that records the matching metric, so a span and its
 metric can never disagree about how the operation ended. Span metrics (call counts and
 durations per span name) are derived by the collector, never emitted by this service.
-
-This is separate from the Postgres-backed endpoint history in `api/metrics_collector.py`
-that operations-console reads over `/api/admin/metrics`. That history is unchanged.
 
 ## Minimal local example
 

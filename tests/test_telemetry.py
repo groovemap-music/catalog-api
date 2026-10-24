@@ -693,7 +693,6 @@ class TestEventLoopMonitor:
             patch("api.api.AsyncPostgreSQLPool", return_value=mock_pool),
             patch("api.api.reconcile_stale_sync_history", new_callable=AsyncMock),
             patch("api.api.aiovalkey.from_url", new_callable=AsyncMock, return_value=mock_valkey),
-            patch("api.api.run_collector", new_callable=AsyncMock),
             patch("api.api._prewarm_search_cache", new_callable=AsyncMock),
         ):
             async with lifespan(app):
