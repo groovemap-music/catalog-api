@@ -899,6 +899,7 @@ PostgreSQL query results.
 | GET    | `/api/insights/top-artists`       | No            | Top artists by release count        |
 | GET    | `/api/insights/genre-trends`      | No            | Genre popularity trends over time   |
 | GET    | `/api/insights/style-atlas`       | No            | Style lifecycle stages and atlas layout |
+| GET    | `/api/insights/style-atlas/cotags` | No           | Top 25 co-tagged styles of one style (`style`, required) |
 | GET    | `/api/insights/label-longevity`   | No            | Label longevity rankings            |
 | GET    | `/api/insights/this-month`        | No            | Releases and trends for this month  |
 | GET    | `/api/insights/data-completeness` | No            | Data quality and completeness stats |
@@ -1192,6 +1193,7 @@ paths retain `/insights/` for API compatibility and are not intended for direct 
 | GET    | `/api/internal/insights/genre-trends`      | No            | Genre trend data from Neo4j           |
 | GET    | `/api/internal/insights/style-year-counts` | No            | Style and genre counts per release year, and style genre shares, from Neo4j |
 | GET    | `/api/internal/insights/style-landmarks`   | No            | Top 25 masters per style by release count, from Neo4j |
+| GET    | `/api/internal/insights/style-cotags`      | No            | Top 25 co-tagged styles per style by shared release count, from Neo4j |
 | GET    | `/api/internal/insights/label-longevity`   | No            | Label longevity data from Neo4j       |
 | GET    | `/api/internal/insights/anniversaries`     | No            | Anniversary data from PostgreSQL      |
 | GET    | `/api/internal/insights/data-completeness` | No            | Data completeness from both databases |

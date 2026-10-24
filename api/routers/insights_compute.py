@@ -25,6 +25,7 @@ from api.queries.insights_neo4j_queries import (
     query_genre_trends,
     query_label_longevity,
     query_monthly_anniversaries,
+    query_style_cotags,
     query_style_landmarks,
     query_style_year_counts,
 )
@@ -165,6 +166,24 @@ async def style_landmarks(request: Request) -> JSONResponse:  # noqa: ARG001
         result = await query_style_landmarks(_neo4j)
     except (TransientError, ClientError, BaseExceptionGroup) as exc:
         return _retryable_unavailable(exc, "Style-landmarks computation")
+    return JSONResponse(content=result)
+
+
+@router.get("/style-cotags")
+@limiter.limit("5/minute")
+async def style_cotags(request: Request) -> JSONResponse:  # noqa: ARG001
+    """Return the co-tagged styles of every style: the top 25 by shared releases, ties by name.
+
+    Raw input for the lateral edges of analytics-engine's atlas. It counts every release's style
+    pairs, so it is its own endpoint under the same long internal budget as the style-year read
+    (see ``STYLE_COTAG_QUERY_TIMEOUT_SECONDS``), published in the internal-insights contract.
+    """
+    if not _neo4j:
+        return JSONResponse(content={"error": "Service not ready"}, status_code=503)
+    try:
+        result = await query_style_cotags(_neo4j)
+    except (TransientError, ClientError, BaseExceptionGroup) as exc:
+        return _retryable_unavailable(exc, "Style-cotags computation")
     return JSONResponse(content=result)
 
 
