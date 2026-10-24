@@ -76,8 +76,10 @@ class ApiConfig:
     resend_api_key: str | None = field(default=None, repr=False)
     resend_sender_email: str = "noreply@groovemap.music"
     resend_sender_name: str = "GrooveMap"
-    extractor_host: str = "extractor-discogs"
-    extractor_health_port: int = 8000
+    extractor_discogs_host: str = "extractor-discogs"
+    extractor_discogs_port: int = 8000
+    extractor_musicbrainz_host: str = "extractor-musicbrainz"
+    extractor_musicbrainz_port: int = 8000
     rabbitmq_management_host: str = "rabbitmq"
     rabbitmq_management_port: int = 15672
     rabbitmq_username: str = "groovemap"
@@ -144,8 +146,12 @@ class ApiConfig:
             resend_api_key=get_secret("RESEND_API_KEY") or None,
             resend_sender_email=getenv("RESEND_SENDER_EMAIL", "noreply@groovemap.music"),
             resend_sender_name=getenv("RESEND_SENDER_NAME", "GrooveMap"),
-            extractor_host=getenv("EXTRACTOR_HOST", "extractor-discogs"),
-            extractor_health_port=_coerce_port(getenv("EXTRACTOR_HEALTH_PORT", "8000"), 8000),
+            # EXTRACTOR_HOST / EXTRACTOR_HEALTH_PORT predate per-source extractors and
+            # are the Discogs fallback for one release.
+            extractor_discogs_host=getenv("EXTRACTOR_DISCOGS_HOST", getenv("EXTRACTOR_HOST", "extractor-discogs")),
+            extractor_discogs_port=_coerce_port(getenv("EXTRACTOR_DISCOGS_HEALTH_PORT", getenv("EXTRACTOR_HEALTH_PORT", "8000")), 8000),
+            extractor_musicbrainz_host=getenv("EXTRACTOR_MUSICBRAINZ_HOST", "extractor-musicbrainz"),
+            extractor_musicbrainz_port=_coerce_port(getenv("EXTRACTOR_MUSICBRAINZ_HEALTH_PORT", "8000"), 8000),
             rabbitmq_management_host=getenv("RABBITMQ_MANAGEMENT_HOST", getenv("RABBITMQ_HOST", "rabbitmq")),
             rabbitmq_management_port=_coerce_port(getenv("RABBITMQ_MANAGEMENT_PORT", "15672"), 15672),
             rabbitmq_username=get_secret("RABBITMQ_USERNAME", "groovemap"),
