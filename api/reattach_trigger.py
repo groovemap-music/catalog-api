@@ -126,7 +126,7 @@ async def _scalar(cur: Any, sql: str, params: Any = None) -> Any:
     return row[0] if row else None
 
 
-async def _ensure_system_actor(cur: Any) -> None:
+async def ensure_system_actor(cur: Any) -> None:
     """Provision the reserved system user if absent, and refuse a row that is not it."""
     await cur.execute(_ENSURE_ACTOR, (str(SYSTEM_ACTOR_ID), SYSTEM_ACTOR_EMAIL, _UNUSABLE_PASSWORD_HASH))
     await cur.execute(_SELECT_ACTOR, (str(SYSTEM_ACTOR_ID),))
@@ -170,7 +170,7 @@ async def run_pending(pool: Any, driver: Any) -> str | None:
             version = await pending_extraction(cur)
             if version is None:
                 return None
-            await _ensure_system_actor(cur)
+            await ensure_system_actor(cur)
             job_id = str(uuid4())
             target = extraction_target(version)
             # Before any identity write, and raising: a run whose entry is missing writes nothing.
