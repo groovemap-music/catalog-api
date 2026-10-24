@@ -49,6 +49,9 @@ def render_admin() -> str:
         constant = name.upper()
         constants.append(f"{constant}_METHOD = {json.dumps(operation['method'])}")
         constants.append(f"{constant}_PATH = {json.dumps(operation['path'])}")
+        source_enum = operation.get("request_body", {}).get("properties", {}).get("source", {}).get("enum")
+        if source_enum is not None:
+            constants.append(f"{constant}_SOURCES = {json.dumps(source_enum)}")
     rendered_constants = "\n".join(constants)
     return f'''"""Generated from api/contracts/operations-console/v1/routes.json; do not edit."""
 

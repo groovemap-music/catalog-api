@@ -25,8 +25,8 @@ flowchart LR
 - Follow [ADR 0005](https://github.com/groovemap-music/design/blob/main/docs/adr/0005-source-owned-catalog-ingestion.md):
   `discogs-ingestion` and `musicbrainz-ingestion` independently own their source acquisition,
   event contracts, images, releases, and schedules. Catalog API promotes both v1 contracts and
-  does not coordinate the producers. Its retained `EXTRACTOR_HOST` administrative trigger is the
-  Discogs compatibility endpoint, not a combined ingestion service.
+  does not coordinate the producers. Its administrative trigger dispatches by `source` to that
+  source's own producer endpoint, not to a combined ingestion service.
 - Keep application construction side-effect free. FastAPI lifespan owns configuration and
   adapter creation, router wiring, background tasks, and reverse-order shutdown; routers depend
   on the configured capabilities while public module and route entry points stay stable.

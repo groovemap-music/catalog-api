@@ -33,6 +33,7 @@ from api.models import (
     DlqPurgeResponse,
     ExtractionHistoryResponse,
     ExtractionListResponse,
+    ExtractionTriggerRequest,
     ExtractionTriggerResponse,
     ProjectionTriggerResponse,
     ReattachTriggerResponse,
@@ -178,7 +179,7 @@ async def admin_logout(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/api/admin/extractions")
+@router.get("/api/admin/extractions", response_model=ExtractionListResponse)
 async def list_extractions(
     current_admin: Annotated[dict[str, Any], Depends(require_admin)],  # noqa: ARG001
     offset: int = 0,
@@ -218,6 +219,7 @@ async def list_extractions(
                 record_counts=row.get("record_counts"),
                 error_message=row.get("error_message"),
                 extractor_version=row.get("extractor_version"),
+                source=row.get("source"),
                 created_at=row["created_at"],
             )
         )
@@ -232,7 +234,7 @@ async def list_extractions(
     )
 
 
-@router.get("/api/admin/extractions/{extraction_id}")
+@router.get("/api/admin/extractions/{extraction_id}", response_model=ExtractionHistoryResponse)
 async def get_extraction(
     extraction_id: UUID,
     current_admin: Annotated[dict[str, Any], Depends(require_admin)],  # noqa: ARG001
@@ -263,6 +265,7 @@ async def get_extraction(
             record_counts=row.get("record_counts"),
             error_message=row.get("error_message"),
             extractor_version=row.get("extractor_version"),
+            source=row.get("source"),
             created_at=row["created_at"],
         ).model_dump(mode="json"),
     )
@@ -389,12 +392,19 @@ def _run_has_started(health: dict[str, Any], tracked_seconds: float) -> bool:
     return any(elapsed <= tracked_seconds + 30 for elapsed in last_times)
 
 
-async def _track_extraction(extraction_id: str) -> None:
-    """Background task: poll extractor /health and update extraction record."""
+def _extractor_base_url(config: ApiConfig, source: str) -> str:
+    """Base URL of the extractor that owns ``source`` (ADR 0005: one producer per source)."""
+    if source == "musicbrainz":
+        return f"http://{config.extractor_musicbrainz_host}:{config.extractor_musicbrainz_port}"
+    return f"http://{config.extractor_discogs_host}:{config.extractor_discogs_port}"
+
+
+async def _track_extraction(extraction_id: str, source: str = "discogs") -> None:
+    """Background task: poll the source's extractor /health and update extraction record."""
     if _pool is None or _config is None:
         return
 
-    url = f"http://{_config.extractor_host}:{_config.extractor_health_port}/health"
+    url = f"{_extractor_base_url(_config, source)}/health"
     consecutive_failures = 0
     max_failures = 5
     iterations = 0
@@ -552,22 +562,28 @@ async def _track_extraction(extraction_id: str) -> None:
         _tracking_tasks.pop(extraction_id, None)
 
 
-@router.post("/api/admin/extractions/trigger", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/api/admin/extractions/trigger", status_code=status.HTTP_202_ACCEPTED, response_model=ExtractionTriggerResponse)
 async def trigger_extraction(
+    body: ExtractionTriggerRequest,
     current_admin: Annotated[dict[str, Any], Depends(require_admin)],
 ) -> JSONResponse:
-    """Trigger a new extraction run."""
+    """Trigger a new extraction run on the requested source's extractor.
+
+    Each source has its own extractor, which enforces one run at a time itself (409), so a
+    running Discogs extraction never blocks a MusicBrainz one.
+    """
     if _pool is None or _config is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
 
     admin_id = current_admin.get("sub")
-    trigger_url = f"http://{_config.extractor_host}:{_config.extractor_health_port}/trigger"
+    source = body.source
+    trigger_url = f"{_extractor_base_url(_config, source)}/trigger"
 
     # Create a pending extraction record
     async with _pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "INSERT INTO extraction_history (triggered_by, status) VALUES (%s::uuid, 'pending') RETURNING id",
-            (admin_id,),
+            "INSERT INTO extraction_history (triggered_by, status, source) VALUES (%s::uuid, 'pending', %s) RETURNING id",
+            (admin_id, source),
         )
         row = await cur.fetchone()
 
@@ -596,13 +612,15 @@ async def trigger_extraction(
                     (extraction_id,),
                 )
             # Spawn background tracking task
-            task = asyncio.create_task(_track_extraction(extraction_id))
+            task = asyncio.create_task(_track_extraction(extraction_id, source))
             _tracking_tasks[extraction_id] = task
 
-            logger.info("🚀 Extraction triggered", extraction_id=extraction_id, admin_id=admin_id)
-            await record_audit_entry(pool=_pool, admin_id=str(admin_id), action="extraction.trigger", details={"extraction_id": extraction_id})
+            logger.info("🚀 Extraction triggered", extraction_id=extraction_id, source=source, admin_id=admin_id)
+            await record_audit_entry(
+                pool=_pool, admin_id=str(admin_id), action="extraction.trigger", details={"extraction_id": extraction_id, "source": source}
+            )
             return JSONResponse(
-                content=ExtractionTriggerResponse(id=UUID(extraction_id), status="running").model_dump(mode="json"),
+                content=ExtractionTriggerResponse(id=UUID(extraction_id), status="running", source=source).model_dump(mode="json"),
                 status_code=status.HTTP_202_ACCEPTED,
             )
 

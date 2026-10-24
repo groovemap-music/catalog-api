@@ -76,6 +76,27 @@
     "rollback": "every destructive migration requires a tested rollback or restore procedure"
   },
   "contract": "groovemap.persistence",
+  "extraction_history_source": {
+    "check": {
+      "allowed": [
+        "discogs",
+        "musicbrainz"
+      ],
+      "constraint": "extraction_history_source_check",
+      "null_allowed": true
+    },
+    "column": "source",
+    "consumers": [
+      "catalog-api"
+    ],
+    "data": "no default and no backfill: rows written before the column existed keep source NULL, meaning the extractor was not recorded",
+    "index": "idx_extraction_history_source_created_at ON extraction_history (source, created_at DESC)",
+    "introduced_in_contract_version": 1,
+    "kind": "additive",
+    "relation": "public.extraction_history",
+    "type": "VARCHAR(20) NULL",
+    "consumer_rollout": "expand phase: catalog-api pins the revision containing this column before it writes or reads source"
+  },
   "extraction_latch": {
     "columns": {
       "loader_extraction_latch.created_at": "TIMESTAMPTZ NOT NULL DEFAULT NOW()",
@@ -688,6 +709,24 @@
   "owners": [
     "database-schema"
   ],
+  "retired_relations": {
+    "consumer_rollout": "contract phase of expand, migrate consumers, then contract: catalog-api stopped writing and reading both tables (gm-catalog-api-gz4r) and operations-console reads queue and service-health history from VictoriaMetrics, so the drop lands only after a catalog-api release containing that removal is deployed",
+    "data": "historical rows are not migrated; VictoriaMetrics holds the same series at finer resolution for its retention window (ADR 0018)",
+    "decision": "design ADR 0018",
+    "drop_statements": {
+      "public.queue_metrics": "DROP TABLE IF EXISTS queue_metrics",
+      "public.service_health_metrics": "DROP TABLE IF EXISTS service_health_metrics"
+    },
+    "indexes_dropped_with_table": [
+      "idx_queue_metrics_recorded_queue",
+      "idx_service_health_recorded_service"
+    ],
+    "kind": "retirement",
+    "relations": [
+      "public.queue_metrics",
+      "public.service_health_metrics"
+    ]
+  },
   "sources": [
     "src/groovemap_schema/neo4j.py",
     "src/groovemap_schema/postgres.py"

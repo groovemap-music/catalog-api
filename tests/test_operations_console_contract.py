@@ -58,3 +58,26 @@ def test_admin_session_route_is_declared() -> None:
     binding = _load_binding()
     assert operation["method"] == binding.ADMIN_SESSION_METHOD
     assert operation["path"] == binding.ADMIN_SESSION_PATH
+
+
+def test_extraction_trigger_declares_validated_source_body() -> None:
+    """The trigger body and response carry `source`, and the contract matches the mounted schema."""
+    operation = json.loads(CONTRACT.read_text())["operations"]["admin_extraction_trigger"]
+    schemas = app.openapi()["components"]["schemas"]
+
+    body = schemas["ExtractionTriggerRequest"]
+    assert body["required"] == operation["request_body"]["required"]
+    assert body["properties"]["source"]["enum"] == operation["request_body"]["properties"]["source"]["enum"]
+    assert set(operation["response_fields"]) == set(schemas["ExtractionTriggerResponse"]["properties"])
+
+    binding = _load_binding()
+    assert operation["request_body"]["properties"]["source"]["enum"] == binding.ADMIN_EXTRACTION_TRIGGER_SOURCES
+
+
+def test_extraction_history_declares_nullable_source() -> None:
+    """Legacy runs have no recorded source; the contract says so rather than guessing one."""
+    operation = json.loads(CONTRACT.read_text())["operations"]["admin_extractions"]
+    assert operation["response_fields_nullable"] == ["source"]
+    source = app.openapi()["components"]["schemas"]["ExtractionHistoryResponse"]["properties"]["source"]
+    assert {"type": "null"} in source["anyOf"]
+    assert "ExtractionHistoryResponse" in app.openapi()["components"]["schemas"]

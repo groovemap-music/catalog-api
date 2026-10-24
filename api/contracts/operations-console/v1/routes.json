@@ -14,8 +14,13 @@
     "admin_extraction_analysis_versions": {"method": "GET", "path": "/api/admin/extraction-analysis/versions"},
     "admin_extraction_analysis_violation": {"method": "GET", "path": "/api/admin/extraction-analysis/{version}/violations/{record_id}"},
     "admin_extraction_analysis_violations": {"method": "GET", "path": "/api/admin/extraction-analysis/{version}/violations"},
-    "admin_extraction_trigger": {"method": "POST", "path": "/api/admin/extractions/trigger"},
-    "admin_extractions": {"method": "GET", "path": "/api/admin/extractions"},
+    "admin_extraction_trigger": {
+      "method": "POST",
+      "path": "/api/admin/extractions/trigger",
+      "request_body": {"required": ["source"], "properties": {"source": {"enum": ["discogs", "musicbrainz"], "type": "string"}}},
+      "response_fields": ["id", "source", "status"]
+    },
+    "admin_extractions": {"method": "GET", "path": "/api/admin/extractions", "response_fields_nullable": ["source"]},
     "admin_identity_project": {"method": "POST", "path": "/api/admin/identity/project"},
     "admin_login": {"method": "POST", "path": "/api/admin/auth/login"},
     "admin_logout": {"method": "POST", "path": "/api/admin/auth/logout"},

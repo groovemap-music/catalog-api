@@ -80,8 +80,12 @@ origin in production so password-reset links do not point at localhost.
 | `RESEND_API_KEY` | unset | Optional transactional-email API key |
 | `RESEND_SENDER_EMAIL` | `noreply@groovemap.music` | Transactional-email sender |
 | `RESEND_SENDER_NAME` | `GrooveMap` | Transactional-email display name |
-| `EXTRACTOR_HOST` | `extractor-discogs` | Discogs trigger and health host; retained compatibility wire ID |
-| `EXTRACTOR_HEALTH_PORT` | `8000` | Discogs trigger and health port |
+| `EXTRACTOR_DISCOGS_HOST` | `EXTRACTOR_HOST` or `extractor-discogs` | Host of the Discogs producer's trigger and health endpoints |
+| `EXTRACTOR_DISCOGS_HEALTH_PORT` | `EXTRACTOR_HEALTH_PORT` or `8000` | Port of the Discogs producer's trigger and health endpoints |
+| `EXTRACTOR_MUSICBRAINZ_HOST` | `extractor-musicbrainz` | Host of the MusicBrainz producer's trigger and health endpoints |
+| `EXTRACTOR_MUSICBRAINZ_HEALTH_PORT` | `8000` | Port of the MusicBrainz producer's trigger and health endpoints |
+| `EXTRACTOR_HOST` | unset | Deprecated Discogs fallback for `EXTRACTOR_DISCOGS_HOST`; remove after one release |
+| `EXTRACTOR_HEALTH_PORT` | unset | Deprecated Discogs fallback for `EXTRACTOR_DISCOGS_HEALTH_PORT`; remove after one release |
 | `DISCOGS_DATA_ROOT` | unset | Mounted Discogs validation-result root exposed by extraction-analysis routes |
 | `MUSICBRAINZ_DATA_ROOT` | unset | Mounted MusicBrainz validation-result root exposed by extraction-analysis routes |
 | `RABBITMQ_MANAGEMENT_HOST` | `RABBITMQ_HOST` or `rabbitmq` | RabbitMQ management endpoint host; used only for DLQ purge |
@@ -96,9 +100,11 @@ origin in production so password-reset links do not point at localhost.
 The internal Analytics secret and RabbitMQ credentials support their corresponding `_FILE`
 forms. [`discogs-ingestion`](https://github.com/groovemap-music/discogs-ingestion) and
 [`musicbrainz-ingestion`](https://github.com/groovemap-music/musicbrainz-ingestion) independently
-own source acquisition and the result trees mounted at the two data roots. The retained
-`EXTRACTOR_HOST`/`EXTRACTOR_HEALTH_PORT` pair targets the Discogs administrative trigger and
-health compatibility wire; Catalog API does not schedule or coordinate MusicBrainz ingestion.
+own source acquisition and the result trees mounted at the two data roots. The administrative
+extraction trigger dispatches by `source` to the per-source `EXTRACTOR_<SOURCE>_HOST` and
+`EXTRACTOR_<SOURCE>_HEALTH_PORT` endpoints. The legacy `EXTRACTOR_HOST`/`EXTRACTOR_HEALTH_PORT`
+pair is honored as the Discogs fallback for one release; it never affects MusicBrainz. Catalog
+API does not schedule or coordinate ingestion.
 
 ## Snapshots, NLQ, and runtime
 
