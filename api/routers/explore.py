@@ -297,9 +297,14 @@ async def strata(
     from the ``COLLECTED`` and ``WANTS`` edges the Discogs sync writes; an anonymous caller
     gets none.
 
+    ``focus`` is an aggregate id from an earlier response, or a pressing: ``r:<release_id>``
+    or ``mb:<mbid>`` returns the page of its master (or no-master lane) that holds it, with
+    the pressing drawn; ``page`` is then ignored, and a pressing this artist does not hold is
+    a 404. A signed-in caller's owned release nodes also carry their copy ids.
+
     The catalog side depends on the root alone, so it is cached in Valkey under the explore
-    key family and TTL and shared by every caller. The caller's marks are read on every
-    request and never cached. A root with more than ``MAX_ROOT_RELEASES`` releases is
+    key family and TTL and shared by every caller. The caller's marks, and the owned copy ids
+    that ride on them, are read on every request and never cached. A root with more than ``MAX_ROOT_RELEASES`` releases is
     refused with a 422 before its ladder is read.
     """
     if not _neo4j_driver:
@@ -311,7 +316,7 @@ async def strata(
     user_id = (current_user or {}).get("sub") or None
 
     def read_marks() -> Coroutine[Any, Any, dict[str, Mark] | None]:
-        return get_strata_marks(_neo4j_driver, user_id, artist_id) if user_id else _anonymous_marks()
+        return get_strata_marks(_neo4j_driver, user_id, artist_id, _pg_pool) if user_id else _anonymous_marks()
 
     try:
         catalog = await _cached_strata_catalog(artist_id)

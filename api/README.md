@@ -416,9 +416,12 @@ and gm-design-on0x (Recommendation 7).
   `credits/masters/releases`. It needs at least 3 credits, at least twice as many masters
   as credits, and more releases than credits; the ceilings are 48/500/500. Anything else
   is a 400.
-- `focus`: an aggregate's `id` (or a master node's `id`) from an earlier response. The
-  response then draws one page of that aggregate's members.
-- `page` (default 0): which page of `focus`. Pages wrap.
+- `focus`: an aggregate's `id` (or a master node's `id`) from an earlier response, or a
+  pressing: `r:<release_id>` for a Discogs release, `mb:<mbid>` for a MusicBrainz-only one.
+  The response then draws one page of that aggregate's members; for a pressing, the page
+  that holds it.
+- `page` (default 0): which page of `focus`. Pages wrap. Ignored for a pressing, which
+  names its own page.
 
 **Response:** `root`, `budget`, `focus` (`null`, or `{id, plane, page, pages, page_size,
 members}`), `signed_in`, `totals` (`credits`, `masters`, `releases`,
@@ -460,6 +463,16 @@ The master plane also carries `edges`.
   - `focus` in the response reports `{id, plane, page, pages, page_size, members}`, with
     `page` already wrapped. A master node's `id` (`m:<id>`) is accepted and resolves to its
     releases' cursor, `ra:m:<id>`. An unknown cursor is a 404.
+  - **A pressing is a cursor.** `focus=r:<release_id>` or `focus=mb:<mbid>` opens a pressing
+    directly, however deep it sits in a large master. It resolves to the member set the
+    pressing belongs to, `ra:m:<master>` or, for a release with no master, its credit's
+    whole no-master lane `ra:nm:<credit>`, and to the page of that set which holds it: the
+    pressing's index in the set's order (undated first, then by year, Discogs before
+    MusicBrainz, then by id), divided by the page size. The response is the usual focused
+    view: `focus` reports the resolved aggregate `id` and `page`, the pressing is drawn as a
+    release node, and the response shape is unchanged. A pressing that this artist does not
+    hold (another artist's, a MusicBrainz-only release that joins none of this artist's
+    masters, or an id that does not exist) is a 404, like any unknown cursor.
 - **Edges** link two drawn masters when one person holds the same `CREDITED_ON.category`
   on releases of both (`kind: "shared_personnel"`, with `categories` and `people`). They
   never key on raw role strings.
@@ -477,6 +490,16 @@ Masters and credits carry a rolled-up `state` (owned, else wanted, else none), a
 aggregates carry `states` counts. Every transition is observed from a Discogs sync; this
 route changes nothing. An anonymous caller, or an invalid token, gets none of these fields.
 
+**Owned copy ids.** A signed-in caller's release nodes also carry `owned_copy_ids`, every
+physical copy the collection sync minted for that release (one per Discogs instance, the
+earliest acquired first), the ids "Record an observation"
+(`POST /api/user/copies/{copy_id}/observations`) is called with. A release that is not
+owned, owned but not yet minted, or MusicBrainz-only has `owned_copy_ids: []`. They come from `user_collections.owned_copy_id`, the same column
+`/api/user/collection` reads, for the releases the caller's `COLLECTED` edges name, and
+never from the catalog: an anonymous caller does not get the field. If that read fails, the
+response degrades to no copy ids and logs a warning rather than failing. The field is
+additive under the graph-explorer contract `"version": 1`.
+
 **Caching.** The catalog side of a read (the root's ladder and its MusicBrainz-only
 releases) depends on the root alone, so it is cached the way `/api/explore` caches: in
 Valkey under `explore:strata:<artist_id>`, for the same 24 hours, because the catalog
@@ -485,7 +508,7 @@ or `page` because the entry is the root's unfolded catalog, not a response: the 
 that applies them runs on every request, so one entry serves every caller and every
 view of that root. The caller's
 `COLLECTED` and `WANTS` edges are read on every request and never cached, so the shared
-entry holds no caller id, state, or recorded time. A hit skips the root, ladder, and
+entry holds no caller id, state, recorded time, or copy id. A hit skips the root, ladder, and
 PostgreSQL reads; drawn labels and shared-personnel edges are still read, bounded by the
 budget. When Valkey is down or not configured, or an entry was written in an older cached
 form, the read goes to the graph and the response is the same. A failed cache write is
