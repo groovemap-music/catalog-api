@@ -177,6 +177,66 @@ class TestAdminLogout:
         assert resp.status_code in (401, 403)
 
 
+class TestAdminSession:
+    def test_valid_admin_returns_identity(self, test_client: TestClient) -> None:
+        resp = test_client.get("/api/admin/auth/session", headers=_admin_auth_headers(_make_admin_jwt(exp=4_102_444_800)))
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["admin_id"] == TEST_ADMIN_ID
+        assert body["email"] == TEST_ADMIN_EMAIL
+        assert datetime.fromisoformat(body["expires_at"]) == datetime.fromtimestamp(4_102_444_800, UTC)
+
+    def test_missing_token(self, test_client: TestClient) -> None:
+        assert test_client.get("/api/admin/auth/session").status_code == 401
+
+    def test_malformed_token(self, test_client: TestClient) -> None:
+        assert test_client.get("/api/admin/auth/session", headers=_admin_auth_headers("not-a-jwt")).status_code == 401
+
+    def test_expired_token(self, test_client: TestClient) -> None:
+        resp = test_client.get("/api/admin/auth/session", headers=_admin_auth_headers(_make_admin_jwt(exp=1)))
+        assert resp.status_code == 401
+
+    def test_revoked_token(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        mock_valkey.get = AsyncMock(side_effect=lambda key: "1" if key.startswith("revoked:jti:") else None)
+        resp = test_client.get("/api/admin/auth/session", headers=_admin_auth_headers())
+        assert resp.status_code == 401
+        assert "revoked" in resp.json()["detail"]
+
+    def test_password_changed_token(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        mock_valkey.get = AsyncMock(side_effect=lambda key: "9999999999" if key.startswith("password_changed:") else None)
+        resp = test_client.get("/api/admin/auth/session", headers=_admin_auth_headers())
+        assert resp.status_code == 401
+
+    def test_non_admin_rejected(self, test_client: TestClient, mock_pool: MagicMock, mock_cur: AsyncMock) -> None:
+        import api.dependencies as deps
+
+        mock_cur.fetchone.return_value = {"is_admin": False}
+        with patch.object(deps, "_pool", mock_pool):
+            resp = test_client.get("/api/admin/auth/session", headers=_admin_auth_headers())
+        assert resp.status_code == 403
+
+    def test_user_token_rejected(self, test_client: TestClient) -> None:
+        resp = test_client.get("/api/admin/auth/session", headers=_admin_auth_headers(_make_admin_jwt(token_type="user")))  # noqa: S106
+        assert resp.status_code in (401, 403)
+
+    @patch("api.routers.admin.record_audit_entry", new_callable=AsyncMock)
+    def test_writes_nothing(self, mock_audit: AsyncMock, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        assert test_client.get("/api/admin/auth/session", headers=_admin_auth_headers()).status_code == 200
+        mock_audit.assert_not_called()
+        mock_valkey.setex.assert_not_called()
+        mock_valkey.delete.assert_not_called()
+
+    def test_rate_limited_per_token(self, test_client: TestClient) -> None:
+        from api.limiter import limiter
+
+        limiter.reset()
+        headers = _admin_auth_headers()
+        statuses = [test_client.get("/api/admin/auth/session", headers=headers).status_code for _ in range(121)]
+        limiter.reset()
+        assert statuses[:120] == [200] * 120
+        assert statuses[120] == 429
+
+
 class TestExtractionTrigger:
     @patch("api.routers.admin.httpx.AsyncClient")
     def test_success(self, mock_client_cls: Any, test_client: TestClient, mock_cur: AsyncMock) -> None:

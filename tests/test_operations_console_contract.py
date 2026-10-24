@@ -48,3 +48,13 @@ def test_media_coverage_route_is_declared() -> None:
     binding = _load_binding()
     assert operation["method"] == binding.ADMIN_UNMAPPED_MEDIA_METHOD
     assert operation["path"] == binding.ADMIN_UNMAPPED_MEDIA_PATH
+
+
+def test_admin_session_route_is_declared() -> None:
+    """The console auth gate calls this route, so it must stay declared with its binding constants."""
+    operation = json.loads(CONTRACT.read_text())["operations"]["admin_session"]
+    assert operation == {"method": "GET", "path": "/api/admin/auth/session"}
+
+    binding = _load_binding()
+    assert operation["method"] == binding.ADMIN_SESSION_METHOD
+    assert operation["path"] == binding.ADMIN_SESSION_PATH

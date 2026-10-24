@@ -21,6 +21,7 @@
     "admin_login": {"method": "POST", "path": "/api/admin/auth/login"},
     "admin_logout": {"method": "POST", "path": "/api/admin/auth/logout"},
     "admin_queue_history": {"method": "GET", "path": "/api/admin/queues/history"},
+    "admin_session": {"method": "GET", "path": "/api/admin/auth/session"},
     "admin_storage": {"method": "GET", "path": "/api/admin/storage"},
     "admin_sync_activity": {"method": "GET", "path": "/api/admin/users/sync-activity"},
     "admin_unmapped_media": {"method": "GET", "path": "/api/admin/media/unmapped"},

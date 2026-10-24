@@ -42,6 +42,7 @@ All administrative endpoints except login require an administrator bearer token.
 | --- | --- | --- |
 | `POST` | `/api/admin/auth/login` | Create an administrator session |
 | `POST` | `/api/admin/auth/logout` | Revoke the current session |
+| `GET` | `/api/admin/auth/session` | Validate the current session; returns `admin_id`, `email`, `expires_at` |
 | `GET` | `/api/admin/audit-log` | Read the paginated 90-day audit window |
 | `GET` | `/api/admin/users/stats` | Aggregate account statistics |
 | `GET` | `/api/admin/users/sync-activity` | Recent user synchronization activity |

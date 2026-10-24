@@ -384,6 +384,12 @@ class AdminLoginResponse(BaseModel):
     expires_in: int
 
 
+class AdminSessionResponse(BaseModel):
+    admin_id: str
+    email: str
+    expires_at: datetime
+
+
 # --- Password Reset Models ---
 
 
