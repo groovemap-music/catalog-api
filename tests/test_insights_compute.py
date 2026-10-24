@@ -86,7 +86,7 @@ def test_style_year_counts_contract_publishes_the_producer_read_budget() -> None
     contract = yaml.safe_load(_CONTRACT.read_text(encoding="utf-8"))
     operation = contract["paths"]["/api/internal/insights/style-year-counts"]["get"]
     assert operation["x-groovemap-max-processing-seconds"] == STYLE_YEAR_QUERY_TIMEOUT_SECONDS
-    assert contract["info"]["version"] == "1.4.0"
+    assert contract["info"]["version"] == "1.5.0"
 
 
 _STYLE_YEAR_RESULT = {
@@ -210,6 +210,72 @@ class TestStyleLandmarksEndpoint:
         err = _neo4j_error("Neo.ClientError.Statement.SyntaxError", "invalid syntax")
         with patch("api.routers.insights_compute.query_style_landmarks", new=AsyncMock(side_effect=err)):
             response = test_client.get("/api/internal/insights/style-landmarks")
+        assert response.status_code == 500
+
+
+def test_style_cotags_contract_publishes_the_producer_read_budget() -> None:
+    """The co-tag operation publishes the server-side timeout the producer enforces."""
+    from api.queries.insights_neo4j_queries import STYLE_COTAG_QUERY_TIMEOUT_SECONDS
+
+    contract = yaml.safe_load(_CONTRACT.read_text(encoding="utf-8"))
+    operation = contract["paths"]["/api/internal/insights/style-cotags"]["get"]
+    assert operation["x-groovemap-max-processing-seconds"] == STYLE_COTAG_QUERY_TIMEOUT_SECONDS
+
+
+_STYLE_COTAG_RESULT = {
+    "cotags": [
+        {"style": "Bop", "other": "Cool", "release_count": 12},
+        {"style": "Bop", "other": "Hard Bop", "release_count": 3},
+    ]
+}
+
+
+class TestStyleCotagsEndpoint:
+    """Tests for GET /api/internal/insights/style-cotags."""
+
+    def test_success_matches_the_published_schema_fields(self, test_client: TestClient) -> None:
+        """Returns 200 and exactly the fields the contract requires, nothing extra."""
+        with patch("api.routers.insights_compute.query_style_cotags", new_callable=AsyncMock, return_value=_STYLE_COTAG_RESULT):
+            response = test_client.get("/api/internal/insights/style-cotags")
+        assert response.status_code == 200
+        body = response.json()
+        assert body == _STYLE_COTAG_RESULT
+
+        schema = yaml.safe_load(_CONTRACT.read_text(encoding="utf-8"))["components"]["schemas"]["StyleCotag"]
+        assert set(body["cotags"][0]) == set(schema["required"]) == set(schema["properties"])
+
+    def test_not_ready(self, test_client: TestClient) -> None:
+        """Returns 503 when Neo4j is not configured."""
+        import api.routers.insights_compute as mod
+
+        original = mod._neo4j
+        mod._neo4j = None
+        try:
+            response = test_client.get("/api/internal/insights/style-cotags")
+            assert response.status_code == 503
+        finally:
+            mod._neo4j = original
+
+    def test_503_on_transaction_timeout(self, test_client: TestClient) -> None:
+        """The server-side read budget expiring is a retryable 503, not a 500."""
+        err = _neo4j_error("Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration", "transaction timed out")
+        with patch("api.routers.insights_compute.query_style_cotags", new=AsyncMock(side_effect=err)):
+            response = test_client.get("/api/internal/insights/style-cotags")
+        assert response.status_code == 503
+        assert response.json()["code"] == "Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration"
+
+    def test_503_on_transient_error(self, test_client: TestClient) -> None:
+        """A transient database error is a retryable 503."""
+        err = _neo4j_error("Neo.TransientError.General.MemoryPoolOutOfMemoryError", "out of memory")
+        with patch("api.routers.insights_compute.query_style_cotags", new=AsyncMock(side_effect=err)):
+            response = test_client.get("/api/internal/insights/style-cotags")
+        assert response.status_code == 503
+
+    def test_non_retryable_error_is_not_masked_as_503(self, test_client: TestClient) -> None:
+        """A genuine query bug still surfaces as a server error."""
+        err = _neo4j_error("Neo.ClientError.Statement.SyntaxError", "invalid syntax")
+        with patch("api.routers.insights_compute.query_style_cotags", new=AsyncMock(side_effect=err)):
+            response = test_client.get("/api/internal/insights/style-cotags")
         assert response.status_code == 500
 
 
@@ -478,6 +544,7 @@ class TestInternalInsightsAuth:
         "/api/internal/insights/genre-trends",
         "/api/internal/insights/style-year-counts",
         "/api/internal/insights/style-landmarks",
+        "/api/internal/insights/style-cotags",
         "/api/internal/insights/label-longevity",
         "/api/internal/insights/anniversaries?year=2025&month=3",
         "/api/internal/insights/data-completeness",
