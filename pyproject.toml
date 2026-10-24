@@ -44,7 +44,6 @@ dependencies = [
     "sse-starlette>=3.4.10",
     "structlog>=26.1.0",
     "uvicorn[standard]>=0.52.4",
-    "prometheus-client>=0.21",
 ]
 
 [project.scripts]
@@ -147,7 +146,6 @@ lines-after-imports = 2
 "performance/*.py" = ["PLC0415", "T201"]
 "tests/**/*.py" = ["PLC", "S105", "T201"]
 "api/queries/search_queries.py" = ["S608"]
-"api/queries/metrics_queries.py" = ["S608"]
 
 [tool.mypy]
 python_version = "3.14"

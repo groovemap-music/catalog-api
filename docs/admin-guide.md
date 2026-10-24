@@ -147,21 +147,6 @@ the allowlist and RabbitMQ management call; processing behavior belongs to the c
 Operators should diagnose and correct the consumer failure before purging. Replay and queue
 recovery procedures belong to the relevant consumer and deployment runbooks.
 
-## Metrics history
-
-The catalog API samples request latency, queue depth, and configured health endpoints, then stores
-history in PostgreSQL. Collection failures return an empty sample rather than terminating the API.
-
-| Method | Path | Responsibility |
-| --- | --- | --- |
-| `GET` | `/api/admin/queues/history` | Queue depth and rate history |
-| `GET` | `/api/admin/health/history` | Health and response-time history |
-
-Both history routes accept `range`; supported values are `1h`, `6h`, `24h`, `7d`, `30d`, `90d`,
-and `365d`.
-`METRICS_COLLECTION_INTERVAL` defaults to 300 seconds and `METRICS_RETENTION_DAYS` defaults to
-366 days. The presentation of these records belongs to `operations-console`.
-
-The metrics and audit table definitions are owned by
+The audit table definitions are owned by
 [`database-schema`](https://github.com/groovemap-music/database-schema). Apply schema changes
 through that repository before deploying catalog-api code that depends on them.

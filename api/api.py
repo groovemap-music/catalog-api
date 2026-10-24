@@ -73,7 +73,6 @@ from api import __version__
 from api.auth import b64url_encode, decrypt_oauth_token, encrypt_oauth_token, get_oauth_encryption_key
 from api.config import ApiConfig
 from api.limiter import limiter
-from api.metrics_collector import MetricsBuffer, normalize_path, run_collector
 from api.notifications import LogNotificationChannel, ResendNotificationChannel
 from api.queries.search_queries import ALL_TYPES, execute_search
 from api.reattach_trigger import run_trigger_loop
@@ -367,10 +366,6 @@ async def _start_service(_app: FastAPI) -> _LifecycleResources:
 
     await _activity.ensure_startup_partitions()
     _app.state.prewarm_task = asyncio.create_task(_prewarm_search_cache())
-    metrics_buffer = MetricsBuffer()
-    _app.state.metrics_buffer = metrics_buffer
-    _app.state.collector_task = asyncio.create_task(run_collector(pool, config, metrics_buffer))
-    logger.info("📊 Metrics collector started", interval=config.metrics_collection_interval)
     _start_identity_maintenance(_app, config, pool, _neo4j)
     return _LifecycleResources(health_server=health_server, anthropic_client=anthropic_client)
 
@@ -400,8 +395,6 @@ async def _stop_service(_app: FastAPI, resources: _LifecycleResources) -> None:
     await _cancel_tasks(list(_admin_router._tracking_tasks.values()))
     if hasattr(_app.state, "prewarm_task"):
         await _cancel_tasks([_app.state.prewarm_task])
-    if hasattr(_app.state, "collector_task"):
-        await _cancel_tasks([_app.state.collector_task])
     identity_maintenance_task = getattr(_app.state, "identity_maintenance_task", None)
     if isinstance(identity_maintenance_task, asyncio.Task):
         await _cancel_tasks([identity_maintenance_task])
@@ -492,32 +485,6 @@ async def security_headers(request: Request, call_next: Any) -> Any:
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
-    return response
-
-
-@app.middleware("http")
-async def metrics_middleware(request: Request, call_next: Any) -> Any:
-    """Record per-request timing for endpoint performance metrics.
-
-    Keys on the matched route's path TEMPLATE (e.g. ``/api/artists/{id}``),
-    not the raw request URL. Requests that never matched a route (unknown
-    paths — attacker-controlled cardinality, wrong HTTP method) collapse into
-    a single ``<unmatched>`` bucket instead of each becoming a distinct key.
-    Previously this keyed on ``normalize_path(request.url.path)``, a regex
-    reconstruction that only collapses pure-integer/UUID segments — an
-    unauthenticated flood of distinct junk paths (``/a1``, ``/a2``, ...) could
-    fill the whole 10k-entry MetricsBuffer and evict every real endpoint's
-    samples (groovemap-jlei).
-    """
-    import time as _time  # noqa: PLC0415
-
-    start = _time.monotonic()
-    response = await call_next(request)
-    elapsed_ms = (_time.monotonic() - start) * 1000
-    route = request.scope.get("route")
-    path = normalize_path(route.path) if route is not None else "<unmatched>"
-    if hasattr(app.state, "metrics_buffer"):
-        app.state.metrics_buffer.record(path, response.status_code, elapsed_ms)
     return response
 
 

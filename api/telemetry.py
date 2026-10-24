@@ -8,9 +8,6 @@ per metric and nothing else, and every span is a no-op until a tracer provider i
 
 Attribute sets are closed and low-cardinality by construction: the ``cache`` and ``outcome``
 values are the module constants below, never a key, an id, or free text.
-
-This is separate from :mod:`api.metrics_collector`, which keeps the homegrown Postgres-backed
-endpoint history that operations-console reads. The two do not interact.
 """
 
 from __future__ import annotations
