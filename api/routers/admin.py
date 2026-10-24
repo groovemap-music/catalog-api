@@ -582,8 +582,8 @@ async def trigger_extraction(
     # Create a pending extraction record
     async with _pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "INSERT INTO extraction_history (triggered_by, status) VALUES (%s::uuid, 'pending') RETURNING id",
-            (admin_id,),
+            "INSERT INTO extraction_history (triggered_by, status, source) VALUES (%s::uuid, 'pending', %s) RETURNING id",
+            (admin_id, source),
         )
         row = await cur.fetchone()
 

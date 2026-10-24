@@ -345,6 +345,10 @@ class TestExtractionTriggerSourceRouting:
         assert mock_audit.call_args.kwargs["details"]["source"] == source
         # The tracker polls the same source's extractor.
         mock_track.assert_called_once_with(extraction_id, source)
+        # The run's source is persisted with the pending row, not only echoed back.
+        insert = next(c for c in mock_cur.execute.call_args_list if "INSERT INTO extraction_history" in c.args[0])
+        assert "source" in insert.args[0]
+        assert insert.args[1][-1] == source
 
     @pytest.mark.parametrize("body", [{}, {"source": "spotify"}, {"source": None}, None])
     def test_missing_or_unknown_source_is_422(self, body: Any, test_client: TestClient) -> None:
@@ -432,6 +436,14 @@ class TestExtractionTriggerSourceRouting:
         resp = test_client.get(f"/api/admin/extractions/{uuid4()}", headers=_admin_auth_headers())
         assert resp.status_code == 200
         assert resp.json()["source"] is None
+
+    def test_pinned_schema_defines_source_column(self) -> None:
+        """The database-schema revision this repo pins must own the column the INSERT writes."""
+        import inspect
+
+        from groovemap_schema import postgres
+
+        assert "extraction_history ADD COLUMN IF NOT EXISTS source" in inspect.getsource(postgres)
 
     def test_history_reports_stored_source(self, test_client: TestClient, mock_cur: AsyncMock) -> None:
         mock_cur.fetchone = AsyncMock(

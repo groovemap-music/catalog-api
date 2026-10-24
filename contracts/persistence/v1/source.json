@@ -1,5 +1,5 @@
 {
-  "contract_sha256": "65dcdf4226a5feb717953d43cac4d3b591264bce1f783ed7a5061cffb2a0df52",
-  "producer_commit": "f21b3e1482a0f74f79d7802c7fcd7b22e074b7cd",
+  "contract_sha256": "d6c3746a86d663e8eb731a784d703a57e40555f7e869b85bcc6df0e583bbf050",
+  "producer_commit": "d0c8c90d851a072970ecd4f1dd7ecf28aa4f9239",
   "producer_repository": "https://github.com/groovemap-music/database-schema"
 }
