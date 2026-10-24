@@ -80,6 +80,7 @@ class ApiConfig:
     extractor_health_port: int = 8000
     rabbitmq_management_host: str = "rabbitmq"
     rabbitmq_management_port: int = 15672
+    rabbitmq_prometheus_url: str = "http://rabbitmq:15692"
     rabbitmq_username: str = "groovemap"
     rabbitmq_password: str = field(default="groovemap", repr=False)
     metrics_retention_days: int = 366
@@ -150,6 +151,7 @@ class ApiConfig:
             extractor_health_port=_coerce_port(getenv("EXTRACTOR_HEALTH_PORT", "8000"), 8000),
             rabbitmq_management_host=getenv("RABBITMQ_MANAGEMENT_HOST", getenv("RABBITMQ_HOST", "rabbitmq")),
             rabbitmq_management_port=_coerce_port(getenv("RABBITMQ_MANAGEMENT_PORT", "15672"), 15672),
+            rabbitmq_prometheus_url=getenv("RABBITMQ_PROMETHEUS_URL", "http://rabbitmq:15692").rstrip("/"),
             rabbitmq_username=get_secret("RABBITMQ_USERNAME", "groovemap"),
             rabbitmq_password=get_secret("RABBITMQ_PASSWORD", "groovemap"),
             metrics_retention_days=_env_int("METRICS_RETENTION_DAYS", 366),
