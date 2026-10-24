@@ -25,6 +25,7 @@ from api.queries.insights_neo4j_queries import (
     query_genre_trends,
     query_label_longevity,
     query_monthly_anniversaries,
+    query_style_landmarks,
     query_style_year_counts,
 )
 from api.queries.insights_pg_queries import query_data_completeness
@@ -146,6 +147,24 @@ async def style_year_counts(request: Request) -> JSONResponse:  # noqa: ARG001
         result = await query_style_year_counts(_neo4j)
     except (TransientError, ClientError, BaseExceptionGroup) as exc:
         return _retryable_unavailable(exc, "Style-year computation")
+    return JSONResponse(content=result)
+
+
+@router.get("/style-landmarks")
+@limiter.limit("5/minute")
+async def style_landmarks(request: Request) -> JSONResponse:  # noqa: ARG001
+    """Return the landmark masters of every style: the top 25 by release count, ties by master id.
+
+    Raw input for the master plane of analytics-engine's atlas. It ranks every (style, master)
+    pair, so it is its own endpoint under the same long internal budget as the style-year read
+    (see ``STYLE_LANDMARK_QUERY_TIMEOUT_SECONDS``), published in the internal-insights contract.
+    """
+    if not _neo4j:
+        return JSONResponse(content={"error": "Service not ready"}, status_code=503)
+    try:
+        result = await query_style_landmarks(_neo4j)
+    except (TransientError, ClientError, BaseExceptionGroup) as exc:
+        return _retryable_unavailable(exc, "Style-landmarks computation")
     return JSONResponse(content=result)
 
 

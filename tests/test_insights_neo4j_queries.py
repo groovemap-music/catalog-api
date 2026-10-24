@@ -181,6 +181,47 @@ class TestQueryStyleYearCounts:
         assert "count(DISTINCT r)" in _GENRE_YEAR_CYPHER
 
 
+class TestQueryStyleLandmarks:
+    """Tests for query_style_landmarks."""
+
+    @pytest.mark.asyncio
+    async def test_rows_are_returned_as_published_landmarks(self) -> None:
+        """The ranked rows are wrapped under ``landmarks`` unchanged."""
+        from api.queries.insights_neo4j_queries import query_style_landmarks
+
+        rows = [{"style": "Bop", "master_id": "m1", "title": "Blue Train", "year": None, "release_count": 4}]
+        with patch("api.queries.insights_neo4j_queries.run_query", AsyncMock(return_value=rows)):
+            assert await query_style_landmarks(AsyncMock()) == {"landmarks": rows}
+
+    @pytest.mark.asyncio
+    async def test_read_carries_the_cap_and_the_long_internal_timeout(self) -> None:
+        """The read passes the per-style cap as a parameter and runs under the landmark budget."""
+        from api.queries.insights_neo4j_queries import (
+            LANDMARKS_PER_STYLE,
+            STYLE_LANDMARK_QUERY_TIMEOUT_SECONDS,
+            query_style_landmarks,
+        )
+
+        run_query = AsyncMock(return_value=[])
+        with patch("api.queries.insights_neo4j_queries.run_query", run_query):
+            await query_style_landmarks(AsyncMock())
+
+        run_query.assert_awaited_once()
+        assert run_query.await_args.kwargs["timeout"] == STYLE_LANDMARK_QUERY_TIMEOUT_SECONDS
+        assert run_query.await_args.kwargs["limit"] == LANDMARKS_PER_STYLE == 25
+        assert STYLE_LANDMARK_QUERY_TIMEOUT_SECONDS > 30.0  # the genre-tree route budget
+
+    def test_only_releases_with_a_master_count_and_ties_break_on_master_id(self) -> None:
+        """The master match is required, and the ranking is release count descending then master id."""
+        from api.queries.insights_neo4j_queries import _STYLE_LANDMARK_CYPHER
+
+        assert "MATCH (r)-[:DERIVED_FROM]->(m:Master)" in _STYLE_LANDMARK_CYPHER
+        assert "OPTIONAL MATCH" not in _STYLE_LANDMARK_CYPHER
+        assert "count(DISTINCT r)" in _STYLE_LANDMARK_CYPHER
+        assert "ORDER BY style, release_count DESC, m.id" in _STYLE_LANDMARK_CYPHER
+        assert "ranked[0..$limit]" in _STYLE_LANDMARK_CYPHER
+
+
 class TestQueryLabelLongevity:
     @pytest.mark.asyncio
     async def test_returns_ranked_labels(self) -> None:

@@ -22,6 +22,15 @@ logger = structlog.get_logger(__name__)
 # ``x-groovemap-max-processing-seconds`` on this operation.
 STYLE_YEAR_QUERY_TIMEOUT_SECONDS = 300.0
 
+# Server-side budget for the landmark read. It ranks every (style, master) pair in the graph, a
+# scan of the same size as the style-year read, so it gets the same long internal budget. The
+# internal-insights contract publishes this figure as ``x-groovemap-max-processing-seconds`` on
+# the style-landmarks operation.
+STYLE_LANDMARK_QUERY_TIMEOUT_SECONDS = 300.0
+
+# Masters kept per style. Concept B draws the top 25 masters of each style as landmarks.
+LANDMARKS_PER_STYLE = 25
+
 
 async def query_artist_centrality(driver: Any, limit: int = 100) -> list[dict[str, Any]]:
     """Query top artists by total edge count (degree centrality).
@@ -148,6 +157,45 @@ async def query_style_year_counts(driver: Any) -> dict[str, list[dict[str, Any]]
     ]
     logger.info("🔍 Style-year counts query complete", cells=len(years), parent_pairs=len(parents), genre_cells=len(genre_years))
     return {"style_years": years, "style_parents": parents, "genre_years": genre_years}
+
+
+# Landmark masters: per style, the masters with the most releases. A release counts toward a
+# master only through DERIVED_FROM, so masterless releases add nothing, and ``DISTINCT`` keeps a
+# release counted once per (style, master) even if the graph carries a duplicate edge. Ranking is
+# release_count descending, then master id ascending (string order), which makes the cut at the
+# cap deterministic when masters tie. The slice happens per style inside the query so only the
+# kept rows leave Neo4j. The year is the master's own and is null when the master has none.
+_STYLE_LANDMARK_CYPHER = """
+MATCH (r:Release)-[:IS]->(s:Style)
+MATCH (r)-[:DERIVED_FROM]->(m:Master)
+WITH s.name AS style, m, count(DISTINCT r) AS release_count
+ORDER BY style, release_count DESC, m.id
+WITH style, collect({master_id: m.id, title: m.title, year: m.year, release_count: release_count}) AS ranked
+UNWIND ranked[0..$limit] AS landmark
+RETURN style, landmark.master_id AS master_id, landmark.title AS title,
+       CASE WHEN landmark.year > 0 THEN landmark.year END AS year,
+       landmark.release_count AS release_count
+ORDER BY style, release_count DESC, master_id
+"""
+
+
+async def query_style_landmarks(driver: Any) -> dict[str, list[dict[str, Any]]]:
+    """Query the landmark masters of every style.
+
+    Returns ``landmarks``: up to :data:`LANDMARKS_PER_STYLE` rows per style, each with the
+    ``master_id``, ``title`` and ``year`` of the master and the ``release_count`` of releases
+    that carry the style and derive from it. Rows are ordered by style, then ``release_count``
+    descending, then ``master_id``. Runs under :data:`STYLE_LANDMARK_QUERY_TIMEOUT_SECONDS`.
+    """
+    landmarks = await run_query(
+        driver,
+        _STYLE_LANDMARK_CYPHER,
+        database="neo4j",
+        timeout=STYLE_LANDMARK_QUERY_TIMEOUT_SECONDS,
+        limit=LANDMARKS_PER_STYLE,
+    )
+    logger.info("🔍 Style landmarks query complete", landmarks=len(landmarks))
+    return {"landmarks": landmarks}
 
 
 async def query_label_longevity(driver: Any, limit: int = 50) -> list[dict[str, Any]]:
