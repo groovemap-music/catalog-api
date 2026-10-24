@@ -22,7 +22,10 @@ surfaces:
 
 Delegated access is on its own scope. ``fit:read`` is not folded into ``collection:read``
 because the two authorise very different things: a kiosk scoring a record in a shop needs
-to *use* the collection to answer, and has no business listing what is in it.
+to *use* the collection to answer, and has no business listing what is in it. The same rule
+keeps ``evidence_entries`` to first-party sessions: uncapped, they name held releases and
+every held facet the candidate touches, so an app token, whatever its scopes, receives the
+capped profile it always has.
 """
 
 from __future__ import annotations
@@ -40,7 +43,7 @@ from api.dependencies import UnifiedAuth, require_user_or_app_token
 from api.fit import compute_fit
 from api.identity import native_ids_for
 from api.limiter import limiter
-from api.models import FitProfile
+from api.models import FitProfile, FitSessionProfile
 from api.queries.fit_queries import get_collection_ids, get_release_context, get_release_rarity
 
 
@@ -67,15 +70,23 @@ def configure(neo4j: Any, pool: Any, valkey: Any | None) -> None:
         _cache = RecommendCache(valkey=valkey, default_ttl=_FIT_CACHE_TTL)
 
 
-def _cache_key(user_id: str, release_id: str) -> str:
+def _cache_key(user_id: str, release_id: str, *, with_entries: bool) -> str:
     """The key one collector's profile of one release is cached under.
 
     Under the ``recommend:explore:{user_id}:…`` prefix on purpose: that is what
     :meth:`api.cache.RecommendCache.invalidate_user` sweeps, and a fit profile is a
     statement about a collection, so the sync that changes the collection has to be able
-    to drop it.
+    to drop it. The session body, with its ``evidence_entries``, has a key of its own, so
+    an app token can never be served one from the cache.
     """
-    return f"recommend:explore:{user_id}:fit:release:{release_id}"
+    key = f"recommend:explore:{user_id}:fit:release:{release_id}"
+    return f"{key}:entries" if with_entries else key
+
+
+def _components(profile: dict[str, Any], *, with_entries: bool) -> dict[str, Any]:
+    """The components as the response model takes them, with the entries only for a session."""
+    fields = ("score", "evidence", "evidence_items", "evidence_entries") if with_entries else ("score", "evidence", "evidence_items")
+    return {name: {field: component[field] for field in fields} for name, component in profile["components"].items()}
 
 
 async def _stamp_impression(user_id: str, body: dict[str, Any]) -> None:
@@ -119,7 +130,9 @@ async def release_fit(
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     user_id = auth.user_id
-    cache_key = _cache_key(user_id, release_id)
+    # A first-party session only; see the module docstring.
+    with_entries = auth.via == "jwt"
+    cache_key = _cache_key(user_id, release_id, with_entries=with_entries)
     if _cache:
         cached = await _cache.get(cache_key)
         if cached is not None:
@@ -137,7 +150,8 @@ async def release_fit(
     gm_ids = await native_ids_for("release", [release_id])
     artists = context.get("artists") or []
 
-    response = FitProfile.model_validate(
+    model = FitSessionProfile if with_entries else FitProfile
+    response = model.model_validate(
         {
             "release": {
                 "id": context["id"],
@@ -149,7 +163,7 @@ async def release_fit(
                 "rarity": rarity,
             },
             "fit": profile["fit"],
-            "components": profile["components"],
+            "components": _components(profile, with_entries=with_entries),
             "confidence": profile["confidence"],
             "policy_id": activity.POLICY_CRATEFIT,
             "fit_version": profile["fit_version"],
@@ -159,7 +173,8 @@ async def release_fit(
     for component in body["components"].values():
         # Trim the unset fields Pydantic fills in as null: `api.fit` only ever sets the
         # keys an entry's kind actually uses, and the wire shape should read the same way.
-        component["evidence_items"] = [{key: value for key, value in item.items() if value is not None} for item in component["evidence_items"]]
+        for field in ("evidence_items", "evidence_entries") if with_entries else ("evidence_items",):
+            component[field] = [{key: value for key, value in item.items() if value is not None} for item in component[field]]
 
     # Cached before the impression is stamped, so the body in Valkey never carries one.
     if _cache:

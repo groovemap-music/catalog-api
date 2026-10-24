@@ -89,6 +89,9 @@ _DIMENSION_NOUN: Final[dict[str, str]] = {"artist": "artist", "label": "label", 
 _HELD_KEYS: Final[dict[str, str]] = {"artist": "artist_ids", "label": "label_ids", "genre": "genres", "style": "styles"}
 _COUNT_KEYS: Final[dict[str, str]] = {"artist": "artist_counts", "label": "label_counts", "genre": "genre_counts", "style": "style_counts"}
 
+# The dimensions the Strata atlas has a node for. Artists and labels have no plane on it.
+_ATLAS_NODES: Final[frozenset[str]] = frozenset({"genre", "style"})
+
 
 def _article(noun: str) -> str:
     """The indefinite article an evidence string needs before ``noun``."""
@@ -103,6 +106,11 @@ def _entry(
     count: int | None = None,
     release_id: str | None = None,
     detail: str | None = None,
+    entity_type: str | None = None,
+    entity_id: str | None = None,
+    genres: list[str] | None = None,
+    master_id: str | None = None,
+    drawable: bool = False,
 ) -> dict[str, Any]:
     """One structured evidence fact: what a component asserts, before it is worded.
 
@@ -114,6 +122,20 @@ def _entry(
     id where the claim has one; ``detail`` is the small amount of extra freeform text a few
     claim kinds need to complete their sentence (a shared media family, a matched artist
     name) and is never the only fact a sentence states.
+
+    The remaining keys exist only on ``evidence_entries`` (see :func:`_component`).
+    ``entity_type`` says what kind of thing ``entity_id`` names (``artist``, ``label``,
+    ``genre``, ``style``, or ``release``), because the ids alone mix Discogs ids with genre
+    and style names and a consumer must never guess which it holds; it is set exactly when
+    ``entity_id`` is. ``entity_id`` is the
+    graph id of ``entity`` in the form the Strata and Explore routes return: the graph
+    node's ``id`` as a string for an artist, label, or release, and the name of a genre or
+    style, which the graph keys by name.
+    ``genres`` is a bridge's regions as a list rather than the rendered sentence, and
+    ``master_id`` the master a redundancy duplicate hangs under. ``drawable`` says whether
+    the Strata atlas can place the claim: a genre or style node, the edge between bridged
+    genre hulls, or a held release under a master. Artists and labels have no plane on the
+    atlas, so their claims are listed beside it instead.
     """
     entry: dict[str, Any] = {"dimension": dimension, "entity": entity, "kind": kind}
     if count is not None:
@@ -122,7 +144,27 @@ def _entry(
         entry["release_id"] = release_id
     if detail is not None:
         entry["detail"] = detail
+    # A type only beside an id: it says what the id names, and there is nothing to name
+    # without one.
+    if entity_id is not None:
+        entry["entity_type"] = entity_type
+        entry["entity_id"] = entity_id
+    if genres is not None:
+        entry["genres"] = genres
+    if master_id is not None:
+        entry["master_id"] = master_id
+    entry["drawable"] = drawable
     return entry
+
+
+# The keys an `evidence_items` entry has always carried. The capped list is projected onto
+# these so it reads byte for byte as it did before `evidence_entries` existed.
+_ITEM_KEYS: Final[tuple[str, ...]] = ("dimension", "entity", "kind", "count", "release_id", "detail")
+
+
+def _item(entry: dict[str, Any]) -> dict[str, Any]:
+    """Project an entry onto the keys ``evidence_items`` carries."""
+    return {key: entry[key] for key in _ITEM_KEYS if key in entry}
 
 
 def _render_entry(entry: dict[str, Any]) -> str:
@@ -164,12 +206,18 @@ def _component(score: float, entries: list[dict[str, Any]]) -> dict[str, Any]:
     same :data:`FIT_CONSTANTS` evidence limit: every entry is rendered into its sentence by
     :func:`_render_entry`, so the prose a collector reads and the structured claim a
     consumer can key on can never say two different things.
+
+    ``evidence_entries`` is every entry, uncapped and carrying its ids, in the same order,
+    so its first entries are ``evidence_items`` with keys added. It is for the Strata
+    atlas, which draws every drawable entry: the cap suits a person reading sentences, and
+    it can hide a drawable unheld style behind three unheld artists and labels.
     """
     capped = entries[:_EVIDENCE_LIMIT]
     return {
         "score": round(min(1.0, max(0.0, score)), _PRECISION),
         "evidence": [_render_entry(entry) for entry in capped],
-        "evidence_items": capped,
+        "evidence_items": [_item(entry) for entry in capped],
+        "evidence_entries": entries,
     }
 
 
@@ -219,7 +267,7 @@ def score_affinity(collection: dict[str, Any], context: dict[str, Any]) -> dict[
 
     weighted = 0.0
     weight_total = 0.0
-    shared: list[tuple[int, str, str]] = []
+    shared: list[tuple[int, str, str, str]] = []
     for dimension, weight in weights.items():
         pairs = facets[dimension]
         if not pairs:
@@ -229,13 +277,17 @@ def score_affinity(collection: dict[str, Any], context: dict[str, Any]) -> dict[
         matches = [(identifier, name) for identifier, name in pairs if identifier in held]
         weighted += weight * (len(matches) / len(pairs))
         weight_total += weight
-        shared.extend((counts.get(identifier, 0), _DIMENSION_NOUN[dimension], name) for identifier, name in matches)
+        shared.extend((counts.get(identifier, 0), _DIMENSION_NOUN[dimension], name, identifier) for identifier, name in matches)
 
     score = weighted / weight_total if weight_total else 0.0
     # Loudest first, then alphabetically, so the same collection always cites the same
     # facts in the same order.
     shared.sort(key=lambda entry: (-entry[0], entry[1], entry[2]))
-    entries = [_entry(noun, name, "shared", count=count) for count, noun, name in shared if count]
+    entries = [
+        _entry(noun, name, "shared", count=count, entity_type=noun, entity_id=identifier, drawable=noun in _ATLAS_NODES)
+        for count, noun, name, identifier in shared
+        if count
+    ]
     return _component(score, entries)
 
 
@@ -250,18 +302,20 @@ def score_novelty(collection: dict[str, Any], context: dict[str, Any]) -> dict[s
     """
     facets = _candidate_facets(context)
     total = 0
-    new: list[tuple[str, str]] = []
+    new: list[tuple[str, str, str]] = []
     for dimension in FIT_CONSTANTS["affinity_weights"]:
         pairs = facets[dimension]
         if not pairs:
             continue
         held = _held(collection, dimension)
         total += len(pairs)
-        new.extend((_DIMENSION_NOUN[dimension], name) for identifier, name in pairs if identifier not in held)
+        new.extend((_DIMENSION_NOUN[dimension], name, identifier) for identifier, name in pairs if identifier not in held)
 
     score = len(new) / total if total else 0.0
     new.sort()
-    return _component(score, [_entry(noun, name, "unheld") for noun, name in new])
+    return _component(
+        score, [_entry(noun, name, "unheld", entity_type=noun, entity_id=identifier, drawable=noun in _ATLAS_NODES) for noun, name, identifier in new]
+    )
 
 
 def score_depth(collection: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -277,7 +331,7 @@ def score_depth(collection: dict[str, Any], context: dict[str, Any]) -> dict[str
     facets = _candidate_facets(context)
 
     score = 0.0
-    deepened: list[tuple[int, str, str]] = []
+    deepened: list[tuple[int, str, str, str]] = []
     for dimension in ("label", "artist"):
         counts = _counts(collection, dimension)
         for identifier, name in facets[dimension]:
@@ -285,10 +339,12 @@ def score_depth(collection: dict[str, Any], context: dict[str, Any]) -> dict[str
             if held <= 0:
                 continue
             score = max(score, min(1.0, held / saturation))
-            deepened.append((held, _DIMENSION_NOUN[dimension], name))
+            deepened.append((held, _DIMENSION_NOUN[dimension], name, identifier))
 
     deepened.sort(key=lambda entry: (-entry[0], entry[1], entry[2]))
-    return _component(score, [_entry(noun, name, "thread", count=count) for count, noun, name in deepened])
+    return _component(
+        score, [_entry(noun, name, "thread", count=count, entity_type=noun, entity_id=identifier) for count, noun, name, identifier in deepened]
+    )
 
 
 def score_bridge(collection: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -338,7 +394,8 @@ def score_bridge(collection: dict[str, Any], context: dict[str, Any]) -> dict[st
     entries: list[dict[str, Any]] = []
     if score > 0:
         named = ", ".join(picked[:-1]) + f" and {picked[-1]}"
-        entries.append(_entry("genre", named, "bridge", count=len(picked)))
+        # The list rather than the sentence: a genre name can itself contain a comma.
+        entries.append(_entry("genre", named, "bridge", count=len(picked), genres=list(picked), drawable=True))
         entries.append(_entry("bridge", "v0 heuristic", "heuristic"))
     return _component(score, entries)
 
@@ -367,9 +424,22 @@ def score_redundancy(collection: dict[str, Any], context: dict[str, Any]) -> dic
     """
     held_releases = {str(value) for value in collection.get("release_ids") or []}
     candidate_id = str(context.get("id") or "")
+    # Every duplicate below is the candidate or a sibling under the candidate's master, so
+    # it is drawable exactly when that master exists: a masterless release has no L2 slot.
+    master_id = str(context.get("master_id") or "") or None
+    drawable = master_id is not None
 
     if candidate_id and candidate_id in held_releases:
-        entry = _entry("release", candidate_id, "duplicate", release_id=candidate_id)
+        entry = _entry(
+            "release",
+            candidate_id,
+            "duplicate",
+            release_id=candidate_id,
+            entity_type="release",
+            entity_id=candidate_id,
+            master_id=master_id,
+            drawable=drawable,
+        )
         return _component(float(FIT_CONSTANTS["redundancy_held_release"]), [entry])
 
     candidate_families = {str(value) for value in context.get("media_families") or [] if value}
@@ -380,23 +450,51 @@ def score_redundancy(collection: dict[str, Any], context: dict[str, Any]) -> dic
         sibling = min(same_family, key=lambda entry: str(entry.get("id")))
         shared = ", ".join(sorted(_sibling_media(sibling) & candidate_families))
         sibling_id = str(sibling.get("id"))
-        entry = _entry("release", str(sibling.get("title") or sibling.get("id")), "duplicate", release_id=sibling_id, detail=shared)
+        entry = _entry(
+            "release",
+            str(sibling.get("title") or sibling.get("id")),
+            "duplicate",
+            release_id=sibling_id,
+            detail=shared,
+            entity_type="release",
+            entity_id=sibling_id,
+            master_id=master_id,
+            drawable=drawable,
+        )
         return _component(float(FIT_CONSTANTS["redundancy_same_master_same_family"]), [entry])
 
     if held_siblings:
         sibling = min(held_siblings, key=lambda entry: str(entry.get("id")))
         families = ", ".join(sorted(_sibling_media(sibling))) or "another format"
         sibling_id = str(sibling.get("id"))
-        entry = _entry("release", str(sibling.get("title") or sibling.get("id")), "duplicate", release_id=sibling_id, detail=families)
+        entry = _entry(
+            "release",
+            str(sibling.get("title") or sibling.get("id")),
+            "duplicate",
+            release_id=sibling_id,
+            detail=families,
+            entity_type="release",
+            entity_id=sibling_id,
+            master_id=master_id,
+            drawable=drawable,
+        )
         return _component(float(FIT_CONSTANTS["redundancy_same_master_other_family"]), [entry])
 
     held_titles: dict[str, Any] = collection.get("held_titles") or {}
+    # Absent from a collection folded before the key existed and still cached; the entry
+    # then goes without an id rather than the profile failing.
+    held_title_releases: dict[str, Any] = collection.get("held_title_releases") or {}
     title = str(context.get("title") or "")
     if title:
         for identifier, name in _candidate_facets(context)["artist"]:
-            held_title = held_titles.get(held_title_key(identifier, title))
+            key = held_title_key(identifier, title)
+            held_title = held_titles.get(key)
             if held_title:
-                entry = _entry("release", str(held_title), "duplicate_title", detail=name)
+                held_id = held_title_releases.get(key)
+                # No master links the two, so the held record has no place on the atlas.
+                entry = _entry(
+                    "release", str(held_title), "duplicate_title", detail=name, entity_type="release", entity_id=str(held_id) if held_id else None
+                )
                 return _component(float(FIT_CONSTANTS["redundancy_same_artist_and_title"]), [entry])
 
     return _component(0.0, [])

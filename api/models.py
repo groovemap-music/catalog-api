@@ -1072,6 +1072,29 @@ class FitEvidenceItem(BaseModel):
     detail: str | None = Field(default=None, description="Extra text a few claim kinds need to complete their sentence, e.g. a shared media family")
 
 
+class FitEvidenceEntry(FitEvidenceItem):
+    """One structured fact with the ids a consumer needs to place or link it.
+
+    The entries of ``evidence_entries`` are uncapped and in the same order as
+    ``evidence_items``, so entry ``i`` below the evidence limit is item ``i`` plus these
+    keys. Built for the Strata atlas, which draws every ``drawable`` entry and lists the
+    rest beside the map.
+    """
+
+    entity_type: str | None = Field(
+        default=None, description="What `entity_id` names: artist, label, genre, style, or release. Present exactly when `entity_id` is"
+    )
+    entity_id: str | None = Field(
+        default=None, description="The graph id of `entity`: the Discogs id of an artist, label, or release; the name of a genre or style"
+    )
+    genres: list[str] | None = Field(default=None, description="A bridge's regions as a list, in the order the sentence names them")
+    master_id: str | None = Field(default=None, description="The master a redundancy duplicate hangs under")
+    drawable: bool = Field(
+        default=False,
+        description="Whether the atlas can place the claim: a genre or style node, a bridged pair of genres, or a release under a master",
+    )
+
+
 class FitComponent(BaseModel):
     """One dimension of a fit answer: a score in [0, 1] and the facts behind it."""
 
@@ -1079,6 +1102,19 @@ class FitComponent(BaseModel):
     evidence: list[str] = Field(default_factory=list, description="Facts about the caller's own collection that produced the score")
     evidence_items: list[FitEvidenceItem] = Field(
         default_factory=list, description="The same facts as `evidence`, structured, and capped by the same evidence limit"
+    )
+
+
+class FitSessionComponent(FitComponent):
+    """A component as a first-party session receives it: with every fact, uncapped.
+
+    Never served to an app token. ``fit:read`` lets a delegate *use* the collection to
+    answer, and the uncapped entries name held releases and every held facet the
+    candidate touches, which is close enough to listing the collection to be withheld.
+    """
+
+    evidence_entries: list[FitEvidenceEntry] = Field(
+        default_factory=list, description="Every fact behind the score, uncapped, with entity ids and whether the atlas can draw it"
     )
 
 
@@ -1094,6 +1130,16 @@ class FitComponents(BaseModel):
     bridge: FitComponent
     depth: FitComponent
     redundancy: FitComponent
+
+
+class FitSessionComponents(FitComponents):
+    """The five dimensions, each with its uncapped entries, for a first-party session."""
+
+    affinity: FitSessionComponent
+    novelty: FitSessionComponent
+    bridge: FitSessionComponent
+    depth: FitSessionComponent
+    redundancy: FitSessionComponent
 
 
 class FitRarity(BaseModel):
@@ -1134,6 +1180,16 @@ class FitProfile(BaseModel):
     # outcome against the showing it actually saw. None when the release has no native id
     # or the impression could not be written.
     impression_id: str | None = None
+
+
+class FitSessionProfile(FitProfile):
+    """Response for GET /api/fit/release/{release_id} to a first-party session.
+
+    The app-token response is :class:`FitProfile`, byte for byte as it was before
+    ``evidence_entries`` existed.
+    """
+
+    components: FitSessionComponents
 
 
 class LookupRelease(BaseModel):

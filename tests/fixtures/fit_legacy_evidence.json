@@ -1,0 +1,669 @@
+{
+  "exact_duplicate": {
+    "affinity": {
+      "evidence": [
+        "shares genre Jazz with 3 releases you hold",
+        "shares label Blue Note with 3 releases you hold",
+        "shares style Hard Bop with 3 releases you hold"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "genre",
+          "entity": "Jazz",
+          "kind": "shared",
+          "count": 3
+        },
+        {
+          "dimension": "label",
+          "entity": "Blue Note",
+          "kind": "shared",
+          "count": 3
+        },
+        {
+          "dimension": "style",
+          "entity": "Hard Bop",
+          "kind": "shared",
+          "count": 3
+        }
+      ]
+    },
+    "novelty": {
+      "evidence": [
+        "John Coltrane is an artist your collection has never held"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "artist",
+          "entity": "John Coltrane",
+          "kind": "unheld"
+        }
+      ]
+    },
+    "bridge": {
+      "evidence": [],
+      "evidence_items": []
+    },
+    "depth": {
+      "evidence": [
+        "deepens label Blue Note (3 held)"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "label",
+          "entity": "Blue Note",
+          "kind": "thread",
+          "count": 3
+        }
+      ]
+    },
+    "redundancy": {
+      "evidence": [
+        "you already hold this exact release"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "release",
+          "entity": "1",
+          "kind": "duplicate",
+          "release_id": "1"
+        }
+      ]
+    }
+  },
+  "same_master_same_family": {
+    "affinity": {
+      "evidence": [
+        "shares genre Jazz with 3 releases you hold",
+        "shares label Blue Note with 3 releases you hold",
+        "shares style Hard Bop with 3 releases you hold"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "genre",
+          "entity": "Jazz",
+          "kind": "shared",
+          "count": 3
+        },
+        {
+          "dimension": "label",
+          "entity": "Blue Note",
+          "kind": "shared",
+          "count": 3
+        },
+        {
+          "dimension": "style",
+          "entity": "Hard Bop",
+          "kind": "shared",
+          "count": 3
+        }
+      ]
+    },
+    "novelty": {
+      "evidence": [
+        "John Coltrane is an artist your collection has never held"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "artist",
+          "entity": "John Coltrane",
+          "kind": "unheld"
+        }
+      ]
+    },
+    "bridge": {
+      "evidence": [],
+      "evidence_items": []
+    },
+    "depth": {
+      "evidence": [
+        "deepens label Blue Note (3 held)"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "label",
+          "entity": "Blue Note",
+          "kind": "thread",
+          "count": 3
+        }
+      ]
+    },
+    "redundancy": {
+      "evidence": [
+        "you hold Moanin', the same record on grooved"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "release",
+          "entity": "Moanin'",
+          "kind": "duplicate",
+          "release_id": "1",
+          "detail": "grooved"
+        }
+      ]
+    }
+  },
+  "same_master_other_family": {
+    "affinity": {
+      "evidence": [
+        "shares genre Jazz with 3 releases you hold",
+        "shares label Blue Note with 3 releases you hold",
+        "shares style Hard Bop with 3 releases you hold"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "genre",
+          "entity": "Jazz",
+          "kind": "shared",
+          "count": 3
+        },
+        {
+          "dimension": "label",
+          "entity": "Blue Note",
+          "kind": "shared",
+          "count": 3
+        },
+        {
+          "dimension": "style",
+          "entity": "Hard Bop",
+          "kind": "shared",
+          "count": 3
+        }
+      ]
+    },
+    "novelty": {
+      "evidence": [
+        "John Coltrane is an artist your collection has never held"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "artist",
+          "entity": "John Coltrane",
+          "kind": "unheld"
+        }
+      ]
+    },
+    "bridge": {
+      "evidence": [],
+      "evidence_items": []
+    },
+    "depth": {
+      "evidence": [
+        "deepens label Blue Note (3 held)"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "label",
+          "entity": "Blue Note",
+          "kind": "thread",
+          "count": 3
+        }
+      ]
+    },
+    "redundancy": {
+      "evidence": [
+        "you hold Moanin', the same record on digital"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "release",
+          "entity": "Moanin'",
+          "kind": "duplicate",
+          "release_id": "1",
+          "detail": "digital"
+        }
+      ]
+    }
+  },
+  "same_artist_and_title": {
+    "affinity": {
+      "evidence": [
+        "shares artist John Coltrane with 1 release you hold",
+        "shares genre Jazz with 1 release you hold",
+        "shares label Blue Note with 1 release you hold"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "artist",
+          "entity": "John Coltrane",
+          "kind": "shared",
+          "count": 1
+        },
+        {
+          "dimension": "genre",
+          "entity": "Jazz",
+          "kind": "shared",
+          "count": 1
+        },
+        {
+          "dimension": "label",
+          "entity": "Blue Note",
+          "kind": "shared",
+          "count": 1
+        }
+      ]
+    },
+    "novelty": {
+      "evidence": [
+        "Hard Bop is a style your collection has never held"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "style",
+          "entity": "Hard Bop",
+          "kind": "unheld"
+        }
+      ]
+    },
+    "bridge": {
+      "evidence": [],
+      "evidence_items": []
+    },
+    "depth": {
+      "evidence": [
+        "deepens artist John Coltrane (1 held)",
+        "deepens label Blue Note (1 held)"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "artist",
+          "entity": "John Coltrane",
+          "kind": "thread",
+          "count": 1
+        },
+        {
+          "dimension": "label",
+          "entity": "Blue Note",
+          "kind": "thread",
+          "count": 1
+        }
+      ]
+    },
+    "redundancy": {
+      "evidence": [
+        "you hold Blue Train by John Coltrane, which no master links to this pressing"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "release",
+          "entity": "Blue Train",
+          "kind": "duplicate_title",
+          "detail": "John Coltrane"
+        }
+      ]
+    }
+  },
+  "bridge_two_regions": {
+    "affinity": {
+      "evidence": [
+        "shares genre Electronic with 1 release you hold",
+        "shares genre Jazz with 1 release you hold",
+        "shares label Blue Note with 1 release you hold"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "genre",
+          "entity": "Electronic",
+          "kind": "shared",
+          "count": 1
+        },
+        {
+          "dimension": "genre",
+          "entity": "Jazz",
+          "kind": "shared",
+          "count": 1
+        },
+        {
+          "dimension": "label",
+          "entity": "Blue Note",
+          "kind": "shared",
+          "count": 1
+        }
+      ]
+    },
+    "novelty": {
+      "evidence": [
+        "John Coltrane is an artist your collection has never held"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "artist",
+          "entity": "John Coltrane",
+          "kind": "unheld"
+        }
+      ]
+    },
+    "bridge": {
+      "evidence": [
+        "bridges Electronic and Jazz, which share no artist or label in your collection",
+        "region boundaries are the v0 genre heuristic, not a computed community"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "genre",
+          "entity": "Electronic and Jazz",
+          "kind": "bridge",
+          "count": 2
+        },
+        {
+          "dimension": "bridge",
+          "entity": "v0 heuristic",
+          "kind": "heuristic"
+        }
+      ]
+    },
+    "depth": {
+      "evidence": [
+        "deepens label Blue Note (1 held)"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "label",
+          "entity": "Blue Note",
+          "kind": "thread",
+          "count": 1
+        }
+      ]
+    },
+    "redundancy": {
+      "evidence": [],
+      "evidence_items": []
+    }
+  },
+  "bridge_comma_genre": {
+    "affinity": {
+      "evidence": [
+        "shares genre Folk, World, & Country with 1 release you hold",
+        "shares genre Jazz with 1 release you hold",
+        "shares genre Rock with 1 release you hold"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "genre",
+          "entity": "Folk, World, & Country",
+          "kind": "shared",
+          "count": 1
+        },
+        {
+          "dimension": "genre",
+          "entity": "Jazz",
+          "kind": "shared",
+          "count": 1
+        },
+        {
+          "dimension": "genre",
+          "entity": "Rock",
+          "kind": "shared",
+          "count": 1
+        }
+      ]
+    },
+    "novelty": {
+      "evidence": [
+        "John Coltrane is an artist your collection has never held",
+        "Blue Note is a label your collection has never held"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "artist",
+          "entity": "John Coltrane",
+          "kind": "unheld"
+        },
+        {
+          "dimension": "label",
+          "entity": "Blue Note",
+          "kind": "unheld"
+        }
+      ]
+    },
+    "bridge": {
+      "evidence": [
+        "bridges Folk, World, & Country, Jazz and Rock, which share no artist or label in your collection",
+        "region boundaries are the v0 genre heuristic, not a computed community"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "genre",
+          "entity": "Folk, World, & Country, Jazz and Rock",
+          "kind": "bridge",
+          "count": 3
+        },
+        {
+          "dimension": "bridge",
+          "entity": "v0 heuristic",
+          "kind": "heuristic"
+        }
+      ]
+    },
+    "depth": {
+      "evidence": [],
+      "evidence_items": []
+    },
+    "redundancy": {
+      "evidence": [],
+      "evidence_items": []
+    }
+  },
+  "jazz_candidate": {
+    "affinity": {
+      "evidence": [
+        "shares genre Jazz with 3 releases you hold",
+        "shares label Blue Note with 3 releases you hold",
+        "shares style Hard Bop with 3 releases you hold"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "genre",
+          "entity": "Jazz",
+          "kind": "shared",
+          "count": 3
+        },
+        {
+          "dimension": "label",
+          "entity": "Blue Note",
+          "kind": "shared",
+          "count": 3
+        },
+        {
+          "dimension": "style",
+          "entity": "Hard Bop",
+          "kind": "shared",
+          "count": 3
+        }
+      ]
+    },
+    "novelty": {
+      "evidence": [
+        "John Coltrane is an artist your collection has never held"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "artist",
+          "entity": "John Coltrane",
+          "kind": "unheld"
+        }
+      ]
+    },
+    "bridge": {
+      "evidence": [],
+      "evidence_items": []
+    },
+    "depth": {
+      "evidence": [
+        "deepens label Blue Note (3 held)"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "label",
+          "entity": "Blue Note",
+          "kind": "thread",
+          "count": 3
+        }
+      ]
+    },
+    "redundancy": {
+      "evidence": [],
+      "evidence_items": []
+    }
+  },
+  "empty_collection": {
+    "affinity": {
+      "evidence": [],
+      "evidence_items": []
+    },
+    "novelty": {
+      "evidence": [
+        "John Coltrane is an artist your collection has never held",
+        "Jazz is a genre your collection has never held",
+        "Blue Note is a label your collection has never held"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "artist",
+          "entity": "John Coltrane",
+          "kind": "unheld"
+        },
+        {
+          "dimension": "genre",
+          "entity": "Jazz",
+          "kind": "unheld"
+        },
+        {
+          "dimension": "label",
+          "entity": "Blue Note",
+          "kind": "unheld"
+        }
+      ]
+    },
+    "bridge": {
+      "evidence": [],
+      "evidence_items": []
+    },
+    "depth": {
+      "evidence": [],
+      "evidence_items": []
+    },
+    "redundancy": {
+      "evidence": [],
+      "evidence_items": []
+    }
+  },
+  "capped_affinity": {
+    "affinity": {
+      "evidence": [
+        "shares genre Jazz with 6 releases you hold",
+        "shares label Blue Note with 6 releases you hold",
+        "shares style Hard Bop with 6 releases you hold"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "genre",
+          "entity": "Jazz",
+          "kind": "shared",
+          "count": 6
+        },
+        {
+          "dimension": "label",
+          "entity": "Blue Note",
+          "kind": "shared",
+          "count": 6
+        },
+        {
+          "dimension": "style",
+          "entity": "Hard Bop",
+          "kind": "shared",
+          "count": 6
+        }
+      ]
+    },
+    "novelty": {
+      "evidence": [],
+      "evidence_items": []
+    },
+    "bridge": {
+      "evidence": [],
+      "evidence_items": []
+    },
+    "depth": {
+      "evidence": [
+        "deepens label Blue Note (6 held)",
+        "deepens artist Four (1 held)",
+        "deepens artist One (1 held)"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "label",
+          "entity": "Blue Note",
+          "kind": "thread",
+          "count": 6
+        },
+        {
+          "dimension": "artist",
+          "entity": "Four",
+          "kind": "thread",
+          "count": 1
+        },
+        {
+          "dimension": "artist",
+          "entity": "One",
+          "kind": "thread",
+          "count": 1
+        }
+      ]
+    },
+    "redundancy": {
+      "evidence": [],
+      "evidence_items": []
+    }
+  },
+  "novelty_cap_hides_style": {
+    "affinity": {
+      "evidence": [
+        "shares genre Jazz with 3 releases you hold"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "genre",
+          "entity": "Jazz",
+          "kind": "shared",
+          "count": 3
+        }
+      ]
+    },
+    "novelty": {
+      "evidence": [
+        "Xavier is an artist your collection has never held",
+        "Yusef is an artist your collection has never held",
+        "Zoot is an artist your collection has never held"
+      ],
+      "evidence_items": [
+        {
+          "dimension": "artist",
+          "entity": "Xavier",
+          "kind": "unheld"
+        },
+        {
+          "dimension": "artist",
+          "entity": "Yusef",
+          "kind": "unheld"
+        },
+        {
+          "dimension": "artist",
+          "entity": "Zoot",
+          "kind": "unheld"
+        }
+      ]
+    },
+    "bridge": {
+      "evidence": [],
+      "evidence_items": []
+    },
+    "depth": {
+      "evidence": [],
+      "evidence_items": []
+    },
+    "redundancy": {
+      "evidence": [],
+      "evidence_items": []
+    }
+  }
+}
