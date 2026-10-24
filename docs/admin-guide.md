@@ -53,13 +53,19 @@ an audit entry with the actor, action, target, and non-secret details.
 
 ## Extraction control and analysis
 
-`POST /api/admin/extractions/trigger` records a pending run, calls the configured
-`EXTRACTOR_HOST` trigger, and tracks progress through its health contract. That retained wire
-targets [`discogs-ingestion`](https://github.com/groovemap-music/discogs-ingestion). The
-independent [`musicbrainz-ingestion`](https://github.com/groovemap-music/musicbrainz-ingestion)
-producer has no Catalog API trigger or scheduling dependency. Each producer owns its extraction
-implementation and release schedule; Catalog API owns only the authenticated Discogs trigger,
-progress record, local result analysis, and failure translation exposed to clients.
+`POST /api/admin/extractions/trigger` takes a required body `{"source": "discogs" | "musicbrainz"}`,
+records a pending run, calls the trigger of that source's own producer, and tracks progress
+through that producer's health contract. A missing or unknown `source` is rejected with `422`.
+`discogs` targets [`discogs-ingestion`](https://github.com/groovemap-music/discogs-ingestion)
+(`EXTRACTOR_DISCOGS_HOST`/`EXTRACTOR_DISCOGS_HEALTH_PORT`) and `musicbrainz` targets
+[`musicbrainz-ingestion`](https://github.com/groovemap-music/musicbrainz-ingestion)
+(`EXTRACTOR_MUSICBRAINZ_HOST`/`EXTRACTOR_MUSICBRAINZ_HEALTH_PORT`); a trigger never reaches the
+other source's producer. Each producer enforces one run at a time itself, so a `409` means that
+source is already running and never blocks the other source. The `202` response and the audit
+entry carry `source`. Each producer owns its extraction implementation and release schedule;
+Catalog API owns the authenticated trigger, progress record, local result analysis, and failure
+translation exposed to clients. Run history reports `source`, which is `null` for runs recorded
+before the source was stored; it is never inferred.
 
 | Method | Path | Responsibility |
 | --- | --- | --- |

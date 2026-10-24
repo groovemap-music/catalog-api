@@ -254,6 +254,7 @@ class TestExtractionTrigger:
 
         resp = test_client.post(
             "/api/admin/extractions/trigger",
+            json={"source": "discogs"},
             headers=_admin_auth_headers(),
         )
         assert resp.status_code == 202
@@ -280,14 +281,187 @@ class TestExtractionTrigger:
 
         resp = test_client.post(
             "/api/admin/extractions/trigger",
+            json={"source": "discogs"},
             headers=_admin_auth_headers(),
         )
         assert resp.status_code == 409
         assert resp.json()["detail"] == "Extraction already in progress"
 
     def test_unauthorized(self, test_client: TestClient) -> None:
-        resp = test_client.post("/api/admin/extractions/trigger")
+        resp = test_client.post("/api/admin/extractions/trigger", json={"source": "discogs"})
         assert resp.status_code in (401, 403)
+
+
+class TestExtractionTriggerSourceRouting:
+    """The trigger starts the requested source's own extractor and never another's."""
+
+    @staticmethod
+    def _client(mock_client_cls: Any) -> AsyncMock:
+        mock_response = AsyncMock()
+        mock_response.status_code = 202
+        instance = AsyncMock()
+        instance.post = AsyncMock(return_value=mock_response)
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = instance
+        return instance
+
+    @pytest.mark.parametrize(
+        ("source", "expected_url"),
+        [
+            ("musicbrainz", "http://extractor-musicbrainz:8000/trigger"),
+            ("discogs", "http://extractor-discogs:8000/trigger"),
+        ],
+    )
+    @patch("api.routers.admin._track_extraction", new_callable=AsyncMock)
+    @patch("api.routers.admin.record_audit_entry", new_callable=AsyncMock)
+    @patch("api.routers.admin.httpx.AsyncClient")
+    def test_routes_to_source_extractor(
+        self,
+        mock_client_cls: Any,
+        mock_audit: AsyncMock,
+        mock_track: AsyncMock,
+        source: str,
+        expected_url: str,
+        test_client: TestClient,
+        mock_cur: AsyncMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import api.routers.admin as admin_mod
+
+        # The stubbed tracker never pops its entry, and a task bound to the TestClient's loop
+        # would break lifespan shutdown in later tests.
+        monkeypatch.setattr(admin_mod, "_tracking_tasks", {})
+        extraction_id = str(uuid4())
+        mock_cur.fetchone = AsyncMock(return_value={"id": extraction_id})
+        instance = self._client(mock_client_cls)
+
+        resp = test_client.post("/api/admin/extractions/trigger", json={"source": source}, headers=_admin_auth_headers())
+
+        assert resp.status_code == 202
+        assert resp.json()["source"] == source
+        instance.post.assert_called_once()
+        assert instance.post.call_args.args[0] == expected_url
+        assert mock_audit.call_args.kwargs["details"]["source"] == source
+        # The tracker polls the same source's extractor.
+        mock_track.assert_called_once_with(extraction_id, source)
+        # The run's source is persisted with the pending row, not only echoed back.
+        insert = next(c for c in mock_cur.execute.call_args_list if "INSERT INTO extraction_history" in c.args[0])
+        assert "source" in insert.args[0]
+        assert insert.args[1][-1] == source
+
+    @pytest.mark.parametrize("body", [{}, {"source": "spotify"}, {"source": None}, None])
+    def test_missing_or_unknown_source_is_422(self, body: Any, test_client: TestClient) -> None:
+        with patch("api.routers.admin.httpx.AsyncClient") as mock_client_cls:
+            resp = test_client.post("/api/admin/extractions/trigger", json=body, headers=_admin_auth_headers())
+        assert resp.status_code == 422
+        mock_client_cls.assert_not_called()
+
+    def test_per_source_urls_and_discogs_fallback_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import api.routers.admin as admin_mod
+        from api.config import ApiConfig
+
+        for name in (
+            "EXTRACTOR_HOST",
+            "EXTRACTOR_HEALTH_PORT",
+            "EXTRACTOR_DISCOGS_HOST",
+            "EXTRACTOR_DISCOGS_HEALTH_PORT",
+            "EXTRACTOR_MUSICBRAINZ_HOST",
+            "EXTRACTOR_MUSICBRAINZ_HEALTH_PORT",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+        def build() -> ApiConfig:
+            return ApiConfig.from_env()
+
+        defaults = build()
+        assert admin_mod._extractor_base_url(defaults, "discogs") == "http://extractor-discogs:8000"
+        assert admin_mod._extractor_base_url(defaults, "musicbrainz") == "http://extractor-musicbrainz:8000"
+
+        # Legacy variables remain the Discogs fallback and never move MusicBrainz.
+        monkeypatch.setenv("EXTRACTOR_HOST", "legacy-host")
+        monkeypatch.setenv("EXTRACTOR_HEALTH_PORT", "9100")
+        legacy = build()
+        assert admin_mod._extractor_base_url(legacy, "discogs") == "http://legacy-host:9100"
+        assert admin_mod._extractor_base_url(legacy, "musicbrainz") == "http://extractor-musicbrainz:8000"
+
+        # Per-source variables win over the fallback.
+        monkeypatch.setenv("EXTRACTOR_DISCOGS_HOST", "dg")
+        monkeypatch.setenv("EXTRACTOR_DISCOGS_HEALTH_PORT", "9200")
+        monkeypatch.setenv("EXTRACTOR_MUSICBRAINZ_HOST", "mb")
+        monkeypatch.setenv("EXTRACTOR_MUSICBRAINZ_HEALTH_PORT", "9300")
+        explicit = build()
+        assert admin_mod._extractor_base_url(explicit, "discogs") == "http://dg:9200"
+        assert admin_mod._extractor_base_url(explicit, "musicbrainz") == "http://mb:9300"
+
+    @pytest.mark.asyncio
+    async def test_status_read_is_per_source(self) -> None:
+        import api.routers.admin as admin_mod
+
+        mock_config = MagicMock(
+            extractor_discogs_host="dg", extractor_discogs_port=8000, extractor_musicbrainz_host="mb", extractor_musicbrainz_port=8000
+        )
+        mock_pool, _ = TestTrackExtractionResilience._pool()
+        original_pool, original_config = admin_mod._pool, admin_mod._config
+        admin_mod._pool, admin_mod._config = mock_pool, mock_config
+        try:
+            with (
+                patch("api.routers.admin.asyncio.sleep", new_callable=AsyncMock),
+                patch("api.routers.admin.httpx.AsyncClient") as mock_client_cls,
+            ):
+                instance = AsyncMock()
+                instance.get = AsyncMock(side_effect=RuntimeError("stop"))
+                instance.__aenter__ = AsyncMock(return_value=instance)
+                instance.__aexit__ = AsyncMock(return_value=False)
+                mock_client_cls.return_value = instance
+                await admin_mod._track_extraction("fake-id", "musicbrainz")
+            assert instance.get.call_args.args[0] == "http://mb:8000/health"
+        finally:
+            admin_mod._pool, admin_mod._config = original_pool, original_config
+
+    def test_history_reports_null_source_for_legacy_rows(self, test_client: TestClient, mock_cur: AsyncMock) -> None:
+        mock_cur.fetchone = AsyncMock(
+            return_value={
+                "id": uuid4(),
+                "triggered_by": TEST_ADMIN_ID,
+                "status": "completed",
+                "started_at": None,
+                "completed_at": None,
+                "record_counts": None,
+                "error_message": None,
+                "extractor_version": None,
+                "created_at": datetime.now(UTC),
+            }
+        )
+        resp = test_client.get(f"/api/admin/extractions/{uuid4()}", headers=_admin_auth_headers())
+        assert resp.status_code == 200
+        assert resp.json()["source"] is None
+
+    def test_pinned_schema_defines_source_column(self) -> None:
+        """The database-schema revision this repo pins must own the column the INSERT writes."""
+        import inspect
+
+        from groovemap_schema import postgres
+
+        assert "extraction_history ADD COLUMN IF NOT EXISTS source" in inspect.getsource(postgres)
+
+    def test_history_reports_stored_source(self, test_client: TestClient, mock_cur: AsyncMock) -> None:
+        mock_cur.fetchone = AsyncMock(
+            return_value={
+                "id": uuid4(),
+                "triggered_by": TEST_ADMIN_ID,
+                "status": "completed",
+                "started_at": None,
+                "completed_at": None,
+                "record_counts": None,
+                "error_message": None,
+                "extractor_version": None,
+                "source": "musicbrainz",
+                "created_at": datetime.now(UTC),
+            }
+        )
+        resp = test_client.get(f"/api/admin/extractions/{uuid4()}", headers=_admin_auth_headers())
+        assert resp.json()["source"] == "musicbrainz"
 
 
 class TestGmIdProjectionTrigger:
@@ -683,6 +857,7 @@ class TestExtractionTriggerEdgeCases:
 
         resp = test_client.post(
             "/api/admin/extractions/trigger",
+            json={"source": "discogs"},
             headers=_admin_auth_headers(),
         )
         assert resp.status_code == 502
@@ -700,6 +875,7 @@ class TestExtractionTriggerEdgeCases:
 
         resp = test_client.post(
             "/api/admin/extractions/trigger",
+            json={"source": "discogs"},
             headers=_admin_auth_headers(),
         )
         assert resp.status_code == 503
@@ -709,6 +885,7 @@ class TestExtractionTriggerEdgeCases:
 
         resp = test_client.post(
             "/api/admin/extractions/trigger",
+            json={"source": "discogs"},
             headers=_admin_auth_headers(),
         )
         assert resp.status_code == 500
@@ -765,6 +942,7 @@ class TestServiceNotReady:
         try:
             resp = test_client.post(
                 "/api/admin/extractions/trigger",
+                json={"source": "discogs"},
                 headers=_admin_auth_headers(),
             )
             assert resp.status_code == 503
@@ -804,8 +982,8 @@ class TestTrackExtraction:
         mock_pool.connection = MagicMock(return_value=conn_ctx)
 
         mock_config = MagicMock()
-        mock_config.extractor_host = "localhost"
-        mock_config.extractor_health_port = 8000
+        mock_config.extractor_discogs_host = "localhost"
+        mock_config.extractor_discogs_port = 8000
 
         original_pool = admin_mod._pool
         original_config = admin_mod._config
@@ -871,8 +1049,8 @@ class TestTrackExtraction:
         mock_pool.connection = MagicMock(return_value=conn_ctx)
 
         mock_config = MagicMock()
-        mock_config.extractor_host = "localhost"
-        mock_config.extractor_health_port = 8000
+        mock_config.extractor_discogs_host = "localhost"
+        mock_config.extractor_discogs_port = 8000
 
         original_pool = admin_mod._pool
         original_config = admin_mod._config
@@ -940,8 +1118,8 @@ class TestTrackExtraction:
         mock_pool.connection = MagicMock(return_value=conn_ctx)
 
         mock_config = MagicMock()
-        mock_config.extractor_host = "localhost"
-        mock_config.extractor_health_port = 8000
+        mock_config.extractor_discogs_host = "localhost"
+        mock_config.extractor_discogs_port = 8000
 
         original_pool = admin_mod._pool
         original_config = admin_mod._config
@@ -1002,8 +1180,8 @@ class TestTrackExtraction:
         mock_pool.connection = MagicMock(return_value=conn_ctx)
 
         mock_config = MagicMock()
-        mock_config.extractor_host = "localhost"
-        mock_config.extractor_health_port = 8000
+        mock_config.extractor_discogs_host = "localhost"
+        mock_config.extractor_discogs_port = 8000
 
         original_pool = admin_mod._pool
         original_config = admin_mod._config
@@ -1074,8 +1252,8 @@ class TestTrackExtraction:
         mock_pool.connection = MagicMock(return_value=conn_ctx)
 
         mock_config = MagicMock()
-        mock_config.extractor_host = "localhost"
-        mock_config.extractor_health_port = 8000
+        mock_config.extractor_discogs_host = "localhost"
+        mock_config.extractor_discogs_port = 8000
 
         original_pool = admin_mod._pool
         original_config = admin_mod._config
@@ -1128,8 +1306,8 @@ class TestTrackExtraction:
         mock_pool.connection = MagicMock(return_value=conn_ctx)
 
         mock_config = MagicMock()
-        mock_config.extractor_host = "localhost"
-        mock_config.extractor_health_port = 8000
+        mock_config.extractor_discogs_host = "localhost"
+        mock_config.extractor_discogs_port = 8000
 
         original_pool = admin_mod._pool
         original_config = admin_mod._config
@@ -1174,8 +1352,8 @@ class TestTrackExtraction:
         mock_pool.connection = MagicMock(return_value=conn_ctx)
 
         mock_config = MagicMock()
-        mock_config.extractor_host = "localhost"
-        mock_config.extractor_health_port = 8000
+        mock_config.extractor_discogs_host = "localhost"
+        mock_config.extractor_discogs_port = 8000
 
         original_pool = admin_mod._pool
         original_config = admin_mod._config
@@ -1222,8 +1400,8 @@ class TestTrackExtraction:
         mock_pool.connection = MagicMock(return_value=conn_ctx)
 
         mock_config = MagicMock()
-        mock_config.extractor_host = "localhost"
-        mock_config.extractor_health_port = 8000
+        mock_config.extractor_discogs_host = "localhost"
+        mock_config.extractor_discogs_port = 8000
 
         original_pool = admin_mod._pool
         original_config = admin_mod._config
@@ -1270,8 +1448,8 @@ class TestTrackExtraction:
         mock_pool.connection = MagicMock(return_value=conn_ctx)
 
         mock_config = MagicMock()
-        mock_config.extractor_host = "localhost"
-        mock_config.extractor_health_port = 8000
+        mock_config.extractor_discogs_host = "localhost"
+        mock_config.extractor_discogs_port = 8000
 
         original_pool = admin_mod._pool
         original_config = admin_mod._config
@@ -1790,6 +1968,7 @@ class TestAuditLogging:
 
         resp = test_client.post(
             "/api/admin/extractions/trigger",
+            json={"source": "discogs"},
             headers=_admin_auth_headers(),
         )
         assert resp.status_code == 202
@@ -1886,7 +2065,7 @@ class TestTrackExtractionResilience:
         import api.routers.admin as admin_mod
 
         mock_pool, mock_cur = self._pool()
-        mock_config = MagicMock(extractor_host="localhost", extractor_health_port=8000)
+        mock_config = MagicMock(extractor_discogs_host="localhost", extractor_discogs_port=8000)
         original_pool, original_config = admin_mod._pool, admin_mod._config
         admin_mod._pool, admin_mod._config = mock_pool, mock_config
 
@@ -1929,7 +2108,7 @@ class TestTrackExtractionResilience:
             return None
 
         mock_pool, _ = self._pool(execute_side_effect=flaky_execute)
-        mock_config = MagicMock(extractor_host="localhost", extractor_health_port=8000)
+        mock_config = MagicMock(extractor_discogs_host="localhost", extractor_discogs_port=8000)
         original_pool, original_config = admin_mod._pool, admin_mod._config
         admin_mod._pool, admin_mod._config = mock_pool, mock_config
 
@@ -1971,7 +2150,7 @@ class TestTrackExtractionResilience:
             return None
 
         mock_pool, _ = self._pool(execute_side_effect=flaky_execute)
-        mock_config = MagicMock(extractor_host="localhost", extractor_health_port=8000)
+        mock_config = MagicMock(extractor_discogs_host="localhost", extractor_discogs_port=8000)
         original_pool, original_config = admin_mod._pool, admin_mod._config
         admin_mod._pool, admin_mod._config = mock_pool, mock_config
 

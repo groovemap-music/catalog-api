@@ -2,7 +2,7 @@
 
 import re
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from common.identity import alias_sources, is_valid_alias_source
@@ -508,6 +508,15 @@ class ListAppTokensResponse(BaseModel):
     revoked: list[AppTokenRevoked]
 
 
+ExtractionSource = Literal["discogs", "musicbrainz"]
+
+
+class ExtractionTriggerRequest(BaseModel):
+    """Body of POST /api/admin/extractions/trigger — which source-owned extractor to start."""
+
+    source: ExtractionSource
+
+
 class ExtractionHistoryResponse(BaseModel):
     id: UUID
     triggered_by: UUID
@@ -518,6 +527,8 @@ class ExtractionHistoryResponse(BaseModel):
     record_counts: dict[str, int] | None
     error_message: str | None
     extractor_version: str | None
+    # None for runs recorded before the source was stored; never inferred.
+    source: ExtractionSource | None = None
     created_at: datetime
 
 
@@ -531,6 +542,7 @@ class ExtractionListResponse(BaseModel):
 class ExtractionTriggerResponse(BaseModel):
     id: UUID
     status: str
+    source: ExtractionSource
 
 
 class ProjectionTriggerResponse(BaseModel):
