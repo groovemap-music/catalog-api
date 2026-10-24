@@ -335,6 +335,71 @@ the `gm_id` projection by itself, once per completed Discogs extraction. It is o
   password hash that matches no password, so it cannot log in or call admin routes. It is
   also counted in the admin dashboard's `total_users`.
 
+### Backfilling the Identity Ledger from the MusicBrainz Full Export
+
+`public.identity_link_events` (declared by `database-schema`) is the Identity Ledger's dated
+link history: one row per change of a MusicBrainz row's Discogs link. From the first catalog
+load onward, `musicbrainz-sql-loader` records those changes exactly as it loads each dump. The
+history before that comes from the `catalog-identity-ledger-backfill` CLI, a one-shot tool
+included in the API container.
+
+**When to run it: once, after the first catalog load, with the latest full export.** The
+command reads the `LATEST` file in the MetaBrainz full-export directory unless `--export` names
+one. It does not need to run again: the loader records every later change.
+
+```bash
+# Dry run: stream and verify the latest full export, print what would be written
+docker exec <api-container> catalog-identity-ledger-backfill
+
+# Write the events
+docker exec <api-container> catalog-identity-ledger-backfill --apply
+
+# A named export, a mirror, or a smaller/larger insert batch
+docker exec <api-container> catalog-identity-ledger-backfill --export 20261024-102842 --apply
+docker exec <api-container> catalog-identity-ledger-backfill --base-url https://mirror.example/fullexport
+docker exec <api-container> catalog-identity-ledger-backfill --apply --batch-size 2000
+```
+
+**Its events are dated from the MusicBrainz full export. They are not GrooveMap's own
+record.** Every row it writes has `dated_from = 'musicbrainz_fullexport'`, and the full-export
+name as `source_ref`. A reader must keep these apart from the `groovemap_load` rows the loader
+records. Only releases are dated (`entity_kind = 'release'`), one `link_added` event per
+release with a current Discogs link. The date is spike `gm-design-6b8u`'s proxy 2: the
+earliest creation bound of the release's Discogs links, where a link row's creation bound is
+the minimum `last_updated` over every release-URL row with the same or a higher id. Out of
+sample it scored precision 0.912 and recall 0.9771. About 9% of the dates belong to an older
+link whose row MusicBrainz replaced, and links removed before the export are missing, so the
+older months are lower bounds. A link with no timestamp at or after its row is undated and
+gets no event.
+
+- **Streamed, verified, never on disk.** Only `mbdump.tar.bz2` is read (about 7 GB). It is
+  streamed over HTTPS, hashed, decompressed, and read in one pass; no byte of it is written to
+  a file. Its SHA-256 must match the export's `SHA256SUMS`, and a mismatch, or a file too
+  corrupt to read, stops the run before anything is written.
+- **Bounded memory.** It keeps only the five tables it needs, as compact arrays: about 24
+  bytes per `l_release_url` row, 20 per `release` row, 12 per Discogs release URL, and 8 per
+  `link` row, plus sorting space for the Discogs links. The unit test bounds the peak at 2 MiB
+  plus 96 bytes per release-URL row, release row, and Discogs release URL. Every other table
+  streams through without being kept.
+- **Dry run is the default.** A dry run connects to no database. It prints the release-URL
+  rows read, the Discogs release links and the releases they link, the events it would write,
+  the undated links, the date range, and the events per year.
+- **One audit entry.** An applying run writes one `admin_audit_log` entry against the reserved
+  identity-maintenance system actor (see above), with
+  `target = 'musicbrainz-fullexport:<export>'`. Every event names it as `decision_ref`, so it
+  is written first, as `identity.ledger.backfill.started`. It becomes
+  `identity.ledger.backfill`, with counts only, when the run finishes, or
+  `identity.ledger.backfill.failed`.
+- **Idempotent.** A finished `identity.ledger.backfill` entry for the export is the handled
+  marker: a second `--apply` of the same export finds it before downloading anything and writes
+  nothing. A run that failed can be run again. Its inserts are
+  `ON CONFLICT ON CONSTRAINT identity_link_events_idempotence_key DO NOTHING`, so the rows the
+  failed run wrote stay, still naming its entry, and only the missing ones are added.
+
+`api/ledger_backfill.py`'s module docstring has the full design, and
+[ADR 0016's 2026-10-24 amendment](https://github.com/groovemap-music/design/blob/main/docs/adr/0016-strata-graph-view.md#2026-10-24-concept-ds-backfill-branch-and-m6)
+records the decision.
+
 ## API Endpoints
 
 ### Authentication
