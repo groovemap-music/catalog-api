@@ -267,14 +267,6 @@
     "current_kind": "call_only"
   },
   {
-    "id": "tests/test_metrics_collector.py::TestPersistMetrics.test_noop_on_empty",
-    "baseline_kind": "assertion_free",
-    "origin": "historical-44",
-    "disposition": "intentional",
-    "reason": "Intentional negative database interaction: no pool connection may be acquired when both metric inputs are empty.",
-    "current_kind": "call_only"
-  },
-  {
     "id": "tests/test_neo4j_queries.py::TestAutocompleteQueries.test_autocomplete_artist_escapes_query",
     "baseline_kind": "call_only",
     "origin": "historical-44",

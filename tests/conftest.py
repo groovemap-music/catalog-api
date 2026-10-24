@@ -280,11 +280,6 @@ def test_client(
     _network_router.configure(mock_neo4j, mock_valkey)
     _rarity_router.configure(mock_neo4j, mock_pool, mock_valkey)
 
-    # Set up metrics buffer so the metrics middleware records requests
-    from api.metrics_collector import MetricsBuffer
-
-    app.state.metrics_buffer = MetricsBuffer()
-
     import api.routers.auth as _auth_router
     from api.notifications import LogNotificationChannel
 
@@ -304,8 +299,6 @@ def test_client(
         yield client
 
     # Restore original state
-    if hasattr(app.state, "metrics_buffer"):
-        del app.state.metrics_buffer
     api_module._pool = original_pool
     api_module._config = original_config
     api_module._valkey = original_valkey

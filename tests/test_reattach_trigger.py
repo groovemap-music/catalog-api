@@ -31,8 +31,18 @@ from api.reattach_trigger import (
     run_trigger_loop,
 )
 from tests.fake_postgres import FakePool
-from tests.test_metrics_config import REQUIRED_ENV
 
+
+REQUIRED_ENV = {
+    "POSTGRES_HOST": "localhost",
+    "POSTGRES_USERNAME": "test",
+    "POSTGRES_PASSWORD": "test",
+    "POSTGRES_DATABASE": "test",
+    "JWT_SECRET_KEY": "secret",
+    "NEO4J_HOST": "localhost",
+    "NEO4J_USERNAME": "neo4j",
+    "NEO4J_PASSWORD": "pass",
+}
 
 VERSION = "20260901"
 _PENDING = [[(True,)], [(VERSION,)], [(False,)]]
