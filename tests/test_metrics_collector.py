@@ -283,88 +283,120 @@ class TestPercentileIndex:
 # ---------------------------------------------------------------------------
 
 
-class TestCollectQueueMetrics:
-    """Test collect_queue_metrics with mocked httpx."""
+_Q = "groovemap-discogs-graphinator-artists"
 
-    @pytest.mark.anyio
-    async def test_returns_filtered_queues(self) -> None:
+
+def _detailed(*, ready: int = 10, unacked: int = 2, consumers: int = 1, published: tuple[int, int] = (100, 50), acked: int = 120) -> str:
+    """Recorded-shape /metrics/detailed body; published is split over two exchanges."""
+    lines = [
+        f'rabbitmq_detailed_queue_messages_ready{{vhost="/",queue="{_Q}"}} {ready}',
+        f'rabbitmq_detailed_queue_messages_unacked{{vhost="/",queue="{_Q}"}} {unacked}',
+        f'rabbitmq_detailed_queue_consumers{{vhost="/",queue="{_Q}"}} {consumers}',
+        f'rabbitmq_detailed_queue_messages_acked_total{{vhost="/",queue="{_Q}"}} {acked}',
+        f'rabbitmq_detailed_queue_exchange_messages_published_total{{vhost="/",queue="{_Q}",exchange="ex-a"}} {published[0]}',
+        f'rabbitmq_detailed_queue_exchange_messages_published_total{{vhost="/",queue="{_Q}",exchange="ex-b"}} {published[1]}',
+        'rabbitmq_detailed_queue_messages_ready{vhost="/",queue="other-queue"} 99',
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _client_returning(text: str | None = None, error: Exception | None = None) -> AsyncMock:
+    response = MagicMock()
+    response.status_code = 200
+    response.text = text
+    client = AsyncMock()
+    client.get = AsyncMock(side_effect=error) if error else AsyncMock(return_value=response)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    return client
+
+
+class TestCollectQueueMetrics:
+    """Test collect_queue_metrics against /metrics/detailed text."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_state(self) -> None:
+        from api import metrics_collector
+
+        metrics_collector._previous_counters.clear()
+
+    async def _collect(self, text: str, now: float) -> list[dict[str, Any]]:
         from api.metrics_collector import collect_queue_metrics
 
-        fake_queues = [
+        with (
+            patch("api.metrics_collector.httpx.AsyncClient", return_value=_client_returning(text)),
+            patch("api.metrics_collector.time.monotonic", return_value=now),
+        ):
+            return await collect_queue_metrics("http://rabbitmq:15692")
+
+    @pytest.mark.anyio
+    async def test_maps_gauges_filters_and_first_sample_rate_zero(self) -> None:
+        rows = await self._collect(_detailed(), 1000.0)
+
+        assert rows == [
             {
-                "name": "groovemap-discogs-artists-graphinator",
+                "queue_name": _Q,
                 "messages_ready": 10,
                 "messages_unacknowledged": 2,
                 "consumers": 1,
-                "message_stats": {"publish_details": {"rate": 5.0}, "ack_details": {"rate": 3.0}},
-            },
-            {
-                "name": "other-queue",
-                "messages_ready": 99,
-                "messages_unacknowledged": 0,
-                "consumers": 0,
-            },
+                "publish_rate": 0.0,
+                "ack_rate": 0.0,
+            }
         ]
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = fake_queues
 
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
+    @pytest.mark.anyio
+    async def test_rate_from_counter_deltas_across_collections(self) -> None:
+        await self._collect(_detailed(published=(100, 50), acked=120), 1000.0)
+        rows = await self._collect(_detailed(published=(160, 90), acked=150), 1010.0)
 
-        with patch("api.metrics_collector.httpx.AsyncClient", return_value=mock_client):
-            rows = await collect_queue_metrics("localhost", 15672, "guest", "guest")
-
-        assert len(rows) == 1
-        assert rows[0]["queue_name"] == "groovemap-discogs-artists-graphinator"
-        assert rows[0]["messages_ready"] == 10
-        assert rows[0]["publish_rate"] == pytest.approx(5.0)
+        assert rows[0]["publish_rate"] == pytest.approx(10.0)  # (250 - 150) / 10s, summed over exchanges
         assert rows[0]["ack_rate"] == pytest.approx(3.0)
 
     @pytest.mark.anyio
-    async def test_returns_empty_on_failure(self) -> None:
-        from api.metrics_collector import collect_queue_metrics
-
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(side_effect=Exception("connection refused"))
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch("api.metrics_collector.httpx.AsyncClient", return_value=mock_client):
-            rows = await collect_queue_metrics("localhost", 15672, "guest", "guest")
-
-        assert rows == []
-
-    @pytest.mark.anyio
-    async def test_missing_message_stats(self) -> None:
-        """Queues without message_stats should have zero rates."""
-        from api.metrics_collector import collect_queue_metrics
-
-        fake_queues = [
-            {
-                "name": "groovemap-discogs-releases-tableinator",
-                "messages_ready": 0,
-                "messages_unacknowledged": 0,
-                "consumers": 1,
-            },
-        ]
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = fake_queues
-
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch("api.metrics_collector.httpx.AsyncClient", return_value=mock_client):
-            rows = await collect_queue_metrics("localhost", 15672, "guest", "guest")
-
-        assert len(rows) == 1
+    async def test_counter_reset_yields_zero_then_recovers(self) -> None:
+        await self._collect(_detailed(published=(100, 50), acked=120), 1000.0)
+        rows = await self._collect(_detailed(published=(5, 0), acked=2), 1010.0)
         assert rows[0]["publish_rate"] == 0.0
         assert rows[0]["ack_rate"] == 0.0
+
+        rows = await self._collect(_detailed(published=(25, 0), acked=12), 1020.0)
+        assert rows[0]["publish_rate"] == pytest.approx(2.0)
+        assert rows[0]["ack_rate"] == pytest.approx(1.0)
+
+    @pytest.mark.anyio
+    async def test_prefix_overrides_drive_filter_and_request(self) -> None:
+        from api.metrics_collector import collect_queue_metrics
+
+        text = (
+            'rabbitmq_detailed_queue_messages_ready{queue="custom-mb-x"} 4\nrabbitmq_detailed_queue_messages_ready{queue="groovemap-discogs-y"} 7\n'
+        )
+        client = _client_returning(text)
+        with (
+            patch("api.metrics_collector.DISCOGS_EXCHANGE_PREFIX", "custom-dg"),
+            patch("api.metrics_collector.MUSICBRAINZ_EXCHANGE_PREFIX", "custom-mb"),
+            patch("api.metrics_collector.httpx.AsyncClient", return_value=client),
+        ):
+            rows = await collect_queue_metrics("http://rabbitmq:15692/")
+
+        assert [r["queue_name"] for r in rows] == ["custom-mb-x"]
+        args, kwargs = client.get.call_args
+        assert args[0] == "http://rabbitmq:15692/metrics/detailed"
+        assert ("queue", "(custom\\-dg|custom\\-mb).*") in kwargs["params"]
+        assert ("family", "queue_exchange_metrics") in kwargs["params"]
+
+    @pytest.mark.anyio
+    async def test_returns_empty_and_warns_on_failure(self) -> None:
+        from api.metrics_collector import collect_queue_metrics
+
+        client = _client_returning(error=Exception("connection refused"))
+        with (
+            patch("api.metrics_collector.httpx.AsyncClient", return_value=client),
+            patch("api.metrics_collector.logger") as log,
+        ):
+            rows = await collect_queue_metrics("http://rabbitmq:15692")
+
+        assert rows == []
+        log.warning.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

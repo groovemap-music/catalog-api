@@ -3,7 +3,7 @@
 Provides:
 - ``normalize_path`` — replaces UUID/integer path segments with ``:id``
 - ``MetricsBuffer`` — bounded in-memory ring buffer for request latency stats
-- ``collect_queue_metrics`` — polls RabbitMQ Management API for queue depths
+- ``collect_queue_metrics`` — reads RabbitMQ Prometheus ``/metrics/detailed`` for queue depths and rates
 - ``collect_service_health`` — concurrent health checks across services
 - ``persist_metrics`` — batch INSERT into PostgreSQL metrics tables
 - ``prune_old_metrics`` — retention-based DELETE from metrics tables
@@ -21,7 +21,10 @@ from typing import Any
 
 import httpx
 import structlog
+from prometheus_client.parser import text_string_to_metric_families
 from psycopg.types.json import Jsonb
+
+from api.catalog_contract import DISCOGS_EXCHANGE_PREFIX, MUSICBRAINZ_EXCHANGE_PREFIX
 
 
 logger = structlog.get_logger(__name__)
@@ -195,37 +198,93 @@ SERVICE_ENDPOINTS: dict[str, tuple[str, int]] = {
 }
 
 
-async def collect_queue_metrics(
-    mgmt_host: str,
-    mgmt_port: int,
-    username: str,
-    password: str,
-) -> list[dict[str, Any]]:
-    """Poll RabbitMQ Management API for groovemap queue metrics.
+_QUEUE_FAMILIES = (
+    "queue_coarse_metrics",
+    "queue_consumer_count",
+    "queue_delivery_metrics",
+    "queue_exchange_metrics",
+)
 
+# metric name -> row field for gauges; counters are rate-converted below.
+_GAUGE_METRICS = {
+    "rabbitmq_detailed_queue_messages_ready": "messages_ready",
+    "rabbitmq_detailed_queue_messages_unacked": "messages_unacknowledged",
+    "rabbitmq_detailed_queue_consumers": "consumers",
+}
+_ACK_METRIC = "rabbitmq_detailed_queue_messages_acked_total"
+_PUBLISH_METRIC = "rabbitmq_detailed_queue_exchange_messages_published_total"
+
+# Previous counter sample per queue: (monotonic seconds, published_total, acked_total).
+_previous_counters: dict[str, tuple[float, float, float]] = {}
+
+
+def _queue_prefixes() -> tuple[str, ...]:
+    return (DISCOGS_EXCHANGE_PREFIX, MUSICBRAINZ_EXCHANGE_PREFIX)
+
+
+def _counter_rate(current: float, previous: float | None, elapsed: float) -> float:
+    """Per-second rate from a counter delta; first sample, reset, or no elapsed time yields 0.0."""
+    if previous is None or elapsed <= 0 or current < previous:
+        return 0.0
+    return (current - previous) / elapsed
+
+
+def _parse_queue_samples(text: str, prefixes: tuple[str, ...]) -> dict[str, dict[str, float]]:
+    """Parse ``/metrics/detailed`` text into per-queue values, keeping only contract-prefixed queues."""
+    queues: dict[str, dict[str, float]] = {}
+    for family in text_string_to_metric_families(text):
+        for sample in family.samples:
+            field_name = _GAUGE_METRICS.get(sample.name)
+            if field_name is None and sample.name == _ACK_METRIC:
+                field_name = "acked"
+            elif field_name is None and sample.name == _PUBLISH_METRIC:
+                field_name = "published"
+            queue = sample.labels.get("queue", "")
+            if field_name is None or not queue.startswith(prefixes):
+                continue
+            values = queues.setdefault(queue, {})
+            # published is labelled per exchange; sum across exchanges for the queue.
+            if field_name == "published":
+                values[field_name] = values.get(field_name, 0.0) + sample.value
+            else:
+                values[field_name] = sample.value
+    return queues
+
+
+async def collect_queue_metrics(prometheus_url: str) -> list[dict[str, Any]]:
+    """Read queue depths and counters from the RabbitMQ Prometheus ``/metrics/detailed`` endpoint.
+
+    Publish/ack rates are derived from counter deltas against the previous
+    collection (the first sample for a queue, or a counter reset, yields 0.0).
     Returns an empty list on any failure.
     """
     try:
-        url = f"http://{mgmt_host}:{mgmt_port}/api/queues"
+        prefixes = _queue_prefixes()
+        params: list[tuple[str, str | int | float | bool | None]] = [("family", f) for f in _QUEUE_FAMILIES]
+        params.append(("queue", "(" + "|".join(re.escape(p) for p in prefixes) + ").*"))
+        url = f"{prometheus_url.rstrip('/')}/metrics/detailed"
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url, auth=(username, password))
-        queues: list[dict[str, Any]] = resp.json()
+            resp = await client.get(url, params=params)
+        resp.raise_for_status()
+        now = time.monotonic()
+        queues = _parse_queue_samples(resp.text, prefixes)
         rows: list[dict[str, Any]] = []
-        for q in queues:
-            name: str = q.get("name", "")
-            if "groovemap" not in name and "musicbrainz" not in name:
-                continue
-            stats = q.get("message_stats", {})
+        for name, values in queues.items():
+            published = values.get("published", 0.0)
+            acked = values.get("acked", 0.0)
+            prev = _previous_counters.get(name)
+            elapsed = now - prev[0] if prev else 0.0
             rows.append(
                 {
                     "queue_name": name,
-                    "messages_ready": q.get("messages_ready", 0),
-                    "messages_unacknowledged": q.get("messages_unacknowledged", 0),
-                    "consumers": q.get("consumers", 0),
-                    "publish_rate": stats.get("publish_details", {}).get("rate", 0.0),
-                    "ack_rate": stats.get("ack_details", {}).get("rate", 0.0),
+                    "messages_ready": int(values.get("messages_ready", 0)),
+                    "messages_unacknowledged": int(values.get("messages_unacknowledged", 0)),
+                    "consumers": int(values.get("consumers", 0)),
+                    "publish_rate": _counter_rate(published, prev[1] if prev else None, elapsed),
+                    "ack_rate": _counter_rate(acked, prev[2] if prev else None, elapsed),
                 }
             )
+            _previous_counters[name] = (now, published, acked)
         return rows
     except Exception:
         logger.warning("⚠️ Failed to collect queue metrics")
@@ -337,12 +396,7 @@ async def run_collector(
 
         # 1. Collect queue metrics
         try:
-            queue_rows = await collect_queue_metrics(
-                config.rabbitmq_management_host,
-                config.rabbitmq_management_port,
-                config.rabbitmq_username,
-                config.rabbitmq_password,
-            )
+            queue_rows = await collect_queue_metrics(config.rabbitmq_prometheus_url)
         except Exception:
             logger.error("❌ Error collecting queue metrics")
 

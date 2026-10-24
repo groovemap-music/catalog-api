@@ -84,10 +84,11 @@ origin in production so password-reset links do not point at localhost.
 | `EXTRACTOR_HEALTH_PORT` | `8000` | Discogs trigger and health port |
 | `DISCOGS_DATA_ROOT` | unset | Mounted Discogs validation-result root exposed by extraction-analysis routes |
 | `MUSICBRAINZ_DATA_ROOT` | unset | Mounted MusicBrainz validation-result root exposed by extraction-analysis routes |
-| `RABBITMQ_MANAGEMENT_HOST` | `RABBITMQ_HOST` or `rabbitmq` | RabbitMQ management endpoint host |
-| `RABBITMQ_MANAGEMENT_PORT` | `15672` | RabbitMQ management endpoint port |
-| `RABBITMQ_USERNAME` | `groovemap` | RabbitMQ management login |
-| `RABBITMQ_PASSWORD` | `groovemap` | RabbitMQ management password |
+| `RABBITMQ_PROMETHEUS_URL` | `http://rabbitmq:15692` | RabbitMQ Prometheus endpoint; queue history reads `/metrics/detailed` here and derives publish/ack rates from counter deltas |
+| `RABBITMQ_MANAGEMENT_HOST` | `RABBITMQ_HOST` or `rabbitmq` | RabbitMQ management endpoint host; used only for DLQ purge |
+| `RABBITMQ_MANAGEMENT_PORT` | `15672` | RabbitMQ management endpoint port; used only for DLQ purge |
+| `RABBITMQ_USERNAME` | `groovemap` | RabbitMQ management login; used only for DLQ purge |
+| `RABBITMQ_PASSWORD` | `groovemap` | RabbitMQ management password; used only for DLQ purge |
 | `METRICS_RETENTION_DAYS` | `366` | API metrics retention window |
 | `METRICS_COLLECTION_INTERVAL` | `300` | Metrics collection interval in seconds |
 | `IDENTITY_AUTO_REATTACH_ENABLED` | `false` | Run the catalog re-attachment then the `gm_id` projection after each completed Discogs extraction (see `api/README.md`) |
