@@ -21,6 +21,9 @@
       "response_fields": ["id", "source", "status"]
     },
     "admin_extractions": {"method": "GET", "path": "/api/admin/extractions", "response_fields_nullable": ["source"]},
+    "admin_identity_ledger_density": {"method": "GET", "path": "/api/admin/identity/ledger/density", "query": ["kind"], "kinds": ["release", "master", "artist", "label"], "dated_from": ["groovemap", "musicbrainz_fullexport"], "response_fields": ["buckets", "kind"]},
+    "admin_identity_ledger_work": {"method": "GET", "path": "/api/admin/identity/ledger/works/{work_id}", "query": ["as_of", "edition_limit"], "dated_from": ["groovemap", "musicbrainz_fullexport"], "response_fields": ["as_of", "edition_count", "editions", "truncated", "work"]},
+    "admin_identity_ledger_works": {"method": "GET", "path": "/api/admin/identity/ledger/works", "query": ["event", "page", "page_size", "since", "until"], "events": ["linked_at_ingest", "reattached", "promoted", "reverted", "evidence_attached", "alias_closed", "link_added", "link_changed", "link_removed"], "response_fields": ["page", "page_size", "total", "works"]},
     "admin_identity_project": {"method": "POST", "path": "/api/admin/identity/project"},
     "admin_login": {"method": "POST", "path": "/api/admin/auth/login"},
     "admin_logout": {"method": "POST", "path": "/api/admin/auth/logout"},
