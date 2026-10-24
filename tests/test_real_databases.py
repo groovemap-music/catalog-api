@@ -23,7 +23,7 @@ from psycopg.rows import dict_row
 from api.queries import strata_queries
 from api.queries.credits_queries import get_person_connections
 from api.queries.helpers import run_count, run_query, run_single
-from api.queries.insights_neo4j_queries import query_style_year_counts
+from api.queries.insights_neo4j_queries import LANDMARKS_PER_STYLE, query_style_landmarks, query_style_year_counts
 from api.queries.strata_queries import get_shared_personnel, get_strata_catalog, get_strata_labels, get_strata_marks, get_strata_root
 from api.queries.taste_queries import get_taste_projection
 from api.strata import MAX_ROOT_RELEASES, Budget, apply_labels, build_strata, label_targets
@@ -787,3 +787,71 @@ async def test_style_year_counts_on_a_seeded_graph(neo4j_driver: AsyncResilientN
     }
     # r7 carries the style and no genre, so Jazz covers one of Cool's two releases.
     assert parents["Cool", "Jazz"] == {"style": "Cool", "genre": "Jazz", "release_count": 1, "style_release_count": 2, "share": 0.5}
+
+
+# Landmarks. Bop has 28 candidate masters: b01 has 5 releases, b02 has 3, and the 25 others (b03..b27
+# plus the shared a01) have one each. The top 25 keep b01, b02 and the first 23 single-release masters
+# by master id, so b25, b26 and b27 fall off the cap. Cool has a tie at two releases (c10 sorts before
+# c9 as a string), a master without a year, a master with year 0, and a masterless release that must
+# not count. a01 is shared: a release tagged with both styles counts toward each, once. Other has only
+# a masterless release, so it gets no landmark.
+_LANDMARK_STYLES = "CREATE (:Style {name: 'Bop'}), (:Style {name: 'Cool'}), (:Style {name: 'Other'})"
+
+_LANDMARK_BOP = """
+MATCH (bop:Style {name: 'Bop'})
+UNWIND range(1, 27) AS n
+WITH bop, n, 'b' + CASE WHEN n < 10 THEN '0' ELSE '' END + toString(n) AS id
+CREATE (m:Master {id: id, title: 'Bop ' + id, year: 1950 + n}), (r:Release {id: 'r-' + id, year: 1960}),
+       (r)-[:IS]->(bop), (r)-[:DERIVED_FROM]->(m)
+"""
+
+_LANDMARK_BOP_EXTRA = """
+MATCH (bop:Style {name: 'Bop'})
+UNWIND [['b01', 4], ['b02', 2]] AS spec
+MATCH (m:Master {id: spec[0]})
+UNWIND range(1, spec[1]) AS k
+CREATE (r:Release {id: 'x' + toString(k) + '-' + spec[0]}), (r)-[:IS]->(bop), (r)-[:DERIVED_FROM]->(m)
+"""
+
+_LANDMARK_COOL = """
+MATCH (bop:Style {name: 'Bop'}), (cool:Style {name: 'Cool'}), (other:Style {name: 'Other'})
+CREATE (a01:Master {id: 'a01', title: 'Shared', year: 1949}),
+       (c9:Master {id: 'c9', title: 'Nine', year: 1961}), (c10:Master {id: 'c10', title: 'Ten', year: 1962}),
+       (cn:Master {id: 'cn', title: 'No year'}), (cz:Master {id: 'cz', title: 'Zero year', year: 0})
+CREATE (a1:Release {id: 'ca1'}), (a2:Release {id: 'ca2'}), (a3:Release {id: 'ca3'}), (a4:Release {id: 'ca4'}),
+       (a5:Release {id: 'ca5'}), (a6:Release {id: 'ca6'}), (a7:Release {id: 'ca7'}), (a8:Release {id: 'ca8'})
+CREATE (a1)-[:IS]->(cool), (a1)-[:DERIVED_FROM]->(c9), (a2)-[:IS]->(cool), (a2)-[:DERIVED_FROM]->(c9),
+       (a3)-[:IS]->(cool), (a3)-[:DERIVED_FROM]->(c10), (a4)-[:IS]->(cool), (a4)-[:DERIVED_FROM]->(c10),
+       (a5)-[:IS]->(cool), (a5)-[:DERIVED_FROM]->(cn),
+       (a6)-[:IS]->(cool), (a6)-[:DERIVED_FROM]->(cz),
+       (a7)-[:IS]->(cool),
+       (a8)-[:IS]->(cool), (a8)-[:IS]->(bop), (a8)-[:DERIVED_FROM]->(a01)
+CREATE (o:Release {id: 'other-r'}), (o)-[:IS]->(other)
+"""
+
+
+async def test_style_landmarks_rank_tie_break_and_cap_on_a_seeded_graph(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    """Landmarks rank by release count, break ties by master id, and stop at the cap, on the real engine.
+
+    The Cypher runs under the long server-side timeout, so this also proves the engine accepts the
+    ``Query(..., timeout=...)`` wrapper and the ``$limit`` slice for the landmark read.
+    """
+    for cypher in (_LANDMARK_STYLES, _LANDMARK_BOP, _LANDMARK_BOP_EXTRA, _LANDMARK_COOL):
+        await _consume(neo4j_driver, cypher)
+
+    landmarks = (await query_style_landmarks(neo4j_driver))["landmarks"]
+
+    assert LANDMARKS_PER_STYLE == 25
+    bop = [row for row in landmarks if row["style"] == "Bop"]
+    single = ["a01"] + [f"b{n:02d}" for n in range(3, 25)]
+    assert [(row["master_id"], row["release_count"]) for row in bop] == [("b01", 5), ("b02", 3), *[(master_id, 1) for master_id in single]]
+    assert bop[0] == {"style": "Bop", "master_id": "b01", "title": "Bop b01", "year": 1951, "release_count": 5}
+    assert bop[2] == {"style": "Bop", "master_id": "a01", "title": "Shared", "year": 1949, "release_count": 1}
+
+    cool = [row for row in landmarks if row["style"] == "Cool"]
+    # c10 and c9 tie at two releases and sort as strings; the single-release masters follow by id.
+    assert [(row["master_id"], row["release_count"]) for row in cool] == [("c10", 2), ("c9", 2), ("a01", 1), ("cn", 1), ("cz", 1)]
+    # The master's own year, null when absent or zero. The masterless release adds no landmark.
+    assert {row["master_id"]: row["year"] for row in cool} == {"c10": 1962, "c9": 1961, "a01": 1949, "cn": None, "cz": None}
+    # A style whose only release has no master has no landmarks.
+    assert {row["style"] for row in landmarks} == {"Bop", "Cool"}
