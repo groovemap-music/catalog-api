@@ -1191,6 +1191,7 @@ paths retain `/insights/` for API compatibility and are not intended for direct 
 | GET    | `/api/internal/insights/artist-centrality` | No            | Artist centrality data from Neo4j     |
 | GET    | `/api/internal/insights/genre-trends`      | No            | Genre trend data from Neo4j           |
 | GET    | `/api/internal/insights/style-year-counts` | No            | Style and genre counts per release year, and style genre shares, from Neo4j |
+| GET    | `/api/internal/insights/style-landmarks`   | No            | Top 25 masters per style by release count, from Neo4j |
 | GET    | `/api/internal/insights/label-longevity`   | No            | Label longevity data from Neo4j       |
 | GET    | `/api/internal/insights/anniversaries`     | No            | Anniversary data from PostgreSQL      |
 | GET    | `/api/internal/insights/data-completeness` | No            | Data completeness from both databases |
