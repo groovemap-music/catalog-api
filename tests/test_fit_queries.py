@@ -163,6 +163,17 @@ def test_fold_indexes_held_titles_per_artist() -> None:
     assert folded["held_titles"][held_title_key("a-coltrane", "BLUE TRAIN")] == "Blue Train"
 
 
+def test_fold_indexes_the_lowest_held_release_id_per_title() -> None:
+    """A title held twice names the same release whichever order the rows arrive in."""
+    rows = [
+        {"release_id": "9", "title": "Blue Train", "artist_ids": ["a-coltrane"]},
+        {"release_id": "4", "title": "blue train", "artist_ids": ["a-coltrane"]},
+    ]
+
+    for ordered in (rows, list(reversed(rows))):
+        assert fold_collection(ordered)["held_title_releases"] == {held_title_key("a-coltrane", "Blue Train"): "4"}
+
+
 def test_fold_skips_rows_without_a_release_id() -> None:
     """A row the graph could not key is dropped rather than folded under an empty id."""
     folded = fold_collection([{"release_id": None, "title": "orphan", "artist_ids": ["a-1"]}])

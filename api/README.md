@@ -811,6 +811,27 @@ per request served under the `cratefit_v0` policy. See
 [the CrateFit guide](../docs/cratefit.md) for the components, the v0 heuristics, and the
 limits of version 0.
 
+For a first-party session only, each component also returns `evidence_entries`: every
+evidence entry, uncapped, in `evidence_items` order, with `entity_id` in the form the
+Explore and Strata routes return and, beside every `entity_id`, an `entity_type`
+(`artist`, `label`, `genre`, `style`, or `release`), plus `genres` on a
+bridge, `master_id` on a master-linked duplicate, and `drawable`. `evidence` and the capped
+`evidence_items` are unchanged. `drawable` marks what the Strata atlas can place:
+
+| Component | Drawable | Listed beside the map |
+| --- | --- | --- |
+| Affinity | Shared genres and styles | Shared artists and labels |
+| Novelty | Unheld genres and styles | Unheld artists and labels |
+| Bridge | The bridged pair of genres (`genres`) | The heuristic caveat |
+| Depth | Nothing | Every artist and label thread |
+| Redundancy | A held release under the candidate's master | A masterless duplicate, and a title-only duplicate |
+
+A `fit:read` app token never receives `evidence_entries`, whatever other scopes it carries:
+its response is the capped profile, byte for byte as before the field existed. `fit:read`
+lets a delegate use the collection to answer, not list it, and the uncapped entries name
+held releases and every held facet the candidate touches. The two bodies are cached under
+separate keys, so the cache cannot hand one caller the other's.
+
 ### Genre Tree
 
 Full genre/style hierarchy derived from release co-occurrence in the knowledge graph.

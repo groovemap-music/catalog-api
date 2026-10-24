@@ -161,6 +161,45 @@ def test_profile_evidence_cites_the_callers_own_collection(test_client: TestClie
     assert {"dimension": "label", "entity": "Blue Note", "kind": "shared", "count": 3} in body["components"]["affinity"]["evidence_items"]
 
 
+def test_profile_keeps_evidence_items_and_adds_uncapped_entries(test_client: TestClient, auth_headers: dict[str, str]) -> None:
+    """A first-party session gets `evidence_entries` beside the unchanged `evidence_items`."""
+    from api.fit import compute_fit
+
+    patchers = _patch_reads()
+    impressions = patch("api.activity.record_impressions", AsyncMock(return_value=[_IMPRESSION_ID]))
+    impressions.start()
+    try:
+        body = test_client.get(_PATH, headers=auth_headers).json()
+    finally:
+        impressions.stop()
+        _stop(patchers)
+
+    profile = compute_fit(_collection(), _context())
+    for name, component in body["components"].items():
+        assert component["evidence"] == profile["components"][name]["evidence"]
+        assert component["evidence_items"] == profile["components"][name]["evidence_items"]
+        assert component["evidence_entries"] == profile["components"][name]["evidence_entries"]
+    assert body["components"]["depth"]["evidence_entries"] == [
+        {
+            "dimension": "label",
+            "entity": "Blue Note",
+            "kind": "thread",
+            "count": 3,
+            "entity_type": "label",
+            "entity_id": "l-blue-note",
+            "drawable": False,
+        }
+    ]
+    assert {
+        "dimension": "artist",
+        "entity": "John Coltrane",
+        "kind": "unheld",
+        "entity_type": "artist",
+        "entity_id": "a-coltrane",
+        "drawable": False,
+    } in body["components"]["novelty"]["evidence_entries"]
+
+
 def test_unknown_release_is_a_404(test_client: TestClient, auth_headers: dict[str, str]) -> None:
     """No release in the graph, no profile — and no collection read paid for."""
     context = patch("api.routers.fit.get_release_context", AsyncMock(return_value=None))
@@ -214,7 +253,7 @@ def test_cached_body_never_carries_an_impression_id(test_client: TestClient, aut
         _stop(patchers)
 
     assert response.json()["impression_id"] == _IMPRESSION_ID
-    written = [json.loads(call.args[1]) for call in mock_valkey.set.await_args_list if str(call.args[0]).endswith("fit:release:555")]
+    written = [json.loads(call.args[1]) for call in mock_valkey.set.await_args_list if str(call.args[0]).endswith("fit:release:555:entries")]
     assert written and written[0]["impression_id"] is None
     assert written[0]["fit"] == response.json()["fit"]
     assert written[0]["components"]["depth"]["evidence_items"] == response.json()["components"]["depth"]["evidence_items"]
@@ -225,7 +264,7 @@ def test_cache_hit_still_stamps_a_fresh_impression(test_client: TestClient, auth
     stored = {"release": {"id": "555", "gm_id": _NATIVE_ID}, "fit": 0.75, "impression_id": None}
 
     async def _get(key: str) -> dict[str, Any] | None:
-        return dict(stored) if key.endswith("fit:release:555") else None
+        return dict(stored) if key.endswith("fit:release:555:entries") else None
 
     context = patch("api.routers.fit.get_release_context", AsyncMock(return_value=_context()))
     cache_get = patch("api.cache.RecommendCache.get", AsyncMock(side_effect=_get))
@@ -321,6 +360,78 @@ def test_app_token_with_the_fit_scope_is_accepted(test_client: TestClient, mock_
 
     assert response.status_code == 200
     assert response.json()["policy_id"] == "cratefit_v0"
+
+
+def test_app_token_gets_the_legacy_profile_without_entries(test_client: TestClient, mock_cur: MagicMock) -> None:
+    """`fit:read` uses the collection and must not list it, so the uncapped entries are withheld.
+
+    Scored on the `jazz_candidate` scenario the legacy fixture was recorded from, so the
+    components an app token receives are compared with the pre-entries bytes directly.
+    """
+    from pathlib import Path
+
+    from api.queries.fit_queries import fold_collection
+
+    legacy = json.loads((Path(__file__).parent / "fixtures" / "fit_legacy_evidence.json").read_text(encoding="utf-8"))["jazz_candidate"]
+    collection = fold_collection(
+        [
+            {
+                "release_id": "1",
+                "title": "Moanin'",
+                "artist_ids": ["a-blakey"],
+                "label_ids": ["l-blue-note"],
+                "genres": ["Jazz"],
+                "styles": ["Hard Bop"],
+            },
+            {
+                "release_id": "2",
+                "title": "Somethin' Else",
+                "artist_ids": ["a-adderley"],
+                "label_ids": ["l-blue-note"],
+                "genres": ["Jazz"],
+                "styles": ["Hard Bop"],
+            },
+            {"release_id": "3", "title": "Go", "artist_ids": ["a-gordon"], "label_ids": ["l-blue-note"], "genres": ["Jazz"], "styles": ["Hard Bop"]},
+        ]
+    )
+    patchers = _patch_reads()
+    reads = patch("api.routers.fit.get_collection_ids", AsyncMock(return_value=collection))
+    impressions = patch("api.activity.record_impressions", AsyncMock(return_value=[_IMPRESSION_ID]))
+    reads.start()
+    impressions.start()
+    try:
+        response = test_client.get(_PATH, headers=_app_token(mock_cur, ["fit:read", "collection:read"]))
+    finally:
+        impressions.stop()
+        reads.stop()
+        _stop(patchers)
+
+    assert response.status_code == 200
+    components = response.json()["components"]
+    for name, component in components.items():
+        assert list(component) == ["score", "evidence", "evidence_items"]
+        assert json.dumps({key: component[key] for key in ("evidence", "evidence_items")}, ensure_ascii=False) == json.dumps(
+            legacy[name], ensure_ascii=False
+        )
+    assert "evidence_entries" not in response.text
+
+
+def test_app_token_is_never_served_a_session_body_from_the_cache(test_client: TestClient, mock_cur: MagicMock, mock_valkey: AsyncMock) -> None:
+    """The session body is cached under its own key, which an app-token request never reads."""
+    patchers = _patch_reads()
+    impressions = patch("api.activity.record_impressions", AsyncMock(return_value=[_IMPRESSION_ID]))
+    impressions.start()
+    try:
+        test_client.get(_PATH, headers=_app_token(mock_cur, ["fit:read"]))
+    finally:
+        impressions.stop()
+        _stop(patchers)
+
+    read = [str(call.args[0]) for call in mock_valkey.get.await_args_list if "fit:release:" in str(call.args[0])]
+    written = [call.args for call in mock_valkey.set.await_args_list if "fit:release:" in str(call.args[0])]
+    assert read and all(key.endswith("fit:release:555") for key in read)
+    assert written and all(str(key).endswith("fit:release:555") for key, *_ in written)
+    assert all("evidence_entries" not in str(value) for _, value, *_ in written)
 
 
 def test_app_token_with_the_wrong_scope_is_a_403(test_client: TestClient, mock_cur: MagicMock) -> None:
