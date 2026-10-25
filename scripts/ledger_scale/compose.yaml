@@ -1,0 +1,54 @@
+# A throwaway PostgreSQL 18 for the Identity Ledger scale measurement (scripts/ledger_scale/README.md).
+# Production's image and memory, I/O, and parallelism settings (deployment docker-compose.prod.yml).
+# One named volume at the image's declared volume path, so no anonymous volume appears and
+# `down --volumes` removes every byte the run wrote.
+name: gm-ledger-scale
+
+services:
+  postgres:
+    image: postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=2GB"
+      - "-c"
+      - "effective_cache_size=6GB"
+      - "-c"
+      - "work_mem=64MB"
+      - "-c"
+      - "maintenance_work_mem=512MB"
+      - "-c"
+      - "wal_buffers=64MB"
+      - "-c"
+      - "max_wal_size=4GB"
+      - "-c"
+      - "min_wal_size=1GB"
+      - "-c"
+      - "checkpoint_completion_target=0.9"
+      - "-c"
+      - "random_page_cost=1.1"
+      - "-c"
+      - "effective_io_concurrency=200"
+      - "-c"
+      - "seq_page_cost=1.0"
+      - "-c"
+      - "max_parallel_workers_per_gather=4"
+      # Load only: with no WAL consumers, a table truncated and filled in one transaction, and
+      # an index built in one, write no WAL. Reads plan and run exactly as at `replica`.
+      - "-c"
+      - "wal_level=minimal"
+      - "-c"
+      - "max_wal_senders=0"
+    environment:
+      PGDATA: /var/lib/postgresql/18/docker
+      POSTGRES_DB: groovemap
+      POSTGRES_USER: groovemap
+      POSTGRES_PASSWORD: ledger-scale
+    ports:
+      - "127.0.0.1::5432"
+    shm_size: 2g
+    volumes:
+      - data:/var/lib/postgresql
+
+volumes:
+  data:

@@ -1325,8 +1325,33 @@ $ curl -H "Authorization: Bearer $ADMIN_JWT" \
 **Density.** `kind` is `release` (default), `master`, `artist`, or `label`. Each bucket is
 `{month, type, dated_from, events}`, so a console can draw backfilled and recorded months apart.
 
-The list and the density strip aggregate over the whole alias table, since `provider_aliases`
-has no index on its validity times; expect them to cost a scan at catalog scale.
+**Latency at catalog scale.** The list and the density strip compute every release item's
+event history on each request. That is a window over all of `provider_aliases` joined to
+`catalog_items`, and a filter only narrows the result afterwards, so no index helps. They were
+measured on a synthetic catalog in `gm-design-loj9`'s proportions
+(`scripts/ledger_scale/README.md`), warm cache, production PostgreSQL settings, on a 6-vCPU
+Colima VM, on 2026-10-25.
+
+| Case | p95 at 25% scale | p95 at 50% scale | p95 at full scale (extrapolated, not measured) |
+| --- | ---: | ---: | ---: |
+| Works list, no filter | 28.5 s | 71.5 s | about 180 s |
+| Works list, `event=link_added` | 22.7 s | 66.1 s | about 190 s |
+| Works list, any other event filter | 7.1 to 27.4 s | 15.7 to 63.6 s | 31 to 150 s |
+| Works list, one-month window | 9.1 s | 27.7 s | about 84 s |
+| Density, `release` / `master` / `artist` / `label` | 15.1 / 4.2 / 6.6 / 1.7 s | 45.6 / 8.8 / 12.7 / 3.1 s | about 138 / 18 / 25 / 6 s |
+| One work (the Discogs master with the most releases) | 28 ms | 59 ms | about 0.13 s |
+
+The extrapolation assumes each doubling of the catalog multiplies latency by the factor
+measured between 25% and 50%. The list and density are far over the 2 s budget. The single-work
+route is within it.
+
+The fix is on the way: precomputed materialized views refreshed off the request path.
+`database-schema` declares them (`gm-database-schema-k8e9`), and this service will read them
+and refresh them after loads and re-attach runs (`gm-catalog-api-6bxr`). A local prototype at
+50% scale answered every list case within 291 ms p95 and every density case within 3 ms. One
+concurrent refresh took 179 s at 50% scale, about 6 to 7 minutes extrapolated to full.
+`gm-catalog-api-l7ek` replaces these synthetic figures with measurements on the first real
+catalog.
 
 ### Internal analytics computation
 
