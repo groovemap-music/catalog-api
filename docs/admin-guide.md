@@ -172,7 +172,9 @@ log, with `page_size` at most 100, but has no default window. `event`, `since` (
 and `until` (exclusive) narrow the events it counts. A work id is answered one hop through
 supersession, so a superseded id returns its survivor with `requested_id`, and an id that is
 not a work is `404`. `as_of` is RFC 3339 transaction time, and `edition_limit` caps the
-editions and sets `truncated`.
+editions and sets `truncated`. The works list and density read precomputed views, so every
+payload carries `refreshed_at`, the last refresh's start. Before the views' first refresh both
+answer `503` with `Retry-After`, never an empty list. One work is read live.
 
 Every event carries `dated_from`. `musicbrainz_fullexport` marks a link change the one-time
 backfill above dated from the MusicBrainz full export, which is wrong for about 9% of links.

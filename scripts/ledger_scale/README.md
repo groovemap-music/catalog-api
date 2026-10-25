@@ -38,11 +38,12 @@ $ docker compose -f scripts/ledger_scale/compose.yaml exec -T postgres \
 $ uv run python scripts/ledger_scale.py --port "$PORT" --counts --runs 5 --out /tmp/ledger-scale.json
 ```
 
-Add `--precomputed` to build the prototype precomputed ledger first: four materialized views
-and `identity_ledger_refresh()`, composed from the route module's own SQL. The harness times
-their build and one concurrent refresh, then measures the same cases reading from them. This is
-the fix `gm-database-schema-k8e9` and `gm-catalog-api-6bxr` implement. `api/README.md`
-("Latency at catalog scale") has the results.
+The works list and density read `database-schema`'s precomputed views
+(`gm-database-schema-k8e9`), which the schema creates unpopulated. Before measuring, the harness
+calls `identity_ledger_refresh()` once to build them and once more as a concurrent refresh, times
+both, and prints the views' sizes. `--no-refresh` skips that and measures the views as they are.
+At 0.5 the views take about 970 MB beside the 9.3 GB catalog. `api/README.md` ("Latency at catalog
+scale") has the results.
 
 The schema is `groovemap_schema.postgres.create_postgres_schema` from the database-schema
 revision `pyproject.toml` pins, which is the same DDL the integration tests apply. The harness
