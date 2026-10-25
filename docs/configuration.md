@@ -88,10 +88,10 @@ origin in production so password-reset links do not point at localhost.
 | `EXTRACTOR_HEALTH_PORT` | unset | Deprecated Discogs fallback for `EXTRACTOR_DISCOGS_HEALTH_PORT`; remove after one release |
 | `DISCOGS_DATA_ROOT` | unset | Mounted Discogs validation-result root exposed by extraction-analysis routes |
 | `MUSICBRAINZ_DATA_ROOT` | unset | Mounted MusicBrainz validation-result root exposed by extraction-analysis routes |
-| `RABBITMQ_MANAGEMENT_HOST` | `RABBITMQ_HOST` or `rabbitmq` | RabbitMQ management endpoint host; used only for DLQ purge |
-| `RABBITMQ_MANAGEMENT_PORT` | `15672` | RabbitMQ management endpoint port; used only for DLQ purge |
-| `RABBITMQ_USERNAME` | `groovemap` | RabbitMQ management login; used only for DLQ purge |
-| `RABBITMQ_PASSWORD` | `groovemap` | RabbitMQ management password; used only for DLQ purge |
+| `RABBITMQ_HOST` | `rabbitmq` | RabbitMQ AMQP host; used only for DLQ purge |
+| `RABBITMQ_PORT` | `5672` | RabbitMQ AMQP port; used only for DLQ purge |
+| `RABBITMQ_USERNAME` | `groovemap` | RabbitMQ AMQP login; used only for DLQ purge |
+| `RABBITMQ_PASSWORD` | `groovemap` | RabbitMQ AMQP password; used only for DLQ purge |
 | `IDENTITY_AUTO_REATTACH_ENABLED` | `false` | Run the catalog re-attachment then the `gm_id` projection after each completed Discogs extraction (see `api/README.md`) |
 | `IDENTITY_AUTO_REATTACH_INTERVAL` | `300` | How often that watcher polls `loader_extraction_latch`, in seconds |
 | `SIMILAR_ARTISTS_PRECOMPUTED_ENABLED` | `false` | Serve `/api/recommend/similar/artist/{id}` from the current release of the precomputed `artist_similar_artists` lists; the heuristic path serves whenever this is off or no list is usable (see `docs/similar-artists-precomputed.md`) |

@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from os import getenv
 from typing import cast
+from urllib.parse import quote
 
 from common.config import (
     _build_neo4j_uri,
@@ -80,14 +81,21 @@ class ApiConfig:
     extractor_discogs_port: int = 8000
     extractor_musicbrainz_host: str = "extractor-musicbrainz"
     extractor_musicbrainz_port: int = 8000
-    rabbitmq_management_host: str = "rabbitmq"
-    rabbitmq_management_port: int = 15672
+    rabbitmq_host: str = "rabbitmq"
+    rabbitmq_port: int = 5672
     rabbitmq_username: str = "groovemap"
     rabbitmq_password: str = field(default="groovemap", repr=False)
     identity_auto_reattach_enabled: bool = False
     identity_auto_reattach_interval: int = 300
     similar_artists_precomputed_enabled: bool = False
     similar_artists_fusion_alpha: float = DEFAULT_FUSION_ALPHA
+
+    @property
+    def rabbitmq_url(self) -> str:
+        """AMQP URL for the default vhost, with credentials percent-encoded."""
+        return (
+            f"amqp://{quote(self.rabbitmq_username, safe='')}:{quote(self.rabbitmq_password, safe='')}@{self.rabbitmq_host}:{self.rabbitmq_port}/%2F"
+        )
 
     @classmethod
     def from_env(cls) -> ApiConfig:
@@ -152,8 +160,8 @@ class ApiConfig:
             extractor_discogs_port=_coerce_port(getenv("EXTRACTOR_DISCOGS_HEALTH_PORT", getenv("EXTRACTOR_HEALTH_PORT", "8000")), 8000),
             extractor_musicbrainz_host=getenv("EXTRACTOR_MUSICBRAINZ_HOST", "extractor-musicbrainz"),
             extractor_musicbrainz_port=_coerce_port(getenv("EXTRACTOR_MUSICBRAINZ_HEALTH_PORT", "8000"), 8000),
-            rabbitmq_management_host=getenv("RABBITMQ_MANAGEMENT_HOST", getenv("RABBITMQ_HOST", "rabbitmq")),
-            rabbitmq_management_port=_coerce_port(getenv("RABBITMQ_MANAGEMENT_PORT", "15672"), 15672),
+            rabbitmq_host=getenv("RABBITMQ_HOST", "rabbitmq"),
+            rabbitmq_port=_coerce_port(getenv("RABBITMQ_PORT", "5672"), 5672),
             rabbitmq_username=get_secret("RABBITMQ_USERNAME", "groovemap"),
             rabbitmq_password=get_secret("RABBITMQ_PASSWORD", "groovemap"),
             identity_auto_reattach_enabled=_env_bool("IDENTITY_AUTO_REATTACH_ENABLED"),

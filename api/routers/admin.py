@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import structlog
-from common import describe_exception
+from common import AsyncResilientRabbitMQ, describe_exception
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
@@ -71,6 +71,7 @@ _tracking_tasks: dict[str, asyncio.Task[Any]] = {}
 
 # Valid DLQ names (one per data type per consumer)
 # Must match actual RabbitMQ queue names: {queue_prefix}-{data_type}.dlq
+_DLQ_PURGE_TIMEOUT_SECONDS = 10.0
 _VALID_DLQ_NAMES: set[str] = set()
 for _dt in DATA_TYPES:
     _VALID_DLQ_NAMES.add(dead_letter_queue_name("graphinator", _dt))
@@ -860,36 +861,27 @@ async def purge_dlq(
     queue: str,
     current_admin: Annotated[dict[str, Any], Depends(require_admin)],
 ) -> JSONResponse:
-    """Purge a dead-letter queue via the RabbitMQ management API."""
+    """Purge a dead-letter queue over AMQP ``queue.purge``."""
     if _config is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
 
     if queue not in _VALID_DLQ_NAMES:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown DLQ: {queue}")
 
-    mgmt_url = f"http://{_config.rabbitmq_management_host}:{_config.rabbitmq_management_port}/api/queues/%2F/{queue}/contents"
-
+    rabbitmq = AsyncResilientRabbitMQ(_config.rabbitmq_url, max_retries=1)
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.delete(
-                mgmt_url,
-                auth=(_config.rabbitmq_username, _config.rabbitmq_password),
-            )
-        if resp.status_code == 204:
-            messages_purged = 0  # RabbitMQ DELETE /contents returns 204 with no body
-        elif resp.status_code == 200:
-            data = resp.json() if resp.content else {}
-            messages_purged = data.get("messages_purged", 0) if isinstance(data, dict) else 0
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"RabbitMQ returned {resp.status_code}",
-            )
-    except (httpx.ConnectError, httpx.RequestError) as exc:
+        async with asyncio.timeout(_DLQ_PURGE_TIMEOUT_SECONDS):
+            channel = await rabbitmq.channel()
+            amqp_queue = await channel.get_queue(queue, ensure=True)
+            purged = await amqp_queue.purge()
+            messages_purged = purged.message_count or 0
+    except Exception as exc:  # the shared client wraps connect failures in a bare Exception
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="RabbitMQ management API unreachable",
+            detail="RabbitMQ unreachable or purge failed",
         ) from exc
+    finally:
+        await rabbitmq.close()
 
     admin_id = current_admin.get("sub", "unknown")
     logger.info("🗑️ DLQ purged", queue=queue, messages_purged=messages_purged, admin_id=admin_id)
