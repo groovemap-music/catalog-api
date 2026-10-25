@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import secrets
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -15,6 +16,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from aio_pika.exceptions import AMQPChannelError
 
 
 if TYPE_CHECKING:
@@ -598,123 +600,75 @@ class TestExtractionList:
         assert resp.status_code in (401, 403)
 
 
+_DLQ = "groovemap-discogs-graphinator-artists.dlq"
+
+
+def _fake_rabbitmq(*, message_count: int | None = 0, channel_error: Exception | None = None) -> MagicMock:
+    """An ``AsyncResilientRabbitMQ`` stand-in whose queue purge reports ``message_count``."""
+    amqp_queue = AsyncMock()
+    amqp_queue.purge = AsyncMock(return_value=MagicMock(message_count=message_count))
+    channel = AsyncMock()
+    channel.get_queue = AsyncMock(return_value=amqp_queue)
+    rabbitmq = MagicMock()
+    rabbitmq.channel = AsyncMock(side_effect=channel_error) if channel_error else AsyncMock(return_value=channel)
+    rabbitmq.close = AsyncMock()
+    rabbitmq.amqp_queue = amqp_queue
+    rabbitmq.amqp_channel = channel
+    return rabbitmq
+
+
 class TestDlqPurge:
-    @patch("api.routers.admin.httpx.AsyncClient")
-    def test_valid_queue(self, mock_client_cls: Any, test_client: TestClient) -> None:
-        mock_response = AsyncMock()
-        mock_response.status_code = 204
-        mock_client_instance = AsyncMock()
-        mock_client_instance.delete = AsyncMock(return_value=mock_response)
-        mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
-        mock_client_instance.__aexit__ = AsyncMock(return_value=False)
-        mock_client_cls.return_value = mock_client_instance
-
-        resp = test_client.post(
-            "/api/admin/dlq/purge/groovemap-discogs-graphinator-artists.dlq",
-            headers=_admin_auth_headers(),
-        )
+    @patch("api.routers.admin.record_audit_entry", new_callable=AsyncMock)
+    def test_valid_queue_reports_purged_count(self, mock_audit: AsyncMock, test_client: TestClient) -> None:
+        rabbitmq = _fake_rabbitmq(message_count=5)
+        with patch("api.routers.admin.AsyncResilientRabbitMQ", return_value=rabbitmq):
+            resp = test_client.post(f"/api/admin/dlq/purge/{_DLQ}", headers=_admin_auth_headers())
         assert resp.status_code == 200
-        data = resp.json()
-        assert data["queue"] == "groovemap-discogs-graphinator-artists.dlq"
-        assert data["messages_purged"] == 0
+        assert resp.json() == {"queue": _DLQ, "messages_purged": 5}
+        rabbitmq.amqp_channel.get_queue.assert_awaited_once_with(_DLQ, ensure=True)
+        rabbitmq.amqp_queue.purge.assert_awaited_once()
+        rabbitmq.close.assert_awaited_once()
+        assert mock_audit.await_args.kwargs["action"] == "dlq.purge"
+        assert mock_audit.await_args.kwargs["target"] == _DLQ
+        assert mock_audit.await_args.kwargs["details"] == {"purged_count": 5}
 
-    def test_invalid_queue(self, test_client: TestClient) -> None:
-        resp = test_client.post(
-            "/api/admin/dlq/purge/nonexistent-queue",
-            headers=_admin_auth_headers(),
-        )
-        assert resp.status_code == 404
-
-    def test_unauthorized(self, test_client: TestClient) -> None:
-        resp = test_client.post("/api/admin/dlq/purge/groovemap-discogs-graphinator-artists.dlq")
-        assert resp.status_code in (401, 403)
-
-    @patch("api.routers.admin.httpx.AsyncClient")
-    def test_purge_200_response(self, mock_client_cls: Any, test_client: TestClient) -> None:
-        mock_response = AsyncMock()
-        mock_response.status_code = 200
-        mock_response.content = b'{"messages_purged": 5}'
-        mock_response.json = MagicMock(return_value={"messages_purged": 5})
-        mock_client_instance = AsyncMock()
-        mock_client_instance.delete = AsyncMock(return_value=mock_response)
-        mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
-        mock_client_instance.__aexit__ = AsyncMock(return_value=False)
-        mock_client_cls.return_value = mock_client_instance
-
-        resp = test_client.post(
-            "/api/admin/dlq/purge/groovemap-discogs-graphinator-artists.dlq",
-            headers=_admin_auth_headers(),
-        )
-        assert resp.status_code == 200
-        assert resp.json()["messages_purged"] == 5
-
-    @patch("api.routers.admin.httpx.AsyncClient")
-    def test_purge_200_empty_body(self, mock_client_cls: Any, test_client: TestClient) -> None:
-        mock_response = AsyncMock()
-        mock_response.status_code = 200
-        mock_response.content = b""
-        mock_client_instance = AsyncMock()
-        mock_client_instance.delete = AsyncMock(return_value=mock_response)
-        mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
-        mock_client_instance.__aexit__ = AsyncMock(return_value=False)
-        mock_client_cls.return_value = mock_client_instance
-
-        resp = test_client.post(
-            "/api/admin/dlq/purge/groovemap-discogs-graphinator-artists.dlq",
-            headers=_admin_auth_headers(),
-        )
+    def test_empty_queue_reports_zero(self, test_client: TestClient) -> None:
+        with patch("api.routers.admin.AsyncResilientRabbitMQ", return_value=_fake_rabbitmq(message_count=None)):
+            resp = test_client.post(f"/api/admin/dlq/purge/{_DLQ}", headers=_admin_auth_headers())
         assert resp.status_code == 200
         assert resp.json()["messages_purged"] == 0
 
-    @patch("api.routers.admin.httpx.AsyncClient")
-    def test_purge_bad_gateway(self, mock_client_cls: Any, test_client: TestClient) -> None:
-        mock_response = AsyncMock()
-        mock_response.status_code = 500
-        mock_client_instance = AsyncMock()
-        mock_client_instance.delete = AsyncMock(return_value=mock_response)
-        mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
-        mock_client_instance.__aexit__ = AsyncMock(return_value=False)
-        mock_client_cls.return_value = mock_client_instance
+    def test_invalid_queue(self, test_client: TestClient) -> None:
+        with patch("api.routers.admin.AsyncResilientRabbitMQ") as rabbitmq_cls:
+            resp = test_client.post("/api/admin/dlq/purge/nonexistent-queue", headers=_admin_auth_headers())
+        assert resp.status_code == 404
+        rabbitmq_cls.assert_not_called()
 
-        resp = test_client.post(
-            "/api/admin/dlq/purge/groovemap-discogs-graphinator-artists.dlq",
-            headers=_admin_auth_headers(),
-        )
+    def test_unauthorized(self, test_client: TestClient) -> None:
+        resp = test_client.post(f"/api/admin/dlq/purge/{_DLQ}")
+        assert resp.status_code in (401, 403)
+
+    def test_broker_unreachable_returns_502(self, test_client: TestClient) -> None:
+        rabbitmq = _fake_rabbitmq(channel_error=Exception("Failed to establish RabbitMQ connection after 1 attempts"))
+        with patch("api.routers.admin.AsyncResilientRabbitMQ", return_value=rabbitmq):
+            resp = test_client.post(f"/api/admin/dlq/purge/{_DLQ}", headers=_admin_auth_headers())
+        assert resp.status_code == 502
+        rabbitmq.close.assert_awaited_once()
+
+    def test_purge_failure_returns_502(self, test_client: TestClient) -> None:
+        rabbitmq = _fake_rabbitmq()
+        rabbitmq.amqp_queue.purge = AsyncMock(side_effect=AMQPChannelError("channel closed"))
+        with patch("api.routers.admin.AsyncResilientRabbitMQ", return_value=rabbitmq):
+            resp = test_client.post(f"/api/admin/dlq/purge/{_DLQ}", headers=_admin_auth_headers())
         assert resp.status_code == 502
 
-    @patch("api.routers.admin.httpx.AsyncClient")
-    def test_purge_connection_error(self, mock_client_cls: Any, test_client: TestClient) -> None:
-        mock_client_instance = AsyncMock()
-        mock_client_instance.delete = AsyncMock(side_effect=httpx.ConnectError("Connection refused"))
-        mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
-        mock_client_instance.__aexit__ = AsyncMock(return_value=False)
-        mock_client_cls.return_value = mock_client_instance
-
-        resp = test_client.post(
-            "/api/admin/dlq/purge/groovemap-discogs-graphinator-artists.dlq",
-            headers=_admin_auth_headers(),
-        )
-        assert resp.status_code == 502
-
-    @patch("api.routers.admin.httpx.AsyncClient")
-    def test_purge_success_does_not_log_email(self, mock_client_cls: Any, test_client: TestClient) -> None:
+    def test_purge_success_does_not_log_email(self, test_client: TestClient) -> None:
         """groovemap-1385: DLQ-purge audit log must carry admin_id, not
         the admin's email address (PII)."""
         from structlog.testing import capture_logs
 
-        mock_response = AsyncMock()
-        mock_response.status_code = 204
-        mock_client_instance = AsyncMock()
-        mock_client_instance.delete = AsyncMock(return_value=mock_response)
-        mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
-        mock_client_instance.__aexit__ = AsyncMock(return_value=False)
-        mock_client_cls.return_value = mock_client_instance
-
-        with capture_logs() as captured:
-            resp = test_client.post(
-                "/api/admin/dlq/purge/groovemap-discogs-graphinator-artists.dlq",
-                headers=_admin_auth_headers(),
-            )
+        with capture_logs() as captured, patch("api.routers.admin.AsyncResilientRabbitMQ", return_value=_fake_rabbitmq()):
+            resp = test_client.post(f"/api/admin/dlq/purge/{_DLQ}", headers=_admin_auth_headers())
         assert resp.status_code == 200
 
         purge_events = [entry for entry in captured if "purged" in entry.get("event", "")]
@@ -724,38 +678,13 @@ class TestDlqPurge:
             assert "admin_email" not in entry
             assert TEST_ADMIN_EMAIL not in str(entry.values())
 
-    @patch("api.routers.admin.httpx.AsyncClient")
-    def test_purge_read_timeout_returns_502(self, mock_client_cls: Any, test_client: TestClient) -> None:
-        """groovemap-cu2.77: a slow/flapping RabbitMQ management API raises
-        ReadTimeout (a TimeoutException/RequestError subclass), not ConnectError.
-        Must surface as 502, not an unhandled 500.
-        """
-        mock_client_instance = AsyncMock()
-        mock_client_instance.delete = AsyncMock(side_effect=httpx.ReadTimeout("Read timed out"))
-        mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
-        mock_client_instance.__aexit__ = AsyncMock(return_value=False)
-        mock_client_cls.return_value = mock_client_instance
 
-        resp = test_client.post(
-            "/api/admin/dlq/purge/groovemap-discogs-graphinator-artists.dlq",
-            headers=_admin_auth_headers(),
-        )
-        assert resp.status_code == 502
+class TestRabbitmqUrl:
+    def test_url_quotes_credentials(self) -> None:
+        from api.config import ApiConfig
 
-    @patch("api.routers.admin.httpx.AsyncClient")
-    def test_purge_remote_protocol_error_returns_502(self, mock_client_cls: Any, test_client: TestClient) -> None:
-        """A flapping connection raising RemoteProtocolError must also surface as 502."""
-        mock_client_instance = AsyncMock()
-        mock_client_instance.delete = AsyncMock(side_effect=httpx.RemoteProtocolError("Server disconnected"))
-        mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
-        mock_client_instance.__aexit__ = AsyncMock(return_value=False)
-        mock_client_cls.return_value = mock_client_instance
-
-        resp = test_client.post(
-            "/api/admin/dlq/purge/groovemap-discogs-graphinator-artists.dlq",
-            headers=_admin_auth_headers(),
-        )
-        assert resp.status_code == 502
+        config = replace(ApiConfig.from_env(), rabbitmq_host="mq", rabbitmq_port=5673, rabbitmq_username="u@x", rabbitmq_password="p/w:d")  # noqa: S106
+        assert config.rabbitmq_url == "amqp://u%40x:p%2Fw%3Ad@mq:5673/%2F"
 
 
 class TestGetExtraction:
@@ -1983,17 +1912,9 @@ class TestAuditLogging:
         assert mock_audit.call_args.kwargs["action"] == "extraction.trigger"
         assert mock_audit.call_args.kwargs["details"]["extraction_id"] == extraction_id
 
-    @patch("api.routers.admin.httpx.AsyncClient")
+    @patch("api.routers.admin.AsyncResilientRabbitMQ", return_value=_fake_rabbitmq())
     @patch("api.routers.admin.record_audit_entry", new_callable=AsyncMock)
-    def test_dlq_purge_records_audit(self, mock_audit: AsyncMock, mock_client_cls: Any, test_client: TestClient) -> None:
-        mock_response = AsyncMock()
-        mock_response.status_code = 204
-        mock_client_instance = AsyncMock()
-        mock_client_instance.delete = AsyncMock(return_value=mock_response)
-        mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
-        mock_client_instance.__aexit__ = AsyncMock(return_value=False)
-        mock_client_cls.return_value = mock_client_instance
-
+    def test_dlq_purge_records_audit(self, mock_audit: AsyncMock, _mock_rabbitmq: MagicMock, test_client: TestClient) -> None:
         resp = test_client.post(
             "/api/admin/dlq/purge/groovemap-discogs-graphinator-artists.dlq",
             headers=_admin_auth_headers(),

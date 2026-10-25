@@ -40,7 +40,7 @@ create or mutate infrastructure schema during ordinary startup.
 | `analytics-engine` | `/api/insights/*` proxy requests return 503 when the service is unavailable |
 | `discogs-ingestion` | The retained administrative trigger/tracker records a terminal failure when its configured endpoint cannot be reached |
 | `musicbrainz-ingestion` | Not called by Catalog API; missing or stale loaded data remains visible through ordinary query/analysis results |
-| RabbitMQ management API | Queue collection or purge reports the management failure without stopping request serving |
+| RabbitMQ (AMQP) | A purge that cannot reach the broker answers 502 without stopping request serving |
 
 Analytics computation is owned by
 [`analytics-engine`](https://github.com/groovemap-music/analytics-engine), and ingestion execution is
