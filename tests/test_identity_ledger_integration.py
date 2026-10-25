@@ -4,14 +4,18 @@ Seeds the invented catalog of `tests/identity_ledger_story.py` (spike `gm-design
 synthetic story, with `identity_link_events` rows of both provenances) into the real schema
 `create_postgres_schema` applies, through the same `postgres_pool` fixture
 `tests/test_real_databases.py` uses, and reads it back through the mounted routes, so every
-statement is parsed, planned, and run by PostgreSQL. Nothing here touches a shared database:
-`just test-integration` starts throwaway containers.
+statement is parsed, planned, and run by PostgreSQL. The works list and density read
+database-schema's precomputed views, so each test refreshes them with `identity_ledger_refresh()`
+after seeding; the parity tests hold every case `gm-catalog-api-278z` measured equal to the live
+statements the routes ran before (`tests/identity_ledger_live.py`). Nothing here touches a
+shared database: `just test-integration` starts throwaway containers.
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -23,6 +27,11 @@ from common import AsyncPostgreSQLPool
 import api.api as api_module
 import api.routers.admin as admin_router
 from api.dependencies import require_admin
+from api.identity_ledger import EVENT_TYPES, KINDS
+from api.ledger_refresh import REASON_UNPOPULATED, ChangeTracker, poll_once
+from api.queries import identity_ledger_queries
+from api.reattach import _run_once
+from tests import identity_ledger_live, identity_ledger_story
 from tests.identity_ledger_story import BACKFILL, E1, E2, E3, E4, E5, E6, E7, EXPORT, G2, G5X, MOVED_ROW, RUN1, W1, W2, W5, X3, mbid, story
 from tests.test_real_databases import TEST_USER_ID, postgres_pool
 
@@ -40,6 +49,21 @@ _RESET = (
 async def _execute(pool: AsyncPostgreSQLPool, sql: str, params: Any = None) -> None:
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(sql, params)
+
+
+async def _query(pool: AsyncPostgreSQLPool, sql: str, params: Any = None) -> list[tuple[Any, ...]]:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(sql, params)
+        return list(await cur.fetchall())
+
+
+async def _refresh(pool: AsyncPostgreSQLPool) -> datetime:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("SELECT identity_ledger_refresh()")
+        row = await cur.fetchone()
+    assert row is not None
+    refreshed_at: datetime = row[0]
+    return refreshed_at
 
 
 _INSERTS = {
@@ -86,6 +110,7 @@ async def _seed(pool: AsyncPostgreSQLPool) -> None:
 async def http(postgres_pool: AsyncPostgreSQLPool, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[httpx.AsyncClient]:
     await _execute(postgres_pool, _RESET)
     await _seed(postgres_pool)
+    await _refresh(postgres_pool)
     monkeypatch.setattr(admin_router, "_pool", postgres_pool)
     api_module.app.dependency_overrides[require_admin] = lambda: {"sub": str(uuid4()), "type": "admin"}
     transport = httpx.ASGITransport(app=api_module.app)
@@ -289,3 +314,284 @@ async def test_density_counts_events_per_month_by_type_and_provenance(http: http
     master_buckets = {(row["month"], row["type"], row["dated_from"]): row["events"] for row in masters["buckets"]}
     assert master_buckets[("2025-12", "link_added", "musicbrainz_fullexport")] == 1
     assert master_buckets[("2026-10", "reattached", "groovemap")] == 1
+
+
+# ---------------------------------------------------------------------------------------------
+# The precomputed views: parity with the live statements, refreshed_at, and the unrefreshed 503.
+# ---------------------------------------------------------------------------------------------
+
+# The story has no promotion, revert, later evidence, closed alias, removed link, artist, or label.
+# These rows add one of each on top of it, so every parity case below has rows to compare.
+E8, E9, P9, A1, L1, S9, RUN9 = (identity_ledger_story.native(n) for n in (0x8, 0x9, 0x19, 0x301, 0x401, 0x5009, 0xA009))
+D1, MB2 = identity_ledger_story.D1, identity_ledger_story.MB2
+PROMOTED, REVERTED = "2026-09-15T00:00:00+00:00", "2026-09-20T00:00:00+00:00"
+_MORE = [
+    (
+        "INSERT INTO catalog_items (id, kind, created_at) VALUES (%s, %s, %s)",
+        [(E8, "release", D1), (E9, "release", D1), (P9, "release", MB2), (A1, "artist", D1), (L1, "label", D1)],
+    ),
+    (
+        "INSERT INTO provider_aliases (provider, entity_kind, external_id, native_id, valid_from, valid_to, source) VALUES (%s, %s, %s, %s, %s, %s, 'catalog')",
+        [
+            ("discogs", "release", "900007", E8, D1, None),
+            # Evidence attached after the mint, and an alias closed other than by a supersession.
+            ("barcode", "release", "synthetic-barcode-8", E8, "2026-09-12T00:00:00+00:00", None),
+            ("barcode", "release", "synthetic-barcode-8b", E8, D1, "2026-09-25T00:00:00+00:00"),
+            ("discogs", "release", "900008", E9, D1, None),
+            # P9 is promoted into E9 and the promotion reverted: its alias moves over and back.
+            ("musicbrainz", "release", mbid(0x9), P9, MB2, PROMOTED),
+            ("musicbrainz", "release", mbid(0x9), E9, PROMOTED, REVERTED),
+            ("musicbrainz", "release", mbid(0x9), P9, REVERTED, None),
+            ("discogs", "artist", "700001", A1, D1, None),
+            ("musicbrainz", "artist", mbid(0x301), A1, "2026-08-03T05:00:30+00:00", None),
+            ("discogs", "label", "800001", L1, D1, "2026-09-29T00:00:00+00:00"),
+        ],
+    ),
+    (
+        "INSERT INTO catalog_item_supersessions (id, superseded_id, survivor_id, cause, decision_ref, valid_from, valid_to) "
+        "VALUES (%s, %s, %s, 'edition_promotion', %s, %s, %s)",
+        [(S9, P9, E9, RUN9, PROMOTED, REVERTED)],
+    ),
+    ("INSERT INTO public.releases (data_id, hash, data) VALUES (%s, 'h', '{}'::jsonb)", [("900007",), ("900008",)]),
+    ("INSERT INTO graph.derived_from (release_id, master_id) VALUES (%s, '900102')", [("900007",), ("900008",)]),
+    (
+        "INSERT INTO identity_link_events (provider, entity_kind, external_id, event, discogs_id_before, discogs_id_after, event_at, "
+        "dated_from, source_ref) VALUES ('musicbrainz', 'release', %s, 'link_removed', 900005, NULL, '2026-09-28T00:00:00+00:00', "
+        "'groovemap_load', '20260928-001001')",
+        [(mbid(0x6),)],
+    ),
+]
+
+
+async def _add_every_event(pool: AsyncPostgreSQLPool) -> None:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        for insert, rows in _MORE:
+            await cur.executemany(insert, rows)
+    await _refresh(pool)
+
+
+@pytest_asyncio.fixture
+async def every_event(http: httpx.AsyncClient, postgres_pool: AsyncPostgreSQLPool) -> httpx.AsyncClient:
+    """The story plus `_MORE`, refreshed."""
+    await _add_every_event(postgres_pool)
+    return http
+
+
+@pytest_asyncio.fixture(params=["story", "every_event"])
+async def catalog(request: pytest.FixtureRequest, http: httpx.AsyncClient, postgres_pool: AsyncPostgreSQLPool) -> httpx.AsyncClient:
+    """The story alone, then with `_MORE`: each parity case runs on both."""
+    if request.param == "every_event":
+        await _add_every_event(postgres_pool)
+    return http
+
+
+# Every case gm-catalog-api-278z measured (works by default, by each event filter, in a window;
+# density for each kind), plus the window's edges, a filtered window, and a second page.
+_WORKS_CASES: list[dict[str, Any]] = [
+    {},
+    *({"event": event} for event in EVENT_TYPES),
+    {"since": "2026-09-05T00:00:00Z", "until": "2026-09-30T00:00:00Z"},
+    {"since": "2026-09-01T00:00:00Z", "until": "2026-10-01T00:00:00Z", "event": "reattached"},
+    {"since": "2026-09-02T10:00:01Z"},
+    {"until": "2026-08-02T00:00:00Z"},
+    {"page_size": 2, "page": 2},
+]
+
+
+async def _get(http: httpx.AsyncClient, path: str, params: dict[str, Any]) -> dict[str, Any]:
+    response = await http.get(path, params=params)
+    assert response.status_code == 200, response.text
+    body: dict[str, Any] = response.json()
+    return body
+
+
+async def _live(http: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, path: str, params: dict[str, Any]) -> dict[str, Any]:
+    """The same request answered by the live statements the routes ran before the views."""
+    with monkeypatch.context() as live:
+        live.setattr(identity_ledger_queries, "_WORKS", identity_ledger_live.WORKS.replace("%(kind)s", "'release'"))
+        live.setattr(identity_ledger_queries, "_DENSITY", identity_ledger_live.DENSITY)
+        return await _get(http, path, params)
+
+
+def _case_id(params: dict[str, Any]) -> str:
+    return "&".join(f"{key}={value}" for key, value in params.items()) or "default"
+
+
+@pytest.mark.parametrize("params", _WORKS_CASES, ids=_case_id)
+async def test_works_list_from_the_views_equals_the_live_statement(
+    catalog: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, params: dict[str, Any]
+) -> None:
+    precomputed = await _get(catalog, "/api/admin/identity/ledger/works", params)
+
+    assert precomputed == await _live(catalog, monkeypatch, "/api/admin/identity/ledger/works", params)
+
+
+async def test_every_parity_case_has_works_to_compare(every_event: httpx.AsyncClient) -> None:
+    """The parity above is not vacuous: with `_MORE`, every filter and window lists works."""
+    totals = {_case_id(params): (await _get(every_event, "/api/admin/identity/ledger/works", params))["total"] for params in _WORKS_CASES}
+
+    assert totals == {
+        "default": 3,
+        "event=linked_at_ingest": 3,
+        "event=reattached": 1,
+        "event=promoted": 1,
+        "event=reverted": 1,
+        "event=evidence_attached": 1,
+        "event=alias_closed": 1,
+        "event=link_added": 1,
+        "event=link_changed": 2,
+        "event=link_removed": 2,
+        "since=2026-09-05T00:00:00Z&until=2026-09-30T00:00:00Z": 3,
+        "since=2026-09-01T00:00:00Z&until=2026-10-01T00:00:00Z&event=reattached": 1,
+        "since=2026-09-02T10:00:01Z": 3,
+        "until=2026-08-02T00:00:00Z": 1,
+        "page_size=2&page=2": 3,
+    }
+
+
+@pytest.mark.parametrize("kind", KINDS)
+async def test_density_from_the_view_equals_the_live_statement(catalog: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
+    precomputed = await _get(catalog, "/api/admin/identity/ledger/density", {"kind": kind})
+
+    assert precomputed == await _live(catalog, monkeypatch, "/api/admin/identity/ledger/density", {"kind": kind})
+
+
+async def test_every_kind_has_density_to_compare(every_event: httpx.AsyncClient) -> None:
+    """The story has release and master items only; `_MORE` adds an artist and a label."""
+    for kind in KINDS:
+        assert (await _get(every_event, "/api/admin/identity/ledger/density", {"kind": kind}))["buckets"], kind
+
+
+async def test_every_payload_names_the_last_refresh(http: httpx.AsyncClient, postgres_pool: AsyncPostgreSQLPool) -> None:
+    refreshed_at = await _refresh(postgres_pool)
+    expected = refreshed_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    assert expected.endswith("Z")
+
+    works = await _get(http, "/api/admin/identity/ledger/works", {})
+    density = await _get(http, "/api/admin/identity/ledger/density", {})
+    work = await _work(http, W1)
+
+    # The single work's planes are live; its refreshed_at names the list it was reached from.
+    assert works["refreshed_at"] == density["refreshed_at"] == work["refreshed_at"] == expected
+
+
+async def test_a_refresh_shows_what_was_written_since_the_last(http: httpx.AsyncClient, postgres_pool: AsyncPostgreSQLPool) -> None:
+    """The views hold the last refresh's rows until the next one."""
+    before = await _get(http, "/api/admin/identity/ledger/density", {})
+    await _execute(
+        postgres_pool,
+        "UPDATE provider_aliases SET valid_to = '2026-09-20T00:00:00Z' "
+        "WHERE provider = 'discogs' AND entity_kind = 'release' AND external_id = '900001' AND valid_to IS NULL",
+    )
+
+    assert await _get(http, "/api/admin/identity/ledger/density", {}) == before
+    await _refresh(postgres_pool)
+    after = await _get(http, "/api/admin/identity/ledger/density", {})
+    assert {(row["month"], row["type"]): row["events"] for row in after["buckets"]}[("2026-09", "alias_closed")] >= 1
+    assert datetime.fromisoformat(after["refreshed_at"]) > datetime.fromisoformat(before["refreshed_at"])
+
+
+_VIEWS = ("identity_ledger_edition_events", "identity_ledger_edition_parents", "identity_ledger_work_summary", "identity_ledger_density")
+
+
+@pytest.mark.parametrize("forget_state", [True, False], ids=["never-refreshed", "view-recreated"])
+async def test_unpopulated_views_answer_503_with_retry_after_never_an_empty_list(
+    http: httpx.AsyncClient, postgres_pool: AsyncPostgreSQLPool, *, forget_state: bool
+) -> None:
+    for view in _VIEWS:
+        await _execute(postgres_pool, f"REFRESH MATERIALIZED VIEW {view} WITH NO DATA")
+    if forget_state:
+        await _execute(postgres_pool, "DELETE FROM identity_ledger_refresh_state")
+
+    for path in ("/api/admin/identity/ledger/works", "/api/admin/identity/ledger/density"):
+        response = await http.get(path)
+        assert response.status_code == 503, response.text
+        assert response.json() == {"detail": "identity ledger not yet refreshed"}
+        assert response.headers["Retry-After"] == "60"
+
+    # One work reads the base tables live, so it still answers.
+    work = await _work(http, W1)
+    assert [edition["gm_id"] for edition in work["editions"]] == [E1, E2, E4, E3, E5]
+    assert (work["refreshed_at"] is None) is forget_state
+
+    await _refresh(postgres_pool)
+    assert (await http.get("/api/admin/identity/ledger/works")).json()["total"] == 3
+
+
+# ---------------------------------------------------------------------------------------------
+# Refreshed inline after a re-attachment run, and by the poll.
+# ---------------------------------------------------------------------------------------------
+
+
+async def _split_under_w1(pool: AsyncPostgreSQLPool) -> tuple[str, str]:
+    """A release of W1's master whose MusicBrainz row loaded first: the split a run repairs."""
+    edition, split = identity_ledger_story.native(0x10), identity_ledger_story.native(0x20)
+    statements: list[tuple[str, tuple[Any, ...]]] = [
+        ("INSERT INTO catalog_items (id, kind) VALUES (%s, 'release'), (%s, 'release')", (split, edition)),
+        (
+            "INSERT INTO provider_aliases (provider, entity_kind, external_id, native_id, source) VALUES ('musicbrainz', 'release', %s, %s, 'catalog')",
+            (mbid(0x10), split),
+        ),
+        (
+            "INSERT INTO provider_aliases (provider, entity_kind, external_id, native_id, source) VALUES ('discogs', 'release', '900009', %s, 'catalog')",
+            (edition,),
+        ),
+        ("INSERT INTO public.releases (data_id, hash, data) VALUES ('900009', 'h', '{}'::jsonb)", ()),
+        ("INSERT INTO graph.derived_from (release_id, master_id) VALUES ('900009', '900101')", ()),
+        (
+            "INSERT INTO musicbrainz.releases (mbid, name, release_group_mbid, discogs_release_id, gm_item_id) VALUES (%s, 'r', %s, 900009, %s)",
+            (mbid(0x10), mbid(0xB1), split),
+        ),
+    ]
+    for sql, params in statements:
+        await _execute(pool, sql, params)
+    return edition, split
+
+
+async def _run_cli(pool: AsyncPostgreSQLPool, job_id: str) -> None:
+    await _execute(pool, "UPDATE users SET is_admin = TRUE WHERE id = %s", (TEST_USER_ID,))
+    assert await _run_once(apply=True, admin_id=str(TEST_USER_ID), batch_size=10, job_id=job_id) is not None
+
+
+async def _run_endpoint(_pool: AsyncPostgreSQLPool, job_id: str) -> None:
+    # The admin route's background job, on the pool the `http` fixture mounted.
+    await admin_router._run_reattach_job(job_id, str(TEST_USER_ID), True)
+
+
+@pytest.mark.parametrize("run", [_run_cli, _run_endpoint], ids=["cli", "endpoint"])
+async def test_a_reattachment_runs_supersession_is_in_the_works_list_without_a_poll(
+    http: httpx.AsyncClient, postgres_pool: AsyncPostgreSQLPool, run: Any
+) -> None:
+    edition, split = await _split_under_w1(postgres_pool)
+    before = await _get(http, "/api/admin/identity/ledger/works", {"event": "reattached"})
+    assert [(row["gm_id"], row["evented_editions"]) for row in before["works"]] == [(W1, 1)]
+    [(started,)] = await _query(postgres_pool, "SELECT clock_timestamp()")
+    job_id = str(uuid4())
+
+    await run(postgres_pool, job_id)
+
+    # No poll and no manual refresh: the run refreshed the views inline before it returned.
+    [(survivor, decision_ref)] = await _query(
+        postgres_pool, "SELECT survivor_id, decision_ref FROM catalog_item_supersessions WHERE superseded_id = %s", (split,)
+    )
+    assert (str(survivor), str(decision_ref)) == (edition, job_id)
+    after = await _get(http, "/api/admin/identity/ledger/works", {"event": "reattached"})
+    assert [(row["gm_id"], row["evented_editions"], row["repaired_editions"]) for row in after["works"]] == [(W1, 2, 2)]
+    assert datetime.fromisoformat(after["refreshed_at"]) > started
+    [(refreshed_at,)] = await _query(postgres_pool, "SELECT refreshed_at FROM identity_ledger_refresh_state")
+    assert refreshed_at > started
+
+
+async def test_the_poll_builds_unpopulated_views_and_stores_the_source_watermark(http: httpx.AsyncClient, postgres_pool: AsyncPostgreSQLPool) -> None:
+    for view in _VIEWS:
+        await _execute(postgres_pool, f"REFRESH MATERIALIZED VIEW {view} WITH NO DATA")
+    assert (await http.get("/api/admin/identity/ledger/works")).status_code == 503
+
+    assert await poll_once(postgres_pool, ChangeTracker(), quiet=10**6, max_staleness=10**6) == REASON_UNPOPULATED
+
+    assert (await _get(http, "/api/admin/identity/ledger/works", {}))["total"] == 3
+    [(watermark,)] = await _query(postgres_pool, "SELECT source_watermark FROM identity_ledger_refresh_state")
+    assert set(watermark) == {"writes"} and watermark["writes"] > 0
+    # Populated, and whatever the statistics say, a load seen this instant is not yet quiet nor
+    # the refresh stale: the next poll waits.
+    assert await poll_once(postgres_pool, ChangeTracker(), quiet=10**6, max_staleness=10**6) is None

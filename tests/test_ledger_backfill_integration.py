@@ -73,8 +73,12 @@ def _at(text: str) -> datetime:
 async def test_apply_writes_labelled_events_under_one_audit_entry_and_a_rerun_adds_nothing(
     pool: AsyncPostgreSQLPool, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], served: dict[str, Any]
 ) -> None:
+    [(started,)] = await _execute(pool, "SELECT clock_timestamp()")
     await _run(monkeypatch, "--apply", "--batch-size", "2")
     assert "Done. 3 events inserted, 0 already present" in capsys.readouterr().out
+    # The precomputed Identity Ledger was refreshed inline, after the run began.
+    [(refreshed_at,)] = await _execute(pool, "SELECT refreshed_at FROM identity_ledger_refresh_state")
+    assert refreshed_at > started
 
     [(entry_id, admin_id, action, target, details)] = await _execute(pool, _AUDIT)
     assert (admin_id, action, target) == (SYSTEM_ACTOR_ID, APPLY_ACTION, f"musicbrainz-fullexport:{EXPORT}")

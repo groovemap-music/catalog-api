@@ -327,6 +327,7 @@ def build_work(
     requested_id: str | None = None,
     as_of: datetime | None = None,
     edition_limit: int = DEFAULT_EDITION_LIMIT,
+    refreshed_at: datetime | None = None,
 ) -> dict[str, Any]:
     """One work's three planes at `as_of` (transaction time; None means now).
 
@@ -338,6 +339,9 @@ def build_work(
         requested_id: The id the caller asked for, when resolution moved it.
         as_of: Transaction time to read the ledger at.
         edition_limit: How many editions to emit; `truncated` reports a cut.
+        refreshed_at: When the precomputed works list and density were last refreshed, None
+            before the first refresh. The work's own planes are read live; this names the age
+            of the list the work was reached from.
     """
     ledger = _Ledger(rows)
     visible = [edition for edition, first_at in editions if as_of is None or first_at <= as_of]
@@ -397,4 +401,5 @@ def build_work(
         "editions": payload_editions,
         "edition_count": len(visible),
         "truncated": len(visible) > len(shown),
+        "refreshed_at": iso(refreshed_at),
     }

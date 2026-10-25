@@ -120,6 +120,7 @@ from common.config import get_secret, parse_postgres_host_port
 
 from api.audit_log import insert_audit_entry, update_audit_entry
 from api.catalog_merge import CACHE_TABLE_NAMES, MOVED_TABLES, MergeConflictError, current_supersession, lock_items, merge_items
+from api.ledger_refresh import TRIGGER_REATTACH, refresh_ledger
 
 
 logger = structlog.get_logger(__name__)
@@ -684,7 +685,10 @@ async def apply_with_audit(pool: Any, *, admin_id: str, job_id: str, batch_size:
 
     The entry is created as :data:`STARTED_ACTION` before :func:`run_reattachment` writes
     anything, and finalized as :data:`APPLY_ACTION` with the outcomes or as
-    :data:`FAILED_ACTION` with the error, which is then re-raised.
+    :data:`FAILED_ACTION` with the error, which is then re-raised. Either way the precomputed
+    Identity Ledger is then refreshed inline (`api/ledger_refresh.py`), since every item
+    commits on its own and a failed run may have written some; a refresh failure is logged and
+    counted, never raised.
 
     Raises:
         AuditEntryError: The entry could not be created; the run did not start.
@@ -696,8 +700,10 @@ async def apply_with_audit(pool: Any, *, admin_id: str, job_id: str, batch_size:
         report = await run_reattachment(pool, apply=True, batch_size=batch_size, decision_ref=UUID(job_id))
     except Exception as exc:
         await finalize_audit_entry(pool, entry_id=job_id, action=FAILED_ACTION, details=failure_details(job_id, exc))
+        await refresh_ledger(pool, trigger=TRIGGER_REATTACH, job_id=job_id)
         raise
     await finalize_audit_entry(pool, entry_id=job_id, action=APPLY_ACTION, details=audit_details(report, job_id))
+    await refresh_ledger(pool, trigger=TRIGGER_REATTACH, job_id=job_id)
     return report
 
 

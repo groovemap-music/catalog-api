@@ -712,6 +712,16 @@ class TestCli:
         assert exc_info.value.code == 1
 
 
+@pytest.fixture(autouse=True)
+def refresh(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """The inline ledger refresh, which `tests/test_identity_ledger_integration.py` runs for real."""
+    import api.reattach as reattach_module
+
+    refresh = AsyncMock(return_value=None)
+    monkeypatch.setattr(reattach_module, "refresh_ledger", refresh)
+    return refresh
+
+
 JOB_ID = "00000000-0000-4000-8000-0000000000cc"
 ADMIN_ID = "00000000-0000-0000-0000-000000000099"
 _APPLIED = {"apply": True, "census": {}, "outcomes": {"release": {"reattached": 2}}}
@@ -752,6 +762,34 @@ class TestApplyWithAudit:
         # The run started only once the entry its supersessions name had been written.
         assert started == [[("INSERT", (JOB_ID, ADMIN_ID, "identity.reattach.started", JOB_ID, {"job_id": JOB_ID, "apply": True}))]]
         assert _audit_calls(pool)[1:] == [("UPDATE", ("identity.reattach.apply", audit_details(_APPLIED, JOB_ID), JOB_ID))]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("fails", [False, True])
+    async def test_the_ledger_is_refreshed_after_the_entry_is_finalized(self, run: AsyncMock, refresh: AsyncMock, fails: bool) -> None:
+        """CLI and endpoint both apply through here; a failed run may have committed items too."""
+        from api.reattach import apply_with_audit
+
+        pool = FakePool()
+        finalized: list[Any] = []
+        refresh.side_effect = lambda *_args, **_kwargs: finalized.append(_audit_calls(pool))
+        if fails:
+            run.side_effect = RuntimeError("connection lost")
+            with pytest.raises(RuntimeError, match="connection lost"):
+                await apply_with_audit(pool, admin_id=ADMIN_ID, job_id=JOB_ID)
+        else:
+            await apply_with_audit(pool, admin_id=ADMIN_ID, job_id=JOB_ID)
+
+        refresh.assert_awaited_once_with(pool, trigger="reattach", job_id=JOB_ID)
+        assert [verb for verb, _params in finalized[0]] == ["INSERT", "UPDATE"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("run")
+    async def test_an_entry_that_cannot_be_written_refreshes_nothing(self, refresh: AsyncMock) -> None:
+        from api.reattach import AuditEntryError, apply_with_audit
+
+        with pytest.raises(AuditEntryError):
+            await apply_with_audit(FakePool(raise_on={"INSERT": RuntimeError("audit table unavailable")}), admin_id=ADMIN_ID, job_id=JOB_ID)
+        refresh.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_an_entry_that_cannot_be_written_stops_the_run(self, run: AsyncMock) -> None:

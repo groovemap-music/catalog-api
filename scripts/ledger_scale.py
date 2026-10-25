@@ -12,14 +12,13 @@ PostgreSQL that ``scripts/ledger_scale/seed.sql`` filled, it
   same ``REPEATABLE READ, READ ONLY`` transaction shape, after one warm-up call;
 - times ``--runs`` further calls and reports p50 and p95 (nearest rank) in milliseconds.
 
-With ``--precomputed`` it first builds the precomputed ledger the fix proposes: four materialized views,
-their unique indexes, and ``identity_ledger_refresh()``. They are composed from the route module's
-own SQL, so they hold exactly what the routes compute today. It times their build and one
-concurrent refresh, then measures the same cases with the works list and density statements read
-from the views. That is the prototype the database-schema and catalog-api follow-ups implement.
+The works list and density read database-schema's precomputed views (gm-catalog-api-gorv), so before
+measuring it calls ``identity_ledger_refresh()``: once to build them when they are unpopulated, as
+after the schema is first applied, and once more as a concurrent refresh. It times both and reports
+the views' sizes. ``--no-refresh`` measures whatever the views already hold.
 
 Aggregates go to stdout as a Markdown table; the full plans go to ``--out`` as JSON, which is
-scratch output and never committed. Without ``--precomputed`` nothing here writes to the database.
+scratch output and never committed. Only the refresh writes to the database.
 """
 
 from __future__ import annotations
@@ -107,125 +106,13 @@ SELECT
 
 _SIZE = "SELECT pg_size_pretty(pg_database_size(current_database())), pg_database_size(current_database())"
 
-# ---------------------------------------------------------------------------------------------
-# The precomputed ledger (--precomputed). Each view is the route module's statement with the
-# filters lifted out, so a refresh computes what a request computes today, once.
-# ---------------------------------------------------------------------------------------------
+_VIEWS = "identity_ledger_edition_events, identity_ledger_edition_parents, identity_ledger_work_summary, identity_ledger_density"
 
-REPAIRS = "('reattached', 'promoted', 'reverted')"
-
-
-def _for_kind(sql: str, kind: str) -> str:
-    return sql.replace("%(kind)s", f"'{kind}'")
-
-
-def _side_events() -> str:
-    """`_WORKS`'s `side_event` body: every non-mint event of a release item, supersessions per side."""
-    body = identity_ledger_queries._WORKS.split("side_event AS (", 1)[1].split("),\nedition_event AS (", 1)[0]
-    assert "supersession_of_kind" in body, "the works statement changed shape; update the prototype"
-    return body
-
-
-def _view_statements() -> list[tuple[str, str]]:
-    resolved = identity_ledger_queries._RESOLVED.format(alias="edition_open", item="side_event.item_id")
-    density = [
-        "("
-        + _for_kind(identity_ledger_queries._DENSITY, kind)
-        .replace("SELECT to_char(", f"SELECT '{kind}'::text AS kind, to_char(", 1)
-        .replace("GROUP BY 1, 2, 3", "GROUP BY 1, 2, 3, 4")
-        .replace("ORDER BY 1, 2, 3", "ORDER BY 2, 3, 4")
-        .strip()
-        + ")"
-        for kind in KINDS
-    ]
-    return [
-        (
-            "identity_ledger_edition_events",
-            f"""CREATE MATERIALIZED VIEW identity_ledger_edition_events AS
-WITH {_for_kind(identity_ledger_queries._ITEM_EVENTS, "release")},
-side_event AS ({_side_events()})
-SELECT COALESCE(edition_open.survivor_id, side_event.item_id) AS edition_id, side_event.at, side_event.type, count(*) AS events
-FROM side_event
-{resolved}
-GROUP BY 1, 2, 3""",  # noqa: S608 — composed of module constants only
-        ),
-        ("identity_ledger_edition_events key", "CREATE UNIQUE INDEX ON identity_ledger_edition_events (edition_id, at, type)"),
-        ("identity_ledger_edition_events at", "CREATE INDEX ON identity_ledger_edition_events (at)"),
-        ("identity_ledger_edition_events type", "CREATE INDEX ON identity_ledger_edition_events (type, at)"),
-        (
-            "identity_ledger_edition_parents",
-            f"""CREATE MATERIALIZED VIEW identity_ledger_edition_parents AS
-WITH member AS MATERIALIZED (
-    SELECT edition_id, edition_id AS item_id FROM (SELECT DISTINCT edition_id FROM identity_ledger_edition_events) AS evented
-    UNION
-    SELECT supersession.survivor_id, supersession.superseded_id
-    FROM catalog_item_supersessions AS supersession
-    WHERE supersession.valid_to IS NULL
-      AND supersession.survivor_id IN (SELECT edition_id FROM identity_ledger_edition_events)
-),
-{identity_ledger_queries._PARENTS_OF_MEMBER}
-SELECT DISTINCT edition_id, work_id FROM edition_parent""",  # noqa: S608 — composed of module constants only
-        ),
-        ("identity_ledger_edition_parents key", "CREATE UNIQUE INDEX ON identity_ledger_edition_parents (edition_id, work_id)"),
-        (
-            "identity_ledger_work_summary",
-            f"""CREATE MATERIALIZED VIEW identity_ledger_work_summary AS
-WITH by_type AS (
-    SELECT parent.work_id, event.edition_id, event.type, min(event.at) AS first_at, max(event.at) AS last_at
-    FROM identity_ledger_edition_events AS event
-    JOIN identity_ledger_edition_parents AS parent ON parent.edition_id = event.edition_id
-    GROUP BY parent.work_id, event.edition_id, event.type
-),
-by_edition AS (
-    SELECT work_id, edition_id, min(first_at) AS first_at, max(last_at) AS last_at, bool_or(type IN {REPAIRS}) AS repaired
-    FROM by_type
-    GROUP BY work_id, edition_id
-)
-SELECT work_id, 'any'::text AS event, count(*) AS evented_editions, count(*) FILTER (WHERE repaired) AS repaired_editions,
-       min(first_at) AS first_event, max(last_at) AS last_event
-FROM by_edition
-GROUP BY work_id
-UNION ALL
-SELECT work_id, type, count(*), count(*) FILTER (WHERE type IN {REPAIRS}), min(first_at), max(last_at)
-FROM by_type
-GROUP BY work_id, type""",  # noqa: S608 — composed of module constants only
-        ),
-        ("identity_ledger_work_summary key", "CREATE UNIQUE INDEX ON identity_ledger_work_summary (event, work_id)"),
-        ("identity_ledger_work_summary page", "CREATE INDEX ON identity_ledger_work_summary (event, last_event DESC, work_id)"),
-        ("identity_ledger_density", "CREATE MATERIALIZED VIEW identity_ledger_density AS\n" + "\nUNION ALL\n".join(density)),
-        ("identity_ledger_density key", "CREATE UNIQUE INDEX ON identity_ledger_density (kind, month, type, dated_from)"),
-        (
-            "identity_ledger_refresh_state",
-            """CREATE TABLE identity_ledger_refresh_state (
-    singleton    boolean PRIMARY KEY DEFAULT true CHECK (singleton),
-    refreshed_at timestamptz NOT NULL,
-    duration     interval NOT NULL
-)""",
-        ),
-        (
-            "identity_ledger_refresh()",
-            """CREATE FUNCTION identity_ledger_refresh() RETURNS timestamptz LANGUAGE plpgsql AS $$
-DECLARE
-    started timestamptz := clock_timestamp();
-BEGIN
-    REFRESH MATERIALIZED VIEW CONCURRENTLY identity_ledger_edition_events;
-    REFRESH MATERIALIZED VIEW CONCURRENTLY identity_ledger_edition_parents;
-    REFRESH MATERIALIZED VIEW CONCURRENTLY identity_ledger_work_summary;
-    REFRESH MATERIALIZED VIEW CONCURRENTLY identity_ledger_density;
-    INSERT INTO identity_ledger_refresh_state (refreshed_at, duration) VALUES (started, clock_timestamp() - started)
-    ON CONFLICT (singleton) DO UPDATE SET refreshed_at = EXCLUDED.refreshed_at, duration = EXCLUDED.duration;
-    RETURN started;
-END
-$$""",
-        ),
-    ]
-
-
-_DROP_VIEWS = """
-DROP FUNCTION IF EXISTS identity_ledger_refresh();
-DROP TABLE IF EXISTS identity_ledger_refresh_state;
-DROP MATERIALIZED VIEW IF EXISTS identity_ledger_work_summary, identity_ledger_edition_parents, identity_ledger_edition_events,
-    identity_ledger_density
+_POPULATED = """
+SELECT count(*) FILTER (WHERE relispopulated) = 4
+FROM pg_class
+WHERE relnamespace = 'public'::regnamespace AND relkind = 'm'
+  AND relname IN ('identity_ledger_edition_events', 'identity_ledger_edition_parents', 'identity_ledger_work_summary', 'identity_ledger_density')
 """
 
 _VIEW_SIZES = """
@@ -235,83 +122,27 @@ WHERE relkind = 'm' AND relname LIKE 'identity_ledger_%'
 ORDER BY relname
 """
 
-# The works list read from the views. Without a window it pages the summary; a window reads the
-# event rows in its range. per_work is NOT MATERIALIZED so the count and the page each plan alone.
-_WORKS_PRECOMPUTED = f"""
-WITH summary AS (
-    SELECT work_id, evented_editions, repaired_editions, first_event, last_event
-    FROM identity_ledger_work_summary
-    WHERE %(since)s::timestamptz IS NULL AND %(until)s::timestamptz IS NULL
-      AND event = COALESCE(%(event)s::text, 'any')
-),
-edition_event AS (
-    SELECT edition_id, at, type
-    FROM identity_ledger_edition_events
-    WHERE NOT (%(since)s::timestamptz IS NULL AND %(until)s::timestamptz IS NULL)
-      AND (%(event)s::text IS NULL OR type = %(event)s::text)
-      AND (%(since)s::timestamptz IS NULL OR at >= %(since)s::timestamptz)
-      AND (%(until)s::timestamptz IS NULL OR at < %(until)s::timestamptz)
-),
-evented AS (
-    SELECT edition_id, min(at) AS first_at, max(at) AS last_at, bool_or(type IN {REPAIRS}) AS repaired
-    FROM edition_event
-    GROUP BY edition_id
-),
-windowed AS (
-    SELECT parent.work_id, count(*) AS evented_editions, count(*) FILTER (WHERE evented.repaired) AS repaired_editions,
-           min(evented.first_at) AS first_event, max(evented.last_at) AS last_event
-    FROM identity_ledger_edition_parents AS parent
-    JOIN evented ON evented.edition_id = parent.edition_id
-    GROUP BY parent.work_id
-),
-per_work AS NOT MATERIALIZED (
-    SELECT * FROM summary
-    UNION ALL
-    SELECT * FROM windowed
-)
-SELECT total.works, page.work_id, page.evented_editions, page.repaired_editions, page.first_event, page.last_event
-FROM (SELECT count(*) AS works FROM per_work) AS total
-LEFT JOIN LATERAL (
-    SELECT * FROM per_work ORDER BY last_event DESC, work_id LIMIT %(limit)s OFFSET %(offset)s
-) AS page ON TRUE
-ORDER BY page.last_event DESC, page.work_id
-"""  # noqa: S608 — composed of module constants only
 
-_DENSITY_PRECOMPUTED = """
-SELECT month, type, dated_from, events
-FROM identity_ledger_density
-WHERE kind = %(kind)s
-ORDER BY 1, 2, 3
-"""
-
-
-async def _build_views(pool: AsyncPostgreSQLPool) -> dict[str, Any]:
-    """Build the views, then time one concurrent refresh of all four; report their sizes."""
+async def _refresh(pool: AsyncPostgreSQLPool) -> dict[str, Any]:
+    """Build the views if unpopulated, then time one concurrent refresh of all four; report their sizes."""
     timings: dict[str, float] = {}
     async with pool.connection() as conn:
         await conn.set_autocommit(True)
         async with conn.cursor() as cur:
-            await cur.execute(_DROP_VIEWS)
-            for name, statement in _view_statements():
+            await cur.execute(_POPULATED)
+            populated = await cur.fetchone()
+            steps = ["refresh_s"] if populated and populated[0] else ["build_s", "refresh_s"]
+            for step in steps:
                 started = time.perf_counter()
-                await cur.execute(statement)
-                timings[name] = round(time.perf_counter() - started, 1)
-                print(f"built {name} in {timings[name]} s", flush=True)
-            await cur.execute(
-                "VACUUM ANALYZE identity_ledger_edition_events, identity_ledger_edition_parents, identity_ledger_work_summary, identity_ledger_density"
-            )
-            started = time.perf_counter()
-            await cur.execute("SELECT identity_ledger_refresh()")
-            refresh = round(time.perf_counter() - started, 1)
-            print(f"identity_ledger_refresh() in {refresh} s", flush=True)
-            await cur.execute(
-                "VACUUM ANALYZE identity_ledger_edition_events, identity_ledger_edition_parents, identity_ledger_work_summary, identity_ledger_density"
-            )
+                await cur.execute("SELECT identity_ledger_refresh()")
+                timings[step] = round(time.perf_counter() - started, 1)
+                print(f"identity_ledger_refresh() ({'first build' if step == 'build_s' else 'concurrent'}) in {timings[step]} s", flush=True)
+                await cur.execute(f"VACUUM ANALYZE {_VIEWS}")
             await cur.execute(_VIEW_SIZES)
             sizes = {name: {"rows": rows, "size": size} for name, rows, size in await cur.fetchall()}
     for name, size in sizes.items():
         print(f"{name}: {size['rows']:,} rows, {size['size']}", flush=True)
-    return {"build_s": timings, "build_total_s": round(sum(timings.values()), 1), "refresh_s": refresh, "sizes": sizes}
+    return {**timings, "sizes": sizes}
 
 
 def _percentile(samples: list[float], q: float) -> float:
@@ -435,7 +266,7 @@ async def main() -> None:
     parser.add_argument("--only", action="append", default=[], help="run only cases whose name starts with this (repeatable)")
     parser.add_argument("--counts", action="store_true", help="print the seeded catalog's loj9 figures first")
     parser.add_argument("--out", type=Path, help="write every result, with full plans, to this JSON file")
-    parser.add_argument("--precomputed", action="store_true", help="build the precomputed ledger views and measure reads from them")
+    parser.add_argument("--no-refresh", action="store_true", help="measure the views as they are, without identity_ledger_refresh()")
     args = parser.parse_args()
 
     pool = AsyncPostgreSQLPool(
@@ -461,11 +292,7 @@ async def main() -> None:
         work = str(largest[0])
         print(f"largest work: {work}", flush=True)
 
-        views: dict[str, Any] | None = None
-        if args.precomputed:
-            views = await _build_views(pool)
-            identity_ledger_queries._WORKS = _WORKS_PRECOMPUTED
-            identity_ledger_queries._DENSITY = _DENSITY_PRECOMPUTED
+        views = None if args.no_refresh else await _refresh(pool)
 
         results = []
         for name, call in _cases(work):

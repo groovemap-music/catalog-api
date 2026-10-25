@@ -20,6 +20,16 @@ link changes of ``identity_link_events`` added as events (``api/identity_ledger.
   ``identity_link_events`` rows of the MusicBrainz releases it currently holds. An alias opened
   or closed at the instant of a supersession of its item was moved by it, not attached.
 
+The works list and density read database-schema's precomputed views (epic
+``gm-database-schema-k8e9``): ``identity_ledger_edition_events``,
+``identity_ledger_edition_parents``, ``identity_ledger_work_summary``, and
+``identity_ledger_density`` hold what those two statements computed per request from the whole
+history, refreshed off the request path by ``identity_ledger_refresh()``. Every payload carries
+``refreshed_at``, when the last refresh started. Until the first refresh the views are
+unpopulated, and the list and density raise ``LedgerNotRefreshed`` rather than answer an empty
+list. One work's planes keep reading the base tables live, because ``as_of`` needs the alias
+history itself.
+
 Nothing here reads ``catalog_item_moves.user_id`` or ``row_id``, or any admin id: moves are
 counted per supersession and table.
 """
@@ -31,11 +41,17 @@ from datetime import datetime
 from typing import Any
 
 from common.query_debug import execute_sql
+from psycopg.errors import ObjectNotInPrerequisiteState
 
 from api.identity_ledger import DEFAULT_EDITION_LIMIT, LedgerRows, build_work, iso
 
 
 _READ_ONLY = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+
+
+class LedgerNotRefreshed(Exception):
+    """The precomputed views a read needs have not been refreshed yet; never an empty answer."""
+
 
 # Open supersessions name each superseded item's one survivor; COALESCE through this join is
 # public.resolve_catalog_item without a function call per row.
@@ -113,115 +129,60 @@ edition_parent AS (
     {_RESOLVED.format(alias="work_open", item="master.native_id")}
 )"""  # noqa: S608 — composed of module constants only
 
-# Per item of one kind, every event its aliases and its MusicBrainz rows' link changes carry:
-# its mint, aliases opened later, aliases closed other than by a supersession, and dated link
-# changes (`item_id` is NULL when no current alias holds the MusicBrainz row). Supersession
-# events are added by each statement, which counts them per side or once.
-_ITEM_EVENTS = """
-kind_alias AS (
-    SELECT alias.native_id, alias.provider, alias.external_id, alias.valid_from, alias.valid_to,
-           min(alias.valid_from) OVER item AS mint,
-           min(alias.valid_from) FILTER (WHERE alias.provider = 'discogs') OVER item AS discogs_at
-    FROM provider_aliases AS alias
-    JOIN catalog_items AS catalog_item ON catalog_item.id = alias.native_id AND catalog_item.kind = %(kind)s
-    WINDOW item AS (PARTITION BY alias.native_id)
-),
-moved_in AS (
-    SELECT survivor_id AS item_id, valid_from AS at FROM catalog_item_supersessions
-    UNION
-    SELECT superseded_id, valid_to FROM catalog_item_supersessions WHERE valid_to IS NOT NULL
-),
-moved_out AS (
-    SELECT superseded_id AS item_id, valid_from AS at FROM catalog_item_supersessions
-    UNION
-    SELECT survivor_id, valid_to FROM catalog_item_supersessions WHERE valid_to IS NOT NULL
-),
-later AS (
-    SELECT kind_alias.native_id, kind_alias.provider, kind_alias.valid_from, kind_alias.discogs_at,
-           row_number() OVER (
-               PARTITION BY kind_alias.native_id, kind_alias.provider = 'musicbrainz'
-               ORDER BY kind_alias.valid_from, kind_alias.external_id
-           ) AS position
-    FROM kind_alias
-    LEFT JOIN moved_in ON moved_in.item_id = kind_alias.native_id AND moved_in.at = kind_alias.valid_from
-    WHERE kind_alias.valid_from > kind_alias.mint AND moved_in.item_id IS NULL
-),
-item_event AS (
-    SELECT DISTINCT native_id AS item_id, mint AS at, 'minted' AS type, 'groovemap' AS dated_from
-    FROM kind_alias
-    UNION ALL
-    SELECT native_id, valid_from,
-           CASE WHEN provider = 'musicbrainz' AND discogs_at IS NOT NULL AND position = 1
-                THEN 'linked_at_ingest' ELSE 'evidence_attached' END,
-           'groovemap'
-    FROM later
-    UNION ALL
-    SELECT kind_alias.native_id, kind_alias.valid_to, 'alias_closed', 'groovemap'
-    FROM kind_alias
-    LEFT JOIN moved_out ON moved_out.item_id = kind_alias.native_id AND moved_out.at = kind_alias.valid_to
-    WHERE kind_alias.valid_to IS NOT NULL AND moved_out.item_id IS NULL
-    UNION ALL
-    SELECT holder.native_id, link.event_at, link.event,
-           CASE link.dated_from WHEN 'musicbrainz_fullexport' THEN 'musicbrainz_fullexport' ELSE 'groovemap' END
-    FROM identity_link_events AS link
-    LEFT JOIN provider_aliases AS holder
-           ON holder.provider = link.provider AND holder.entity_kind = link.entity_kind
-          AND holder.external_id = link.external_id AND holder.valid_to IS NULL
-    WHERE link.provider = 'musicbrainz' AND link.entity_kind = %(kind)s
-),
-supersession_of_kind AS (
-    SELECT supersession.*
-    FROM catalog_item_supersessions AS supersession
-    JOIN catalog_items AS superseded ON superseded.id = supersession.superseded_id AND superseded.kind = %(kind)s
-)"""
+_REPAIRS = "('reattached', 'promoted', 'reverted')"
 
+# The precomputed views (database-schema, epic gm-database-schema-k8e9) that the works list and
+# density read, as `pg_class` names them. Each route checks its own before reading.
+_WORKS_VIEWS = ("identity_ledger_edition_events", "identity_ledger_edition_parents", "identity_ledger_work_summary")
+_DENSITY_VIEWS = ("identity_ledger_density",)
+
+# Whether every named view has been refreshed at least once, and when the last refresh started.
+# `pg_class.relispopulated` takes no lock on a view, so a request that arrives during the first
+# build (a plain REFRESH under ACCESS EXCLUSIVE) is answered at once instead of queuing behind it.
+_FRESHNESS = """
+SELECT count(*) FILTER (WHERE view.relispopulated) = cardinality(%(views)s::text[]),
+       (SELECT refreshed_at FROM identity_ledger_refresh_state)
+FROM pg_class AS view
+WHERE view.relnamespace = 'public'::regnamespace AND view.relkind = 'm' AND view.relname = ANY(%(views)s::text[])
+"""
+
+_REFRESHED_AT = "SELECT refreshed_at FROM identity_ledger_refresh_state"
+
+# Works with evented editions, read from the views. Without a window it pages the per-work
+# summary for the event filter ('any' is every event type). A window reads the edition events in
+# its range and counts them per work through the editions' parents, as the live statement did.
+# per_work is NOT MATERIALIZED so the count and the page each plan alone.
 _WORKS = f"""
-WITH {_ITEM_EVENTS},
-side_event AS (
-    SELECT item_id, at, type, dated_from FROM item_event WHERE type <> 'minted' AND item_id IS NOT NULL
-    UNION ALL
-    SELECT side.item_id, supersession.valid_from,
-           CASE supersession.cause WHEN 'catalog_reattachment' THEN 'reattached' ELSE 'promoted' END, 'groovemap'
-    FROM supersession_of_kind AS supersession
-    CROSS JOIN LATERAL (VALUES (supersession.superseded_id), (supersession.survivor_id)) AS side (item_id)
-    UNION ALL
-    SELECT side.item_id, supersession.valid_to, 'reverted', 'groovemap'
-    FROM supersession_of_kind AS supersession
-    CROSS JOIN LATERAL (VALUES (supersession.superseded_id), (supersession.survivor_id)) AS side (item_id)
-    WHERE supersession.valid_to IS NOT NULL
+WITH summary AS (
+    SELECT work_id, evented_editions, repaired_editions, first_event, last_event
+    FROM identity_ledger_work_summary
+    WHERE %(since)s::timestamptz IS NULL AND %(until)s::timestamptz IS NULL
+      AND event = COALESCE(%(event)s::text, 'any')
 ),
 edition_event AS (
-    SELECT COALESCE(edition_open.survivor_id, side_event.item_id) AS edition_id, side_event.at, side_event.type
-    FROM side_event
-    {_RESOLVED.format(alias="edition_open", item="side_event.item_id")}
-    WHERE (%(event)s::text IS NULL OR side_event.type = %(event)s::text)
-      AND (%(since)s::timestamptz IS NULL OR side_event.at >= %(since)s::timestamptz)
-      AND (%(until)s::timestamptz IS NULL OR side_event.at < %(until)s::timestamptz)
+    SELECT edition_id, at, type
+    FROM identity_ledger_edition_events
+    WHERE NOT (%(since)s::timestamptz IS NULL AND %(until)s::timestamptz IS NULL)
+      AND (%(event)s::text IS NULL OR type = %(event)s::text)
+      AND (%(since)s::timestamptz IS NULL OR at >= %(since)s::timestamptz)
+      AND (%(until)s::timestamptz IS NULL OR at < %(until)s::timestamptz)
 ),
 evented AS (
-    SELECT edition_id, min(at) AS first_at, max(at) AS last_at,
-           bool_or(type IN ('reattached', 'promoted', 'reverted')) AS repaired
+    SELECT edition_id, min(at) AS first_at, max(at) AS last_at, bool_or(type IN {_REPAIRS}) AS repaired
     FROM edition_event
     GROUP BY edition_id
 ),
-member AS MATERIALIZED (
-    SELECT edition_id, edition_id AS item_id FROM evented
-    UNION
-    SELECT supersession.survivor_id, supersession.superseded_id
-    FROM catalog_item_supersessions AS supersession
-    JOIN evented ON evented.edition_id = supersession.survivor_id
-    WHERE supersession.valid_to IS NULL
+windowed AS (
+    SELECT parent.work_id, count(*) AS evented_editions, count(*) FILTER (WHERE evented.repaired) AS repaired_editions,
+           min(evented.first_at) AS first_event, max(evented.last_at) AS last_event
+    FROM identity_ledger_edition_parents AS parent
+    JOIN evented ON evented.edition_id = parent.edition_id
+    GROUP BY parent.work_id
 ),
-{_PARENTS_OF_MEMBER},
-per_work AS (
-    SELECT edition_parent.work_id,
-           count(DISTINCT edition_parent.edition_id) AS evented_editions,
-           count(DISTINCT edition_parent.edition_id) FILTER (WHERE evented.repaired) AS repaired_editions,
-           min(evented.first_at) AS first_event,
-           max(evented.last_at) AS last_event
-    FROM edition_parent
-    JOIN evented ON evented.edition_id = edition_parent.edition_id
-    GROUP BY edition_parent.work_id
+per_work AS NOT MATERIALIZED (
+    SELECT * FROM summary
+    UNION ALL
+    SELECT * FROM windowed
 )
 SELECT total.works, page.work_id, page.evented_editions, page.repaired_editions, page.first_event, page.last_event
 FROM (SELECT count(*) AS works FROM per_work) AS total
@@ -260,21 +221,12 @@ WHERE native_id = ANY(%(works)s::uuid[]) AND valid_to IS NULL
 ORDER BY native_id, provider, external_id
 """
 
-_DENSITY = f"""
-WITH {_ITEM_EVENTS},
-event AS (
-    SELECT at, type, dated_from FROM item_event
-    UNION ALL
-    SELECT valid_from, CASE cause WHEN 'catalog_reattachment' THEN 'reattached' ELSE 'promoted' END, 'groovemap'
-    FROM supersession_of_kind
-    UNION ALL
-    SELECT valid_to, 'reverted', 'groovemap' FROM supersession_of_kind WHERE valid_to IS NOT NULL
-)
-SELECT to_char(at AT TIME ZONE 'UTC', 'YYYY-MM') AS month, type, dated_from, count(*) AS events
-FROM event
-GROUP BY 1, 2, 3
+_DENSITY = """
+SELECT month, type, dated_from, events
+FROM identity_ledger_density
+WHERE kind = %(kind)s
 ORDER BY 1, 2, 3
-"""  # noqa: S608 — composed of module constants only
+"""
 
 _RESOLVE = """
 SELECT item.id, item.kind
@@ -384,6 +336,15 @@ async def _rows(cur: Any, sql: str, params: dict[str, Any]) -> list[tuple[Any, .
     return list(await cur.fetchall())
 
 
+async def _refreshed_at(cur: Any, views: tuple[str, ...]) -> datetime:
+    """When the views were last refreshed; raises ``LedgerNotRefreshed`` if any is unpopulated."""
+    rows = await _rows(cur, _FRESHNESS, {"views": list(views)})
+    refreshed_at: datetime | None = rows[0][1] if rows and rows[0][0] else None
+    if refreshed_at is None:
+        raise LedgerNotRefreshed
+    return refreshed_at
+
+
 def _alias_rows(rows: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
     return [
         {
@@ -417,7 +378,8 @@ async def get_ledger_work(
 
     A superseded work id answers as its survivor, with ``requested_id`` (one hop, ADR 0009
     amendment section 4). An id that is not a catalog item, or resolves to an item of another
-    kind, is None, which the route answers 404.
+    kind, is None, which the route answers 404. The planes are read live; ``refreshed_at`` is
+    the last refresh of the list the work was reached from, None before the first.
     """
     async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
         await cur.execute(_READ_ONLY)
@@ -500,6 +462,7 @@ async def get_ledger_work(
                 },
             )
         ]
+        refreshed = await _rows(cur, _REFRESHED_AT, {})
 
     rows = LedgerRows(
         aliases=aliases,
@@ -510,7 +473,15 @@ async def get_ledger_work(
         master_works=master_works,
         link_events=link_events,
     )
-    return build_work(rows, work, editions, requested_id=work_id, as_of=as_of, edition_limit=edition_limit)
+    return build_work(
+        rows,
+        work,
+        editions,
+        requested_id=work_id,
+        as_of=as_of,
+        edition_limit=edition_limit,
+        refreshed_at=refreshed[0][0] if refreshed else None,
+    )
 
 
 async def get_ledger_works(
@@ -527,22 +498,29 @@ async def get_ledger_works(
     ``event`` keeps only that event type; ``since`` (inclusive) and ``until`` (exclusive)
     bound the events' times. ``evented_editions``, ``repaired_editions``, ``first_event``, and
     ``last_event`` count the matching events only. ``editions`` and ``work_disagreements``
-    describe the whole work. There is no default window: the ledger spans every month.
+    describe the whole work, read live. There is no default window: the ledger spans every
+    month. Raises ``LedgerNotRefreshed`` until the views' first refresh.
     """
-    params = {"kind": "release", "event": event, "since": since, "until": until, "limit": page_size, "offset": (page - 1) * page_size}
-    async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
-        await cur.execute(_READ_ONLY)
-        page_rows = await _rows(cur, _WORKS, params)
-        total = int(page_rows[0][0]) if page_rows else 0
-        listed = [row[1:] for row in page_rows if row[1] is not None]
-        works = [str(row[0]) for row in listed]
-        summaries: dict[str, tuple[int, int]] = {}
-        providers: dict[str, list[dict[str, str]]] = {work: [] for work in works}
-        if works:
-            for work_id, editions, disagreements in await _rows(cur, _WORK_SUMMARIES, {"works": works}):
-                summaries[str(work_id)] = (int(editions), int(disagreements))
-            for native_id, provider, external_id in await _rows(cur, _WORK_PROVIDERS, {"works": works}):
-                providers[str(native_id)].append({"provider": provider, "external_id": external_id})
+    params = {"event": event, "since": since, "until": until, "limit": page_size, "offset": (page - 1) * page_size}
+    try:
+        async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            await cur.execute(_READ_ONLY)
+            refreshed_at = await _refreshed_at(cur, _WORKS_VIEWS)
+            page_rows = await _rows(cur, _WORKS, params)
+            total = int(page_rows[0][0]) if page_rows else 0
+            listed = [row[1:] for row in page_rows if row[1] is not None]
+            works = [str(row[0]) for row in listed]
+            summaries: dict[str, tuple[int, int]] = {}
+            providers: dict[str, list[dict[str, str]]] = {work: [] for work in works}
+            if works:
+                for work_id, editions, disagreements in await _rows(cur, _WORK_SUMMARIES, {"works": works}):
+                    summaries[str(work_id)] = (int(editions), int(disagreements))
+                for native_id, provider, external_id in await _rows(cur, _WORK_PROVIDERS, {"works": works}):
+                    providers[str(native_id)].append({"provider": provider, "external_id": external_id})
+    except ObjectNotInPrerequisiteState as exc:
+        # A view dropped and recreated unpopulated after the check above (database-schema's
+        # definition-change migration) reads as not refreshed, like one never refreshed.
+        raise LedgerNotRefreshed from exc
 
     entries = []
     for work_id, evented_editions, repaired_editions, first_event, last_event in listed:
@@ -560,19 +538,25 @@ async def get_ledger_works(
                 "last_event": iso(last_event),
             }
         )
-    return {"works": entries, "total": total, "page": page, "page_size": page_size}
+    return {"works": entries, "total": total, "page": page, "page_size": page_size, "refreshed_at": iso(refreshed_at)}
 
 
 async def get_ledger_density(pool: Any, kind: str = "release") -> dict[str, Any]:
     """Events per month by type and provenance for one catalog kind: the ledger's time axis.
 
     Months are UTC. Each bucket names its ``dated_from``: the full-export backfill's link
-    events are counted apart from GrooveMap's own record.
+    events are counted apart from GrooveMap's own record. Raises ``LedgerNotRefreshed`` until
+    the view's first refresh.
     """
-    async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
-        await cur.execute(_READ_ONLY)
-        rows = await _rows(cur, _DENSITY, {"kind": kind})
+    try:
+        async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            await cur.execute(_READ_ONLY)
+            refreshed_at = await _refreshed_at(cur, _DENSITY_VIEWS)
+            rows = await _rows(cur, _DENSITY, {"kind": kind})
+    except ObjectNotInPrerequisiteState as exc:
+        raise LedgerNotRefreshed from exc
     return {
         "kind": kind,
         "buckets": [{"month": month, "type": event, "dated_from": dated_from, "events": int(count)} for month, event, dated_from, count in rows],
+        "refreshed_at": iso(refreshed_at),
     }

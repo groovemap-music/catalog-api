@@ -57,12 +57,14 @@ def _sql(pool: FakePool) -> list[str]:
 
 @pytest.fixture
 def jobs() -> MagicMock:
-    """Both jobs, patched on one parent mock so their call order is observable."""
+    """Both jobs and the ledger refresh, patched on one parent mock so their call order is observable."""
     parent = MagicMock()
     parent.reattach = AsyncMock(return_value=_REPORT)
+    parent.refresh = AsyncMock(return_value=None)
     parent.project = AsyncMock(return_value=_PROJECTION)
     with (
         patch.object(reattach_trigger, "run_reattachment", parent.reattach),
+        patch.object(reattach_trigger, "refresh_ledger", parent.refresh),
         patch.object(reattach_trigger, "run_gm_id_projection", parent.project),
     ):
         yield parent
@@ -135,7 +137,9 @@ async def test_runs_apply_then_projection_then_marks_and_unlocks(jobs: MagicMock
     jobs.reattach.side_effect = lambda *_args, **_kwargs: audited_before_run.append(_audit(pool)) or _REPORT
     assert await run_pending(pool, driver) == VERSION
 
-    assert [name for name, _args, _kwargs in jobs.mock_calls] == ["reattach", "project"]
+    # The ledger is refreshed inline, as soon as the re-attachment has written.
+    assert [name for name, _args, _kwargs in jobs.mock_calls] == ["reattach", "refresh", "project"]
+    jobs.refresh.assert_awaited_once_with(pool, trigger="reattach", job_id=str(jobs.reattach.await_args.kwargs["decision_ref"]))
     jobs.reattach.assert_awaited_once()
     assert jobs.reattach.await_args.args == (pool,)
     assert jobs.reattach.await_args.kwargs["apply"] is True
@@ -175,6 +179,9 @@ async def test_a_failed_job_writes_no_marker_and_still_unlocks(jobs: MagicMock, 
     pool = FakePool([*_UP_TO_ACTOR, [], [], [(True,)]])
     with pytest.raises(RuntimeError, match="boom"):
         await run_pending(pool, object())
+    # Items commit one by one, so even a failed re-attachment is followed by a refresh.
+    expected = {"reattach": ["reattach", "refresh"], "project": ["reattach", "refresh", "project"]}[failing]
+    assert [name for name, _args, _kwargs in jobs.mock_calls] == expected
     sql = _sql(pool)
     # The started row is updated to the failed action, under the run's decision_ref: not the marker.
     [(inserted, (entry_id, *_rest)), (updated, (action, details, updated_id))] = _audit(pool)
