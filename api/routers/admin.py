@@ -405,6 +405,15 @@ def _extractor_base_url(config: ApiConfig, source: str) -> str:
     raise ValueError(f"Unknown extraction source: {source!r}")
 
 
+# Entity types each source's extractor produces, named as its /health extraction_progress
+# reports them. Both extractors share one progress struct, so the other source's types are
+# present in the payload (always 0); a run must record only its own source's types.
+_SOURCE_ENTITY_TYPES: dict[str, tuple[str, ...]] = {
+    "discogs": ("artists", "labels", "masters", "releases"),
+    "musicbrainz": ("artists", "labels", "release_groups", "releases"),
+}
+
+
 async def _track_extraction(extraction_id: str, source: ExtractionSource) -> None:
     """Background task: poll the source's extractor /health and update extraction record."""
     if _pool is None or _config is None:
@@ -436,12 +445,7 @@ async def _track_extraction(extraction_id: str, source: ExtractionSource) -> Non
                         data = resp.json()
                         extraction_status = data.get("extraction_status", "")
                         progress = data.get("extraction_progress", {})
-                        record_counts = {
-                            "artists": progress.get("artists", 0),
-                            "labels": progress.get("labels", 0),
-                            "masters": progress.get("masters", 0),
-                            "releases": progress.get("releases", 0),
-                        }
+                        record_counts = {entity: progress.get(entity, 0) for entity in _SOURCE_ENTITY_TYPES[source]}
 
                         # Update progress
                         async with _pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:

@@ -426,6 +426,50 @@ class TestExtractionTriggerSourceRouting:
         finally:
             admin_mod._pool, admin_mod._config = original_pool, original_config
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("source", "expected"),
+        [
+            ("discogs", {"artists": 100, "labels": 50, "masters": 25, "releases": 200}),
+            ("musicbrainz", {"artists": 100, "labels": 50, "release_groups": 75, "releases": 200}),
+        ],
+    )
+    async def test_record_counts_are_the_sources_own_entity_types(self, source: str, expected: dict[str, int]) -> None:
+        import api.routers.admin as admin_mod
+
+        mock_config = MagicMock(
+            extractor_discogs_host="dg", extractor_discogs_port=8000, extractor_musicbrainz_host="mb", extractor_musicbrainz_port=8000
+        )
+        mock_pool, mock_cur = TestTrackExtractionResilience._pool()
+        # Both extractors report the full shared progress struct; the other source's type is 0.
+        progress = {"artists": 100, "labels": 50, "masters": 25, "release_groups": 75, "releases": 200}
+        progress[{"discogs": "release_groups", "musicbrainz": "masters"}[source]] = 0
+        expected_payload = {k: v for k, v in progress.items() if k in expected}
+        assert expected_payload == expected
+        running = MagicMock(status_code=200)
+        running.json.return_value = {"extraction_status": "running", "extraction_progress": progress}
+        done = MagicMock(status_code=200)
+        done.json.return_value = {"extraction_status": "completed", "extraction_progress": progress}
+        original_pool, original_config = admin_mod._pool, admin_mod._config
+        admin_mod._pool, admin_mod._config = mock_pool, mock_config
+        try:
+            with (
+                patch("api.routers.admin.asyncio.sleep", new_callable=AsyncMock),
+                patch("api.routers.admin.httpx.AsyncClient") as mock_client_cls,
+            ):
+                instance = AsyncMock()
+                instance.get = AsyncMock(side_effect=[running, done])
+                instance.__aenter__ = AsyncMock(return_value=instance)
+                instance.__aexit__ = AsyncMock(return_value=False)
+                mock_client_cls.return_value = instance
+                await admin_mod._track_extraction("fake-id", source)
+        finally:
+            admin_mod._pool, admin_mod._config = original_pool, original_config
+
+        written = [json.loads(call.args[1][-2]) for call in mock_cur.execute.await_args_list if "record_counts" in call.args[0]]
+        assert written
+        assert all(counts == expected for counts in written)
+
     def test_history_reports_null_source_for_legacy_rows(self, test_client: TestClient, mock_cur: AsyncMock) -> None:
         mock_cur.fetchone = AsyncMock(
             return_value={
