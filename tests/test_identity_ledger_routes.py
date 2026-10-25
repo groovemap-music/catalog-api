@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from api.identity_ledger import DEFAULT_EDITION_LIMIT, MAX_EDITION_LIMIT
+from api.queries.identity_ledger_queries import LedgerNotRefreshed
 from tests.test_admin_endpoints import _admin_auth_headers
 
 
@@ -21,7 +22,7 @@ WORK_ID = "00000000-0000-4000-8000-000000000101"
 WORK = f"{WORKS}/{WORK_ID}"
 DENSITY = "/api/admin/identity/ledger/density"
 
-_EMPTY_WORKS = {"works": [], "total": 0, "page": 1, "page_size": 50}
+_EMPTY_WORKS = {"works": [], "total": 0, "page": 1, "page_size": 50, "refreshed_at": "2026-10-25T09:30:00Z"}
 
 
 @pytest.mark.parametrize("path", [WORKS, WORK, DENSITY])
@@ -124,3 +125,13 @@ def test_density_defaults_to_releases_and_takes_a_kind(test_client: TestClient) 
 
         assert test_client.get(DENSITY, params={"kind": "user"}, headers=_admin_auth_headers()).status_code == 422
         assert query.await_count == 2
+
+
+@pytest.mark.parametrize(("path", "query"), [(WORKS, "get_ledger_works"), (DENSITY, "get_ledger_density")])
+def test_unrefreshed_list_and_density_are_503_with_retry_after(test_client: TestClient, path: str, query: str) -> None:
+    """Before the views' first refresh there is nothing true to list: 503, never an empty list."""
+    with patch(f"api.routers.admin.{query}", new=AsyncMock(side_effect=LedgerNotRefreshed)):
+        resp = test_client.get(path, headers=_admin_auth_headers())
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "identity ledger not yet refreshed"
+    assert resp.headers["Retry-After"] == "60"
