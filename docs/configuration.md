@@ -94,6 +94,10 @@ origin in production so password-reset links do not point at localhost.
 | `RABBITMQ_PASSWORD` | `groovemap` | RabbitMQ AMQP password; used only for DLQ purge |
 | `IDENTITY_AUTO_REATTACH_ENABLED` | `false` | Run the catalog re-attachment then the `gm_id` projection after each completed Discogs extraction (see `api/README.md`) |
 | `IDENTITY_AUTO_REATTACH_INTERVAL` | `300` | How often that watcher polls `loader_extraction_latch`, in seconds |
+| `IDENTITY_LEDGER_REFRESH_ENABLED` | `false` | Refresh the Identity Ledger's precomputed views after loads, by polling the sources' write counts; re-attachment and backfill runs refresh inline either way (see `api/README.md`, "Keeping the Identity Ledger Fresh") |
+| `IDENTITY_LEDGER_REFRESH_INTERVAL` | `300` | How often that poll runs, in seconds |
+| `IDENTITY_LEDGER_REFRESH_QUIET` | `600` | Seconds the sources must stop changing before the poll refreshes |
+| `IDENTITY_LEDGER_MAX_STALENESS` | `21600` | Seconds after the last refresh at which the poll refreshes changed sources even while writes continue |
 | `SIMILAR_ARTISTS_PRECOMPUTED_ENABLED` | `false` | Serve `/api/recommend/similar/artist/{id}` from the current release of the precomputed `artist_similar_artists` lists; the heuristic path serves whenever this is off or no list is usable (see `docs/similar-artists-precomputed.md`) |
 | `SIMILAR_ARTISTS_FUSION_ALPHA` | `0.8` | Weight on the embedding cosine in `alpha * cosine + (1 - alpha) * heuristic`; `1.0` ranks by the precomputed list alone. Must be within 0 and 1 |
 
