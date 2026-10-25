@@ -13,9 +13,10 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from psycopg.errors import ObjectNotInPrerequisiteState
 
 from api.queries import identity_ledger_queries as queries
-from api.queries.identity_ledger_queries import get_ledger_density, get_ledger_work, get_ledger_works
+from api.queries.identity_ledger_queries import LedgerNotRefreshed, get_ledger_density, get_ledger_work, get_ledger_works
 from tests.fake_postgres import FakePool
 
 
@@ -30,6 +31,9 @@ RUN = "00000000-0000-4000-8000-00000000a0f1"
 T0 = datetime(2026, 8, 1, 2, tzinfo=UTC)
 T1 = datetime(2026, 8, 3, 5, tzinfo=UTC)
 BACKFILLED = datetime(2025, 11, 14, tzinfo=UTC)
+REFRESHED = datetime(2026, 10, 25, 9, 30, tzinfo=UTC)
+# `_FRESHNESS`: every view the read needs is populated, and the last refresh started at REFRESHED.
+FRESH = [(True, REFRESHED)]
 
 
 def _alias(provider: str, kind: str, external_id: str, native_id: str, valid_from: datetime) -> tuple[Any, ...]:
@@ -90,6 +94,7 @@ async def test_work_reads_in_one_read_only_transaction() -> None:
         queries._SUPERSESSIONS,
         queries._MOVE_COUNTS,
         queries._LINK_EVENTS,
+        queries._REFRESHED_AT,
     ]
     assert payload is not None
     [edition] = payload["editions"]
@@ -172,6 +177,7 @@ async def test_works_list_pages_and_joins_each_works_summary() -> None:
     pool = FakePool(
         [
             [],
+            FRESH,
             [(3, UUID(W), 3, 1, T0, T1), (3, UUID(E), 1, 0, T1, T1)],
             [(UUID(W), 5, 0)],
             [(UUID(W), "discogs", "10"), (UUID(W), "musicbrainz", G1)],
@@ -181,7 +187,9 @@ async def test_works_list_pages_and_joins_each_works_summary() -> None:
     data = await get_ledger_works(pool, event="reattached", since=since, until=until, page=2, page_size=2)
 
     works_call = next(call for call in pool.calls if call.sql == queries._WORKS)
-    assert works_call.params == {"kind": "release", "event": "reattached", "since": since, "until": until, "limit": 2, "offset": 2}
+    assert works_call.params == {"event": "reattached", "since": since, "until": until, "limit": 2, "offset": 2}
+    assert _statements(pool)[1:4] == [queries._READ_ONLY, queries._FRESHNESS, queries._WORKS]
+    assert pool.calls[2].params == {"views": ["identity_ledger_edition_events", "identity_ledger_edition_parents", "identity_ledger_work_summary"]}
     assert next(call.params for call in pool.calls if call.sql == queries._WORK_SUMMARIES) == {"works": [W, E]}
     assert data == {
         "works": [
@@ -209,15 +217,16 @@ async def test_works_list_pages_and_joins_each_works_summary() -> None:
         "total": 3,
         "page": 2,
         "page_size": 2,
+        "refreshed_at": "2026-10-25T09:30:00Z",
     }
 
 
 async def test_an_empty_page_still_reports_the_total() -> None:
-    pool = FakePool([[], [(4, None, None, None, None, None)]])
+    pool = FakePool([[], FRESH, [(4, None, None, None, None, None)]])
 
     data = await get_ledger_works(pool, page=9, page_size=50)
 
-    assert data == {"works": [], "total": 4, "page": 9, "page_size": 50}
+    assert data == {"works": [], "total": 4, "page": 9, "page_size": 50, "refreshed_at": "2026-10-25T09:30:00Z"}
     assert queries._WORK_SUMMARIES not in _statements(pool)
 
 
@@ -227,10 +236,11 @@ async def test_works_list_has_no_default_window() -> None:
 
 
 async def test_density_buckets_name_their_provenance() -> None:
-    pool = FakePool([[], [("2025-11", "link_added", "musicbrainz_fullexport", 1), ("2026-08", "minted", "groovemap", 7)]])
+    pool = FakePool([[], FRESH, [("2025-11", "link_added", "musicbrainz_fullexport", 1), ("2026-08", "minted", "groovemap", 7)]])
 
     data = await get_ledger_density(pool, "master")
 
+    assert next(call.params for call in pool.calls if call.sql == queries._FRESHNESS) == {"views": ["identity_ledger_density"]}
     assert next(call.params for call in pool.calls if call.sql == queries._DENSITY) == {"kind": "master"}
     assert data == {
         "kind": "master",
@@ -238,6 +248,7 @@ async def test_density_buckets_name_their_provenance() -> None:
             {"month": "2025-11", "type": "link_added", "dated_from": "musicbrainz_fullexport", "events": 1},
             {"month": "2026-08", "type": "minted", "dated_from": "groovemap", "events": 7},
         ],
+        "refreshed_at": "2026-10-25T09:30:00Z",
     }
     assert _statements(pool)[1] == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
 
@@ -263,3 +274,51 @@ async def test_moves_are_counted_per_supersession_and_table() -> None:
     [reattached] = [event for event in payload["editions"][0]["events"] if event["type"] == "reattached"]
     assert reattached["moves"] == {"owned_copies": 2, "artifacts": 1}
     assert (reattached["superseded"], reattached["survivor"], reattached["decision_ref"]) == (H, E, RUN)
+
+
+async def test_work_names_the_last_refresh_or_none_before_the_first() -> None:
+    results = _work_results()
+    results.append([(REFRESHED,)])
+    payload = await get_ledger_work(FakePool(results), W)
+    assert payload is not None
+    assert payload["refreshed_at"] == "2026-10-25T09:30:00Z"
+
+    # The work's planes are live, so it answers before the first refresh too.
+    payload = await get_ledger_work(FakePool(_work_results()), W)
+    assert payload is not None
+    assert payload["refreshed_at"] is None
+
+
+@pytest.mark.parametrize(
+    "freshness",
+    [
+        [(False, None)],  # created WITH NO DATA, never refreshed
+        [(False, REFRESHED)],  # refreshed once, then one view recreated unpopulated
+        [(True, None)],  # populated by a bare REFRESH, outside identity_ledger_refresh()
+        [],
+    ],
+)
+async def test_unrefreshed_views_raise_rather_than_answer_empty(freshness: list[tuple[Any, ...]]) -> None:
+    works = FakePool([[], freshness, [(0, None, None, None, None, None)]])
+    with pytest.raises(LedgerNotRefreshed):
+        await get_ledger_works(works)
+    assert queries._WORKS not in _statements(works)
+
+    density = FakePool([[], freshness, []])
+    with pytest.raises(LedgerNotRefreshed):
+        await get_ledger_density(density)
+    assert queries._DENSITY not in _statements(density)
+
+
+async def test_a_view_found_unpopulated_mid_read_is_not_refreshed() -> None:
+    unpopulated = ObjectNotInPrerequisiteState('materialized view "identity_ledger_work_summary" has not been populated')
+    with pytest.raises(LedgerNotRefreshed):
+        await get_ledger_works(FakePool([[], FRESH], raise_on={queries._WORKS: unpopulated}))
+    with pytest.raises(LedgerNotRefreshed):
+        await get_ledger_density(FakePool([[], FRESH], raise_on={queries._DENSITY: unpopulated}))
+
+
+async def test_list_and_density_read_only_the_views() -> None:
+    for statement in (queries._WORKS, queries._DENSITY):
+        for base in ("provider_aliases", "catalog_items", "catalog_item_supersessions", "identity_link_events", "graph.derived_from"):
+            assert base not in statement

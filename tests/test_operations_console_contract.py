@@ -3,6 +3,7 @@
 import asyncio
 import importlib.util
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -97,14 +98,15 @@ _LEDGER_OPERATIONS = {
         "path": "/api/admin/identity/ledger/works",
         "query": ["event", "page", "page_size", "since", "until"],
         "events": list(EVENT_TYPES),
-        "response_fields": ["page", "page_size", "total", "works"],
+        "response_fields": ["page", "page_size", "refreshed_at", "total", "works"],
     },
     "admin_identity_ledger_work": {
         "method": "GET",
         "path": "/api/admin/identity/ledger/works/{work_id}",
         "query": ["as_of", "edition_limit"],
         "dated_from": _DATED_FROM,
-        "response_fields": ["as_of", "edition_count", "editions", "truncated", "work"],
+        "response_fields": ["as_of", "edition_count", "editions", "refreshed_at", "truncated", "work"],
+        "response_fields_nullable": ["refreshed_at"],
     },
     "admin_identity_ledger_density": {
         "method": "GET",
@@ -112,7 +114,7 @@ _LEDGER_OPERATIONS = {
         "query": ["kind"],
         "kinds": list(KINDS),
         "dated_from": _DATED_FROM,
-        "response_fields": ["buckets", "kind"],
+        "response_fields": ["buckets", "kind", "refreshed_at"],
     },
 }
 
@@ -136,13 +138,28 @@ def test_identity_ledger_vocabularies_match_the_producer() -> None:
     assert sorted(set(LINK_DATED_FROM.values())) == _DATED_FROM
 
 
+_REFRESHED = (True, datetime(2026, 10, 25, 12, 0, 0, 250000, tzinfo=timezone(timedelta(hours=2))))
+
+
 def test_identity_ledger_response_fields_match_the_payloads() -> None:
     """Each declared response field set is exactly what the producer returns."""
     operations = json.loads(CONTRACT.read_text())["operations"]
     work = build_work(LedgerRows(aliases=[], supersessions=[]), "00000000-0000-4000-8000-000000000101", [])
-    works = asyncio.run(get_ledger_works(FakePool([[], [(0, None, None, None, None, None)]])))
-    density = asyncio.run(get_ledger_density(FakePool([[], []])))
+    works = asyncio.run(get_ledger_works(FakePool([[], [_REFRESHED], [(0, None, None, None, None, None)]])))
+    density = asyncio.run(get_ledger_density(FakePool([[], [_REFRESHED], []])))
 
     assert sorted(work) == operations["admin_identity_ledger_work"]["response_fields"]
     assert sorted(works) == operations["admin_identity_ledger_works"]["response_fields"]
     assert sorted(density) == operations["admin_identity_ledger_density"]["response_fields"]
+
+
+def test_identity_ledger_payloads_carry_refreshed_at_in_rfc_3339_utc() -> None:
+    """The list and density name their last refresh as RFC 3339 Z; one work may not have one yet."""
+    works = asyncio.run(get_ledger_works(FakePool([[], [_REFRESHED], [(0, None, None, None, None, None)]])))
+    density = asyncio.run(get_ledger_density(FakePool([[], [_REFRESHED], []])))
+    assert works["refreshed_at"] == density["refreshed_at"] == "2026-10-25T10:00:00.250000Z"
+
+    never = build_work(LedgerRows(aliases=[], supersessions=[]), "00000000-0000-4000-8000-000000000101", [])
+    assert never["refreshed_at"] is None
+    refreshed = build_work(LedgerRows(aliases=[], supersessions=[]), "00000000-0000-4000-8000-000000000101", [], refreshed_at=_REFRESHED[1])
+    assert refreshed["refreshed_at"] == "2026-10-25T10:00:00.250000Z"

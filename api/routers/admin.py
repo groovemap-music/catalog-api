@@ -50,7 +50,7 @@ from api.queries.admin_queries import (
     get_user_stats,
     get_valkey_storage,
 )
-from api.queries.identity_ledger_queries import get_ledger_density, get_ledger_work, get_ledger_works
+from api.queries.identity_ledger_queries import LedgerNotRefreshed, get_ledger_density, get_ledger_work, get_ledger_works
 from api.queries.media_coverage_queries import DEFAULT_LIMIT, MAX_LIMIT, get_unmapped_media, known_providers
 from api.reattach import apply_with_audit, run_reattachment
 from api.valkey_errors import valkey_write_guard
@@ -788,6 +788,19 @@ async def trigger_catalog_reattach(
 # Identity ledger (ADR 0016 section 7, concept D): read-only PostgreSQL
 # ---------------------------------------------------------------------------
 
+# Until the precomputed views' first refresh the list and density have nothing true to say, so
+# they answer 503 rather than an empty list. A console retrying after a minute catches a first
+# build, which takes minutes at catalog scale (api/README.md, "Latency at catalog scale").
+LEDGER_NOT_REFRESHED_RETRY_AFTER = "60"
+
+
+def _ledger_not_refreshed() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="identity ledger not yet refreshed",
+        headers={"Retry-After": LEDGER_NOT_REFRESHED_RETRY_AFTER},
+    )
+
 
 @router.get("/api/admin/identity/ledger/works")
 async def list_identity_ledger_works(
@@ -801,7 +814,8 @@ async def list_identity_ledger_works(
     """Works whose editions carry identity events, most recent event first.
 
     Paged like the audit log (page_size at most 100), but with no default window: the
-    ledger's history spans every month, including the full-export backfill's.
+    ledger's history spans every month, including the full-export backfill's. Read from the
+    precomputed views as of ``refreshed_at``; 503 with Retry-After before their first refresh.
     """
     if _pool is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
@@ -811,7 +825,10 @@ async def list_identity_ledger_works(
     page = max(page, 1)
     page_size = min(max(page_size, 1), 100)
 
-    data = await get_ledger_works(_pool, event=event, since=since, until=until, page=page, page_size=page_size)
+    try:
+        data = await get_ledger_works(_pool, event=event, since=since, until=until, page=page, page_size=page_size)
+    except LedgerNotRefreshed as exc:
+        raise _ledger_not_refreshed() from exc
     return JSONResponse(content=data)
 
 
@@ -841,13 +858,20 @@ async def get_identity_ledger_density(
     _admin: Annotated[dict[str, Any], Depends(require_admin)],
     kind: Annotated[str, Query(description=f"Catalog kind whose events to count: {', '.join(KINDS)}.")] = "release",
 ) -> JSONResponse:
-    """Identity events per UTC month, by type and by where their dates come from."""
+    """Identity events per UTC month, by type and by where their dates come from.
+
+    Read from the precomputed view as of ``refreshed_at``; 503 with Retry-After before its
+    first refresh.
+    """
     if _pool is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
     if kind not in KINDS:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=f"Unknown catalog kind: {kind}")
 
-    data = await get_ledger_density(_pool, kind)
+    try:
+        data = await get_ledger_density(_pool, kind)
+    except LedgerNotRefreshed as exc:
+        raise _ledger_not_refreshed() from exc
     return JSONResponse(content=data)
 
 
