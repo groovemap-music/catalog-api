@@ -172,9 +172,30 @@ log, with `page_size` at most 100, but has no default window. `event`, `since` (
 and `until` (exclusive) narrow the events it counts. A work id is answered one hop through
 supersession, so a superseded id returns its survivor with `requested_id`, and an id that is
 not a work is `404`. `as_of` is RFC 3339 transaction time, and `edition_limit` caps the
-editions and sets `truncated`. The works list and density read precomputed views, so every
-payload carries `refreshed_at`, the last refresh's start. Before the views' first refresh both
-answer `503` with `Retry-After`, never an empty list. One work is read live.
+editions and sets `truncated`.
+
+The works list and density read precomputed views, not the live tables, and every ledger
+payload carries `refreshed_at`. It is the UTC instant the last refresh of those views started.
+The list and density show every identity change committed before that instant, and none made
+after it until the next refresh. Read it as "as of", not "now". Before the views' first refresh
+both routes answer `503` with `Retry-After`, never an empty list. One work's states, evidence,
+and events are read live, so they can be newer than the list you reached the work from, and its
+`refreshed_at` names that list's age. It is `null` before the first refresh.
+
+The views refresh:
+
+- inline at the end of every applying re-attachment run (CLI, endpoint, or automatic) and every
+  applying ledger backfill run, so that run's changes are listed when it reports done;
+- after catalog loads, when `IDENTITY_LEDGER_REFRESH_ENABLED=true`: once the sources have
+  stopped changing for `IDENTITY_LEDGER_REFRESH_QUIET` seconds (default 10 minutes), or once the
+  last refresh is older than `IDENTITY_LEDGER_MAX_STALENESS` (default 6 hours) while a long
+  load is still writing. The poll runs every `IDENTITY_LEDGER_REFRESH_INTERVAL` seconds
+  (default 5 minutes).
+
+With the defaults, a load's last write reaches the list within about 15 minutes plus one
+refresh (several minutes at full catalog scale). A refresh that fails leaves the previous rows
+and an older `refreshed_at`, and raises the `identity_ledger_refresh_failed` alert. See
+[Keeping the Identity Ledger Fresh](../api/README.md#keeping-the-identity-ledger-fresh).
 
 Every event carries `dated_from`. `musicbrainz_fullexport` marks a link change the one-time
 backfill above dated from the MusicBrainz full export, which is wrong for about 9% of links.

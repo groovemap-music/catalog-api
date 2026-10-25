@@ -28,7 +28,9 @@ import api.api as api_module
 import api.routers.admin as admin_router
 from api.dependencies import require_admin
 from api.identity_ledger import EVENT_TYPES, KINDS
+from api.ledger_refresh import REASON_UNPOPULATED, ChangeTracker, poll_once
 from api.queries import identity_ledger_queries
+from api.reattach import _run_once
 from tests import identity_ledger_live, identity_ledger_story
 from tests.identity_ledger_story import BACKFILL, E1, E2, E3, E4, E5, E6, E7, EXPORT, G2, G5X, MOVED_ROW, RUN1, W1, W2, W5, X3, mbid, story
 from tests.test_real_databases import TEST_USER_ID, postgres_pool
@@ -47,6 +49,12 @@ _RESET = (
 async def _execute(pool: AsyncPostgreSQLPool, sql: str, params: Any = None) -> None:
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(sql, params)
+
+
+async def _query(pool: AsyncPostgreSQLPool, sql: str, params: Any = None) -> list[tuple[Any, ...]]:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(sql, params)
+        return list(await cur.fetchall())
 
 
 async def _refresh(pool: AsyncPostgreSQLPool) -> datetime:
@@ -508,3 +516,82 @@ async def test_unpopulated_views_answer_503_with_retry_after_never_an_empty_list
 
     await _refresh(postgres_pool)
     assert (await http.get("/api/admin/identity/ledger/works")).json()["total"] == 3
+
+
+# ---------------------------------------------------------------------------------------------
+# Refreshed inline after a re-attachment run, and by the poll.
+# ---------------------------------------------------------------------------------------------
+
+
+async def _split_under_w1(pool: AsyncPostgreSQLPool) -> tuple[str, str]:
+    """A release of W1's master whose MusicBrainz row loaded first: the split a run repairs."""
+    edition, split = identity_ledger_story.native(0x10), identity_ledger_story.native(0x20)
+    statements: list[tuple[str, tuple[Any, ...]]] = [
+        ("INSERT INTO catalog_items (id, kind) VALUES (%s, 'release'), (%s, 'release')", (split, edition)),
+        (
+            "INSERT INTO provider_aliases (provider, entity_kind, external_id, native_id, source) VALUES ('musicbrainz', 'release', %s, %s, 'catalog')",
+            (mbid(0x10), split),
+        ),
+        (
+            "INSERT INTO provider_aliases (provider, entity_kind, external_id, native_id, source) VALUES ('discogs', 'release', '900009', %s, 'catalog')",
+            (edition,),
+        ),
+        ("INSERT INTO public.releases (data_id, hash, data) VALUES ('900009', 'h', '{}'::jsonb)", ()),
+        ("INSERT INTO graph.derived_from (release_id, master_id) VALUES ('900009', '900101')", ()),
+        (
+            "INSERT INTO musicbrainz.releases (mbid, name, release_group_mbid, discogs_release_id, gm_item_id) VALUES (%s, 'r', %s, 900009, %s)",
+            (mbid(0x10), mbid(0xB1), split),
+        ),
+    ]
+    for sql, params in statements:
+        await _execute(pool, sql, params)
+    return edition, split
+
+
+async def _run_cli(pool: AsyncPostgreSQLPool, job_id: str) -> None:
+    await _execute(pool, "UPDATE users SET is_admin = TRUE WHERE id = %s", (TEST_USER_ID,))
+    assert await _run_once(apply=True, admin_id=str(TEST_USER_ID), batch_size=10, job_id=job_id) is not None
+
+
+async def _run_endpoint(_pool: AsyncPostgreSQLPool, job_id: str) -> None:
+    # The admin route's background job, on the pool the `http` fixture mounted.
+    await admin_router._run_reattach_job(job_id, str(TEST_USER_ID), True)
+
+
+@pytest.mark.parametrize("run", [_run_cli, _run_endpoint], ids=["cli", "endpoint"])
+async def test_a_reattachment_runs_supersession_is_in_the_works_list_without_a_poll(
+    http: httpx.AsyncClient, postgres_pool: AsyncPostgreSQLPool, run: Any
+) -> None:
+    edition, split = await _split_under_w1(postgres_pool)
+    before = await _get(http, "/api/admin/identity/ledger/works", {"event": "reattached"})
+    assert [(row["gm_id"], row["evented_editions"]) for row in before["works"]] == [(W1, 1)]
+    [(started,)] = await _query(postgres_pool, "SELECT clock_timestamp()")
+    job_id = str(uuid4())
+
+    await run(postgres_pool, job_id)
+
+    # No poll and no manual refresh: the run refreshed the views inline before it returned.
+    [(survivor, decision_ref)] = await _query(
+        postgres_pool, "SELECT survivor_id, decision_ref FROM catalog_item_supersessions WHERE superseded_id = %s", (split,)
+    )
+    assert (str(survivor), str(decision_ref)) == (edition, job_id)
+    after = await _get(http, "/api/admin/identity/ledger/works", {"event": "reattached"})
+    assert [(row["gm_id"], row["evented_editions"], row["repaired_editions"]) for row in after["works"]] == [(W1, 2, 2)]
+    assert datetime.fromisoformat(after["refreshed_at"]) > started
+    [(refreshed_at,)] = await _query(postgres_pool, "SELECT refreshed_at FROM identity_ledger_refresh_state")
+    assert refreshed_at > started
+
+
+async def test_the_poll_builds_unpopulated_views_and_stores_the_source_watermark(http: httpx.AsyncClient, postgres_pool: AsyncPostgreSQLPool) -> None:
+    for view in _VIEWS:
+        await _execute(postgres_pool, f"REFRESH MATERIALIZED VIEW {view} WITH NO DATA")
+    assert (await http.get("/api/admin/identity/ledger/works")).status_code == 503
+
+    assert await poll_once(postgres_pool, ChangeTracker(), quiet=10**6, max_staleness=10**6) == REASON_UNPOPULATED
+
+    assert (await _get(http, "/api/admin/identity/ledger/works", {}))["total"] == 3
+    [(watermark,)] = await _query(postgres_pool, "SELECT source_watermark FROM identity_ledger_refresh_state")
+    assert set(watermark) == {"writes"} and watermark["writes"] > 0
+    # Populated, and whatever the statistics say, a load seen this instant is not yet quiet nor
+    # the refresh stale: the next poll waits.
+    assert await poll_once(postgres_pool, ChangeTracker(), quiet=10**6, max_staleness=10**6) is None

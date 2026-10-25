@@ -90,6 +90,7 @@ import structlog
 
 from api import __version__
 from api.audit_log import insert_audit_entry, update_audit_entry
+from api.ledger_refresh import TRIGGER_BACKFILL, refresh_ledger
 from api.reattach import _connection_params
 from api.reattach_trigger import SYSTEM_ACTOR_ID, ensure_system_actor
 
@@ -570,11 +571,15 @@ async def apply_backfill(pool: Any, plan: BackfillPlan, *, export: str, job_id: 
         inserted = await write_events(pool, plan, source_ref=export, decision_ref=UUID(job_id), batch_size=batch_size)
     except Exception as exc:
         await _finalize_failed(pool, job_id=job_id, details={**details, "error": type(exc).__name__})
+        # Batches commit one by one, so a failed run may still have written some.
+        await refresh_ledger(pool, trigger=TRIGGER_BACKFILL, job_id=job_id)
         raise
     details |= {"inserted": inserted, "already_present": len(plan) - inserted}
     async with pool.connection() as conn, conn.cursor() as cur:
         await update_audit_entry(cur, entry_id=job_id, action=APPLY_ACTION, details=details)
     logger.info("✅ Identity ledger backfill finished", export=export, job_id=job_id, inserted=inserted)
+    # Inline, so the dated months are in the works list and density when the run reports done.
+    await refresh_ledger(pool, trigger=TRIGGER_BACKFILL, job_id=job_id)
     return details
 
 

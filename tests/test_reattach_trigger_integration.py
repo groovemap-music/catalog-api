@@ -90,9 +90,13 @@ async def test_complete_extraction_runs_both_jobs_once_and_survives_a_restart(
     mbid, split, discogs_native = await _split_release(pool, 7001)
     await _consume(neo4j_driver, "CREATE (:Release {id: '7001'})")
     await _latch(pool, "20260901", _ALL)
+    [(started,)] = await _execute(pool, "SELECT clock_timestamp()")
 
     assert await run_pending(pool, neo4j_driver) == "20260901"
 
+    # The precomputed Identity Ledger was refreshed inline, after the run began.
+    [(refreshed_at,)] = await _execute(pool, "SELECT refreshed_at FROM identity_ledger_refresh_state")
+    assert refreshed_at > started
     assert await _current(pool, "musicbrainz", "release", mbid) == [(discogs_native, "catalog")]
     async with neo4j_driver.session(database="neo4j") as session:
         record = await (await session.run("MATCH (n:Release {id: '7001'}) RETURN n.gm_id AS gm_id")).single()

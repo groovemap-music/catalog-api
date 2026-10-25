@@ -92,6 +92,11 @@ NLQ_INVALID = "invalid"
 NLQ_SUCCESS = "success"
 NLQ_UNAVAILABLE = "unavailable"
 
+# Identity ledger refresh outcomes (`api/ledger_refresh.py`). The counter's other attribute,
+# `trigger`, is that module's closed set: reattach, backfill, or poll.
+LEDGER_REFRESH_FAILED = "failed"
+LEDGER_REFRESH_SUCCESS = "success"
+
 # `db.system.name` for the Valkey client, which is not one of the shared resilient wrappers
 # and therefore reports `db.client.operation.duration` itself.
 VALKEY_SYSTEM = "valkey"
@@ -110,6 +115,7 @@ class _Instruments:
     cache: Any
     cache_write_failures: Any
     db_operation_duration: Any
+    identity_ledger_refreshes: Any
     nlq_requests: Any
     sync_duration: Any
 
@@ -152,6 +158,11 @@ def _build_instruments() -> _Instruments:
             "db.client.operation.duration",
             unit="s",
             description="Duration of a database client operation",
+        ),
+        identity_ledger_refreshes=meter.create_counter(
+            "groovemap.api.identity_ledger.refreshes",
+            unit="{refresh}",
+            description="Identity ledger view refreshes by trigger and outcome; a failed one is an alert",
         ),
         nlq_requests=meter.create_counter(
             "groovemap.api.nlq.requests",
@@ -275,6 +286,11 @@ def record_cache_write_failure(cache: str, exc: BaseException) -> None:
         return
     _write_failure_log[cache] = (now, 0)
     logger.warning("⚠️ Cache write failed", cache=cache, error_type=error_type, suppressed=suppressed)
+
+
+def record_identity_ledger_refresh(trigger: str, outcome: str) -> None:
+    """Count one refresh of the precomputed identity ledger, by what started it and how it ended."""
+    instruments().identity_ledger_refreshes.add(1, {"trigger": trigger, OUTCOME_ATTRIBUTE: outcome})
 
 
 def record_nlq_request(outcome: str) -> None:
