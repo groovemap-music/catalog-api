@@ -5,7 +5,8 @@ catalog re-attachment (`api/reattach.py`, ADR 0014 section 8) and then the `gm_i
 (`api/projection.py`, ADR 0009) after every Discogs import. This module does the same thing on
 its own: a background task, started in the app lifespan beside the metrics collector, polls
 for a completed Discogs extraction it has not yet handled and runs
-``run_reattachment(apply=True)`` followed by ``run_gm_id_projection``. It only calls those two
+``run_reattachment(apply=True)``, then refreshes the precomputed Identity Ledger inline
+(`api/ledger_refresh.py`), then runs ``run_gm_id_projection``. It only calls those
 functions; their internals are theirs.
 
 It is off by default. ``IDENTITY_AUTO_REATTACH_ENABLED=true`` turns it on and
@@ -70,6 +71,7 @@ from uuid import UUID, uuid4
 import structlog
 
 from api.audit_log import insert_audit_entry, update_audit_entry
+from api.ledger_refresh import TRIGGER_REATTACH, refresh_ledger
 from api.projection import run_gm_id_projection
 from api.reattach import audit_details, failure_details, finalize_audit_entry, run_reattachment
 
@@ -185,9 +187,19 @@ async def run_pending(pool: Any, driver: Any) -> str | None:
             logger.info("🚀 Automatic identity maintenance started", extraction=version, job_id=job_id)
             try:
                 report = await run_reattachment(pool, apply=True, decision_ref=UUID(job_id))
-                projection = await run_gm_id_projection(pool, driver)
             except Exception as exc:
                 # On its own connection: this one may be what failed.
+                await finalize_audit_entry(
+                    pool, entry_id=job_id, action=FAILED_ACTION, details={**failure_details(job_id, exc), "extraction": version}
+                )
+                # Items commit one by one, so a failed run may still have written some.
+                await refresh_ledger(pool, trigger=TRIGGER_REATTACH, job_id=job_id)
+                raise
+            # Inline, before the projection: the ledger reads PostgreSQL only. Never raises.
+            await refresh_ledger(pool, trigger=TRIGGER_REATTACH, job_id=job_id)
+            try:
+                projection = await run_gm_id_projection(pool, driver)
+            except Exception as exc:
                 await finalize_audit_entry(
                     pool, entry_id=job_id, action=FAILED_ACTION, details={**failure_details(job_id, exc), "extraction": version}
                 )

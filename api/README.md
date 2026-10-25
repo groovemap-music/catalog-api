@@ -300,8 +300,9 @@ guarded item is skipped again.
 
 ### Running Both Automatically After Each Discogs Import
 
-Set `IDENTITY_AUTO_REATTACH_ENABLED=true` and the API runs the re-attachment (apply) and then
-the `gm_id` projection by itself, once per completed Discogs extraction. It is off by default;
+Set `IDENTITY_AUTO_REATTACH_ENABLED=true` and the API runs the re-attachment (apply), refreshes
+the Identity Ledger, and then runs the `gm_id` projection by itself, once per completed Discogs
+extraction. It is off by default;
 `IDENTITY_AUTO_REATTACH_INTERVAL` (seconds, default `300`) sets how often it polls.
 `api/reattach_trigger.py`'s module docstring has the full design.
 
@@ -399,6 +400,56 @@ gets no event.
 `api/ledger_backfill.py`'s module docstring has the full design, and
 [ADR 0016's 2026-10-24 amendment](https://github.com/groovemap-music/design/blob/main/docs/adr/0016-strata-graph-view.md#2026-10-24-concept-ds-backfill-branch-and-m6)
 records the decision.
+
+### Keeping the Identity Ledger Fresh
+
+The Identity Ledger's works list and density read four materialized views that
+`database-schema` declares, and `identity_ledger_refresh(source_watermark)` rebuilds them
+(see [The Identity Ledger](#the-identity-ledger)). `database-schema` never calls that function,
+so catalog-api triggers every refresh, and no loader needs a change. `api/ledger_refresh.py`'s
+module docstring has the full design.
+
+- **Inline, after re-attachment and backfill runs.** Every applying re-attachment run (the
+  `catalog-identity-reattach --apply` CLI, `POST /api/admin/identity/reattach?apply=true`, and
+  the automatic trigger) and every applying `catalog-identity-ledger-backfill --apply` refreshes
+  the views itself, after its audit entry is final and before it reports done. A failed run
+  refreshes too, because its items or batches commit one at a time. The refresh adds its own
+  duration to the run: 195 s at 50% synthetic scale, and about 6 to 7 minutes extrapolated to
+  full scale.
+- **After loads, by change detection.** A background poll sums `n_tup_ins + n_tup_upd +
+  n_tup_del` from `pg_stat_user_tables` over the ledger's sources (`provider_aliases`,
+  `catalog_items`, `catalog_item_supersessions`, `identity_link_events`, `graph.derived_from`,
+  and `musicbrainz.releases`). Each refresh stores that sum as its `source_watermark`. The poll
+  refreshes when the sum has changed and has then stopped moving for the quiet interval, or when
+  it has changed and the last refresh is older than the maximum staleness. It also builds any
+  unpopulated view at once, so a new deployment answers the ledger routes after one poll
+  instead of `503`. A statistics reset (crash, `pg_stat_reset`) changes the sum, which costs at
+  most one extra refresh.
+- **One refresh at a time.** Every refresh holds a PostgreSQL transaction-level advisory lock.
+  An inline refresh waits for it. A poll only tries it, so a replica that cannot take it skips
+  that poll, and the holder re-reads the stored watermark under the lock so it does not repeat
+  a refresh another replica just made.
+- **A failed refresh never fails a run.** It is logged at error level with
+  `alert=identity_ledger_refresh_failed` and counted by the
+  `groovemap.api.identity_ledger.refreshes` counter (`trigger` is `reattach`, `backfill`, or
+  `poll`; `outcome` is `success` or `failed`). The views keep the previous refresh's rows, and
+  `refreshed_at` shows how old they are.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `IDENTITY_LEDGER_REFRESH_ENABLED` | `false` | Run the change-detection poll. The inline refreshes run either way. |
+| `IDENTITY_LEDGER_REFRESH_INTERVAL` | `300` | Seconds between polls (at least 1) |
+| `IDENTITY_LEDGER_REFRESH_QUIET` | `600` | Seconds the source watermark must hold still after a change before the poll refreshes |
+| `IDENTITY_LEDGER_MAX_STALENESS` | `21600` (6 h) | Age of the last refresh after which the poll refreshes a changed ledger even while writes continue |
+
+**How stale the ledger can be.** With the defaults:
+
+| After | At most | With the defaults |
+| --- | --- | --- |
+| A re-attachment or backfill run | Nothing beyond the refresh itself: the run returns once its changes are in the views | 0 |
+| The last write of a load | Quiet interval + one poll interval + one refresh | 10 + 5 min + the refresh (about 6 to 7 min at full scale, extrapolated) |
+| A write during a load still writing | Maximum staleness + one poll interval + one refresh | 6 h + 5 min + the refresh |
+| Any write, with the poll disabled | Until the next re-attachment or backfill run | Unbounded |
 
 ## API Endpoints
 
@@ -1260,9 +1311,11 @@ ones, because the history lives only in `provider_aliases`, `catalog_item_supers
 **Freshness.** The works list and density read four materialized views that `database-schema`
 declares (`identity_ledger_edition_events`, `identity_ledger_edition_parents`,
 `identity_ledger_work_summary`, and `identity_ledger_density`), refreshed off the request path
-by `identity_ledger_refresh()`. Every ledger payload carries `refreshed_at`, the RFC 3339 UTC
-instant the last refresh started (`identity_ledger_refresh_state`), so a console can say how old
-the list and density are. Writes after that instant appear at the next refresh. One work's
+by `identity_ledger_refresh()` (see
+[Keeping the Identity Ledger Fresh](#keeping-the-identity-ledger-fresh)). Every ledger payload
+carries `refreshed_at`, the RFC 3339 UTC instant the last refresh started
+(`identity_ledger_refresh_state`), so a console can say how old the list and density are.
+Writes after that instant appear at the next refresh. One work's
 states, evidence, and events are read live from the base tables, because `as_of` needs the alias
 history itself. Its `refreshed_at` names the list it was reached from, and is `null` before the
 first refresh. Until that first refresh the views are unpopulated, and the list and density
@@ -1365,9 +1418,10 @@ more for full scale gives under 0.8 s (extrapolated, not measured).
 
 At 50% scale `identity_ledger_refresh()` built the views in 140 s the first time and refreshed
 them concurrently in 195 s. That is about 6 to 7 minutes extrapolated to full scale. The four
-views take about 970 MB beside a 9.3 GB catalog. `gm-catalog-api-7vfr` triggers the refresh after
-re-attach and backfill runs and after loads. `gm-catalog-api-l7ek` replaces these synthetic
-figures with measurements on the first real catalog.
+views take about 970 MB beside a 9.3 GB catalog. The refresh runs after re-attachment and
+backfill runs and after loads (see
+[Keeping the Identity Ledger Fresh](#keeping-the-identity-ledger-fresh)). `gm-catalog-api-l7ek`
+replaces these synthetic figures with measurements on the first real catalog.
 
 ### Internal analytics computation
 

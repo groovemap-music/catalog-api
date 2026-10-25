@@ -60,6 +60,14 @@ from tests.fake_postgres import FakePool
 from tests.synthetic_fullexport import BASE_URL, EXPORT, GID, TINY_MEMBERS, chunks, dump, sha256sums, tarball, transport
 
 
+@pytest.fixture(autouse=True)
+def refresh(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """The inline ledger refresh, which `tests/test_ledger_backfill_integration.py` runs for real."""
+    refresh = AsyncMock(return_value=None)
+    monkeypatch.setattr(backfill, "refresh_ledger", refresh)
+    return refresh
+
+
 _INT64_MAX = 2**63 - 1
 
 
@@ -587,6 +595,28 @@ async def test_apply_refuses_a_users_row_that_is_not_the_system_actor() -> None:
     with pytest.raises(RuntimeError, match="identity-maintenance system actor"):
         await apply_backfill(pool, _plan(), export=EXPORT, job_id=str(uuid4()))
     assert len(pool.calls) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [False, True])
+async def test_an_applying_run_refreshes_the_ledger_after_its_entry(refresh: AsyncMock, fails: bool) -> None:
+    job_id = str(uuid4())
+    pool = FakePool([*_ACTOR, [(False,)], [], [(3,)]], raise_on={"WITH inserted": RuntimeError("boom")} if fails else None)
+    finalized: list[str] = []
+    refresh.side_effect = lambda *_args, **_kwargs: finalized.append(_sql(pool)[-1])
+    if fails:
+        with pytest.raises(RuntimeError, match="boom"):
+            await apply_backfill(pool, _plan(), export=EXPORT, job_id=job_id)
+    else:
+        await apply_backfill(pool, _plan(), export=EXPORT, job_id=job_id)
+    refresh.assert_awaited_once_with(pool, trigger="backfill", job_id=job_id)
+    assert finalized[0].startswith("UPDATE admin_audit_log")
+
+
+@pytest.mark.asyncio
+async def test_an_export_already_backfilled_refreshes_nothing(refresh: AsyncMock) -> None:
+    assert await apply_backfill(FakePool([*_ACTOR, [(True,)]]), _plan(), export=EXPORT, job_id=str(uuid4())) is None
+    refresh.assert_not_awaited()
 
 
 @pytest.mark.asyncio

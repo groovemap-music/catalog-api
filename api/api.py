@@ -72,6 +72,7 @@ import api.syncer as _syncer
 from api import __version__
 from api.auth import b64url_encode, decrypt_oauth_token, encrypt_oauth_token, get_oauth_encryption_key
 from api.config import ApiConfig
+from api.ledger_refresh import run_refresh_loop
 from api.limiter import limiter
 from api.notifications import LogNotificationChannel, ResendNotificationChannel
 from api.queries.search_queries import ALL_TYPES, execute_search
@@ -367,6 +368,7 @@ async def _start_service(_app: FastAPI) -> _LifecycleResources:
     await _activity.ensure_startup_partitions()
     _app.state.prewarm_task = asyncio.create_task(_prewarm_search_cache())
     _start_identity_maintenance(_app, config, pool, _neo4j)
+    _start_ledger_refresh(_app, config, pool)
     return _LifecycleResources(health_server=health_server, anthropic_client=anthropic_client)
 
 
@@ -380,6 +382,27 @@ def _start_identity_maintenance(_app: FastAPI, config: ApiConfig, pool: Any, neo
         return
     _app.state.identity_maintenance_task = asyncio.create_task(run_trigger_loop(pool, neo4j, config.identity_auto_reattach_interval))
     logger.info("🔗 Automatic identity maintenance watcher started", interval=config.identity_auto_reattach_interval)
+
+
+def _start_ledger_refresh(_app: FastAPI, config: ApiConfig, pool: Any) -> None:
+    """Start the identity ledger's change-detection poll when it is enabled (api/ledger_refresh.py)."""
+    _app.state.ledger_refresh_task = None
+    if not config.identity_ledger_refresh_enabled:
+        return
+    _app.state.ledger_refresh_task = asyncio.create_task(
+        run_refresh_loop(
+            pool,
+            interval=config.identity_ledger_refresh_interval,
+            quiet=config.identity_ledger_refresh_quiet,
+            max_staleness=config.identity_ledger_max_staleness,
+        )
+    )
+    logger.info(
+        "🔄 Identity ledger refresh poll started",
+        interval=config.identity_ledger_refresh_interval,
+        quiet=config.identity_ledger_refresh_quiet,
+        max_staleness=config.identity_ledger_max_staleness,
+    )
 
 
 async def _cancel_tasks(tasks: list[asyncio.Task[Any]]) -> None:
@@ -398,6 +421,9 @@ async def _stop_service(_app: FastAPI, resources: _LifecycleResources) -> None:
     identity_maintenance_task = getattr(_app.state, "identity_maintenance_task", None)
     if isinstance(identity_maintenance_task, asyncio.Task):
         await _cancel_tasks([identity_maintenance_task])
+    ledger_refresh_task = getattr(_app.state, "ledger_refresh_task", None)
+    if isinstance(ledger_refresh_task, asyncio.Task):
+        await _cancel_tasks([ledger_refresh_task])
     if _neo4j:
         await _neo4j.close()
     if _pool:

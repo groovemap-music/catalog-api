@@ -35,7 +35,9 @@ import api.routers.nlq as nlq_router
 import api.telemetry as telemetry
 from api.cache import RecommendCache
 from api.config import ApiConfig
+from api.ledger_refresh import refresh_ledger
 from api.syncer import run_full_sync
+from tests.fake_postgres import FakePool
 
 
 CACHE_METRIC = "groovemap.api.cache"
@@ -386,6 +388,21 @@ class TestNlqRequests:
         outcomes = [value for name, value in vars(telemetry).items() if name.startswith("NLQ_")]
 
         assert sorted(outcomes) == ["cached", "error", "invalid", "success", "unavailable"]
+
+
+class TestIdentityLedgerRefreshes:
+    """groovemap.api.identity_ledger.refreshes — one count per refresh, by trigger and outcome."""
+
+    @pytest.mark.asyncio
+    async def test_a_failed_inline_refresh_counts_without_failing_the_caller(self, collector: Collector) -> None:
+        pool = FakePool([[], [(1,)]], raise_on={"SELECT public.identity_ledger_refresh": RuntimeError("down")})
+        assert await refresh_ledger(pool, trigger="reattach") is None
+        telemetry.record_identity_ledger_refresh("poll", telemetry.LEDGER_REFRESH_SUCCESS)
+
+        assert collector.attributes("groovemap.api.identity_ledger.refreshes") == [
+            {"trigger": "reattach", "outcome": "failed"},
+            {"trigger": "poll", "outcome": "success"},
+        ]
 
 
 class TestHttpServerInstrumentation:

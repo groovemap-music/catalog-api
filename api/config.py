@@ -87,6 +87,10 @@ class ApiConfig:
     rabbitmq_password: str = field(default="groovemap", repr=False)
     identity_auto_reattach_enabled: bool = False
     identity_auto_reattach_interval: int = 300
+    identity_ledger_refresh_enabled: bool = False
+    identity_ledger_refresh_interval: int = 300
+    identity_ledger_refresh_quiet: int = 600
+    identity_ledger_max_staleness: int = 21600
     similar_artists_precomputed_enabled: bool = False
     similar_artists_fusion_alpha: float = DEFAULT_FUSION_ALPHA
 
@@ -166,6 +170,10 @@ class ApiConfig:
             rabbitmq_password=get_secret("RABBITMQ_PASSWORD", "groovemap"),
             identity_auto_reattach_enabled=_env_bool("IDENTITY_AUTO_REATTACH_ENABLED"),
             identity_auto_reattach_interval=max(1, _env_int("IDENTITY_AUTO_REATTACH_INTERVAL", 300)),
+            identity_ledger_refresh_enabled=_env_bool("IDENTITY_LEDGER_REFRESH_ENABLED"),
+            identity_ledger_refresh_interval=max(1, _env_int("IDENTITY_LEDGER_REFRESH_INTERVAL", 300)),
+            identity_ledger_refresh_quiet=max(0, _env_int("IDENTITY_LEDGER_REFRESH_QUIET", 600)),
+            identity_ledger_max_staleness=max(0, _env_int("IDENTITY_LEDGER_MAX_STALENESS", 21600)),
             similar_artists_precomputed_enabled=_env_bool("SIMILAR_ARTISTS_PRECOMPUTED_ENABLED"),
             similar_artists_fusion_alpha=_env_unit_float("SIMILAR_ARTISTS_FUSION_ALPHA", DEFAULT_FUSION_ALPHA),
         )
