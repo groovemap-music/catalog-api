@@ -31,7 +31,7 @@ dependencies = [
     "defusedxml>=0.7.1",
     "fastapi>=0.141.1",
     "groovemap-agent-tools==0.1.0",
-    "groovemap-runtime[neo4j,otel,otel-http,postgres]==0.1.0",
+    "groovemap-runtime[neo4j,otel,otel-http,postgres,rabbitmq]==0.1.0",
     "httpx>=0.28.1",
     "neo4j-rust-ext>=6.3.0.0",
     "orjson>=3.12.0",
@@ -93,7 +93,7 @@ exclude-newer-package = { certifi = "2026-10-20T02:24:17Z" }
 # The schema dev dependency retains an older direct runtime URL. Resolve every
 # runtime edge to the independently reviewed Valkey helper commit, not two sources.
 override-dependencies = [
-    "groovemap-runtime[neo4j,otel,otel-http,postgres] @ git+https://github.com/groovemap-music/python-libraries.git@771515349b592ff569b1b3e5712f7bef936bab58",
+    "groovemap-runtime[neo4j,otel,otel-http,postgres,rabbitmq] @ git+https://github.com/groovemap-music/python-libraries.git@771515349b592ff569b1b3e5712f7bef936bab58",
 ]
 
 [tool.uv.sources]
