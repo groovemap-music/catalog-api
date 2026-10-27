@@ -53,6 +53,12 @@ exhaustive inventory of every Catalog API route.
 | `GET /api/node/{id}`                     | Each artist and label                         | Neo4j      |
 | `GET /api/expand`                        | Each artist (releases), each label (releases) | Neo4j      |
 
+`/api/expand` takes the entity **name** as `node_id` (the route matches nodes by name, not by
+autocomplete ID). The entity must still resolve via autocomplete, and each expand scenario
+asserts a non-empty `children` list: a scenario that returns nothing counts as an error, is
+marked `EMPTY` in the run output, and is listed under `EMPTY-RESULT scenarios` in the report
+summary (`empty_runs` in the JSON), because its timing measures no real expansion work.
+
 ### Credits, recommendations, and network endpoints
 
 The configured people and role categories exercise person credits, timelines, profiles,
