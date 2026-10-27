@@ -1,10 +1,11 @@
 """Unit tests for credits query functions."""
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from api.queries import credits_queries
 from api.queries.credits_queries import (
     autocomplete_person,
     get_person_connections,
@@ -114,15 +115,40 @@ class TestGetReleaseCredits:
 class TestGetRoleLeaderboard:
     """Tests for get_role_leaderboard."""
 
+    @pytest.fixture(autouse=True)
+    def _reset_flag(self) -> None:
+        credits_queries._fallback_logged = False
+
     @pytest.mark.asyncio
-    async def test_returns_leaderboard(self) -> None:
-        records = [
-            {"name": "Top Person", "credit_count": 100},
-        ]
-        driver = _make_mock_driver(query_returns=records)
-        result = await get_role_leaderboard(driver, "mastering", limit=20)
-        assert len(result) == 1
-        assert result[0]["credit_count"] == 100
+    async def test_computed_uses_indexed_property(self) -> None:
+        rows = [{"name": "Top Person", "credit_count": 100}]
+        with patch.object(credits_queries, "run_query", AsyncMock(side_effect=[[{"computed": True}], rows])) as rq:
+            result = await get_role_leaderboard(MagicMock(), "mastering", limit=20)
+        assert result == rows
+        probe, main = rq.await_args_list
+        assert "p.credit_count_mastering IS NOT NULL" in probe.args[1]
+        assert "p.credit_count_mastering > 0" in main.args[1]
+        assert "ORDER BY p.credit_count_mastering DESC" in main.args[1]
+        assert "CREDITED_ON" not in main.args[1]
+
+    @pytest.mark.asyncio
+    async def test_uncomputed_falls_back_to_live_count_and_logs_once(self) -> None:
+        rows = [{"name": "Live Person", "credit_count": 3}]
+        with (
+            patch.object(credits_queries, "run_query", AsyncMock(side_effect=[[], rows, [], rows])) as rq,
+            patch.object(credits_queries, "logger") as log,
+        ):
+            first = await get_role_leaderboard(MagicMock(), "mastering")
+            second = await get_role_leaderboard(MagicMock(), "mastering")
+        assert first == second == rows
+        assert "CREDITED_ON" in rq.await_args_list[1].args[1]
+        log.warning.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_unknown_category_rejected_before_any_query(self) -> None:
+        with patch.object(credits_queries, "run_query", AsyncMock()) as rq, pytest.raises(ValueError, match="unknown credit category"):
+            await get_role_leaderboard(MagicMock(), "x) DETACH DELETE p //")
+        rq.assert_not_awaited()
 
 
 class TestGetSharedCredits:
