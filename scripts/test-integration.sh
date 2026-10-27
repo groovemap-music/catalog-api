@@ -75,5 +75,6 @@ NEO4J_PASSWORD="${password}" \
         tests/test_identity_ledger_integration.py \
         tests/test_lookup_integration.py \
         tests/test_activity_dedup_integration.py \
+        tests/test_activity_request_keys_integration.py \
         tests/test_similar_precomputed_integration.py \
         tests/test_role_leaderboard_integration.py

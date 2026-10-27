@@ -269,6 +269,24 @@ async def set_consent(
 EVENT_ERASURE_REQUESTED = "account.erasure_requested"
 EVENT_EXPORT_REQUESTED = "account.export_requested"
 
+
+def _request_key(event_type: str, request_id: str) -> str:
+    """Return the idempotency key of one erasure or export request's event.
+
+    The key is the event type and the request's own id — the `erasure_id` or `export_id`
+    minted for the request and carried in the event's payload — and nothing that names
+    the account. `activity.events` carries the pseudonymous subject only, and the claim
+    trigger copies the key into `activity.event_idempotency` beside that subject, so a
+    user id in the key would put the pseudonym's owner in both tables in plain text.
+
+    The request id is the grain dedup needs: a second write of the same request's event
+    carries the same id and is skipped, while a new request is a new export or erasure and
+    gets a new id. Keying on the subject instead would tie the key to a lookup that can
+    fail on export and to a link erasure is about to delete; the request id needs neither.
+    """
+    return f"{event_type}:{request_id}"
+
+
 # The bypass. The immutability trigger on activity.events and activity.impressions rejects
 # every UPDATE and DELETE unless this session setting is on, and SET LOCAL is what scopes
 # it to this transaction: it cannot leak to the next statement on a pooled connection.
@@ -645,11 +663,12 @@ async def request_erasure(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Could not resolve the activity subject")
 
     requested_at = datetime.now(UTC)
+    request_id = str(new_id())
     await activity.record_event(
         user_id,
         EVENT_ERASURE_REQUESTED,
-        {"erasure_id": str(new_id())},
-        idempotency_key=f"{EVENT_ERASURE_REQUESTED}:{user_id}:{requested_at.isoformat()}",
+        {"erasure_id": request_id},
+        idempotency_key=_request_key(EVENT_ERASURE_REQUESTED, request_id),
     )
 
     erasure_id, events_deleted, impressions_deleted = await _erase_postgres(user_id, subject_id, requested_at)
@@ -707,11 +726,12 @@ async def export_account(current_user: Annotated[dict[str, Any], Depends(require
     _require_pool()
 
     subject_id = await activity.subject_for(user_id)
+    request_id = str(new_id())
     await activity.record_event(
         user_id,
         EVENT_EXPORT_REQUESTED,
-        {"export_id": str(new_id()), "format": "jsonl"},
-        idempotency_key=f"{EVENT_EXPORT_REQUESTED}:{user_id}:{datetime.now(UTC).isoformat()}",
+        {"export_id": request_id, "format": "jsonl"},
+        idempotency_key=_request_key(EVENT_EXPORT_REQUESTED, request_id),
     )
 
     return StreamingResponse(

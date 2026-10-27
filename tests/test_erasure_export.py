@@ -168,6 +168,15 @@ class TestErasureProcedure:
         assert set(erasable.await_args.args[2]) == {"erasure_id"}
         assert UUID(erasable.await_args.args[2]["erasure_id"])
 
+    def test_the_request_event_is_keyed_on_the_request_and_not_the_account(
+        self, test_client: TestClient, auth_headers: dict[str, str], erasable: Any
+    ) -> None:
+        test_client.post("/api/user/erasure", json={"password": PASSWORD}, headers=auth_headers)
+
+        key = erasable.await_args.kwargs["idempotency_key"]
+        assert key == f"account.erasure_requested:{erasable.await_args.args[2]['erasure_id']}"
+        assert str(TEST_USER_ID) not in key
+
     def test_the_neo4j_subgraph_is_detach_deleted(self, test_client: TestClient, auth_headers: dict[str, str], mock_neo4j_session: MagicMock) -> None:
         test_client.post("/api/user/erasure", json={"password": PASSWORD}, headers=auth_headers)
 
@@ -459,6 +468,15 @@ class TestExport:
         assert set(payload) == {"export_id", "format"}
         assert payload["format"] == "jsonl"
         assert UUID(payload["export_id"])
+
+    def test_the_export_event_is_keyed_on_the_request_and_not_the_account(
+        self, test_client: TestClient, auth_headers: dict[str, str], sections: Any
+    ) -> None:
+        self.read(test_client, auth_headers)
+
+        key = sections.await_args.kwargs["idempotency_key"]
+        assert key == f"account.export_requested:{sections.await_args.args[2]['export_id']}"
+        assert str(TEST_USER_ID) not in key
 
     def test_a_caller_with_no_subject_still_exports_the_relational_half(
         self, test_client: TestClient, auth_headers: dict[str, str], mock_cur: MagicMock
