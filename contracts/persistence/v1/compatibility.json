@@ -1,5 +1,46 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "activity_event_idempotency": {
+    "backfill": "one-time, in the same statement that creates the claim trigger and under a SHARE ROW EXCLUSIVE lock on activity.events, so no event lands between them without a key; guarded on the trigger's presence, so later inits do not rescan activity.events. Existing duplicate rows are kept, and each key is given to its earliest occurrence",
+    "claim": {
+      "function": "activity.claim_idempotency_key()",
+      "held_key": "honoured only while the event it names is stored: the BEFORE INSERT trigger then returns NULL, so the event row is skipped with no error and no RETURNING row, exactly like an INSERT ... ON CONFLICT DO NOTHING that met its conflict. A key whose event is not stored is moved onto the new event",
+      "occurrence_key": "a row whose (occurred_at, idempotency_key) another subject's stored event already holds is handed to that key unclaimed (ON CONFLICT skips it, a plain INSERT raises), so no key is claimed for a row that is never stored",
+      "trigger": "activity_events_claim_idempotency_key"
+    },
+    "columns": [
+      "subject_id",
+      "idempotency_key",
+      "event_id",
+      "occurred_at",
+      "recorded_at"
+    ],
+    "consumers": [
+      "catalog-api"
+    ],
+    "design_decision": "activity.events is partitioned by occurred_at, so its own unique key must include occurred_at and cannot see a retry stamped a moment later or routed to another partition. This non-partitioned table holds one row per (subject_id, idempotency_key), claimed by a BEFORE INSERT trigger on activity.events, so a second insert of the same key is skipped whatever its occurred_at, including under concurrent inserts. The events table's UNIQUE (occurred_at, idempotency_key) is kept, additively, because writers name it as their ON CONFLICT target; subject-scoping it would be a coordinated breaking change, so the claim defers to it instead.",
+    "erasure": {
+      "count": "activity.erasures.idempotency_keys_deleted, a nullable BIGINT: the erasure procedure counts the subject's keys before it deletes the events, because the triggers delete them",
+      "event_release": "activity_events_release_idempotency_key, AFTER DELETE on activity.events: deleting an event releases the key it holds, so deleting a subject's events removes their keys",
+      "subject_release": "activity_user_subjects_release_idempotency_keys, AFTER DELETE on activity.user_subjects: removing the pseudonym link removes the subject's keys that name no stored event",
+      "summary": "personal data keyed to subject_id, closed at the schema level: catalog-api's existing erasure transaction (delete events and impressions by subject, then the user_subjects link, under SET LOCAL groovemap.erasure = 'on') leaves no key row without naming this table"
+    },
+    "immutability": "activity.reject_key_mutation(): UPDATE and DELETE of a key whose event is stored are rejected unless groovemap.erasure is on, as on activity.events; a key naming no stored event may be moved or removed",
+    "introduced_in_contract_version": 1,
+    "kind": "additive",
+    "primary_key": [
+      "subject_id",
+      "idempotency_key"
+    ],
+    "relation": "activity.event_idempotency",
+    "retained_unique_key": "UNIQUE (occurred_at, idempotency_key)",
+    "retention": {
+      "function": "activity.purge_idempotency_keys(older_than TIMESTAMPTZ) RETURNS BIGINT",
+      "index": "idx_activity_event_idempotency_occurred_at ON activity.event_idempotency (occurred_at)",
+      "procedure": "run right after dropping an activity.events month partition, with the dropped partition's upper bound; it removes only keys older than the bound whose event is no longer stored and returns the count. Until then a retry under a dropped month's key is stored afresh, so the dedup window is the retention window"
+    },
+    "consumer_rollout": "expand phase: catalog-api pins the revision containing this table, treats a skipped retry (no RETURNING row) as already recorded, and may record idempotency_keys_deleted in its erasure row; its erasure statements need no change. deployment's partition-drop runbook adds the purge call"
+  },
   "application_runtime": {
     "package": "groovemap-runtime",
     "required_capabilities": [
@@ -476,8 +517,39 @@
     "key_columns": {
       "availability": "unconditional",
       "kind": "additive",
-      "note": "Every key column of every graph relation is text. The four Discogs vertex views publish data_id::text and the loader-written tables are declared text from the start. This keeps ordinary SQL joins consistent and retires the graph.artist.artist_key, graph.label.label_key, graph.master.master_key, and graph.release.release_key restatements.",
-      "type": "text"
+      "note": "Key columns are not all text. Discogs vertex and edge keys (artist_id, label_id, master_id, release_id, medium_id, company_id, sublabel_id, and the genre, style, person, and media-family names) are text: the four Discogs vertex views publish data_id::text and the loader-written tables are declared text from the start, which retires the graph.artist.artist_key, graph.label.label_key, graph.master.master_key, and graph.release.release_key restatements. The exceptions are recorded under types and are the types the relations actually declare: uuid for the identifiers of the application-owned relations and for every MusicBrainz mbid, bigint for track ordinals and MusicBrainz relationship ids, and \"char\" for graph.vertex_degree.kind. graph.collected.release_id and graph.wants.release_id also publish data_id::text, so every Discogs graph key is text and a join against graph.release.release_id needs no cast; schema init converges an existing database by dropping and recreating those two views when the column still reads as another type.",
+      "types": {
+        "bigint": [
+          "graph.mb_rel_*.relationship_id",
+          "graph.track_by_artist.sub_track_ordinal",
+          "graph.track_by_artist.track_ordinal",
+          "graph.track_credited_on.sub_track_ordinal",
+          "graph.track_credited_on.track_ordinal"
+        ],
+        "char": [
+          "graph.vertex_degree.kind"
+        ],
+        "text": "every other key column of every loader-written table, and the key column of the Discogs vertex views (graph.artist.artist_id, graph.label.label_id, graph.master.master_id, graph.release.release_id) and of graph.collected.release_id, graph.wants.release_id, graph.sublabel_of, graph.part_of, graph.in_family, and graph.release_degree",
+        "uuid": [
+          "graph.app_user.user_id",
+          "graph.catalog_item.item_id",
+          "graph.collected.collection_id",
+          "graph.collected.user_id",
+          "graph.mb_artist.mbid",
+          "graph.mb_label.mbid",
+          "graph.mb_rel_*.source_mbid",
+          "graph.mb_rel_*.target_mbid",
+          "graph.mb_release.mbid",
+          "graph.mb_release_group.mbid",
+          "graph.owns.artifact_id",
+          "graph.owns.collection_row_id",
+          "graph.owns.item_id",
+          "graph.owns.owned_copy_id",
+          "graph.owns.user_id",
+          "graph.wants.user_id",
+          "graph.wants.wantlist_id"
+        ]
+      }
     },
     "kind": "additive",
     "member_of_union": {
@@ -499,7 +571,7 @@
         "graph.mb_rel_artist_artist"
       ]
     },
-    "note": "Twenty relations are loader-written tables replacing a view that computed the same rows on every read, seven more hold the counters, degrees, and genre aggregates the graph enrichers compute today, one more is the cross-provenance MEMBER_OF union recorded under graph_schema.member_of_union, one more is the per-vertex degree recorded under graph_schema.vertex_degree, and the rest are read-only views over tables declared elsewhere in this contract. This repository declares every one of them and writes rows into none: the owner named against each relation does that, so an empty table on a fresh database is the expected state rather than a fault.",
+    "note": "Twenty relations are loader-written tables replacing a view that computed the same rows on every read, seven more hold the counters, degrees, and genre aggregates the graph enrichers compute today, one more is the cross-provenance MEMBER_OF union recorded under graph_schema.member_of_union, one more is the per-vertex degree recorded under graph_schema.vertex_degree, two more (graph.track_credited_on and graph.track_by_artist) are the track-level credits and performers that never had a view, which makes thirty-one tables, and the remaining thirty-seven relations are read-only views over tables declared elsewhere in this contract. This repository declares every one of them and writes rows into none: the owner named against each relation does that, so an empty table on a fresh database is the expected state rather than a fault.",
     "path_function": {
       "availability": "unconditional",
       "clamped_to": [

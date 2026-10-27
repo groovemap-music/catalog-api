@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = "==3.14.*"
 
 [options]
@@ -724,7 +724,7 @@ dev = [
     { name = "commitizen", specifier = ">=4.18.0" },
     { name = "cyclonedx-bom", specifier = ">=7.3.1" },
     { name = "fakeredis", extras = ["valkey"], specifier = ">=2.37.1" },
-    { name = "groovemap-database-schema", git = "https://github.com/groovemap-music/database-schema.git?rev=00b74e77503d16ee6ca88891170acac08e1bcc1b" },
+    { name = "groovemap-database-schema", git = "https://github.com/groovemap-music/database-schema.git?rev=6c8a1598e3402335e3f5f195d58c32c953cea091" },
     { name = "hypothesis", specifier = ">=6.167.1" },
     { name = "mypy", specifier = ">=2.3.1" },
     { name = "pip-audit", specifier = ">=2.10.1" },
@@ -742,8 +742,8 @@ dev = [
 
 [[package]]
 name = "groovemap-database-schema"
-version = "0.4.1"
-source = { git = "https://github.com/groovemap-music/database-schema.git?rev=00b74e77503d16ee6ca88891170acac08e1bcc1b#00b74e77503d16ee6ca88891170acac08e1bcc1b" }
+version = "0.5.0"
+source = { git = "https://github.com/groovemap-music/database-schema.git?rev=6c8a1598e3402335e3f5f195d58c32c953cea091#6c8a1598e3402335e3f5f195d58c32c953cea091" }
 dependencies = [
     { name = "groovemap-runtime", extra = ["neo4j", "otel", "otel-http", "postgres", "rabbitmq"] },
     { name = "psycopg", extra = ["binary"] },
