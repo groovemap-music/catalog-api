@@ -1213,6 +1213,12 @@ designers) behind releases. The graph data is produced by
 | GET    | `/api/credits/person/{name}/profile`  | No            | 60/min     | Summary profile with role breakdown                   |
 | GET    | `/api/credits/release/{release_id}`   | No            | 60/min     | Full credits breakdown for a release                  |
 | GET    | `/api/credits/role/{role}/top`        | No            | 30/min     | Most prolific people in a given role category         |
+
+`/api/credits/role/{role}/top` is served from the indexed `Person.credit_count_<category>`
+properties (distinct releases per role category) that `discogs-graph-enricher` recomputes after
+each import; people with a zero count are excluded. On a graph where those properties have never
+been written, it falls back to counting `CREDITED_ON` live and logs a warning once per process.
+The response is identical either way.
 | GET    | `/api/credits/shared`                 | No            | 30/min     | Releases where two people are both credited           |
 | GET    | `/api/credits/connections/{name}`     | No            | 30/min     | People connected through shared releases              |
 | GET    | `/api/credits/autocomplete`           | No            | 120/min    | Search credits by person name (fulltext, min 2 chars) |

@@ -8,12 +8,18 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import structlog
+from common.credit_roles import ALL_CATEGORIES
+
 from api.queries.helpers import run_query, run_single
 from api.queries.neo4j_queries import _build_autocomplete_query
 
 
 if TYPE_CHECKING:
     from common import AsyncResilientNeo4jDriver
+
+
+logger = structlog.get_logger(__name__)
 
 
 async def get_person_credits(
@@ -71,21 +77,67 @@ async def get_release_credits(
     return await run_query(driver, cypher, release_id=release_id)
 
 
+_LIVE_LEADERBOARD_CYPHER = """
+MATCH (p:Person)-[c:CREDITED_ON]->(r:Release)
+WHERE c.category = $category
+WITH p, count(DISTINCT r) AS credit_count
+RETURN p.name AS name, credit_count
+ORDER BY credit_count DESC, p.name
+LIMIT $limit
+"""
+
+_fallback_logged = False
+
+
+def _credit_count_property(category: str) -> str:
+    """Return the precomputed Person property for ``category``.
+
+    Raises ValueError for anything outside ``ALL_CATEGORIES``: the result is spliced into
+    Cypher (property names cannot be parameters), so it is built only from a validated value.
+    """
+    if category not in ALL_CATEGORIES:
+        msg = f"unknown credit category {category!r}"
+        raise ValueError(msg)
+    return f"credit_count_{category}"
+
+
 async def get_role_leaderboard(
     driver: AsyncResilientNeo4jDriver,
     category: str,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """Return most prolific people in a given role category."""
-    cypher = """
-    MATCH (p:Person)-[c:CREDITED_ON]->(r:Release)
-    WHERE c.category = $category
-    WITH p, count(DISTINCT r) AS credit_count
-    RETURN p.name AS name, credit_count
-    ORDER BY credit_count DESC
+    """Return most prolific people in a given role category.
+
+    Reads the indexed ``Person.credit_count_<category>`` property that
+    discogs-graph-enricher precomputes after each import. If that property has never been
+    written (counts not computed yet) it falls back to counting CREDITED_ON live, and logs
+    the fallback once per process.
+    """
+    global _fallback_logged
+    prop = _credit_count_property(category)
+
+    # IS NOT NULL is answered by the property index; a computed graph writes 0 rather than
+    # leaving the property absent, so absence everywhere means "never computed".
+    computed = await run_query(
+        driver,
+        f"MATCH (p:Person) WHERE p.{prop} IS NOT NULL RETURN true AS computed LIMIT 1",
+    )
+    if not computed:
+        if not _fallback_logged:
+            _fallback_logged = True
+            logger.warning("credit counts not computed, serving role leaderboard from live count", property=prop)
+        return await run_query(driver, _LIVE_LEADERBOARD_CYPHER, category=category, limit=limit)
+
+    # The range predicate lets the planner use the index for both filter and ORDER BY.
+    # > 0 matches the live query, which only returns people with a credit in the category.
+    cypher = f"""
+    MATCH (p:Person)
+    WHERE p.{prop} > 0
+    RETURN p.name AS name, p.{prop} AS credit_count
+    ORDER BY p.{prop} DESC, p.name
     LIMIT $limit
     """
-    return await run_query(driver, cypher, category=category, limit=limit)
+    return await run_query(driver, cypher, limit=limit)
 
 
 async def get_shared_credits(
