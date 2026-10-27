@@ -429,8 +429,7 @@ async def _track_extraction(extraction_id: str, source: ExtractionSource) -> Non
     # the first poll recorded a run that never started as a success — and since
     # extraction_progress is only reset INSIDE process_*_data, the phantom run was
     # stamped with the PREVIOUS run's record counts, so nothing looked wrong. Only
-    # honor a terminal "waiting"/"completed" after the run was observed running
-    # (groovemap-exnk).
+    # honor a terminal "waiting"/"completed" after the run was observed running.
     has_seen_running = False
     startup_polls = 0
 

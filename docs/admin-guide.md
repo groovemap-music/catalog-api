@@ -22,13 +22,13 @@ flowchart LR
 
 ## Bootstrap an administrator
 
-The packaged `admin-setup` command creates, lists, or updates administrators in PostgreSQL.
-It never accepts a password as a command-line argument. Interactive use prompts without echo;
-automation must supply `ADMIN_PASSWORD` or `ADMIN_PASSWORD_FILE`.
+The packaged `catalog-admin-setup` command creates, lists, or updates administrators in
+PostgreSQL. It never accepts a password as a command-line argument. Interactive use prompts
+without echo; automation must supply `ADMIN_PASSWORD` or `ADMIN_PASSWORD_FILE`.
 
 ```bash
-admin-setup --email admin@example.com
-admin-setup --list
+catalog-admin-setup --email admin@example.com
+catalog-admin-setup --list
 ```
 
 Passwords must contain at least eight characters. Running the create command for an existing

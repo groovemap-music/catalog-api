@@ -45,9 +45,11 @@ host resources with every result.
 1. Profile one query family at a time before changing indexes or caches.
 1. Preserve result JSON and logs outside the repository.
 
-Request middleware records bounded per-path latency samples. Identifier path segments are
-normalized so metrics do not create an unbounded label set. Health, metrics, and administrative
-paths are excluded from ordinary endpoint timing.
+Request latency is reported only through OpenTelemetry: the FastAPI instrumentation records
+`http.server.request.duration` keyed on the templated route (`http.route`), so identifier path
+segments never become an unbounded label set. Health, readiness, and metrics paths are excluded,
+and nothing is exported without `OTEL_EXPORTER_OTLP_ENDPOINT`. See the
+[OpenTelemetry configuration](configuration.md#opentelemetry-metrics-and-traces).
 
 ## API-owned optimization patterns
 

@@ -568,7 +568,7 @@ class TestRequireUserTokenChecks:
 
 
 class TestChallengeTokenRejection:
-    """Regression tests for groovemap-cu2.1.
+    """A 2FA challenge token must never authenticate a protected endpoint.
 
     A 2FA challenge token (``type == "2fa_challenge"``) proves only the password.
     It must NEVER authenticate a protected user endpoint — otherwise an attacker
@@ -599,7 +599,7 @@ class TestChallengeTokenRejection:
 
     @pytest.mark.asyncio
     async def test_get_optional_user_rejects_admin_token(self) -> None:
-        """Regression for groovemap-cu2.71: an admin JWT presented to an
+        """Regression: an admin JWT presented to an
         optional-auth endpoint must resolve to None (anonymous), not to a user
         session keyed by the admin's own sub — matching the admin/user token
         isolation require_user, _get_current_user, and the sync/snapshot
@@ -665,7 +665,7 @@ def test_jwt_validation_policy_has_one_implementation() -> None:
 
 
 class TestUnifiedAuthTouchesLastUsedAt:
-    """groovemap-cu2.22: the unified auth path (require_user_or_app_token)
+    """The unified auth path (require_user_or_app_token)
     is the ONLY path production app-token endpoints use, so it must perform the
     same last_used_at bookkeeping as require_app_token — otherwise every token
     reports 'never used' forever.
@@ -710,7 +710,7 @@ class TestUnifiedAuthTouchesLastUsedAt:
 
 
 class TestUnifiedAuthDefenseInDepth:
-    """groovemap-osoc: require_user_or_app_token's app-token branch must
+    """The app-token branch of require_user_or_app_token must
     perform the same compare_digest defense-in-depth check as require_app_token,
     against the row's own persisted token_hash — not a self-comparison."""
 

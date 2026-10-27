@@ -56,7 +56,7 @@ async def token_revocation_reason(payload: Mapping[str, Any], valkey: Any) -> st
     ``decode_token`` only proves signature and ``exp`` — revocation lives entirely
     in Valkey, so EVERY site that turns a decoded token into an identity must
     consult this. A site that skips it keeps accepting logged-out and
-    password-changed tokens until they expire (groovemap-aexv).
+    password-changed tokens until they expire.
 
     Returns ``REASON_REVOKED`` (logout blacklisted the jti),
     ``REASON_CREDENTIALS_CHANGED`` (issued at or before a password change), or None.
@@ -209,8 +209,7 @@ def create_challenge_token(
     was READ rather than the moment the token was minted. Password verification
     is deliberately slow (PBKDF2, 100k iterations), and a password change that
     commits inside that window must invalidate the credential derived from the
-    old password — which only works if ``iat`` predates the change marker
-    (groovemap-jxmn).
+    old password — which only works if ``iat`` predates the change marker.
     """
     expire = datetime.now(UTC) + timedelta(minutes=5)
     payload: dict[str, Any] = {

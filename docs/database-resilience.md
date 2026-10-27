@@ -18,13 +18,15 @@ stateDiagram-v2
 
 The API initializes its PostgreSQL pool and constructs Valkey and Neo4j clients during lifespan
 startup. Missing required configuration or PostgreSQL initialization failure prevents application
-traffic. Valkey and Neo4j failures are surfaced when their operations run. Connection construction and retry primitives come
-from the pinned shared runtime in
+traffic. Valkey and Neo4j failures are surfaced when their operations run. Connection construction
+and retry primitives come from the pinned shared runtime in
 [`python-libraries`](https://github.com/groovemap-music/python-libraries).
 
-- PostgreSQL stores users, tokens, audit records, metrics, and relational catalog data.
+- PostgreSQL stores users, tokens, audit records, sync and extraction history, and relational
+  catalog data.
 - Neo4j serves graph exploration, recommendations, credits, and relationship queries.
-- Valkey stores short-lived OAuth state, revocations, snapshots, rate limits, and caches.
+- Valkey stores short-lived OAuth state, revocations, snapshots, sync locks and cooldowns, and
+  caches. Per-route request rate limits are held in each process's memory, not in Valkey.
 
 The authoritative PostgreSQL and Neo4j definitions are owned by
 [`database-schema`](https://github.com/groovemap-music/database-schema). `catalog-api` must not
@@ -51,10 +53,6 @@ wire, and error translation; it does not coordinate the two producers.
 
 ## Data-loss boundaries
 
-The request metrics buffer uses drain/restore semantics: samples are swapped out before an
-awaited write and restored ahead of newer entries if persistence fails. The bounded buffer evicts
-oldest entries first when its limit is reached.
-
 User synchronization invalidates caches only after durable writes succeed. OAuth state and JWT
 revocation remain TTL-bound in Valkey. Authentication and authorization paths must never treat an
 unknown dependency result as successful.
@@ -62,8 +60,11 @@ unknown dependency result as successful.
 ## Health and observability
 
 `GET /health` is served on the application and dedicated health ports. It reports the API's own
-dependency state; it is not a fleet-level status page. Historical administrative endpoints expose
-the samples that catalog-api collected, while visualization and operator workflow belong to
+dependency state; it is not a fleet-level status page. Request, database, and cache timings are
+pushed as OpenTelemetry metrics (see the
+[configuration guide](configuration.md#opentelemetry-metrics-and-traces)); catalog-api keeps no
+metric history of its own. Administrative endpoints expose its sync, storage, and extraction
+records, while visualization and operator workflow belong to
 [`operations-console`](https://github.com/groovemap-music/operations-console).
 
 Connection events use the repository [logging conventions](logging-guide.md). They must not

@@ -24,21 +24,24 @@ flowchart TD
 - `just test` executes the suite with coverage, while `just coverage` is an alias rather than a
   second copy of the command. It excludes the `integration` marker, so nothing it runs needs a
   live database.
-- `just test-integration` is the engine-backed suite and is **not** part of `just check` or of
-  shared CI. It needs Docker, starts throwaway PostgreSQL and Neo4j containers, applies the
-  authoritative schema from `groovemap-music/database-schema` at the revision
-  `contracts/persistence/v1/source.json` records, and runs `tests/test_real_databases.py`
-  against them. Run it locally before submitting a change to the collection sync or to the
-  native identity read paths; it is the only gate that proves those statements against the
-  real tables rather than a mock.
+- `just test-integration` is the engine-backed suite and is **not** part of `just check`;
+  shared CI runs it as the separate integration lane. It needs Docker, starts throwaway
+  PostgreSQL and Neo4j containers, applies the authoritative schema from
+  `groovemap-music/database-schema` at the revision `contracts/persistence/v1/source.json`
+  records, and runs the `integration`-marked suites listed in `scripts/test-integration.sh`
+  (`tests/test_real_databases.py` and the re-attachment, ledger, lookup, and precomputed
+  similar-artist integration tests) against them. Run it locally before submitting a change
+  to the collection sync or to the native identity read paths; it is the only gate that
+  proves those statements against the real tables rather than a mock.
 - `just integration-valkey` is opt-in and also outside `just check` and shared CI. It needs
   Docker, fills a throwaway production-pinned Valkey under `noeviction` and checks the
   write-rejection paths against it and a throwaway PostgreSQL. Run it before changing
   `api/valkey_errors.py`, `tests/noeviction_valkey.py`, or a Valkey write site. See
   [valkey-noeviction-verification.md](valkey-noeviction-verification.md).
 - `just secret-scan` is the narrow gitleaks capability used by both local and shared CI gates.
-- `just check` runs formatting, linting, type checks, the complete test suite, secret scans,
-  wheel construction, installed-wheel smoke tests, dependency-license policy, and version checks.
+- `just check` runs formatting, linting, contract checks, type checks, the non-integration test
+  suite with coverage, secret scans, wheel construction, installed-wheel smoke tests,
+  dependency-license policy, and version checks.
 - `just audit` checks the locked environment for known vulnerabilities.
 - `just coverage` produces `coverage.xml`, which CI always retains and uploads to Codecov.
 - `just image` and `just performance-image` build the repository-named local images from a clean

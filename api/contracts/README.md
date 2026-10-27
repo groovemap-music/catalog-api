@@ -5,11 +5,16 @@ ownership.
 
 `catalog-api` owns the HTTP and OpenAPI contracts in this directory. The internal
 Insights surface is versioned separately because `analytics-engine` is an independent
-release unit. Generate its pinned consumer constants with:
+release unit. Generate its pinned consumer constants, together with the
+`operations-console` route constants, with:
 
 ```bash
 uv run python api/contracts/generate.py
 ```
+
+`--check` verifies the committed bindings instead of writing them. After regenerating,
+update the matching `python/source.json` digests; `just contract-check` verifies both
+the contract and its binding against that record.
 
 Breaking path or envelope changes require a new contract version and a coordinated
 rollout. Authentication material is deliberately absent: the contract states shape,

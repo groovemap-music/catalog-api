@@ -175,8 +175,7 @@ async def explore_artist(driver: AsyncResilientNeo4jDriver, name: str) -> dict[s
 
     alias_count dedups across ALIAS_OF/MEMBER_OF categories the same way
     count_artist_aliases and expand_artist_aliases do, so an artist reachable
-    through more than one category still contributes exactly one
-    (groovemap-1wiu).
+    through more than one category still contributes exactly one.
     """
     cypher = """
     MATCH (a:Artist {name: $name})
@@ -315,7 +314,7 @@ async def explore_style(driver: AsyncResilientNeo4jDriver, name: str) -> dict[st
 # count_* reports the correct total. Same tiebreaker discipline the SQL side
 # already applies (search_queries.py's `data_id`, rarity_queries.py's
 # `release_id`) — expand_artist_aliases (ORDER BY id on unique item.id) was
-# already safe; these were not (groovemap-ypkc).
+# already safe; these were not.
 
 
 def _year_filter(before_year: int | None, *, compact: bool = False) -> str:
@@ -602,7 +601,7 @@ async def count_artist_aliases(driver: AsyncResilientNeo4jDriver, artist_name: s
     than one category (e.g. both ALIAS_OF and MEMBER_OF the same node) must
     contribute exactly one to this total, matching the one row expand_artist_aliases
     returns for it — otherwise pagination's `total` disagrees with the
-    enumerable row count (groovemap-1wiu).
+    enumerable row count.
     """
     cypher = """
     MATCH (a:Artist {name: $name})
@@ -899,7 +898,7 @@ def node_label_to_type(labels: list[str]) -> str:
     "Release") into the lowercase entity-type vocabulary the rest of the API
     uses. Both api/routers/explore.py's /api/path endpoint and the NLQ
     find_path tool (api/nlq/tools.py) build entities from the same
-    find_shortest_path node shape and must not diverge (groovemap-apt8).
+    find_shortest_path node shape and must not diverge.
     """
     for label in labels:
         lower = label.lower()

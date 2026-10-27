@@ -1,15 +1,15 @@
 """CLI tool for managing admin accounts.
 
 Usage:
-    admin-setup --email admin@example.com          # prompts for the password
-    admin-setup --list
+    catalog-admin-setup --email admin@example.com          # prompts for the password
+    catalog-admin-setup --list
 
 The password may also come from the ADMIN_PASSWORD (or ADMIN_PASSWORD_FILE)
 environment variable for non-interactive/scripted use. A bare --password
 CLI argument is intentionally NOT offered: command-line arguments are
 world-readable via /proc/*/cmdline for the life of the process and land
 verbatim in shell history, leaking the highest-privilege credential in the
-system (groovemap-dir0).
+system.
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ def _resolve_password() -> str:
     Command-line arguments are world-readable via /proc/*/cmdline for the life
     of the process (`ps aux`, `docker container top`) and land verbatim in
     shell history — for the highest-privilege account in the system, that is
-    an unconditional credential leak on every invocation (groovemap-dir0).
+    an unconditional credential leak on every invocation.
     ADMIN_PASSWORD / ADMIN_PASSWORD_FILE (via the repo's standard `get_secret`
     Docker-secrets convention) covers scripted/non-interactive use; an
     interactive getpass prompt (never echoed, never in argv or history)
@@ -88,10 +88,10 @@ def _resolve_password() -> str:
 
 
 def main() -> None:
-    """Entry point for the admin-setup CLI tool."""
+    """Entry point for the catalog-admin-setup CLI tool."""
     parser = argparse.ArgumentParser(
-        prog="admin-setup",
-        description="Manage admin accounts for the dashboard.",
+        prog="catalog-admin-setup",
+        description="Manage catalog-api administrator accounts.",
     )
     parser.add_argument("--email", metavar="EMAIL", help="Admin email address")
     parser.add_argument("--list", action="store_true", help="List existing admin accounts")

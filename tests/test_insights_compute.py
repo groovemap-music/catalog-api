@@ -484,7 +484,7 @@ class TestRarityScoresEndpoint:
         assert "error" in response.json()
 
     def test_503_on_transaction_timeout_client_error(self, test_client: TestClient) -> None:
-        """groovemap-lx1n: the 600s transaction timeout is a ClientError.
+        """The 600s transaction timeout is a ClientError.
 
         The previous handler only caught TransientError, so this escaped as an
         unhandled 500 on every production run.
@@ -537,7 +537,7 @@ class TestAnniversariesValidation:
 
 
 class TestInternalInsightsAuth:
-    """cu2.8: the /api/internal/insights/* router must not be anonymously reachable."""
+    """The /api/internal/insights/* router must not be anonymously reachable."""
 
     _PROTECTED_PATHS = (
         "/api/internal/insights/artist-centrality",

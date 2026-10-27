@@ -78,7 +78,7 @@ router = APIRouter(
 # Reuse api.syncer's rate-limit pacing constant rather than forking a second copy
 # — the two are explicit rate-limit siblings (both share MAX_RATE_LIMIT_RETRIES
 # against the same Discogs 60 req/min budget) and a fork previously let this value
-# drift out of sync with syncer.py's (groovemap-fnhk).
+# drift out of sync with syncer.py's.
 _ENRICHMENT_DELAY_SECONDS = SYNC_DELAY_SECONDS
 _STALENESS_DAYS = 7
 

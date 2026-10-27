@@ -144,7 +144,7 @@ class TestAdminLogin:
         assert resp.status_code == 403
 
     def test_success_does_not_log_email(self, test_client: TestClient, mock_cur: AsyncMock) -> None:
-        """groovemap-1385: admin login success log must carry user_id, not email."""
+        """Admin login success log must carry user_id, not email."""
         from structlog.testing import capture_logs
 
         admin_row = _make_admin_row()
@@ -707,7 +707,7 @@ class TestDlqPurge:
         assert resp.status_code == 502
 
     def test_purge_success_does_not_log_email(self, test_client: TestClient) -> None:
-        """groovemap-1385: DLQ-purge audit log must carry admin_id, not
+        """DLQ-purge audit log must carry admin_id, not
         the admin's email address (PII)."""
         from structlog.testing import capture_logs
 
@@ -976,7 +976,7 @@ class TestTrackExtraction:
             patch("api.routers.admin.asyncio.sleep", new_callable=AsyncMock),
             patch("api.routers.admin.httpx.AsyncClient") as mock_client_cls,
         ):
-            # groovemap-exnk: a run that produced records was necessarily observed
+            # A run that produced records was necessarily observed
             # running first — the tracker only accepts a terminal status after that.
             running_response = MagicMock()
             running_response.status_code = 200
@@ -1043,7 +1043,7 @@ class TestTrackExtraction:
             patch("api.routers.admin.asyncio.sleep", new_callable=AsyncMock),
             patch("api.routers.admin.httpx.AsyncClient") as mock_client_cls,
         ):
-            # groovemap-exnk: a run that produced records was necessarily observed
+            # A run that produced records was necessarily observed
             # running first — the tracker only accepts a terminal status after that.
             running_response = MagicMock()
             running_response.status_code = 200
@@ -1078,7 +1078,7 @@ class TestTrackExtraction:
 
     @pytest.mark.asyncio
     async def test_parked_waiting_is_not_recorded_as_success(self) -> None:
-        """groovemap-exnk: "waiting" is also the PARKED state before a trigger
+        """The "waiting" status is also the PARKED state before a trigger
         takes effect. If the extractor consumes the trigger and then fails before the
         run starts, status stays "waiting" forever — and because extraction_progress is
         only reset inside process_*_data, the phantom run carries the PREVIOUS run's
@@ -2004,7 +2004,7 @@ class TestAdminAuthSecurity:
 
 
 class TestTrackExtractionResilience:
-    """groovemap-cu2.57: the tracker polls every 10s for up to 24h and does
+    """The tracker polls every 10s for up to 24h and does
     resp.json() + PG writes inside the loop. A transient error (non-JSON body,
     PG disconnect) that is not an httpx.RequestError must NOT kill the task and
     leave the extraction_history row stuck in 'running' forever.

@@ -13,7 +13,7 @@ The API service:
 - Issues and validates HS256 JWT access tokens
 - Manages the Discogs OAuth 1.0a flow for users (OOB by default, registered callback when configured)
 - Stores Discogs OAuth access tokens in PostgreSQL
-- Reads Discogs app credentials from the `app_config` table (set via `discogs-setup` CLI)
+- Reads Discogs app credentials from the `app_config` table (set via the `catalog-setup` CLI)
 
 Catalog data arrives through independently owned
 [`discogs-ingestion`](https://github.com/groovemap-music/discogs-ingestion) and
@@ -78,6 +78,11 @@ JWT_EXPIRE_MINUTES=30     # Default: 30 minutes
 LOG_LEVEL=INFO
 ```
 
+This block is a starting point, not the full list. [`docs/configuration.md`](../docs/configuration.md)
+is the complete reference, including `INSIGHTS_INTERNAL_SECRET` (required for the internal
+analytics routes), `DISCOGS_OAUTH_CALLBACK_URL`, `APP_BASE_URL`, and the identity and
+similar-artist settings.
+
 ### JWT Authentication
 
 All tokens are HS256 JWTs containing:
@@ -118,19 +123,19 @@ Go to <https://www.discogs.com/settings/developers> and create a new application
 
 ### 2. Store Credentials via the CLI
 
-The `discogs-setup` CLI is included in the API container:
+The `catalog-setup` CLI is included in the API container:
 
 ```bash
 # Set credentials
-docker exec <api-container> discogs-setup \
+docker exec <api-container> catalog-setup \
   --consumer-key YOUR_CONSUMER_KEY \
   --consumer-secret YOUR_CONSUMER_SECRET
 
 # Verify (values are masked)
-docker exec <api-container> discogs-setup --show
+docker exec <api-container> catalog-setup --show
 ```
 
-The CLI upserts the values into the `app_config` table using the container's existing database connection environment variables. No service restart is required.
+The CLI upserts the values into the `app_config` table using the container's existing database connection environment variables, encrypting them first when `ENCRYPTION_MASTER_KEY` is set. No service restart is required.
 
 ### 3. Verify
 
@@ -143,11 +148,11 @@ discogs_consumer_secret: ef********************gh
 
 ### Error Without Credentials
 
-If a user attempts to start the Discogs OAuth flow before credentials are configured, the API returns:
+If a user attempts to start the Discogs OAuth flow before credentials are configured, the API returns `503` with:
 
 ```json
 {
-  "detail": "Discogs app credentials not configured. Ask an admin to run discogs-setup on the API container."
+  "detail": "Discogs app credentials not configured. Ask an admin to run catalog-setup on the API container."
 }
 ```
 
@@ -453,6 +458,10 @@ module docstring has the full design.
 
 ## API Endpoints
 
+The operator console's admin routes (session, extractions, audit log, DLQ purge, and extraction
+analysis) are documented in the [admin guide](../docs/admin-guide.md); this section covers
+the rest.
+
 ### Authentication
 
 | Method | Path                 | Auth Required | Rate Limit | Description                      |
@@ -461,26 +470,28 @@ module docstring has the full design.
 | POST   | `/api/auth/login`    | No            | 5/min      | Login and receive JWT token      |
 | POST   | `/api/auth/logout`   | Yes           | —          | Revoke JWT token (JTI blacklist) |
 | GET    | `/api/auth/me`       | Yes           | —          | Get current user details         |
-| POST   | `/api/auth/change-password` | Yes     | —          | Change password and revoke older sessions |
+| POST   | `/api/auth/change-password` | Yes     | 5/min      | Change password and revoke older sessions |
 
 ### Password Reset
 
-| Method | Path                      | Auth Required | Description                         |
-| ------ | ------------------------- | ------------- | ----------------------------------- |
-| POST   | `/api/auth/reset-request` | No            | Request a password reset email/link |
-| POST   | `/api/auth/reset-confirm` | No            | Confirm password reset with token   |
+| Method | Path                      | Auth Required | Rate Limit | Description                         |
+| ------ | ------------------------- | ------------- | ---------- | ----------------------------------- |
+| POST   | `/api/auth/reset-request` | No            | 3/min      | Request a password reset email/link |
+| POST   | `/api/auth/reset-confirm` | No            | 5/min      | Confirm password reset with token   |
 
 ### Two-Factor Authentication (TOTP 2FA)
 
-Requires `ENCRYPTION_MASTER_KEY` to be configured. All 2FA endpoints require JWT authentication.
+Requires `ENCRYPTION_MASTER_KEY` to be configured. Setup, confirm, and disable require JWT
+authentication. Verify and recovery complete a login instead: they take the short-lived
+`challenge_token` that `/api/auth/login` returns for a 2FA account, not a JWT.
 
-| Method | Path                     | Auth Required | Description                          |
-| ------ | ------------------------ | ------------- | ------------------------------------ |
-| POST   | `/api/auth/2fa/setup`    | Yes           | Generate TOTP secret and QR code URI |
-| POST   | `/api/auth/2fa/confirm`  | Yes           | Confirm 2FA setup with TOTP code     |
-| POST   | `/api/auth/2fa/verify`   | Yes           | Verify TOTP code during login        |
-| POST   | `/api/auth/2fa/recovery` | Yes           | Use a recovery code to bypass 2FA    |
-| POST   | `/api/auth/2fa/disable`  | Yes           | Disable 2FA for the account          |
+| Method | Path                     | Auth Required   | Rate Limit | Description                          |
+| ------ | ------------------------ | --------------- | ---------- | ------------------------------------ |
+| POST   | `/api/auth/2fa/setup`    | Yes             | —          | Generate TOTP secret and QR code URI |
+| POST   | `/api/auth/2fa/confirm`  | Yes             | —          | Confirm 2FA setup with TOTP code     |
+| POST   | `/api/auth/2fa/verify`   | Challenge token | 10/min     | Verify TOTP code during login        |
+| POST   | `/api/auth/2fa/recovery` | Challenge token | 5/min      | Use a recovery code to bypass 2FA    |
+| POST   | `/api/auth/2fa/disable`  | Yes             | —          | Disable 2FA for the account          |
 
 ### Discogs OAuth
 
@@ -696,10 +707,10 @@ Personalized endpoints that return data from the user's synced Discogs collectio
 
 | Method | Path                         | Auth Required | Description                              |
 | ------ | ---------------------------- | ------------- | ---------------------------------------- |
-| GET    | `/api/user/collection`       | Yes           | List user's collected releases           |
+| GET    | `/api/user/collection`       | JWT or `collection:read` token | List user's collected releases |
 | GET    | `/api/user/wantlist`         | Yes           | List user's wantlist releases            |
 | GET    | `/api/user/recommendations`  | Yes           | Get recommended releases                 |
-| GET    | `/api/user/collection/stats` | Yes           | Collection statistics summary            |
+| GET    | `/api/user/collection/stats` | JWT or `collection:read` token | Collection statistics summary |
 | GET    | `/api/user/status`           | Optional      | Check collection/wantlist status for IDs |
 
 **Native identity ([ADR 0009](https://github.com/groovemap-music/design/blob/main/docs/adr/0009-native-identity-and-provider-aliases.md)):**
@@ -756,7 +767,7 @@ Manage third-party app tokens for the authenticated user. The plaintext token is
 | ------ | ----------------------------- | ------------- | ------------------------------------------------ |
 | POST   | `/api/user/app-tokens`        | Yes           | Mint a new app token (plaintext returned once)  |
 | GET    | `/api/user/app-tokens`        | Yes           | List active and revoked tokens for the user     |
-| DELETE | `/api/user/app-tokens/{id}`   | Yes           | Revoke (tombstone) a token                      |
+| DELETE | `/api/user/app-tokens/{token_id}` | Yes       | Revoke (tombstone) a token                      |
 
 **Allowed scopes:** every scope below, and only these — an unknown scope is rejected at
 mint time with a `400`.
@@ -769,6 +780,7 @@ mint time with a `400`.
 | `consent:write`      | `PUT /api/user/consent/{purpose}`                  |
 | `observations:read`  | `GET /api/user/copies/{copy_id}/observations`      |
 | `observations:write` | `POST /api/user/copies/{copy_id}/observations`     |
+| `fit:read`           | `GET /api/fit/release/{release_id}` (capped profile only; see [Recommendations](#recommendations)) |
 
 No scope reaches `POST /api/user/erasure` or `GET /api/user/export`.
 
@@ -803,11 +815,11 @@ Save and restore graph exploration states as shareable URLs.
 
 ### Unified Search
 
-Full-text search across all entity types using PostgreSQL, with facet counts and result highlighting. Results are cached in Valkey for 5 minutes. The response's `facets` object carries `type`, `genre`, `decade`, and `media` — each a `{value: count}` mapping (`media` keyed by ADR 0007 family id), counted from matching releases.
+Full-text search across all entity types using PostgreSQL, with facet counts and result highlighting. Results are cached in Valkey for 1 hour. The response's `facets` object carries `type`, `genre`, `decade`, and `media` — each a `{value: count}` mapping (`media` keyed by ADR 0007 family id), counted from matching releases.
 
 | Method | Path          | Auth Required | Rate Limit | Description                                   |
 | ------ | ------------- | ------------- | ---------- | --------------------------------------------- |
-| GET    | `/api/search` | No            | 30/min     | Search artists, labels, masters, and releases |
+| GET    | `/api/search` | Optional      | 30/min     | Search artists, labels, masters, and releases |
 
 **Query parameters:**
 
@@ -815,15 +827,16 @@ Full-text search across all entity types using PostgreSQL, with facet counts and
 - `types` — Comma-separated entity types to search (default: `artist,label,master,release`)
 - `genres` — Comma-separated genre filter
 - `media` — Repeated media family or medium id to filter release results (e.g. `?media=vinyl&media=optical_cd`). Ids come from the ADR 0007 canonical media taxonomy vendored in `common.media` (`family_ids()` / `medium_ids()`); an unrecognised id returns `400` listing the unknown id(s). Family and medium ids are OR-combined with each other and AND-combined with `genres`/`year_min`/`year_max`. Only release results carry media — the filter is a no-op for artist/label/master results.
+- `country` — Repeated release country ([ADR 0011](https://github.com/groovemap-music/design/blob/main/docs/adr/0011-catalog-identifiers-and-manufacturing-credits.md)), matched exactly as the catalog stores it (Discogs writes country names). An unknown value matches nothing rather than returning `400`. Like `media`, it narrows release results only, and each release hit carries a top-level `country`.
+- `year_min` — Minimum release year (1000–9999)
+- `year_max` — Maximum release year (1000–9999)
+- `limit` — Results per page (1–100, default: 20)
+- `offset` — Pagination offset (default: 0)
 
 A signed-in caller's search is recorded as first-party activity (ADR 0010): one `search.query`
 event plus one `search.result_impression` event per hit shown. See
 [Native identity and first-party activity](../docs/identity-and-activity.md) for the emission
 detail, including how the `types` filter is represented in the recorded payload.
-- `year_min` — Minimum release year (1000–9999)
-- `year_max` — Maximum release year (1000–9999)
-- `limit` — Results per page (1–100, default: 20)
-- `offset` — Pagination offset (default: 0)
 
 ### Identifier Lookup
 
@@ -834,7 +847,7 @@ in hand rather than signed in.
 
 | Method | Path                             | Auth Required | Rate Limit | Description                                    |
 | ------ | -------------------------------- | ------------- | ---------- | ----------------------------------------------- |
-| GET    | `/api/lookup/{provider}/{value}` | No            | 30/min     | Resolve a barcode, catalogue number, or matrix  |
+| GET    | `/api/lookup/{provider}/{value}` | Optional      | 30/min     | Resolve a barcode, catalogue number, or matrix  |
 
 `provider` is one of `barcode`, `catalog_number`, or `matrix` — the alias namespaces ADR 0011
 mints. `value` is normalized with that namespace's declared rule before it is looked up (a
@@ -880,7 +893,7 @@ Find the shortest path between any two entities in the knowledge graph.
 - `from_type` — Source entity type (default: `artist`)
 - `to_name` (required) — Target entity name
 - `to_type` — Target entity type (default: `artist`)
-- `max_depth` — Maximum path depth (1–15, default: 10)
+- `max_depth` — Maximum path depth (1–10, default: 6)
 
 ### Collaborators
 
@@ -900,16 +913,16 @@ Multi-hop collaborator traversal, centrality scoring, and community detection vi
 
 | Method | Path                                     | Auth Required | Rate Limit | Description                                               |
 | ------ | ---------------------------------------- | ------------- | ---------- | --------------------------------------------------------- |
-| GET    | `/api/network/artist/{id}/collaborators` | No            | 30/min     | Multi-hop collaborators via shared releases (depth 1–3)   |
-| GET    | `/api/network/artist/{id}/centrality`    | No            | 30/min     | Degree centrality, collaborator count, group/alias counts |
-| GET    | `/api/network/cluster/{id}`              | No            | 30/min     | Community detection via genre-based clustering            |
+| GET    | `/api/network/artist/{artist_id}/collaborators` | No     | 30/min     | Multi-hop collaborators via shared releases (depth 1–3)   |
+| GET    | `/api/network/artist/{artist_id}/centrality`    | No     | 30/min     | Degree centrality, collaborator count, group/alias counts |
+| GET    | `/api/network/cluster/{artist_id}`              | No     | 30/min     | Community detection via genre-based clustering            |
 
-**Query parameters for `/api/network/artist/{id}/collaborators`:**
+**Query parameters for `/api/network/artist/{artist_id}/collaborators`:**
 
 - `depth` — Number of hops to traverse (1–3, default: 2)
 - `limit` — Maximum collaborators to return (1–200, default: 50)
 
-**Query parameters for `/api/network/cluster/{id}`:**
+**Query parameters for `/api/network/cluster/{artist_id}`:**
 
 - `limit` — Maximum cluster members to return (1–200, default: 50)
 
@@ -919,15 +932,15 @@ Artist similarity and personalized graph-traversal discovery, ranked by multi-di
 
 | Method | Path                                          | Auth Required | Rate Limit | Description                                                    |
 | ------ | ---------------------------------------------- | ------------- | ---------- | ---------------------------------------------------------------- |
-| GET    | `/api/recommend/similar/artist/{artist_id}`    | No            | 30/min     | Artists with the closest multi-dimensional similarity           |
-| GET    | `/api/recommend/explore/{entity_type}/{id}`    | Yes           | 30/min     | Personalized multi-hop traversal from an entity, ranked by taste |
+| GET    | `/api/recommend/similar/artist/{artist_id}`    | Optional      | 30/min     | Artists with the closest multi-dimensional similarity           |
+| GET    | `/api/recommend/explore/{entity_type}/{entity_id}` | Yes       | 30/min     | Personalized multi-hop traversal from an entity, ranked by taste |
 | GET    | `/api/fit/release/{release_id}`                | JWT or `fit:read` token | 30/min | CrateFit: the decomposed fit of one candidate release for the caller |
 
 **Query parameters for `/api/recommend/similar/artist/{artist_id}`:**
 
 - `limit` — Number of similar artists to return (1–50, default: 20)
 
-**Query parameters for `/api/recommend/explore/{entity_type}/{id}`:**
+**Query parameters for `/api/recommend/explore/{entity_type}/{entity_id}`:**
 
 - `entity_type` — One of `artist`, `label`, `genre`, `style`
 - `hops` — Number of hops to traverse (1–3, default: 2)
@@ -1175,7 +1188,7 @@ Temporal analysis of the authenticated user's collection, showing how their tast
 
 | Method | Path                             | Auth Required | Description                                     |
 | ------ | -------------------------------- | ------------- | ----------------------------------------------- |
-| GET    | `/api/user/collection/timeline`  | Yes           | Release count distribution by year or decade    |
+| GET    | `/api/user/collection/timeline`  | JWT or `collection:read` token | Release count distribution by year or decade |
 | GET    | `/api/user/collection/evolution` | Yes           | How genre, style, or label mix shifts over time |
 
 **Query parameters for `/api/user/collection/timeline`:**
@@ -1427,18 +1440,23 @@ replaces these synthetic figures with measurements on the first real catalog.
 
 Internal endpoints called by `analytics-engine` over HTTP to fetch raw query results. These wire
 paths retain `/insights/` for API compatibility and are not intended for direct external use.
+Every route requires the shared secret from `INSIGHTS_INTERNAL_SECRET` in the `X-Internal-Secret`
+header: a missing or wrong header is `401`, and with the variable unset every route answers
+`503`, so the router fails closed. Each route is limited to 5/min, and community enrichment to
+1/min.
 
 | Method | Path                                       | Auth Required | Description                           |
 | ------ | ------------------------------------------ | ------------- | ------------------------------------- |
-| GET    | `/api/internal/insights/artist-centrality` | No            | Artist centrality data from Neo4j     |
-| GET    | `/api/internal/insights/genre-trends`      | No            | Genre trend data from Neo4j           |
-| GET    | `/api/internal/insights/style-year-counts` | No            | Style and genre counts per release year, and style genre shares, from Neo4j |
-| GET    | `/api/internal/insights/style-landmarks`   | No            | Top 25 masters per style by release count, from Neo4j |
-| GET    | `/api/internal/insights/style-cotags`      | No            | Top 25 co-tagged styles per style by shared release count, from Neo4j |
-| GET    | `/api/internal/insights/label-longevity`   | No            | Label longevity data from Neo4j       |
-| GET    | `/api/internal/insights/anniversaries`     | No            | Anniversary data from PostgreSQL      |
-| GET    | `/api/internal/insights/data-completeness` | No            | Data completeness from both databases |
-| GET    | `/api/internal/insights/rarity-scores`     | No            | Rarity score data from PostgreSQL     |
+| GET    | `/api/internal/insights/artist-centrality` | Secret header | Artist centrality data from Neo4j     |
+| GET    | `/api/internal/insights/genre-trends`      | Secret header | Genre trend data from Neo4j           |
+| GET    | `/api/internal/insights/style-year-counts` | Secret header | Style and genre counts per release year, and style genre shares, from Neo4j |
+| GET    | `/api/internal/insights/style-landmarks`   | Secret header | Top 25 masters per style by release count, from Neo4j |
+| GET    | `/api/internal/insights/style-cotags`      | Secret header | Top 25 co-tagged styles per style by shared release count, from Neo4j |
+| GET    | `/api/internal/insights/label-longevity`   | Secret header | Label longevity data from Neo4j       |
+| GET    | `/api/internal/insights/anniversaries`     | Secret header | Anniversary data from Neo4j           |
+| GET    | `/api/internal/insights/data-completeness` | Secret header | Data completeness from PostgreSQL (cached in Valkey for 6 hours) |
+| GET    | `/api/internal/insights/rarity-scores`     | Secret header | Rarity score data from Neo4j and PostgreSQL |
+| GET    | `/api/internal/insights/community-enrichment` | Secret header | Fetch Discogs community have/want counts for collected releases (at most 1,500 per call) |
 
 ### Health
 
@@ -1522,9 +1540,9 @@ No endpoint or field is removed yet; all of the above remain readable and are st
 - **OAuth tokens encrypted at rest**: Discogs OAuth access tokens are encrypted with Fernet symmetric encryption using an HKDF-derived key from `ENCRYPTION_MASTER_KEY`
 - **TOTP 2FA**: Optional time-based one-time password with `pyotp`, Fernet-encrypted secrets, SHA-256 hashed recovery codes, brute-force lockout
 - **Password reset**: Valkey-backed tokens (15min TTL), anti-enumeration responses, session revocation on password change
-- **Rate limiting**: register (3/min), login (5/min), sync (10/min), autocomplete (30/min) via slowapi; per-user sync cooldown (60s) in Valkey
+- **Rate limiting**: per-route slowapi limits held in process memory (for example register 3/min, login 5/min, sync 10/min, autocomplete 30/min; see the tables above); per-user sync cooldown (60s) in Valkey
 - **Security response headers**: `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`
-- **CORS**: Configurable via `CORS_ORIGINS` env var (disabled by default)
+- **CORS**: Configurable via `CORS_ORIGINS` env var; when unset, only `http://localhost:3000` and `http://localhost:8003` are allowed
 - **Snapshots require auth**: `POST /api/snapshot` requires a valid JWT
 - **Container**: All endpoints run as non-root container user (UID 1000)
 

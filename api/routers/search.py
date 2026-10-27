@@ -131,7 +131,7 @@ async def search(
     """Search across artists, labels, masters, and releases using PostgreSQL full-text search.
 
     Returns relevance-ranked results with facet counts and result highlighting.
-    Results are cached in Valkey for 5 minutes.
+    Results are cached in Valkey for 1 hour.
     Rate limited to 30 requests/minute.
     """
     if _pool is None:

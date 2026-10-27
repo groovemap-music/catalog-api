@@ -49,10 +49,12 @@ the measured floor used by both local checks and CI.
 `just test-integration` starts disposable PostgreSQL and Neo4j containers on random
 loopback ports, runs the engine-backed query and collection-write regressions, and removes
 both containers on exit. It requires a running Docker engine and never targets configured
-development or production databases. The suite covers the historical credits-query grouping
-failure, collection-upsert preservation, query-helper result handling, invalid Cypher, and a
-real server-side query timeout. Pull-request CI supplies this command as the repository's
-separate integration lane; `just check` remains network-free.
+development or production databases. It applies the pinned `database-schema` DDL and covers the
+historical credits-query grouping failure, collection-upsert preservation, query-helper result
+handling, invalid Cypher, a real server-side query timeout, catalog re-attachment and its
+automatic watcher, the Identity Ledger backfill and routes, barcode lookup, and the precomputed
+similar-artist reads. Pull-request CI supplies this command as the repository's separate
+integration lane; `just check` remains network-free.
 
 `just integration-valkey` is a separate opt-in check. It starts the production-pinned Valkey
 with a tiny `maxmemory` under `noeviction`, plus PostgreSQL, both as throwaway loopback
@@ -72,11 +74,11 @@ exposes a Prometheus scrape endpoint of its own. It reads only the standard Open
 environment variables; with `OTEL_EXPORTER_OTLP_ENDPOINT` unset it installs a no-op meter
 provider and a no-op tracer provider and behaves exactly as it did before.
 
-Alongside the HTTP, database, cache, sync, and NLQ metrics it records, the service reports
-the process view and event-loop lag that `groovemap-runtime` installs, and it opens two
-domain root spans of its own: `api.sync` for a Discogs collection and wantlist sync, and
-`api.nlq` for a natural-language query. Request, outbound-HTTP, and database spans come from
-the instrumentations and the shared resilient wrappers. The
+Alongside the HTTP, database, cache, sync, NLQ, activity, and Identity Ledger refresh metrics
+it records, the service reports the process view and event-loop lag that `groovemap-runtime`
+installs, and it opens two domain root spans of its own: `api.sync` for a Discogs collection
+and wantlist sync, and `api.nlq` for a natural-language query. Request, outbound-HTTP, and
+database spans come from the instrumentations and the shared resilient wrappers. The
 [configuration guide](docs/configuration.md#opentelemetry-metrics-and-traces) lists the
 variables, the metrics, and the spans.
 
@@ -93,8 +95,8 @@ variables, the metrics, and the spans.
 
 ## Release and license
 
-This repository versions one service wheel and container image. Commitizen reads the PEP
-621 version and uses annotated `v$version` tags. `just release-dry-run` creates local
+This repository versions one service wheel and its two container images, `catalog-api`
+and `catalog-api-performance`. Commitizen reads the PEP 621 version and uses annotated `v$version` tags. `just release-dry-run` creates local
 checksums, an SBOM, notices, and provenance without tagging, pushing, publishing, or
 releasing.
 

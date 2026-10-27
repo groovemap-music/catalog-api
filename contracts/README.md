@@ -2,16 +2,19 @@
 
 `catalog-api` consumes two upstream contracts. Both are promoted from a reviewed,
 immutable commit of the owning repository rather than edited here; `scripts/check-
-contracts.py` (`just source-check`) digest-verifies every promoted file against its
-`source.json` record.
+contracts.py` (`just contract-check`, also run by `just source-check`) digest-verifies
+every promoted file against its `source.json` record.
 
 ## `persistence/v1`
 
 `database-schema` owns Neo4j and PostgreSQL compatibility. `compatibility.json` is
 promoted byte-for-byte from `database-schema`; `source.json` records the producer commit
-and the file's SHA-256 digest. `compatibility.json`'s `application_runtime.tested_commit`
-must equal the `groovemap-runtime` / `groovemap-agent-tools` revision pinned in
-`pyproject.toml`'s `[tool.uv.sources]` -- the check script asserts the two match.
+and the file's SHA-256 digest. Because the promoted file stays byte-identical, the runtime
+this repository actually tests against is recorded separately in the consumer-owned
+`consumer-runtime.json`: its `producer_compatibility_sha256` must equal the promoted
+digest, and its `application_runtime.tested_commit` must equal the `groovemap-runtime` /
+`groovemap-agent-tools` revision pinned in `pyproject.toml`'s `[tool.uv.sources]` -- the
+check script asserts both.
 
 ## `catalog-events/v1`
 
@@ -71,7 +74,7 @@ promotion that silently shifts a name is caught immediately.
    `tests/test_catalog_contract_frozen_identifiers.py` -- a diff there is a durable AMQP
    identifier moving and must be treated as a breaking, coordinated rollout, not a
    routine promotion.
-5. Run `just source-check` (or at least `python scripts/check-contracts.py`) to confirm
+5. Run `just source-check` (or at least `just contract-check`) to confirm
    every promoted file and its `source.json` agree.
 
 Never write an absolute host path into any `source.json` or other tracked file -- only

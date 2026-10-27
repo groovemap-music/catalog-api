@@ -35,7 +35,7 @@ def _make_pool_with_row(row: dict[str, Any] | None) -> MagicMock:
     If `row` doesn't set its own "token_hash", it's auto-filled with whatever
     token_hash the query was actually invoked with, so the defense-in-depth
     `hmac.compare_digest(row["token_hash"], token_hash)` check
-    (groovemap-osoc) naturally passes for tests that aren't specifically
+    naturally passes for tests that aren't specifically
     exercising a hash mismatch.
     """
     pool = MagicMock()
@@ -124,7 +124,7 @@ class TestHashToken:
 
 
 class TestLookupActiveTokenQuery:
-    """groovemap-ci4a: a deactivated user's app tokens must stop authenticating.
+    """A deactivated user's app tokens must stop authenticating.
 
     _lookup_active_token now joins `users` and filters `is_active = TRUE`
     instead of a bare token_hash/revoked_at lookup on app_tokens alone.
@@ -144,8 +144,7 @@ class TestLookupActiveTokenQuery:
     @pytest.mark.asyncio
     async def test_selects_token_hash_for_defense_in_depth(self) -> None:
         """The row must project its own token_hash so callers can do a real
-        compare_digest check instead of comparing a value to itself
-        (groovemap-osoc)."""
+        compare_digest check instead of comparing a value to itself."""
         pool = _make_pool_with_row(None)
         configure(pool)
         await app_tokens._lookup_active_token("deadbeef")
@@ -229,7 +228,7 @@ class TestRequireAppTokenFailureModes:
 
     @pytest.mark.asyncio
     async def test_defense_in_depth_rejects_row_hash_mismatch(self) -> None:
-        """groovemap-osoc: the compare_digest guard must be a REAL check
+        """The compare_digest guard must be a REAL check
         against the row's own persisted token_hash, not a self-comparison of
         hash_token(plaintext) against itself. Forcing the row's token_hash to
         diverge from the lookup hash must make the guard fire (401) — the

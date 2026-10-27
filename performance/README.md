@@ -22,7 +22,6 @@ exhaustive inventory of every Catalog API route.
 | `GET /api/genre-tree`                               | Neo4j                           |
 | `GET /api/graph/stats`                              | Neo4j                           |
 | `GET /api/insights/top-artists`                     | Neo4j (via insights proxy)      |
-| `GET /api/insights/genre-trends`                    | Neo4j (via insights proxy)      |
 | `GET /api/insights/label-longevity`                 | Neo4j (via insights proxy)      |
 | `GET /api/insights/this-month`                      | Neo4j (via insights proxy)      |
 | `GET /api/insights/data-completeness`               | PostgreSQL (via insights proxy) |
@@ -31,13 +30,14 @@ exhaustive inventory of every Catalog API route.
 
 ### Parameterized Endpoints (driven by config)
 
-| Endpoint                | Test Coverage                    | Database   |
-| ----------------------- | -------------------------------- | ---------- |
-| `GET /api/autocomplete` | Each artist, genre, style, label | Neo4j      |
-| `GET /api/explore`      | Each artist, genre, style, label | Neo4j      |
-| `GET /api/trends`       | Each artist, genre, style, label | Neo4j      |
-| `GET /api/search`       | Each entity name                 | PostgreSQL |
-| `GET /api/path`         | All artist pair combinations     | Neo4j      |
+| Endpoint                         | Test Coverage                    | Database                   |
+| -------------------------------- | -------------------------------- | -------------------------- |
+| `GET /api/insights/genre-trends` | Each genre                       | Neo4j (via insights proxy) |
+| `GET /api/autocomplete`          | Each artist, genre, style, label | Neo4j                      |
+| `GET /api/explore`               | Each artist, genre, style, label | Neo4j                      |
+| `GET /api/trends`                | Each artist, genre, style, label | Neo4j                      |
+| `GET /api/search`                | Each entity name                 | PostgreSQL                 |
+| `GET /api/path`                  | All artist pair combinations     | Neo4j                      |
 
 ### ID-Resolved Endpoints (IDs resolved via autocomplete)
 
@@ -64,7 +64,8 @@ removed from the configuration.
 
 ## Prerequisites
 
-The GrooveMap stack must be running with data loaded:
+The GrooveMap stack must be running with data loaded. From a
+[`deployment`](https://github.com/groovemap-music/deployment) checkout:
 
 ```bash
 docker compose up -d
@@ -105,7 +106,7 @@ docker run --rm \
 Before running a performance test, truncate the API and profiling logs so results only contain queries from this run. This prevents stale data from prior sessions mixing into the profiling output:
 
 ```bash
-docker exec catalog-api sh -c 'truncate -s 0 /logs/api.log /logs/profiling.log 2>/dev/null; echo "Logs cleared"'
+docker exec groovemap-api sh -c 'truncate -s 0 /logs/api.log /logs/profiling.log 2>/dev/null; echo "Logs cleared"'
 ```
 
 > **Why this matters:** Profiling logs accumulate across API restarts and prior test runs. Without truncating, the profiling output contains queries from different code versions and cache states, making it hard to attribute execution plans to specific query changes.
@@ -115,8 +116,8 @@ docker exec catalog-api sh -c 'truncate -s 0 /logs/api.log /logs/profiling.log 2
 After the performance test completes, copy logs from the API container into your results directory:
 
 ```bash
-docker cp catalog-api:/logs/api.log ./perftest-results/
-docker cp catalog-api:/logs/profiling.log ./perftest-results/
+docker cp groovemap-api:/logs/api.log ./perftest-results/
+docker cp groovemap-api:/logs/profiling.log ./perftest-results/
 ```
 
 > **Tip:** To capture database profiling data, restart the API with `LOG_LEVEL=DEBUG` and `DB_PROFILING=true` before running the performance test. This writes Cypher PROFILE and SQL EXPLAIN (ANALYZE, BUFFERS, VERBOSE) execution plans to `profiling.log`.
@@ -140,6 +141,10 @@ The test is driven by a `config.yaml` file mounted at `/config/config.yaml`. The
 ```yaml
 api_base_url: "http://api:8004"
 health_url: "http://api:8005/health"
+neo4j_uri: "bolt://neo4j:7687"      # Optional: index listing in the report
+neo4j_user: "neo4j"
+neo4j_password: "groovemap"
+postgres_url: "postgresql://groovemap:groovemap@postgres:5432/groovemap"
 iterations: 3          # Times each endpoint is called
 timeout: 30            # HTTP request timeout (seconds)
 health_retries: 30     # Health check retries before giving up
@@ -164,12 +169,26 @@ labels:
   - Hooj Choons
   - Reprise Records
   - Tracid Traxx
+
+credited_persons:
+  - Bob Ludwig
+  - Flood
+  - Alan Moulder
+
+credit_role_categories:
+  - mastering
+  - production
+  - engineering
 ```
+
+The default file also defines two `nlq_scenarios` (`POST /api/nlq/query` and
+`GET /api/nlq/suggestions`).
 
 ### Configuration Notes
 
 - **Entity names must exist in your dataset.** If an entity is not found via autocomplete, ID-resolved endpoints for that entity are skipped.
 - **Artist pairs** are generated as all combinations (not permutations) — 4 artists produce 6 pairs.
+- **Database connections are optional.** `neo4j_uri`, `neo4j_user`, `neo4j_password`, and `postgres_url` are used only to list indexes at the top of the report; the listing is skipped when they are absent.
 - **Iterations** controls statistical accuracy. Use 1 for a quick smoke test, 5+ for reliable p95 values.
 
 ## Results
@@ -178,7 +197,7 @@ After a run, `perftest-results/` contains:
 
 | File                    | Description                                                                                                                           |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `perftest-report.txt`   | Human-readable report with per-endpoint stats grouped by category, top 10 slowest endpoints, and summary                              |
+| `perftest-report.txt`   | Human-readable report with database indexes, per-endpoint stats grouped by category, summary, and top 10 slowest endpoints            |
 | `perftest-results.json` | Machine-readable JSON with full timing data for every individual run                                                                  |
 | `api.log`               | API service log (copied via `docker cp` after the run)                                                                                |
 | `profiling.log`         | Database profiling output — Cypher PROFILE and SQL EXPLAIN plans (copied via `docker cp` after the run, requires `DB_PROFILING=true`) |

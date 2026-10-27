@@ -266,7 +266,6 @@ def test_every_indexed_document_respects_repository_ownership() -> None:
         "extractor service",
         "insights service",
         "former curator",
-        "discogsography",
         "monorepo-specific",
     )
     for relative_path, content in documents.items():

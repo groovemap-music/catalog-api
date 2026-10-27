@@ -43,6 +43,7 @@ password in the environment. Do not set both forms to conflicting values.
 | `POSTGRES_PORT` | `5432` | PostgreSQL port when it is not embedded in `POSTGRES_HOST` |
 | `POSTGRES_POOL_MIN_SIZE` | `2` | Minimum API pool size |
 | `POSTGRES_POOL_MAX_SIZE` | `8` | Maximum API pool size |
+| `NEO4J_PORT` | `7687` | Bolt port used when `NEO4J_HOST` is a bare host; ignored for a full URI |
 | `NEO4J_TLS_ENABLED` | `false` | Enable Bolt TLS for a host without a TLS URI scheme |
 | `NEO4J_TLS_VERIFY` | `true` | Verify the Bolt certificate when TLS is enabled |
 | `VALKEY_HOST` | `localhost` | Valkey hostname; supply a host, not a URL |
@@ -66,7 +67,7 @@ TLS policy. Deployment-specific certificate and network guidance belongs in `dep
 | `DISCOGS_USER_AGENT` | `GrooveMap-catalog-api/1.0 +https://github.com/groovemap-music/catalog-api` | Discogs request identity |
 | `DISCOGS_OAUTH_CALLBACK_URL` | unset | Registered public Discogs callback; unset retains the OOB flow |
 | `APP_BASE_URL` | `http://localhost:8006` | Public browser origin used in email links |
-| `CORS_ORIGINS` | unset | Comma-separated allowed origins; unset disables CORS |
+| `CORS_ORIGINS` | unset | Comma-separated allowed origins; unset allows only the local development origins `http://localhost:3000` and `http://localhost:8003` |
 | `ENCRYPTION_MASTER_KEY` | unset | HKDF input for OAuth and TOTP encryption |
 
 `APP_BASE_URL` is a user-facing origin, not an internal API address. Set it to the real HTTPS
@@ -126,6 +127,7 @@ API does not schedule or coordinate ingestion.
 | `NLQ_CACHE_TTL` | `3600` | NLQ cache lifetime in seconds |
 | `NLQ_RATE_LIMIT` | `10/minute` | Per-client rate limit |
 | `LOG_LEVEL` | `INFO` | API and server log level |
+| `ENVIRONMENT` | `development` | Deployment name written as the `environment` field of every log record |
 | `LOG_FILE_MAX_BYTES` | `104857600` | Size in bytes at which `/logs/api.log` rolls over |
 | `LOG_FILE_BACKUP_COUNT` | `5` | Number of rotated `/logs/api.log` backups retained |
 | `FORWARDED_ALLOW_IPS` | `172.20.0.0/16` | Trusted proxy addresses for Uvicorn |
@@ -166,13 +168,16 @@ ever carries an identifier, a cache key, or free text.
 
 | Metric | Attributes |
 | --- | --- |
-| `http.server.request.duration` | `http.request.method`, `http.route` (the templated path), `http.response.status_code`; `/health` is excluded |
+| `http.server.request.duration` | `http.request.method`, `http.route` (the templated path), `http.response.status_code`; `/health` and `/ready` are excluded |
 | `http.client.request.duration` | `http.request.method`, `server.address`, `http.response.status_code`; covers analytics-engine, Discogs, and Anthropic |
 | `db.client.operation.duration` | `db.system.name` (`postgresql`, `neo4j`, or `valkey`), `db.operation.name`, `error.type` on failure |
 | `groovemap.api.sync.duration` | `outcome` (`completed`, `failed`, `cancelled`) |
 | `groovemap.api.cache` | `outcome` (`hit`, `miss`), `cache` (the logical Valkey cache) |
 | `groovemap.api.cache.write_failures` | `cache` (the logical Valkey cache), `error.type` (the exception class) |
 | `groovemap.api.nlq.requests` | `outcome` (`success`, `cached`, `error`, `invalid`, `unavailable`) |
+| `groovemap.api.activity_events` | `event_type` (the version 1 event vocabulary, plus `impression`) |
+| `groovemap.api.activity_failures` | `outcome` (`invalid`, `not_configured`, `no_native_id`, `no_subject`, `write_failed`) |
+| `groovemap.api.identity_ledger.refreshes` | `trigger` (`reattach`, `backfill`, `poll`), `outcome` (`success`, `failed`) |
 
 Cache writes are best-effort: a failed write never fails the request. Each one increments
 `groovemap.api.cache.write_failures` and logs a `Cache write failed` warning, at most once a
@@ -256,7 +261,7 @@ Anthropic, or Resend connections.
 ## Operator-owned credentials
 
 Discogs application credentials are stored in PostgreSQL rather than environment variables.
-Use the packaged `discogs-setup` CLI from the deployed API container; its output masks values.
+Use the packaged `catalog-setup` CLI from the deployed API container; its output masks values.
 The [API service guide](../api/README.md#operator-setup) documents that operation.
 
 For runtime secret mounts, container topology, and environment promotion, follow the

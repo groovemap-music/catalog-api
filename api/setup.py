@@ -1,8 +1,8 @@
 """CLI tool for configuring Discogs app credentials in the database.
 
 Run via docker exec on the API container:
-    docker exec <container> discogs-setup --consumer-key KEY --consumer-secret SECRET
-    docker exec <container> discogs-setup --show
+    docker exec <container> catalog-setup --consumer-key KEY --consumer-secret SECRET
+    docker exec <container> catalog-setup --show
 """
 
 import argparse
@@ -88,9 +88,9 @@ def set_config(conninfo: str, consumer_key: str, consumer_secret: str) -> None:
 
 
 def main() -> None:
-    """Entry point for the discogs-setup CLI tool."""
+    """Entry point for the catalog-setup CLI tool."""
     parser = argparse.ArgumentParser(
-        prog="discogs-setup",
+        prog="catalog-setup",
         description="Configure Discogs app credentials in the database.",
         epilog=("Reads DB connection from environment variables: POSTGRES_HOST, POSTGRES_USERNAME, POSTGRES_PASSWORD, POSTGRES_DATABASE"),
     )

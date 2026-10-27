@@ -117,7 +117,7 @@ class TestTemporalScarcityScore:
         assert score == 50.0
 
     def test_future_dated_release_floors_at_zero(self) -> None:
-        """groovemap-cu2.94: a typo'd/erroneous future year (e.g. 2050) must not
+        """A typo'd/erroneous future year (e.g. 2050) must not
         drive the score negative — the age-based base is floored at 0.0, matching the
         existing upper-bound cap at 100.0.
         """
@@ -937,7 +937,7 @@ class TestFetchAllRaritySignals:
 
     @pytest.mark.asyncio
     async def test_pressing_query_uses_two_optional_matches(self) -> None:
-        """groovemap-cu2.75: the master lookup and sibling lookup must be two
+        """The master lookup and sibling lookup must be two
         separate OPTIONAL MATCHes. A single combined pattern makes `m` (and therefore
         pressing_count) null whenever the release is its master's ONLY pressing —
         misclassifying the rarest pressing case as "no master link".
@@ -978,7 +978,7 @@ class TestFetchAllRaritySignals:
 
     @pytest.mark.asyncio
     async def test_sole_pressing_of_master_scores_as_unique_not_standalone(self) -> None:
-        """groovemap-cu2.75: a release that IS linked to a master but has no
+        """A release that IS linked to a master but has no
         sibling pressings must score pressing_count=1 (-> 100.0, unique pressing),
         not pressing_count=0 (-> 90.0, standalone/no-master-link).
         """
@@ -1011,7 +1011,7 @@ class TestFetchAllRaritySignals:
 
 
 class TestRarityPaginationTiebreaker:
-    """groovemap-cu2.55: rarity_score / hidden_gem_score are heavily
+    """The rarity_score / hidden_gem_score values are heavily
     quantized (round(..., 1)), so OFFSET pagination without a unique tiebreaker
     duplicates and skips rows across pages. Every paginated ORDER BY must append
     the unique release_id column.
@@ -1077,7 +1077,7 @@ class TestRarityPaginationTiebreaker:
 
 
 class TestRarityChunking:
-    """groovemap-lx1n: the rarity signal scans must never run unbounded.
+    """The rarity signal scans must never run unbounded.
 
     Eight full-graph `MATCH (r:Release)` scans blew Neo4j's 600s
     db.transaction.timeout on every production run, failing release_rarity 33
