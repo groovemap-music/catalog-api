@@ -16,6 +16,7 @@ from common.config import (
 
 
 DEFAULT_FUSION_ALPHA = 0.8  # gm-analytics-engine-8ts dev-selected weight on the embedding cosine
+DEFAULT_INSIGHTS_BASE_URL = "http://insights:8008"
 DEFAULT_DISCOGS_USER_AGENT = "GrooveMap-catalog-api/1.0 +https://github.com/groovemap-music/catalog-api"
 
 
@@ -74,6 +75,7 @@ class ApiConfig:
     snapshot_max_nodes: int = 100
     encryption_master_key: str | None = field(default=None, repr=False)
     insights_internal_secret: str | None = field(default=None, repr=False)
+    insights_base_url: str = DEFAULT_INSIGHTS_BASE_URL
     resend_api_key: str | None = field(default=None, repr=False)
     resend_sender_email: str = "noreply@groovemap.music"
     resend_sender_name: str = "GrooveMap"
@@ -155,6 +157,7 @@ class ApiConfig:
             snapshot_max_nodes=_env_int("SNAPSHOT_MAX_NODES", 100),
             encryption_master_key=get_secret("ENCRYPTION_MASTER_KEY") or None,
             insights_internal_secret=get_secret("INSIGHTS_INTERNAL_SECRET") or None,
+            insights_base_url=(getenv("INSIGHTS_BASE_URL") or DEFAULT_INSIGHTS_BASE_URL).strip().rstrip("/"),
             resend_api_key=get_secret("RESEND_API_KEY") or None,
             resend_sender_email=getenv("RESEND_SENDER_EMAIL", "noreply@groovemap.music"),
             resend_sender_name=getenv("RESEND_SENDER_NAME", "GrooveMap"),

@@ -337,3 +337,103 @@ class TestInsightsForwardClient:
         mock_instance.__aenter__.assert_awaited_once()
         mock_instance.__aexit__.assert_awaited_once()
         assert result.status_code == 200
+
+
+class TestInsightsConfiguredUrl:
+    """The configured analytics-engine URL is what outbound requests use."""
+
+    @pytest.mark.asyncio
+    async def test_forward_uses_configured_base_url(self) -> None:
+        import api.routers.insights as mod
+
+        original = mod._INSIGHTS_BASE_URL
+        captured: list[str] = []
+
+        class FakeClient:
+            def __init__(self, *_a: object, **_k: object) -> None:
+                pass
+
+            async def __aenter__(self) -> FakeClient:
+                return self
+
+            async def __aexit__(self, *_a: object) -> None:
+                return None
+
+            async def get(self, url: str) -> MagicMock:
+                captured.append(url)
+                resp = MagicMock()
+                resp.json.return_value = {}
+                resp.status_code = 200
+                return resp
+
+        request = MagicMock()
+        request.url.query = "limit=5"
+        try:
+            mod.configure("http://analytics.internal:9100/")
+            with patch("api.routers.insights.httpx.AsyncClient", FakeClient):
+                await mod._forward(request, "/api/insights/status")
+        finally:
+            mod._INSIGHTS_BASE_URL = original
+        assert captured == ["http://analytics.internal:9100/api/insights/status?limit=5"]
+
+    def test_default_url_unchanged(self) -> None:
+        import api.routers.insights as mod
+        from api.config import DEFAULT_INSIGHTS_BASE_URL
+
+        assert DEFAULT_INSIGHTS_BASE_URL == "http://insights:8008"
+        assert mod._INSIGHTS_BASE_URL == "http://insights:8008"
+
+    def test_from_env_reads_insights_base_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from api.config import ApiConfig
+
+        for k, v in {
+            "POSTGRES_HOST": "h",
+            "POSTGRES_USERNAME": "u",
+            "POSTGRES_PASSWORD": "p",
+            "POSTGRES_DATABASE": "d",
+            "JWT_SECRET_KEY": "x" * 32,
+            "NEO4J_HOST": "bolt://n:7687",
+            "NEO4J_USERNAME": "n",
+            "NEO4J_PASSWORD": "p",
+        }.items():
+            monkeypatch.setenv(k, v)
+        monkeypatch.delenv("INSIGHTS_BASE_URL", raising=False)
+        assert ApiConfig.from_env().insights_base_url == "http://insights:8008"
+        monkeypatch.setenv("INSIGHTS_BASE_URL", "http://analytics.internal:9100/")
+        assert ApiConfig.from_env().insights_base_url == "http://analytics.internal:9100"
+
+    @pytest.mark.asyncio
+    async def test_lifespan_calls_configure_with_config_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import dataclasses
+
+        import api.api as api_module
+        import api.routers.insights as mod
+        from api.api import lifespan
+        from tests.test_api import TestLifespanShutdownClosesAnthropicClient as Helper
+
+        monkeypatch.setenv("NLQ_ENABLED", "false")
+        monkeypatch.delenv("NLQ_API_KEY", raising=False)
+        config = dataclasses.replace(Helper._make_config(), insights_base_url="http://analytics.internal:9100")
+        health = MagicMock()
+        pool = MagicMock()
+        pool.initialize = AsyncMock()
+        pool.close = AsyncMock()
+        valkey = AsyncMock()
+        neo4j = MagicMock()
+        neo4j.close = AsyncMock()
+        original = mod._INSIGHTS_BASE_URL
+        try:
+            with (
+                patch("api.api.ApiConfig.from_env", return_value=config),
+                patch("api.api.HealthServer", return_value=health),
+                patch("api.api.AsyncPostgreSQLPool", return_value=pool),
+                patch("api.api.reconcile_stale_sync_history", new_callable=AsyncMock),
+                patch("api.api.aiovalkey.from_url", new_callable=AsyncMock, return_value=valkey),
+                patch("api.api.AsyncResilientNeo4jDriver", return_value=neo4j),
+                patch("api.api._prewarm_search_cache", new_callable=AsyncMock),
+            ):
+                async with lifespan(MagicMock()):
+                    assert mod._INSIGHTS_BASE_URL == "http://analytics.internal:9100"
+        finally:
+            mod._INSIGHTS_BASE_URL = original
+            api_module._pool = api_module._config = api_module._valkey = api_module._neo4j = None

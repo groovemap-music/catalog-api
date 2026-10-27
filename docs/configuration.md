@@ -78,6 +78,7 @@ origin in production so password-reset links do not point at localhost.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `INSIGHTS_INTERNAL_SECRET` | unset | Shared secret for the internal Analytics router; unset fails closed |
+| `INSIGHTS_BASE_URL` | `http://insights:8008` | Base URL of the analytics-engine that `/api/insights/*` requests are proxied to; a trailing slash is ignored |
 | `RESEND_API_KEY` | unset | Optional transactional-email API key |
 | `RESEND_SENDER_EMAIL` | `noreply@groovemap.music` | Transactional-email sender |
 | `RESEND_SENDER_NAME` | `GrooveMap` | Transactional-email display name |

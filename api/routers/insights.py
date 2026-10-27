@@ -21,7 +21,7 @@ def configure(insights_base_url: str | None = None) -> None:
     """Configure the insights proxy."""
     global _INSIGHTS_BASE_URL
     if insights_base_url:
-        _INSIGHTS_BASE_URL = insights_base_url
+        _INSIGHTS_BASE_URL = insights_base_url.rstrip("/")
 
 
 async def _forward(request: Request, path: str) -> JSONResponse:
