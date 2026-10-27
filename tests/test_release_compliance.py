@@ -283,7 +283,7 @@ def test_every_indexed_document_respects_repository_ownership() -> None:
             "/api/internal/insights/",
             "`/insights/`",
         ),
-        "docs/configuration.md": ("`extractor-discogs`", "`extractor-musicbrainz`", "`http://insights:8008`"),
+        "docs/configuration.md": ("`extractor-discogs`", "`extractor-musicbrainz`", "`http://insights:8008`", "`/api/insights/*`"),
         "docs/database-resilience.md": ("`/api/insights/*`",),
         "docs/usage-examples.md": ("/api/insights/",),
     }
