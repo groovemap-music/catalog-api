@@ -131,9 +131,32 @@ only the batch total, and with it `rowcount` is the last statement's alone). The
 keeps the original's `occurred_at`; the retry does not move it.
 
 Only an emission point with a natural key benefits. The outcome endpoint keys on
-`{event_type}:{impression_id}`; search and lookup key on their request id, and the consent,
-erasure, and export events on the request's timestamp, so those never collide. An event with no
-key passed gets a fresh id: safe to write, never deduplicated.
+`{event_type}:{impression_id}`; search and lookup key on their request id; the erasure and
+export events key on the id minted for the request and carried in their payload
+(`account.erasure_requested:{erasure_id}`, `account.export_requested:{export_id}`), so a second
+write of one request's event is skipped and a new request is a new event; and the consent events
+key on the request's timestamp, so those never collide. An event with no key passed gets a fresh
+id: safe to write, never deduplicated.
+
+**No key names the account.** `activity.events` carries the pseudonymous `subject_id` and never
+the user id, and the claim trigger copies every key into `activity.event_idempotency` beside that
+subject — so a user id in a key would name the pseudonym's owner in both tables in plain text. A
+key is built from the event type and a request, impression, or purpose, never from the caller.
+The erasure and export keys use the request id rather than the subject: the request id needs no
+lookup, which on export can fail, and no subject link, which erasure deletes moments later.
+`tests/test_activity_request_keys_integration.py` reads back every column of both stored rows
+for each event and asserts the user id is in none of them.
+
+**Rows written before this rule.** Earlier builds keyed these two events
+`{event_type}:{user_id}:{timestamp}`. Nothing rewrites such a row in place: `activity.events`
+rejects an UPDATE outside the erasure bypass, and `activity.event_idempotency` rejects one while
+the key's event is stored. What removes them is erasure. An `account.erasure_requested` row is
+deleted by the very erasure it announced (with every other event for the subject, the release
+trigger following with its key); one survives only if that erasure's PostgreSQL transaction
+rolled back, and the next successful erasure removes it. An `account.export_requested` row
+persists, user id and all, until the account is erased or its month partition is dropped by
+retention (after which `activity.purge_idempotency_keys` removes the key). Rewriting the
+surviving rows sooner is a data migration under the bypass, and belongs to `database-schema`.
 
 ### Where the vocabulary the implementation resolved differs from a casual reading
 
@@ -167,7 +190,8 @@ implementation follows the schema:
   lookup).
 - **`account.export_requested` and `account.erasure_requested` carry `export_id`/`format` and
   `erasure_id`.** Each is minted fresh at request time and put in the event payload, ahead of
-  (and independent from) the ids the endpoints return in their HTTP response.
+  (and independent from) the ids the endpoints return in their HTTP response. The same id is
+  the event's idempotency key, after the event type.
 
 ### Emission points
 
@@ -293,7 +317,8 @@ caller, across every store, in this order:
 4. **Revoke the caller's own token.**
 
 Consent revocation is not a prerequisite; erasure implies it. `account.erasure_requested` is
-emitted *before* the procedure runs (so a concurrent reader sees the request in the stream) and
+emitted *before* the procedure runs (so a concurrent reader sees the request in the stream),
+keyed on its `erasure_id` rather than on the account, and
 is then itself deleted along with every other event for the subject — the durable record of the
 erasure is the `activity.erasures` row, which survives.
 
@@ -335,7 +360,8 @@ order over one PostgreSQL connection, so two exports of unchanged data are byte-
    full in section 5
 9. `consent_grant` — `activity.consent_grants` rows
 
-`account.export_requested` is emitted before streaming begins. The response carries
+`account.export_requested` is emitted before streaming begins, keyed on its `export_id` (see
+[Retried events are recorded once](#retried-events-are-recorded-once)). The response carries
 `Content-Disposition: attachment; filename="groovemap-export.ndjson"`.
 
 ## See also
