@@ -34,7 +34,7 @@ PRESSING_WEIGHT: Final[float] = 0.25
 
 # Sibling pressings of the same master, for one page of release ids.
 #
-# NOTE (groovemap-cu2.75): the master lookup and the sibling lookup are deliberately two
+# NOTE: the master lookup and the sibling lookup are deliberately two
 # separate OPTIONAL MATCHes. Combining them into one pattern makes `m` contingent on a sibling
 # existing: for a release that IS linked to a master but is that master's ONLY pressing, the
 # combined pattern (including its inline WHERE sibling <> r) fails entirely and `m` comes back

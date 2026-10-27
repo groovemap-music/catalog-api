@@ -44,7 +44,7 @@ class _SingleFlightTTLCache[T]:
     admin requests for the same cold version each run their own full-corpus
     JSONL scan (or classification pass) in parallel, each holding its own
     near-cap parsed corpus in memory simultaneously — multiplying exactly the
-    peak-memory bound the size caps exist to enforce (groovemap-jrm3).
+    peak-memory bound the size caps exist to enforce.
 
     The in-flight ``asyncio.Task`` registry is a plain ``dict``; the `Task`
     objects it holds are only ever created inside the running event loop
@@ -607,8 +607,7 @@ async def get_violation_detail(
     Callers that know the entity type (the violations list already does) should
     pass it to disambiguate; otherwise this deterministically scopes the
     response to one entity type's violations and files instead of merging
-    violations from every colliding type under one entity's raw data
-    (groovemap-tre5).
+    violations from every colliding type under one entity's raw data.
     """
     context = _resolve_version(version)
     _validate_record_id(record_id)
@@ -688,7 +687,7 @@ def _find_json_field_value(node: Any, leaf: str) -> Any:
     structure, so the parsed JSON nests the leaf under a container key —
     e.g. ``{"genres": {"genre": [...]}}``). A top-level-only lookup misses
     fields the XML search finds, causing correctly-parsed records to be
-    falsely classified as ``parsing_error`` (groovemap-bfcm).
+    falsely classified as ``parsing_error``.
 
     Returns the first matching value found via depth-first search (dict keys
     checked before descending into nested containers, matching
@@ -741,7 +740,7 @@ def _classify_violation(
         # A top-level-only .get(leaf) misses nested container fields (e.g.
         # "genres.genre" -> {"genres": {"genre": [...]}}) that the parser
         # handled correctly, systematically miscounting them as parsing
-        # errors (groovemap-bfcm).
+        # errors.
         leaf = field.rsplit(".", maxsplit=1)[-1] if field else field
         raw_json_val = _find_json_field_value(parsed_json, leaf) if leaf else None
         json_value = str(raw_json_val).strip() if raw_json_val is not None and str(raw_json_val).strip() else None

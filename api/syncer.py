@@ -38,7 +38,7 @@ from api.telemetry import SPAN_SYNC, api_span, record_sync_duration, timer
 logger = structlog.get_logger(__name__)
 
 DISCOGS_API_BASE = "https://api.discogs.com"
-SYNC_DELAY_SECONDS = 1.0  # 1 req/sec to stay under 60 req/min (groovemap-fnhk)
+SYNC_DELAY_SECONDS = 1.0  # 1 req/sec to stay under 60 req/min
 PAGE_SIZE = 100
 MAX_RATE_LIMIT_RETRIES = 5
 
@@ -563,7 +563,7 @@ async def sync_collection(
                 # metadata_json/formats_json is None — the PostgreSQL upsert below
                 # uses COALESCE(EXCLUDED.x, user_collections.x) so a NULL from this
                 # run can never overwrite a previously-synced value; Neo4j's `+=`
-                # merge already had that property (groovemap-z7d3).
+                # merge already had that property.
                 release_metadata: dict[str, Any] = {}
                 if labels and labels[0].get("catno"):
                     release_metadata["catalog_number"] = labels[0]["catno"]
@@ -599,7 +599,7 @@ async def sync_collection(
                         # which already stamps synced_at=sync_started. A DB-host clock
                         # lagging the API host would otherwise make NOW() land before the
                         # cutoff and _reconcile_stale_collection would delete the row this
-                        # sync just wrote (groovemap-vqr0). Kept as the LAST tuple element
+                        # sync just wrote. Kept as the LAST tuple element
                         # so existing `batch_params[i][-1]` assertions stay valid.
                         sync_started,
                     )
@@ -848,7 +848,7 @@ async def sync_wantlist(
                         item.get("date_added"),
                         media_json,
                         # Same single-clock fix as sync_collection: stamp with the
-                        # app-host sync_started clock, not PG's NOW() (groovemap-vqr0).
+                        # app-host sync_started clock, not PG's NOW().
                         # Kept as the LAST tuple element so existing
                         # `batch_params[i][-1]` assertions stay valid.
                         sync_started,
@@ -1081,8 +1081,7 @@ async def _run_full_sync(
         # via api/api.py's lifespan (task.cancel() + gather(...,
         # return_exceptions=True)), so this path is routinely reachable, not
         # exceptional. Record a terminal status in `finally` below and
-        # re-raise so cancellation still propagates normally
-        # (groovemap-pxqw).
+        # re-raise so cancellation still propagates normally.
         cancelled = True
         error_message = "Sync cancelled (service shutdown or restart)"
         raise
@@ -1107,8 +1106,7 @@ async def _run_full_sync(
         # Update sync_history record — moved INTO `finally` so it runs even
         # when CancelledError is propagating (the previous plain-code
         # placement after the try/except/finally never executed on
-        # cancellation, leaving the row stuck at status='running' forever —
-        # groovemap-pxqw).
+        # cancellation, leaving the row stuck at status='running' forever).
         final_status = "cancelled" if cancelled else ("failed" if error_message else "completed")
         # Recorded before the sync_history write so a failing UPDATE cannot cost the
         # measurement, and inside `finally` so a cancelled run is still counted.
@@ -1149,7 +1147,7 @@ async def reconcile_stale_sync_history(pg_pool: AsyncPostgreSQLPool) -> None:
     the row is simply abandoned with no in-process handler left to run.
     Call this once at service startup, before traffic is accepted, so a
     restart after a crash mid-sync doesn't leave GET /api/sync/status
-    reporting a phantom running sync forever (groovemap-pxqw).
+    reporting a phantom running sync forever.
     """
     async with pg_pool.connection() as conn, conn.cursor() as cur:
         await execute_sql(

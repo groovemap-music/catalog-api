@@ -45,7 +45,7 @@ rather than landing quietly.
 | Standalone releases | 12, with no master link |
 | Labels | 12, with catalog sizes from 4 to 12,500 |
 | Artists | 36 |
-| Collectors | 12, holding 15 to 40 releases each |
+| Collectors | 12, holding 15 to 38 releases each (the generator draws 15 to 40) |
 | Acquisition dates | 2018-01-01 to 2024-12-31 |
 
 Three properties make it usable as a fixture rather than as sample data.
@@ -182,16 +182,22 @@ is deterministic, so any real difference is a baseline change.
 
 ## Registering a second baseline version: the similar-artist candidate scope
 
+> **Status (2026-10-26):** the round 5 decision below kept the all-signal candidate query out
+> of production. Production serves the per-genre-capped generator (`get_candidate_artists` in
+> `api/queries/recommend_queries.py`), and `recommend_pg_queries.py` was removed with the
+> SQL/PGQ backend. The all-signal scope survives as the offline baseline described here.
+
 `BASELINE_VERSION` ("heuristics-2026-09") stays frozen: it always replays the candidate
 generator that was in production before gm-catalog-api-tsmu.1
 (`GoldenGraph.candidate_artists`, top 5 genres, 500 candidates per genre, 200 overall, 50
 profiled), and its committed `expected-metrics.json` never moves for this change.
 
 gm-catalog-api-tsmu.1 replaced that candidate generator in production
-(`api/queries/recommend_queries.py` and `recommend_pg_queries.py`) with a set-based query that
-scores every artist sharing at least one genre, style, label, or collaborator signal -- no
-per-genre cap. Registering *that* as a baseline change without disturbing the frozen one means
-adding a second, narrower version rather than bumping `BASELINE_VERSION` in place:
+(`api/queries/recommend_queries.py` and the since-removed `recommend_pg_queries.py`) with a
+set-based query that scores every artist sharing at least one genre, style, label, or
+collaborator signal -- no per-genre cap. Registering *that* as a baseline change without
+disturbing the frozen one means adding a second, narrower version rather than bumping
+`BASELINE_VERSION` in place:
 
 - `GoldenGraph.candidate_artists_all_signals` mirrors the new production query.
 - `run_baseline(graph, similar_artist_candidates="all_signals")` replays it for
@@ -269,4 +275,5 @@ acquisitions. Changing the fixture or the cut to improve a comparison invalidate
 | `api/evaluation/split.py` | The time-split protocol |
 | `api/evaluation/baseline.py` | Frozen weights and the baseline run |
 | `api/evaluation/metrics.py` | Pure metric functions and aggregations |
+| `api/evaluation/precomputed.py` | Synthetic embeddings and the offline replay of the precomputed similar-artist path |
 | `api/evaluation/report.py` | Report assembly and the `just evaluate` entry point |

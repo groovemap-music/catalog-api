@@ -29,7 +29,7 @@ visible in source.
 
 ```cypher
 MATCH path = shortestPath(
-  (source)-[:BY|ON|IS|ALIAS_OF|MEMBER_OF|MASTER_OF|DERIVED_FROM*..6]-(target)
+  (source)-[:BY|ON|IS|ALIAS_OF|MEMBER_OF|DERIVED_FROM*..6]-(target)
 )
 RETURN path
 ```
@@ -92,6 +92,13 @@ caps were measurably starving recall (see `docs/evaluation.md`). That is a direc
 from "Cap high-cardinality expansions" above, and across rounds 2-4 it was measured, tried with
 two mitigations, and re-measured more rigorously -- documented in full below, because the
 investigation and its numbers are the useful output even though the change did not ship.
+
+> **Status (2026-10-02):** removing the SQL PGQ graph backend (commit `2eeb230`) deleted
+> `api/queries/recommend_pg_queries.py`, `tests/test_recommend_candidate_latency.py`, and
+> `tests/graph_fixture.py`. The remaining legacy candidate generator is the Neo4j query in
+> `api/queries/recommend_queries.py`. `scripts/generate_latency_fixture.py` and
+> `tests/all_signal_recommend_sql.py` remain, but the PostgreSQL benchmark below cannot be
+> rerun as written. The record below is unchanged.
 
 **Maintainer decision (round 5, option (b)): the production similar-artist path stays on the
 legacy per-genre-capped generator.** The serving-side improvement moves to

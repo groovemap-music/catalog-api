@@ -88,7 +88,7 @@ async def get_obscurity_score(
     # *edges* instead — inflated for any release owned in multiple physical
     # copies (syncer.py keys the edge on instance_id) and internally
     # inconsistent with the distinct-release score/median in the same
-    # response (groovemap-omrb).
+    # response.
     return {"score": round(score, 4), "median_collectors": median, "total_releases": n}
 
 

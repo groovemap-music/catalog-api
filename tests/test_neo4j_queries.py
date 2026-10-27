@@ -255,7 +255,7 @@ class TestExploreQueries:
 
     @pytest.mark.asyncio
     async def test_explore_artist_alias_count_dedups_across_categories(self) -> None:
-        """Regression (groovemap-1wiu): explore_artist's alias_count badge must
+        """Regression: explore_artist's alias_count badge must
         use the same cross-category DISTINCT dedup as count_artist_aliases /
         expand_artist_aliases, not a plain per-category COUNT {} sum."""
         from api.queries.neo4j_queries import explore_artist
@@ -546,7 +546,7 @@ class TestCountQueries:
 
     @pytest.mark.asyncio
     async def test_count_artist_aliases_dedups_across_categories(self) -> None:
-        """Regression (groovemap-1wiu): count_artist_aliases must dedup a node
+        """Regression: count_artist_aliases must dedup a node
         reachable through more than one category (e.g. both ALIAS_OF and MEMBER_OF)
         the same way expand_artist_aliases's `RETURN DISTINCT item.id` does — a
         plain per-category sum would double-count it and disagree with the
@@ -1149,7 +1149,7 @@ class TestFindShortestPath:
     @pytest.mark.asyncio
     async def test_node_id_coalesces_to_name_for_name_keyed_nodes(self) -> None:
         """Genre/Style path nodes have no `id` property; the Cypher must coalesce
-        to `name` so path nodes never carry id=None (sibling of groovemap-cu2.5).
+        to `name` so path nodes never carry id=None (the same coalesce the explore-recommend discovery query uses).
         """
         from api.queries.neo4j_queries import find_shortest_path
 
@@ -1175,7 +1175,7 @@ class TestFindShortestPath:
 
     @pytest.mark.asyncio
     async def test_max_depth_clamped_to_upper_bound(self) -> None:
-        """Regression for groovemap-cu2.93: max_depth is interpolated as a
+        """Regression: max_depth is interpolated as a
         Cypher integer literal with no query-parameter escaping, so an
         unbounded caller-supplied value (e.g. from a model-steered NLQ tool
         call bypassing the HTTP route's Query(ge=1, le=10) validation) must be
@@ -1329,7 +1329,7 @@ class TestGraphStatsQuery:
 
 
 # ---------------------------------------------------------------------------
-# groovemap-cu2.74: unknown-year (null) releases must sort last, not first,
+# Unknown-year (null) releases must sort last, not first,
 # under the default newest-first ORDER BY year DESC.
 # ---------------------------------------------------------------------------
 
@@ -1397,7 +1397,7 @@ class TestExpandReleasesNullYearOrdering:
 
 
 class TestExpandQueriesHaveUniqueOrderByTiebreaker:
-    """Regression groovemap-ypkc: SKIP/LIMIT pagination requires a TOTAL
+    """Regression: SKIP/LIMIT pagination requires a TOTAL
     order to stay stable across separate query executions. Every expand
     ORDER BY previously sorted only by a non-unique key (release_count, or
     year for releases) with no tiebreaker, so a tied group's ordering was not

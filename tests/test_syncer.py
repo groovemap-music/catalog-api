@@ -197,7 +197,7 @@ class TestDatabaseFixtureContracts:
 
 
 class TestSyncDelaySeconds:
-    """Regression groovemap-fnhk: SYNC_DELAY_SECONDS must actually respect
+    """Regression: SYNC_DELAY_SECONDS must actually respect
     the Discogs 60 req/min rate limit its comment claims to honor, and must not
     fork out of sync with its rate-limit sibling in insights_compute.py."""
 
@@ -284,7 +284,7 @@ class TestSyncCollection:
         assert result == 1
         mock_pg_pool.connection.return_value.cursor.return_value.executemany.assert_awaited_once()
         # 2 session.run calls: the per-page upsert MERGE, then the post-loop
-        # stale-row reconciliation DELETE (groovemap-cu2.9).
+        # stale-row reconciliation DELETE.
         assert mock_neo4j.session.return_value.run.await_count == 2
 
     @pytest.mark.asyncio
@@ -324,7 +324,7 @@ class TestSyncCollection:
 
     @pytest.mark.asyncio
     async def test_rate_limit_retries_exhausted(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
-        """groovemap-cu2.30: persistent 429s must raise (not silently break)
+        """Persistent 429s must raise (not silently break)
         so run_full_sync records the sync as 'failed', not 'completed'.
         """
         rate_limited = MagicMock()
@@ -402,7 +402,7 @@ class TestSyncCollection:
 
     @pytest.mark.asyncio
     async def test_non_200_raises(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
-        """groovemap-cu2.30: a non-200 response must raise (not silently
+        """A non-200 response must raise (not silently
         break) so run_full_sync records the sync as 'failed', not 'completed'.
         """
         error_response = MagicMock()
@@ -566,7 +566,7 @@ class TestSyncCollection:
 
     @pytest.mark.asyncio
     async def test_reconciles_stale_rows_after_successful_sync(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
-        """groovemap-cu2.9 regression: after a fully successful sync, stale
+        """Regression: after a fully successful sync, stale
         rows/edges (items removed from Discogs since the last sync, or orphaned
         by a remove+re-add under a new instance_id) must be deleted — sync is
         not allowed to stay upsert-only.
@@ -618,7 +618,7 @@ class TestSyncCollection:
 
     @pytest.mark.asyncio
     async def test_upsert_stamps_updated_at_with_sync_started_not_pg_now(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
-        """Regression groovemap-vqr0: the PG upsert must stamp updated_at with
+        """Regression: the PG upsert must stamp updated_at with
         the same app-host sync_started clock the Neo4j half uses for synced_at
         (and that _reconcile_stale_collection's DELETE cutoff compares against) —
         not PostgreSQL's own NOW(). A DB-host clock lagging the API host would
@@ -842,7 +842,7 @@ class TestSyncWantlist:
         first_sql = mock_pg_pool.connection.return_value.cursor.return_value.executemany.await_args_list[0].args[0]
         assert "user_wantlists" in first_sql
         # 2 session.run calls: the per-page upsert MERGE, then the post-loop
-        # stale-row reconciliation DELETE (groovemap-cu2.9).
+        # stale-row reconciliation DELETE.
         assert mock_neo4j.session.return_value.run.await_count == 2
 
     @pytest.mark.asyncio
@@ -881,7 +881,7 @@ class TestSyncWantlist:
 
     @pytest.mark.asyncio
     async def test_rate_limit_retries_exhausted(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
-        """groovemap-cu2.30: persistent 429s must raise (not silently
+        """Persistent 429s must raise (not silently
         break) so run_full_sync records the sync as 'failed', not 'completed'.
         """
         rate_limited = MagicMock()
@@ -915,7 +915,7 @@ class TestSyncWantlist:
 
     @pytest.mark.asyncio
     async def test_non_200_raises(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
-        """groovemap-cu2.30: a non-200 response must raise (not silently
+        """A non-200 response must raise (not silently
         break) so run_full_sync records the sync as 'failed', not 'completed'.
         """
         error = MagicMock()
@@ -1040,7 +1040,7 @@ class TestSyncWantlist:
 
     @pytest.mark.asyncio
     async def test_reconciles_stale_wants_after_successful_sync(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
-        """groovemap-cu2.9 regression: after a fully successful wantlist
+        """Regression: after a fully successful wantlist
         sync, items removed from the wantlist (e.g. after purchase) must be
         deleted from both PostgreSQL and Neo4j, not persisted forever.
         """
@@ -1080,7 +1080,7 @@ class TestSyncWantlist:
 
     @pytest.mark.asyncio
     async def test_upsert_stamps_updated_at_with_sync_started_not_pg_now(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
-        """Regression groovemap-vqr0 — wantlist mirror of the collection fix:
+        """Regression: wantlist mirror of the collection fix:
         the PG upsert must stamp updated_at with the same sync_started clock the
         Neo4j half uses, not PostgreSQL's own NOW()."""
         want = _make_want_item(456)
@@ -1318,7 +1318,7 @@ class TestRunFullSync:
 
     @pytest.mark.asyncio
     async def test_revoked_oauth_token_records_failed_not_completed(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
-        """groovemap-cu2.30 regression: a real (unmocked) sync_collection
+        """Regression: a real (unmocked) sync_collection
         hitting a 401 (revoked OAuth token) must leave run_full_sync's status
         as 'failed' with a populated error — not silently 'completed' with
         items_synced=0 and error=None, which would hide the failure from the
@@ -1476,7 +1476,7 @@ class TestRunFullSync:
 
     @pytest.mark.asyncio
     async def test_partial_failure_still_invalidates_recommendation_cache(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
-        """groovemap-cu2.99 regression: a partial failure (collection synced,
+        """Regression: a partial failure (collection synced,
         wantlist raises) must still invalidate the recommendation cache — the
         collection sync already durably wrote data via autocommit executemany,
         so skipping invalidation on the exception path would serve stale
@@ -1562,7 +1562,7 @@ class TestRunFullSync:
 
     @pytest.mark.asyncio
     async def test_cancelled_mid_sync_marks_row_cancelled_and_reraises(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
-        """groovemap-pxqw: asyncio.CancelledError is a BaseException, not
+        """An asyncio.CancelledError is a BaseException, not
         an Exception — it must still result in a terminal sync_history write
         (previously the UPDATE sat after the try/except/finally and never ran
         on cancellation, leaving the row stuck at status='running' forever),
@@ -1623,7 +1623,7 @@ class TestRunFullSync:
 
 class TestReconcileStaleSyncHistory:
     """Tests for reconcile_stale_sync_history — the startup reconciliation
-    pass for groovemap-pxqw's case (b): a hard process crash (SIGKILL/
+    pass for the case no cancellation handler can catch: a hard process crash (SIGKILL/
     OOM) between the INSERT and run_full_sync's terminal UPDATE, which no
     in-process handler can ever cover."""
 
@@ -1725,7 +1725,7 @@ class TestCatalogNumberCapture:
 
         # Cypher params live in the second positional arg of session.run(cypher, params).
         # Call [0] is the per-page upsert MERGE; the post-loop reconciliation
-        # DELETE (groovemap-cu2.9) is the subsequent call.
+        # DELETE is the subsequent call.
         run_call = mock_neo4j.session.return_value.run.await_args_list[0]
         cypher_text = run_call[0][0]
         cypher_params = run_call[0][1]
@@ -1800,7 +1800,7 @@ class TestCatalogNumberCapture:
 
     @pytest.mark.asyncio
     async def test_collection_upsert_never_overwrites_metadata_or_formats_with_null(self, mock_pg_pool: MagicMock, mock_neo4j: MagicMock) -> None:
-        """groovemap-z7d3: a run with no catalog_number (or no formats) must not
+        """A run with no catalog_number (or no formats) must not
         wipe a previously-synced value. The PostgreSQL upsert's DO UPDATE SET must use
         COALESCE(EXCLUDED.x, user_collections.x) for metadata AND formats — a bare
         `metadata = EXCLUDED.metadata` full-column replace would overwrite a prior

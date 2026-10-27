@@ -1,4 +1,4 @@
-"""Tests for the discogs-setup CLI tool (api/setup.py)."""
+"""Tests for the catalog-setup CLI tool (api/setup.py)."""
 
 from unittest.mock import MagicMock, patch
 
@@ -259,35 +259,35 @@ class TestMain:
     def test_help_exits_cleanly(self) -> None:
         from api.setup import main
 
-        with pytest.raises(SystemExit) as exc_info, patch("sys.argv", ["discogs-setup", "--help"]):
+        with pytest.raises(SystemExit) as exc_info, patch("sys.argv", ["catalog-setup", "--help"]):
             main()
         assert exc_info.value.code == 0
 
     def test_no_args_exits_with_error(self) -> None:
         from api.setup import main
 
-        with pytest.raises(SystemExit) as exc_info, patch("sys.argv", ["discogs-setup"]):
+        with pytest.raises(SystemExit) as exc_info, patch("sys.argv", ["catalog-setup"]):
             main()
         assert exc_info.value.code != 0
 
     def test_consumer_key_without_secret_exits_with_error(self) -> None:
         from api.setup import main
 
-        with pytest.raises(SystemExit) as exc_info, patch("sys.argv", ["discogs-setup", "--consumer-key", "mykey"]):
+        with pytest.raises(SystemExit) as exc_info, patch("sys.argv", ["catalog-setup", "--consumer-key", "mykey"]):
             main()
         assert exc_info.value.code != 0
 
     def test_consumer_secret_without_key_exits_with_error(self) -> None:
         from api.setup import main
 
-        with pytest.raises(SystemExit) as exc_info, patch("sys.argv", ["discogs-setup", "--consumer-secret", "mysecret"]):
+        with pytest.raises(SystemExit) as exc_info, patch("sys.argv", ["catalog-setup", "--consumer-secret", "mysecret"]):
             main()
         assert exc_info.value.code != 0
 
     def test_show_and_key_together_exits_with_error(self) -> None:
         from api.setup import main
 
-        with pytest.raises(SystemExit) as exc_info, patch("sys.argv", ["discogs-setup", "--show", "--consumer-key", "k"]):
+        with pytest.raises(SystemExit) as exc_info, patch("sys.argv", ["catalog-setup", "--show", "--consumer-key", "k"]):
             main()
         assert exc_info.value.code != 0
 
@@ -300,7 +300,7 @@ class TestMain:
         monkeypatch.setenv("POSTGRES_DATABASE", "d")
 
         with (
-            patch("sys.argv", ["discogs-setup", "--show"]),
+            patch("sys.argv", ["catalog-setup", "--show"]),
             patch("api.setup.show_config") as mock_show,
         ):
             main()
@@ -316,7 +316,7 @@ class TestMain:
         monkeypatch.setenv("POSTGRES_DATABASE", "d")
 
         with (
-            patch("sys.argv", ["discogs-setup", "--consumer-key", "mykey", "--consumer-secret", "mysecret"]),
+            patch("sys.argv", ["catalog-setup", "--consumer-key", "mykey", "--consumer-secret", "mysecret"]),
             patch("api.setup.set_config") as mock_set,
         ):
             main()

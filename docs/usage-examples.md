@@ -47,7 +47,7 @@ RETURN alias.name as alias_name, primary.name as primary_name;
 
 ```cypher
 MATCH (member:Artist)-[:MEMBER_OF]->(band:Artist {name: "The Beatles"})
-RETURN member.name, member.real_name
+RETURN member.name
 ORDER BY member.name;
 ```
 
@@ -187,10 +187,14 @@ ORDER BY r.year;
 
 #### Find main release of a master
 
-```cypher
-MATCH (m:Master {title: "Kind of Blue"})<-[:DERIVED_FROM]-(r:Release)
-WHERE r.id = m.main_release
-RETURN r.title, r.year, r.country;
+Graph `Master` nodes carry only `id`, `title`, and `year`. The main release id is in the
+PostgreSQL `masters` document:
+
+```sql
+SELECT r.data->>'title' as title, r.data->>'year' as year, r.data->>'country' as country
+FROM masters m
+JOIN releases r ON r.data_id = m.data->>'main_release'
+WHERE m.data->>'title' = 'Kind of Blue';
 ```
 
 #### Count releases per country for a master
@@ -241,19 +245,21 @@ LIMIT 20;
 > [`deployment`](https://github.com/groovemap-music/deployment); verify that environment before
 > running this query.
 
+Project artists linked by shared releases, rank them, then drop the projection:
+
 ```cypher
-CALL gds.pageRank.stream({
-  nodeProjection: 'Artist',
-  relationshipProjection: {
-    BY: {
-      orientation: 'REVERSE'
-    }
-  }
-})
+MATCH (a1:Artist)<-[:BY]-(:Release)-[:BY]->(a2:Artist)
+WHERE a1 <> a2
+WITH gds.graph.project('artistCollaboration', a1, a2) AS g
+RETURN g.graphName, g.nodeCount, g.relationshipCount;
+
+CALL gds.pageRank.stream('artistCollaboration')
 YIELD nodeId, score
 RETURN gds.util.asNode(nodeId).name AS artist, score
 ORDER BY score DESC
 LIMIT 20;
+
+CALL gds.graph.drop('artistCollaboration');
 ```
 
 ## 🐘 PostgreSQL Queries
@@ -267,7 +273,7 @@ PostgreSQL provides fast structured queries and full-text search capabilities on
 ```sql
 SELECT
     data->>'name' as name,
-    data->>'real_name' as real_name,
+    data->>'realname' as real_name,
     data->>'profile' as profile
 FROM artists
 WHERE data->>'name' ILIKE '%pink%floyd%'
@@ -287,10 +293,10 @@ WHERE data->>'name' = 'Miles Davis';
 ```sql
 SELECT
     data->>'name' as artist_name,
-    data->>'real_name' as real_name
+    data->>'realname' as real_name
 FROM artists
-WHERE data->>'real_name' IS NOT NULL
-AND data->>'real_name' != ''
+WHERE data->>'realname' IS NOT NULL
+AND data->>'realname' != ''
 ORDER BY data->>'name'
 LIMIT 20;
 ```
@@ -458,9 +464,10 @@ ORDER BY data->>'title';
 
 #### Find releases with specific format
 
-`formats` holds the raw Discogs format name list (deprecated per ADR 0007 — new consumers
-should filter on the canonical `media` family/medium ids via `GET /api/search?media=vinyl` or
-a `GET /api/collection/gaps/*` endpoint's `media` parameter instead of matching raw names here).
+`formats` holds the raw Discogs format objects (`name`, `qty`, `descriptions`). It is
+deprecated per ADR 0007: new consumers should filter on the canonical `media` family/medium
+ids via `GET /api/search?media=vinyl` or a `GET /api/collection/gaps/*` endpoint's `media`
+parameter instead of matching raw names here.
 
 ```sql
 SELECT
@@ -468,7 +475,7 @@ SELECT
     data->>'year' as year,
     data->'formats' as formats
 FROM releases
-WHERE data->'formats' @> '["Vinyl"]'
+WHERE data->'formats' @> '[{"name": "Vinyl"}]'
 AND (data->>'year')::int >= 1960
 ORDER BY (data->>'year')::int
 LIMIT 20;
@@ -496,9 +503,9 @@ LIMIT 20;
 SELECT
     data->>'title' as album,
     data->>'year' as year,
-    jsonb_array_length(data->'tracklist') as track_count
+    jsonb_array_length(data->'tracklist'->'track') as track_count
 FROM releases
-WHERE data->'tracklist' IS NOT NULL
+WHERE jsonb_typeof(data->'tracklist'->'track') = 'array'
 ORDER BY track_count DESC
 LIMIT 20;
 ```
@@ -545,7 +552,7 @@ curl "http://localhost:8004/api/autocomplete?q=miles&type=artist&limit=10"
 # Explore a center node (returns categories with counts)
 curl "http://localhost:8004/api/explore?name=Miles%20Davis&type=artist"
 
-# Expand a category (paginated)
+# Expand a category (paginated; node_id is the entity name)
 curl "http://localhost:8004/api/expand?node_id=Miles%20Davis&type=artist&category=releases&limit=50&offset=0"
 
 # Get full details for a node
@@ -645,7 +652,7 @@ curl -X POST "http://localhost:8004/api/nlq/query" \
 
 ### Graph Snapshots
 
-Snapshots are persisted in Valkey with a configurable TTL (default 28 days) and survive service restarts.
+Snapshots are persisted in Valkey with a configurable TTL (`SNAPSHOT_TTL_DAYS`, default 28 days) and survive service restarts.
 
 ```bash
 # Save a graph snapshot (requires authentication)
@@ -765,7 +772,7 @@ full signal breakdown, weights, and `media_families`/`family_signals` response f
 curl "http://localhost:8004/api/rarity/12345678"
 
 # Top rarest releases overall
-curl "http://localhost:8004/api/rarity/leaderboard?limit=20"
+curl "http://localhost:8004/api/rarity/leaderboard?page=1&page_size=20"
 ```
 
 ### Label DNA (Fingerprint and Compare)
@@ -908,4 +915,4 @@ AND (data->>'year')::int = 1959;
 
 ______________________________________________________________________
 
-**Last Updated**: 2026-09-04
+**Last Updated**: 2026-10-26

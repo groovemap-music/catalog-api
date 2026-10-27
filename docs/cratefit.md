@@ -26,7 +26,7 @@ will eventually replace the guesses with learned weights.
     "media_families": ["grooved"],
     "rarity": {"score": 72.5, "tier": "scarce"}
   },
-  "fit": 0.82,
+  "fit": 1.0,
   "components": {
     "affinity":   {"score": 0.55, "evidence": ["shares label Blue Note with 3 releases you hold"],
                    "evidence_items": [{"dimension": "label", "entity": "Blue Note", "kind": "shared", "count": 3}]},

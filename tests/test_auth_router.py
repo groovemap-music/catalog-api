@@ -42,8 +42,8 @@ def _challenge_only_get(value: str = TEST_USER_ID) -> AsyncMock:
     """Build a valkey.get mock that answers ONLY the 2fa_challenge key.
 
     A blanket truthy get() also answers `revoked:jti:*` and
-    `password_changed:*`, which the challenge-staleness guard added for
-    groovemap-jxmn then (correctly) treats as an invalidated challenge.
+    `password_changed:*`, which the challenge-staleness guard
+    then (correctly) treats as an invalidated challenge.
     """
 
     async def _get(key: str) -> str | None:
@@ -92,7 +92,7 @@ class TestResetRequest:
         mock_cur: AsyncMock,
         mock_valkey: AsyncMock,
     ) -> None:
-        """groovemap-0lof: the SELECT must be the only DB/network work done
+        """The SELECT must be the only DB/network work done
         BEFORE the response is built. `_process_reset_request` (Valkey setex +
         notification send) is scheduled as a FastAPI background task so its
         cost never leaks into response timing and never diverges between the
@@ -234,7 +234,7 @@ class TestResetConfirm:
         mock_cur: AsyncMock,
         mock_valkey: AsyncMock,
     ) -> None:
-        """groovemap-ci4a: a password reset must bulk-revoke the user's
+        """A password reset must bulk-revoke the user's
         app tokens — the password_changed Valkey marker alone never covers
         them (it only gates JWTs and it TTLs out; app tokens carry no
         expiry)."""
@@ -637,7 +637,7 @@ class TestTwoFactorConfirm:
         mock_cur: AsyncMock,
         mock_valkey: AsyncMock,
     ) -> None:
-        """groovemap-8vlp: if a concurrent twofa_disable commits between
+        """If a concurrent twofa_disable commits between
         confirm's SELECT and its enable UPDATE, the guarded
         `AND totp_secret = %s` matches zero rows — confirm must reject with
         409 rather than landing totp_enabled=TRUE against a NULLed secret
@@ -929,7 +929,7 @@ class TestTwoFactorRecoveryFull:
         mock_cur: AsyncMock,
         mock_valkey: AsyncMock,
     ) -> None:
-        """groovemap-cflq: a successful recovery must reset
+        """A successful recovery must reset
         totp_failed_attempts/totp_locked_until in the same UPDATE that redeems
         the code — otherwise stale lockout state survives the recovery login
         and can 429 a subsequent CORRECT TOTP code."""
@@ -957,7 +957,7 @@ class TestTwoFactorRecoveryFull:
         mock_cur: AsyncMock,
         mock_valkey: AsyncMock,
     ) -> None:
-        """groovemap-kqw4: a concurrent request that already consumed the
+        """A concurrent request that already consumed the
         challenge (getdel -> None) must reject this one with 401, mirroring
         twofa_verify's identical check. Previously the getdel return value was
         discarded entirely, so a single challenge token backed by two
@@ -1402,7 +1402,7 @@ class TestTwoFactorRecoveryEdgeCases:
 
 
 class TestTwoFactorStateMachineRegressions:
-    """Regression tests for the 2FA state-machine bug-hunt fixes (cu2.24/25/58/59/60/96)."""
+    """Regression tests for the 2FA state-machine fixes: setup races, challenge consumption, and lockout counting."""
 
     @staticmethod
     def _executed_sql(mock_cur: AsyncMock) -> list[str]:
@@ -1415,7 +1415,7 @@ class TestTwoFactorStateMachineRegressions:
         mock_cur: AsyncMock,
         mock_valkey: AsyncMock,
     ) -> None:
-        """cu2.24: setup must refuse to overwrite a live secret while 2FA is enabled."""
+        """Setup must refuse to overwrite a live secret while 2FA is enabled."""
         mock_valkey.get = AsyncMock(return_value=None)
         # SELECT totp_enabled -> TRUE; the guarded UPDATE also matches no row (rowcount 0).
         mock_cur.fetchone = AsyncMock(return_value={"totp_enabled": True})
@@ -1440,7 +1440,7 @@ class TestTwoFactorStateMachineRegressions:
         mock_cur: AsyncMock,
         mock_valkey: AsyncMock,
     ) -> None:
-        """cu2.24: the SELECT sees 2FA disabled, but a concurrent enable wins the race so
+        """The SELECT sees 2FA disabled, but a concurrent enable wins the race so
         the guarded UPDATE matches zero rows — setup must then reject with 400 rather
         than returning a secret it never persisted."""
         mock_valkey.get = AsyncMock(return_value=None)
@@ -1468,7 +1468,7 @@ class TestTwoFactorStateMachineRegressions:
         mock_cur: AsyncMock,
         mock_valkey: AsyncMock,
     ) -> None:
-        """cu2.24: the setup UPDATE carries a `totp_enabled IS NOT TRUE` guard against races."""
+        """The setup UPDATE carries a `totp_enabled IS NOT TRUE` guard against races."""
         mock_valkey.get = AsyncMock(return_value=None)
         mock_cur.fetchone = AsyncMock(return_value=make_sample_user_row())
         mock_cur.rowcount = 1
@@ -1491,7 +1491,7 @@ class TestTwoFactorStateMachineRegressions:
         mock_cur: AsyncMock,
         mock_valkey: AsyncMock,
     ) -> None:
-        """cu2.59: a wrong TOTP code must NOT consume the challenge (verify-then-consume)."""
+        """A wrong TOTP code must NOT consume the challenge (verify-then-consume)."""
         _secret, encrypted_secret = _make_encrypted_totp_secret()
         challenge_token = _make_challenge_token()
 
@@ -1519,7 +1519,7 @@ class TestTwoFactorStateMachineRegressions:
         mock_cur: AsyncMock,
         mock_valkey: AsyncMock,
     ) -> None:
-        """cu2.25: the failure counter is incremented in SQL with RETURNING, not read-then-blind-write."""
+        """The failure counter is incremented in SQL with RETURNING, not read-then-blind-write."""
         _secret, encrypted_secret = _make_encrypted_totp_secret()
         challenge_token = _make_challenge_token()
 
@@ -1549,7 +1549,7 @@ class TestTwoFactorStateMachineRegressions:
         mock_valkey: AsyncMock,
         mock_conn: AsyncMock,
     ) -> None:
-        """groovemap-vjod: the lockout SELECT must take a row lock (FOR
+        """The lockout SELECT must take a row lock (FOR
         UPDATE) inside an explicit transaction, so concurrent verify attempts
         for the same user serialize instead of all reading a stale
         pre-increment snapshot."""
@@ -1582,7 +1582,7 @@ class TestTwoFactorStateMachineRegressions:
         mock_cur: AsyncMock,
         mock_valkey: AsyncMock,
     ) -> None:
-        """cu2.96: a wrong code after an expired lock window starts the counter fresh, not at 5+1."""
+        """A wrong code after an expired lock window starts the counter fresh, not at 5+1."""
         _secret, encrypted_secret = _make_encrypted_totp_secret()
         challenge_token = _make_challenge_token()
 
@@ -1612,7 +1612,7 @@ class TestTwoFactorStateMachineRegressions:
         mock_cur: AsyncMock,
         mock_valkey: AsyncMock,
     ) -> None:
-        """cu2.58/cu2.60: recovery-code consumption is a single guarded atomic UPDATE."""
+        """Recovery-code consumption is a single guarded atomic UPDATE."""
         plaintext_codes, _hashed_codes = generate_recovery_codes()
         challenge_token = _make_challenge_token()
 
@@ -1665,7 +1665,7 @@ class TestChangePassword:
         mock_valkey: AsyncMock,  # noqa: ARG002  # required so setex is stubbed
         auth_headers: dict[str, str],
     ) -> None:
-        """groovemap-ci4a: same bulk-revoke contract as reset-confirm."""
+        """Same bulk-revoke contract as reset-confirm."""
         mock_cur.fetchone = AsyncMock(return_value=make_sample_user_row())
         response = test_client.post(
             "/api/auth/change-password",
@@ -1739,7 +1739,7 @@ class TestChangePassword:
 
 
 class TestChallengeSurvivesPasswordChange:
-    """Regression tests for groovemap-jxmn (2FA challenge outlives a reset)."""
+    """Regression tests: a 2FA challenge must not outlive a password reset."""
 
     @staticmethod
     def _valkey_with_password_change(changed_at: int) -> AsyncMock:

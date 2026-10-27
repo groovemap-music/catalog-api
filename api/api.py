@@ -150,7 +150,7 @@ def _create_access_token(user_id: str, email: str, issued_at: int | None = None)
     was derived from was verified, instead of the (later) moment of minting. A
     password change committing in between must invalidate the new token, and the
     `iat <= password_changed` predicate can only see that if `iat` predates the
-    change (groovemap-jxmn).
+    change.
     """
     if _config is None:
         raise RuntimeError("Service not initialized")
@@ -564,16 +564,16 @@ async def authorize_discogs(
         if consumer_secret:
             consumer_secret = decrypt_oauth_token(consumer_secret, get_oauth_encryption_key(_config.encryption_master_key))
     except ValueError:
-        logger.error("❌ Failed to decrypt Discogs app credentials — re-run discogs-setup")
+        logger.error("❌ Failed to decrypt Discogs app credentials — re-run catalog-setup")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Discogs app credentials could not be decrypted. Ask an admin to re-run discogs-setup on the API container.",
+            detail="Discogs app credentials could not be decrypted. Ask an admin to re-run catalog-setup on the API container.",
         ) from None
 
     if not consumer_key or not consumer_secret:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Discogs app credentials not configured. Ask an admin to run discogs-setup on the API container.",
+            detail="Discogs app credentials not configured. Ask an admin to run catalog-setup on the API container.",
         )
 
     try:
@@ -642,10 +642,10 @@ async def verify_discogs(
         if consumer_secret:
             consumer_secret = decrypt_oauth_token(consumer_secret, get_oauth_encryption_key(_config.encryption_master_key))
     except ValueError:
-        logger.error("❌ Failed to decrypt Discogs app credentials — re-run discogs-setup")
+        logger.error("❌ Failed to decrypt Discogs app credentials — re-run catalog-setup")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Discogs app credentials could not be decrypted. Ask an admin to re-run discogs-setup on the API container.",
+            detail="Discogs app credentials could not be decrypted. Ask an admin to re-run catalog-setup on the API container.",
         ) from None
 
     if not consumer_key or not consumer_secret:
@@ -845,7 +845,7 @@ def main() -> None:  # pragma: no cover
         # groovemap docker network. Trust X-Forwarded-For/-Proto only from
         # that internal subnet so slowapi's IP-keyed rate limits (api/limiter.py)
         # resolve the true client instead of collapsing every request behind the
-        # proxy into a single global bucket — see groovemap-quq5. The
+        # proxy into a single global bucket. The
         # subnet must match docker-compose.yml's `networks.groovemap.ipam`.
         proxy_headers=True,
         forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "172.20.0.0/16"),

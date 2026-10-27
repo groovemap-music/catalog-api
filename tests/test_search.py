@@ -245,7 +245,7 @@ class TestSearchQueryModuleHelpers:
         assert params == []
 
     def test_entity_select_pushes_year_filter_before_limit(self) -> None:
-        """groovemap-cu2.6: year filter must land in the subquery WHERE,
+        """Year filter must land in the subquery WHERE,
         BEFORE its ORDER BY rank LIMIT — not only in an outer WHERE applied
         after the per-table cap.
         """
@@ -360,7 +360,7 @@ class TestSearchQueryModuleHelpers:
 
     @pytest.mark.asyncio
     async def test_run_results_applies_year_genre_filter_before_per_table_limit(self) -> None:
-        """groovemap-cu2.6 regression: filtered search must not apply
+        """Regression: filtered search must not apply
         year/genre WHERE after the per-table rank LIMIT — that silently
         drops/empties results for high-cardinality terms whose top-ranked
         rows fall outside the filter. Each per-table subquery's WHERE (before
@@ -629,7 +629,7 @@ class TestMediaFacetFilter:
 
     @pytest.mark.asyncio
     async def test_run_results_applies_media_and_genre_filter_together(self) -> None:
-        """groovemap-be1.5: media and genre filters must combine (AND) on release results."""
+        """Media and genre filters must combine (AND) on release results."""
         from api.queries.search_queries import _run_results
 
         mock_pool = TestSearchQueryAsyncFunctions._db_mocks()
@@ -972,7 +972,7 @@ class TestSearchQueryAsyncFunctions:
 
     @pytest.mark.asyncio
     async def test_execute_search_degrades_when_valkey_get_raises(self) -> None:
-        """groovemap-cu2.23: a Valkey read outage must fall through to the DB,
+        """A Valkey read outage must fall through to the DB,
         not propagate a 500 — search is fully PostgreSQL-backed.
         """
         from valkey.exceptions import ConnectionError as ValkeyConnectionError
@@ -994,7 +994,7 @@ class TestSearchQueryAsyncFunctions:
 
     @pytest.mark.asyncio
     async def test_execute_search_returns_when_valkey_setex_raises(self) -> None:
-        """groovemap-cu2.23: a Valkey write outage must not fail an otherwise
+        """A Valkey write outage must not fail an otherwise
         successful search response.
         """
         from valkey.exceptions import ConnectionError as ValkeyConnectionError
@@ -1014,7 +1014,7 @@ class TestSearchQueryAsyncFunctions:
 
     @pytest.mark.asyncio
     async def test_execute_search_treats_corrupt_cache_entry_as_miss(self) -> None:
-        """groovemap-cu2.23: a corrupt (non-JSON) cache entry must be treated
+        """A corrupt (non-JSON) cache entry must be treated
         as a miss rather than raising.
         """
         from api.queries.search_queries import execute_search
@@ -1052,7 +1052,7 @@ class TestSearchQueryAsyncFunctions:
 
     @pytest.mark.asyncio
     async def test_run_results_final_order_has_unique_tiebreaker(self) -> None:
-        """groovemap-cu2.56: the outer paginated query must sort by a unique
+        """The outer paginated query must sort by a unique
         secondary key so OFFSET pagination is page-consistent across executions.
         """
         from api.queries.search_queries import _run_results

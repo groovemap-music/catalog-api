@@ -581,7 +581,7 @@ class NLQToolRunner:
             # unconditionally — discarding the requested type even though
             # _handle_autocomplete knows it. Mirror the explore_entity
             # convention: read the propagated _entity_type from the tool
-            # result (groovemap-apt8).
+            # result.
             etype = entity_type or result.get("_entity_type", "")
             for item in result.get("results", []):
                 entity: dict[str, str] = {"id": item.get("id", ""), "name": item.get("name", "")}
@@ -603,7 +603,7 @@ class NLQToolRunner:
             # site cannot diverge from it again — the raw-label fallback
             # this replaced shipped mixed-case types like "Artist" that
             # broke (id, type) dedup against every other producer, which
-            # always emits lowercase (groovemap-apt8).
+            # always emits lowercase.
             for node in result.get("nodes", []):
                 entities.append(
                     {
@@ -648,7 +648,7 @@ class NLQToolRunner:
         # Propagate the requested type for extract_entities to fall back to
         # (mirrors the explore_entity "_entity_type" convention) — the
         # autocomplete handlers never return a "type" key on their result
-        # items (groovemap-apt8).
+        # items.
         return {"results": results, "_entity_type": entity_type}
 
     async def _handle_explore_entity(self, params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:

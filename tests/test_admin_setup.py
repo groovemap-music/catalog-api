@@ -1,4 +1,4 @@
-"""Tests for the admin-setup CLI tool (api/admin_setup.py).
+"""Tests for the catalog-admin-setup CLI tool (api/admin_setup.py).
 
 Covers connection-string construction, the add/list admin operations, and the
 argparse-driven ``main`` entry point. All DB and config boundaries are mocked —
@@ -132,7 +132,7 @@ def test_list_admins_renders_rows(monkeypatch: pytest.MonkeyPatch, capsys: pytes
 # main
 # --------------------------------------------------------------------------- #
 def _run_main(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> None:
-    monkeypatch.setattr(admin_setup.sys, "argv", ["admin-setup", *argv])
+    monkeypatch.setattr(admin_setup.sys, "argv", ["catalog-admin-setup", *argv])
     monkeypatch.setattr(admin_setup, "_build_conninfo", lambda: "fake-conninfo")
 
 
@@ -144,7 +144,7 @@ def test_main_no_args_prints_help_and_exits(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_main_rejects_password_as_cli_argument(monkeypatch: pytest.MonkeyPatch) -> None:
-    """groovemap-dir0: --password must not exist as a CLI flag at all —
+    """--password must not exist as a CLI flag at all —
     argparse must reject it rather than silently accepting a leaky argument."""
     _run_main(monkeypatch, ["--email", "a@example.com", "--password", "longenoughpw"])
     with pytest.raises(SystemExit) as exc:
@@ -184,7 +184,7 @@ def test_main_add_calls_add_admin_using_env_password(monkeypatch: pytest.MonkeyP
 
 def test_main_add_prompts_interactively_when_no_env_password(monkeypatch: pytest.MonkeyPatch) -> None:
     """No ADMIN_PASSWORD set → falls back to an interactive, non-echoed prompt —
-    never a CLI argument, never in shell history (groovemap-dir0)."""
+    never a CLI argument, never in shell history."""
     _run_main(monkeypatch, ["--email", "a@example.com"])
     monkeypatch.setattr(admin_setup, "get_secret", lambda _name: None)
     with (

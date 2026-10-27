@@ -288,7 +288,7 @@ class TestRegisterEndpoint:
         test_client: TestClient,
         mock_cur: AsyncMock,
     ) -> None:
-        """groovemap-1385: the success log must carry user_id, never the
+        """The success log must carry user_id, never the
         registrant's email (PII) — no ad-hoc emoji/log rule bypass."""
         from structlog.testing import capture_logs
 
@@ -400,7 +400,7 @@ class TestLoginEndpoint:
         test_client: TestClient,
         mock_cur: AsyncMock,
     ) -> None:
-        """groovemap-1385: sibling of the registration leak — the
+        """Sibling of the registration leak — the
         high-volume per-session login log must also carry user_id, not email."""
         from structlog.testing import capture_logs
 
@@ -890,7 +890,7 @@ class TestGetCurrentUser:
         self,
         test_client: TestClient,
     ) -> None:
-        """Regression groovemap-cu2.1 — a 2FA challenge token must NOT authenticate _get_current_user endpoints."""
+        """Regression: a 2FA challenge token must NOT authenticate _get_current_user endpoints."""
         import base64
         import hashlib
         import hmac
@@ -1352,7 +1352,7 @@ class TestVerifyDiscogsOAuthStateBinding:
 
 
 class TestLifespanShutdownClosesAnthropicClient:
-    """groovemap-8nle: the lifespan-created AsyncAnthropic client must be
+    """The lifespan-created AsyncAnthropic client must be
     closed on shutdown, mirroring the existing _neo4j/_pool/_valkey cleanup."""
 
     @staticmethod

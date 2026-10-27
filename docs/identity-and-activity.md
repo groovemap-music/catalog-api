@@ -69,7 +69,7 @@ validated against the identity vocabulary's alias sources (who or what asserted 
 ### The `gm_id` graph projection job
 
 PostgreSQL's `provider_aliases` table is the authority; Neo4j only ever holds a projection of
-it. See [Projecting `gm_id` onto Neo4j Nodes`](../api/README.md#projecting-gm_id-onto-neo4j-nodes)
+it. See [Projecting `gm_id` onto Neo4j Nodes](../api/README.md#projecting-gm_id-onto-neo4j-nodes)
 in the main README for the job itself, its admin trigger (`POST /api/admin/identity/project`),
 and its CLI entry point (`catalog-identity-projection`).
 
@@ -106,8 +106,9 @@ Each write:
 4. Ensures the month partition the row lands in (`activity.ensure_month_partition`, cached per
    process per month; also run for the current and next month at startup).
 5. Inserts, and counts the result on one of two OTEL counters: `groovemap.api.activity_events`
-   (attribute `event_type`) for what was written, and a failure counter (attribute `outcome`)
-   for what was not.
+   (attribute `event_type`) for what was written, and `groovemap.api.activity_failures`
+   (attribute `outcome`: `invalid`, `not_configured`, `no_native_id`, `no_subject`, or
+   `write_failed`) for what was not.
 
 ### Where the vocabulary the implementation resolved differs from a casual reading
 
@@ -148,8 +149,11 @@ implementation follows the schema:
 | Surface | Event type(s) | Where |
 | --- | --- | --- |
 | Search | `search.query`, `search.result_impression` | `GET /api/search` — one query event plus one impression event per hit shown |
-| Recommendations | impressions under `SURFACE_RECOMMENDATION` | The four ranked endpoints below |
+| Identifier lookup | `search.query` | `GET /api/lookup/{provider}/{value}` — signed-in callers only, with `lookup:{provider}` in `filters` |
+| Recommendations | impressions under `SURFACE_RECOMMENDATION` | The ranked endpoints below |
 | Recommendation outcome | `recommendation.opened`, `recommendation.saved`, `recommendation.dismissed`, `recommendation.hidden` | `POST /api/activity/events`, client-reported |
+| CrateFit | one impression under `SURFACE_FIT` (policy `cratefit_v0`) | `GET /api/fit/release/{release_id}` — see [CrateFit](cratefit.md#the-impression) |
+| CrateFit outcome | `fit.opened`, `fit.saved`, `fit.dismissed`, `fit.hidden` | `POST /api/activity/events`, client-reported |
 | Collection sync | `collection.item_added`, `collection.item_removed`, `collection.item_updated`, `wantlist.item_added`, `wantlist.item_removed` | The sync diff, from `api/syncer.py` |
 | Consent | `consent.granted`, `consent.revoked` | `PUT /api/user/consent/{purpose}` |
 | Erasure / export | `account.erasure_requested`, `account.export_requested` | `POST /api/user/erasure`, `GET /api/user/export` |
@@ -177,11 +181,12 @@ not exist.
 | --- | --- | --- | --- |
 | POST | `/api/activity/events` | JWT or `activity:write` token | Record one client-reported outcome against an impression |
 
-The body carries `event_type` (one of the four outcomes above), `impression_id`, and `item_id`;
-any other `event_type` is rejected as a `422` by the request model before it reaches the
-recorder. The write is idempotent on `{event_type}:{impression_id}`, so a retried report is a
-no-op. Returns `202` — the row is written before the response, but the caller is told the
-outcome was accepted, not that an analysis has consumed it.
+The body carries `event_type` (one of the eight outcomes above: four `recommendation.*`, four
+`fit.*`), `impression_id`, and `item_id`; any other `event_type` is rejected as a `422` by the
+request model before it reaches the recorder. The write is idempotent on
+`{event_type}:{impression_id}`, so a retried report is a no-op. Returns `202` — the row is
+written before the response, but the caller is told the outcome was accepted, not that an
+analysis has consumed it.
 
 ## Consent
 

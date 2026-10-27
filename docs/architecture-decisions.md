@@ -42,6 +42,10 @@ flowchart LR
   uses the notification-channel interface and sends through Resend over HTTP without a vendor SDK.
 - Build the performance runner as the repository-named `catalog-api-performance` image. Runtime
   deployment and environment orchestration remain outside this repository.
+- Follow [ADR 0012](https://github.com/groovemap-music/design/blob/main/docs/adr/0012-postgresql-property-graph-migration.md)
+  as amended on 2026-10-02: Neo4j is the only graph query engine. The optional PostgreSQL
+  SQL/PGQ backend was removed in October 2026; ordinary PostgreSQL persistence is unchanged. See
+  [SQL/PGQ backend removal and recovery](pgq-removal.md) for the recovery points.
 - Follow [ADR 0009](https://github.com/groovemap-music/design/blob/main/docs/adr/0009-native-identity-and-provider-aliases.md):
   key every catalog entity by a native id that `provider_aliases` maps a provider's id onto;
   mint only on the write side (the Discogs sync), never from a read path. See
