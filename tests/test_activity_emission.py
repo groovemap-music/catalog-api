@@ -426,6 +426,31 @@ class TestBatchWriter:
         assert len({row[3] for row in rows}) == 1, "one subject resolution for the whole batch"
 
     @pytest.mark.asyncio
+    async def test_each_statement_of_the_batch_is_counted_by_its_own_result(self, mock_pool: MagicMock, mock_cur: MagicMock) -> None:
+        """`executemany` keeps one result per statement only with `returning=True`; the
+        recorder walks them so a skipped retry inside a page is a duplicate, not a write."""
+        subject = (uuid4(),)
+        # The subject resolves; then the three statements return a row, nothing, a row.
+        mock_cur.fetchone.side_effect = [subject, (uuid4(),), None, (uuid4(),)]
+        mock_cur.fetchall.return_value = []
+        activity.configure(mock_pool, None)
+        counted: list[tuple[str, bool]] = []
+
+        with patch.object(activity, "_count_write", lambda event_type, *, stored: counted.append((event_type, stored))):
+            await activity.record_events(
+                "user",
+                [
+                    ("wantlist.item_added", {"item_id": ITEM_ID}, "a"),
+                    ("wantlist.item_removed", {"item_id": OTHER_ITEM_ID}, "b"),
+                    ("wantlist.item_added", {"item_id": OTHER_ITEM_ID}, "c"),
+                ],
+            )
+
+        assert mock_cur.executemany.await_args.kwargs == {"returning": True}
+        assert mock_cur.nextset.call_count == 2
+        assert counted == [("wantlist.item_added", True), ("wantlist.item_removed", False), ("wantlist.item_added", True)]
+
+    @pytest.mark.asyncio
     async def test_one_invalid_event_does_not_lose_the_rest_of_the_page(self, mock_pool: MagicMock, mock_cur: MagicMock) -> None:
         mock_cur.fetchone.return_value = (uuid4(),)
         mock_cur.fetchall.return_value = []

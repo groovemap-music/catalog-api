@@ -192,11 +192,26 @@ class TestRecordEvent:
         assert metrics.values(EVENTS_COUNTER, "event_type") == ["recommendation.opened"]
 
     @pytest.mark.asyncio
-    async def test_the_insert_is_idempotent_on_the_occurrence_scoped_key(self, mock_cur: MagicMock) -> None:
+    async def test_the_insert_returns_the_row_it_stored(self, mock_cur: MagicMock) -> None:
+        """The schema's claim trigger skips a retry with no row and no error, so the
+        statement must return the stored row for the recorder to tell the two apart. The
+        occurrence-scoped conflict target stays for the case the trigger defers to it."""
         await activity.record_event(USER_ID, "recommendation.opened", VALID_OUTCOME_PAYLOAD)
 
         insert = next(sql for sql in statements(mock_cur) if "INSERT INTO activity.events" in sql)
         assert "ON CONFLICT (occurred_at, idempotency_key) DO NOTHING" in insert
+        assert "RETURNING event_id" in insert
+
+    @pytest.mark.asyncio
+    async def test_a_retry_the_schema_skipped_is_counted_as_a_duplicate_not_a_write(self, mock_cur: MagicMock, metrics: Any) -> None:
+        # The subject resolves, then the insert returns no row: the key was already held.
+        mock_cur.fetchone.side_effect = [(SUBJECT_ID,), None]
+
+        await activity.record_event(USER_ID, "recommendation.saved", VALID_OUTCOME_PAYLOAD, idempotency_key="saved:1")
+
+        assert any("INSERT INTO activity.events" in sql for sql in statements(mock_cur))
+        assert metrics.values(EVENTS_COUNTER, "event_type") == []
+        assert metrics.values(FAILURES_COUNTER, "outcome") == [telemetry.ACTIVITY_DUPLICATE]
 
     @pytest.mark.asyncio
     async def test_the_partition_is_ensured_once_per_process_per_month(self, mock_cur: MagicMock) -> None:

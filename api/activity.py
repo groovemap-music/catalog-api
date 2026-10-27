@@ -33,6 +33,15 @@ reading of the ADR's prose:
 Observability is deliberately thin, as the ADR asks: one counter for what was written,
 keyed by event type, and one for what was not, keyed by a closed outcome vocabulary.
 Neither carries a subject, a session, an item, or a request id.
+
+A retried event is not written twice. ``activity.events`` is partitioned by
+``occurred_at``, so its own unique key has to include the partition column and cannot see
+a retry stamped a second or a month later. The deduplication is the schema's instead:
+``activity.event_idempotency`` holds one row per (subject, idempotency key) across every
+partition, and a ``BEFORE INSERT`` trigger skips an event whose key is already held. The
+recorder reads the insert's ``RETURNING`` row to tell a written event from a skipped
+retry, and counts the retry as :data:`~api.telemetry.ACTIVITY_DUPLICATE` rather than as a
+second write.
 """
 
 from __future__ import annotations
@@ -55,6 +64,7 @@ from common.identity import new_id
 from common.query_debug import execute_sql
 
 from api.telemetry import (
+    ACTIVITY_DUPLICATE,
     ACTIVITY_INVALID,
     ACTIVITY_NO_NATIVE_ID,
     ACTIVITY_NO_SUBJECT,
@@ -166,9 +176,18 @@ WHERE user_id = %s::uuid AND revoked_at IS NULL
 # the default one.
 _ENSURE_PARTITION: Final = "SELECT activity.ensure_month_partition(%s, %s)"
 
-# `ON CONFLICT DO NOTHING` is what makes a retried write safe inside the partitioned
-# table: the unique key is (occurred_at, idempotency_key), and a second arrival of the
-# same logical event is a no-op rather than a duplicate row or a raised error. DO NOTHING
+# A retry is deduplicated by the schema, not by this statement's conflict target. The
+# events table is partitioned by `occurred_at`, so its unique key (occurred_at,
+# idempotency_key) only sees a retry stamped with the original's exact instant. The
+# `activity_events_claim_idempotency_key` trigger claims the key in the non-partitioned
+# `activity.event_idempotency`, keyed (subject_id, idempotency_key), and skips the row when
+# the key is already held by a stored event, whatever the retry's `occurred_at` or
+# partition. A skipped row returns no `RETURNING` row and raises nothing, which is how the
+# recorder tells a written event from a retry.
+#
+# `ON CONFLICT (occurred_at, idempotency_key) DO NOTHING` stays: it is the case where another
+# subject's stored event already holds this exact occurrence key, which the trigger leaves
+# to the unique key rather than claiming a key for a row that is never stored. DO NOTHING
 # rather than DO UPDATE because the immutability trigger would reject the update.
 _INSERT_EVENT: Final = """
 INSERT INTO activity.events (
@@ -181,6 +200,7 @@ INSERT INTO activity.events (
     %s, %s, %s, %s::jsonb
 )
 ON CONFLICT (occurred_at, idempotency_key) DO NOTHING
+RETURNING event_id
 """
 
 _INSERT_IMPRESSION: Final = """
@@ -440,9 +460,11 @@ async def record_event(
         session_id: The session it happened in, when there is one.
         model_version: The model version in play, when there is one.
         feature_version: The feature version in play, when there is one.
-        idempotency_key: The key a retried write deduplicates on, unique with
-            ``occurred_at``. Defaults to a fresh id, which makes the write safe but not
-            deduplicable; an emission point with a natural key should pass it.
+        idempotency_key: The key a retried write deduplicates on, per subject and across
+            every partition: a second write under a key the subject already holds is
+            skipped, however much later it arrives. Defaults to a fresh id, which makes the
+            write safe but not deduplicable; an emission point with a natural key should
+            pass it.
         occurred_at: When the thing happened. Defaults to now.
     """
     pool = _pool
@@ -474,12 +496,22 @@ async def record_event(
         async with pool.connection() as conn, conn.cursor() as cursor:
             await _ensure_partition(cursor, EVENTS_TABLE, event.occurred_at)
             await execute_sql(cursor, _INSERT_EVENT, _event_parameters(event))
+            stored = await cursor.fetchone() is not None
     except Exception:
         logger.warning("⚠️ Activity event write failed", event_type=event_type, exc_info=True)
         record_activity_failure(ACTIVITY_WRITE_FAILED)
         return
 
-    record_activity_event(event_type)
+    _count_write(event_type, stored=stored)
+
+
+def _count_write(event_type: str, *, stored: bool) -> None:
+    """Count one insert as a written row, or as a retry the schema skipped."""
+    if stored:
+        record_activity_event(event_type)
+        return
+    logger.debug("🔁 Activity event already recorded; retry skipped", event_type=event_type)
+    record_activity_failure(ACTIVITY_DUPLICATE)
 
 
 async def record_events(user_id: str, events: Sequence[tuple[str, Mapping[str, Any], str | None]]) -> None:
@@ -491,7 +523,8 @@ async def record_events(user_id: str, events: Sequence[tuple[str, Mapping[str, A
     correct as well as cheaper: every row of one batch describes one moment.
 
     An event that fails validation is dropped and counted; the rest of the batch is still
-    written, because one malformed payload is not a reason to lose the page.
+    written, because one malformed payload is not a reason to lose the page. An event whose
+    key the subject already holds is skipped by the schema and counted as a duplicate.
 
     Args:
         user_id: The account every event in the batch belongs to.
@@ -524,14 +557,22 @@ async def record_events(user_id: str, events: Sequence[tuple[str, Mapping[str, A
     try:
         async with pool.connection() as conn, conn.cursor() as cursor:
             await _ensure_partition(cursor, EVENTS_TABLE, moment)
-            await cursor.executemany(_INSERT_EVENT, [_event_parameters(event) for event in built])
+            # `returning=True` keeps one result per statement, which is the only per-row
+            # answer an executemany gives: its `rowcount` is the batch total without it and
+            # the last statement's alone with it, so neither says which event was skipped.
+            await cursor.executemany(_INSERT_EVENT, [_event_parameters(event) for event in built], returning=True)
+            stored = []
+            for index in range(len(built)):
+                if index:
+                    cursor.nextset()
+                stored.append(await cursor.fetchone() is not None)
     except Exception:
         logger.warning("⚠️ Activity event batch write failed", count=len(built), exc_info=True)
         record_activity_failure(ACTIVITY_WRITE_FAILED)
         return
 
-    for event in built:
-        record_activity_event(event.event_type)
+    for event, written in zip(built, stored, strict=True):
+        _count_write(event.event_type, stored=written)
 
 
 async def record_impressions(
