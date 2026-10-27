@@ -293,6 +293,7 @@ def _configure_routers(
     _fit_router.configure(neo4j, pool, valkey)
     _search_router.configure(pool, valkey)
     _lookup_router.configure(pool)
+    _insights_router.configure(config.insights_base_url)
     _insights_compute_router.configure(neo4j, pool, valkey, config)
     _admin_router.configure(pool, valkey, config, neo4j_driver=neo4j)
     _musicbrainz_router.configure(pool, neo4j)
