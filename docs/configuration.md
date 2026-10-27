@@ -177,7 +177,7 @@ ever carries an identifier, a cache key, or free text.
 | `groovemap.api.cache.write_failures` | `cache` (the logical Valkey cache), `error.type` (the exception class) |
 | `groovemap.api.nlq.requests` | `outcome` (`success`, `cached`, `error`, `invalid`, `unavailable`) |
 | `groovemap.api.activity_events` | `event_type` (the version 1 event vocabulary, plus `impression`) |
-| `groovemap.api.activity_failures` | `outcome` (`invalid`, `not_configured`, `no_native_id`, `no_subject`, `write_failed`) |
+| `groovemap.api.activity_failures` | `outcome` (`duplicate`, `invalid`, `not_configured`, `no_native_id`, `no_subject`, `write_failed`) |
 | `groovemap.api.identity_ledger.refreshes` | `trigger` (`reattach`, `backfill`, `poll`), `outcome` (`success`, `failed`) |
 
 Cache writes are best-effort: a failed write never fails the request. Each one increments

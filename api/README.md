@@ -1518,7 +1518,7 @@ The API service uses the following tables. Their DDL and initialization image ar
 - `app_tokens` — revocable third-party app tokens (`id`, `user_id`, `name`, `scope`, `token_hash`, `created_at`, `last_used_at`, `revoked_at`)
 - `provider_aliases` — native id mapping (`provider`, `entity_kind`, `external_id`, `native_id`, `valid_to`) — see [ADR 0009](https://github.com/groovemap-music/design/blob/main/docs/adr/0009-native-identity-and-provider-aliases.md)
 - `owned_copies`, `observations`, `collection_snapshots` — the physical-copy and evidence tables ADR 0009 adds; see [Native identity and first-party activity](../docs/identity-and-activity.md)
-- `activity.events`, `activity.impressions`, `activity.user_subjects`, `activity.consent_grants`, `activity.erasures` — the month-partitioned behavioural record and its consent/erasure bookkeeping; see [ADR 0010](https://github.com/groovemap-music/design/blob/main/docs/adr/0010-first-party-events-consent-and-deletion.md)
+- `activity.events`, `activity.impressions`, `activity.event_idempotency`, `activity.user_subjects`, `activity.consent_grants`, `activity.erasures` — the month-partitioned behavioural record, the cross-partition idempotency keys that make a retried event a no-op, and its consent/erasure bookkeeping; see [ADR 0010](https://github.com/groovemap-music/design/blob/main/docs/adr/0010-first-party-events-consent-and-deletion.md)
 
 ## Deprecations
 

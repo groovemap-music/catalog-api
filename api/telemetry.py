@@ -73,6 +73,13 @@ WRITE_FAILURE_LOG_INTERVAL_SECONDS = 60.0
 # tables are the analytical record and the metrics only say whether the writer is working,
 # so these are the whole closed vocabulary of the `outcome` attribute on the failure
 # counter — never a subject, a session, an item, or a request id.
+#
+# `duplicate` is the one outcome that is not a malfunction: a retried event whose
+# idempotency key the subject already holds, which the schema's claim trigger skips because
+# the original is already recorded. It is counted here rather than as a write so the
+# written counter means rows, and kept apart from the others so an alert on failures can
+# exclude it.
+ACTIVITY_DUPLICATE = "duplicate"
 ACTIVITY_INVALID = "invalid"
 ACTIVITY_NOT_CONFIGURED = "not_configured"
 ACTIVITY_NO_NATIVE_ID = "no_native_id"
