@@ -149,18 +149,43 @@ def compute_stats(timings: list[float]) -> dict[str, float]:
 # ---------------------------------------------------------------------------
 
 
-def timed_get(client: httpx.Client, url: str, params: dict[str, str] | None = None, headers: dict[str, str] | None = None) -> dict[str, Any]:
-    """Make a GET request and return timing + response metadata."""
+def response_is_empty(resp: httpx.Response, key: str) -> bool:
+    """True when a 2xx JSON response has no items under ``key`` (missing, null, or empty)."""
+    if resp.status_code >= 400:
+        return False  # already reported as an HTTP error
+    try:
+        body = resp.json()
+    except ValueError:
+        return True
+    return not (isinstance(body, dict) and body.get(key))
+
+
+def timed_get(
+    client: httpx.Client,
+    url: str,
+    params: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+    nonempty_key: str | None = None,
+) -> dict[str, Any]:
+    """Make a GET request and return timing + response metadata.
+
+    With ``nonempty_key``, the result also carries ``empty``: whether the response
+    had no items under that key, so a scenario that times nothing is not mistaken
+    for real work.
+    """
     start = time.perf_counter()
     try:
         resp = client.get(url, params=params, headers=headers)
         elapsed = time.perf_counter() - start
-        return {
+        result: dict[str, Any] = {
             "status": resp.status_code,
             "elapsed": round(elapsed, 4),
             "size": len(resp.content),
             "error": None,
         }
+        if nonempty_key is not None:
+            result["empty"] = response_is_empty(resp, nonempty_key)
+        return result
     except Exception as exc:
         elapsed = time.perf_counter() - start
         return {
@@ -225,11 +250,15 @@ def run_endpoint(
     method: str = "GET",
     json_body: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
+    nonempty_key: str | None = None,
     max_429_retries: int = 4,
     base_429_delay: float = 32.0,
     max_429_delay: float = 300.0,
 ) -> dict[str, Any]:
     """Run an endpoint N times, collect results and stats.
+
+    With ``nonempty_key`` (GET only), a 2xx response with no items under that JSON
+    key counts as an error and is flagged, since it timed no real work.
 
     If a 429 (Too Many Requests) response is received, pauses with
     exponential backoff (32s, 64s, 128s, 256s) and retries that
@@ -244,7 +273,7 @@ def run_endpoint(
             elif method == "PUT":
                 result = timed_put(client, url, json_body, headers)
             else:
-                result = timed_get(client, url, params, headers)
+                result = timed_get(client, url, params, headers, nonempty_key)
             if result["status"] == 429 and retries < max_429_retries:
                 retries += 1
                 delay = min(base_429_delay * (2 ** (retries - 1)), max_429_delay)
@@ -254,11 +283,14 @@ def run_endpoint(
             break
         runs.append(result)
         status_indicator = f"{result['status']}" if result["status"] else f"ERR: {result['error']}"
+        if result.get("empty"):
+            status_indicator += f" EMPTY ('{nonempty_key}' has no items; this run timed no real work)"
         retry_note = f" (after {retries} 429 retries)" if retries > 0 else ""
         print(f"  [{i + 1}/{iterations}] {name} -> {status_indicator} in {result['elapsed']:.4f}s{retry_note}")
 
     timings = [r["elapsed"] for r in runs if r["error"] is None and r["status"] != 429]
-    errors = sum(1 for r in runs if r["error"] is not None or r["status"] >= 400)
+    errors = sum(1 for r in runs if r["error"] is not None or r["status"] >= 400 or r.get("empty"))
+    empty_runs = sum(1 for r in runs if r.get("empty"))
 
     return {
         "endpoint": name,
@@ -266,6 +298,7 @@ def run_endpoint(
         "params": params,
         "iterations": iterations,
         "errors": errors,
+        "empty_runs": empty_runs,
         "stats": compute_stats(timings),
         "runs": runs,
     }
@@ -641,7 +674,10 @@ def build_test_plan(
             }
         )
 
-    # --- Expand (requires resolved IDs, tests releases category) ---
+    # --- Expand (tests releases category) ---
+    # /api/expand matches nodes by *name* (node_id is the entity name, not a graph ID).
+    # The entity must still resolve via autocomplete (so it exists in the dataset), and
+    # each scenario asserts a non-empty "children" list so an empty result is reported.
     for artist_name, artist_id in artist_ids.items():
         if artist_id is None:
             continue
@@ -649,8 +685,9 @@ def build_test_plan(
             {
                 "name": f"expand/artist/{artist_name}/releases",
                 "url": f"{base}/api/expand",
+                "nonempty_key": "children",
                 "params": {
-                    "node_id": str(artist_id),
+                    "node_id": artist_name,
                     "type": "artist",
                     "category": "releases",
                     "limit": "20",
@@ -664,8 +701,9 @@ def build_test_plan(
             {
                 "name": f"expand/label/{label_name}/releases",
                 "url": f"{base}/api/expand",
+                "nonempty_key": "children",
                 "params": {
-                    "node_id": str(label_id),
+                    "node_id": label_name,
                     "type": "label",
                     "category": "releases",
                     "limit": "20",
@@ -779,6 +817,10 @@ def write_report(
     lines.append("--- SUMMARY ---")
     lines.append(f"  Total endpoints tested: {len(results)}")
     lines.append(f"  Total errors: {total_errors}")
+    empty_scenarios = [r["endpoint"] for r in results if r.get("empty_runs")]
+    if empty_scenarios:
+        lines.append(f"  EMPTY-RESULT scenarios ({len(empty_scenarios)}): timings measure no real work")
+        lines.extend(f"    - {name}" for name in empty_scenarios)
     if all_avgs:
         lines.append(f"  Fastest avg: {min(all_avgs):.4f}s")
         lines.append(f"  Slowest avg: {max(all_avgs):.4f}s")
@@ -897,6 +939,7 @@ def main() -> None:
                 iterations,
                 method=test.get("method", "GET"),
                 json_body=test.get("json_body"),
+                nonempty_key=test.get("nonempty_key"),
             )
             results.append(result)
             print()
