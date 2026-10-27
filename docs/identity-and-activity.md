@@ -107,8 +107,33 @@ Each write:
    process per month; also run for the current and next month at startup).
 5. Inserts, and counts the result on one of two OTEL counters: `groovemap.api.activity_events`
    (attribute `event_type`) for what was written, and `groovemap.api.activity_failures`
-   (attribute `outcome`: `invalid`, `not_configured`, `no_native_id`, `no_subject`, or
-   `write_failed`) for what was not.
+   (attribute `outcome`: `duplicate`, `invalid`, `not_configured`, `no_native_id`,
+   `no_subject`, or `write_failed`) for what was not. `duplicate` is not a malfunction: it is
+   a retry the schema skipped because the original is already recorded (see below).
+
+### Retried events are recorded once
+
+Every event carries an `idempotency_key`, and a second write under a key the subject already
+holds is skipped rather than stored, however much later it arrives. `activity.events` is
+partitioned by month on `occurred_at`, so its own `UNIQUE (occurred_at, idempotency_key)` has to
+include the partition column and only sees a retry stamped with the original's exact instant;
+an `occurred_at` that defaults to now gives a retry a second, a minute, or a month later a
+different key, in a possibly different partition. The deduplication is therefore the schema's
+(`database-schema` v0.5.0): `activity.event_idempotency`, a non-partitioned table keyed
+`(subject_id, idempotency_key)`, is claimed by a `BEFORE INSERT` trigger on `activity.events`,
+which skips the row when the key is held by a stored event. Concurrent retries are serialised on
+that primary key, so racing copies of one report still produce one row.
+
+A skipped row returns no `RETURNING` row and raises nothing, so the recorder reads the insert's
+result to tell a write from a retry: `record_event` from its one statement, and `record_events`
+from one result per statement (`executemany(..., returning=True)` — without it psycopg reports
+only the batch total, and with it `rowcount` is the last statement's alone). The recorded row
+keeps the original's `occurred_at`; the retry does not move it.
+
+Only an emission point with a natural key benefits. The outcome endpoint keys on
+`{event_type}:{impression_id}`; search and lookup key on their request id, and the consent,
+erasure, and export events on the request's timestamp, so those never collide. An event with no
+key passed gets a fresh id: safe to write, never deduplicated.
 
 ### Where the vocabulary the implementation resolved differs from a casual reading
 
@@ -184,7 +209,9 @@ not exist.
 The body carries `event_type` (one of the eight outcomes above: four `recommendation.*`, four
 `fit.*`), `impression_id`, and `item_id`; any other `event_type` is rejected as a `422` by the
 request model before it reaches the recorder. The write is idempotent on
-`{event_type}:{impression_id}`, so a retried report is a no-op. Returns `202` — the row is
+`{event_type}:{impression_id}` per user, so a retried report is a no-op whenever it arrives —
+the same second or a later month — and still returns `202` (see
+[Retried events are recorded once](#retried-events-are-recorded-once)). Returns `202` — the row is
 written before the response, but the caller is told the outcome was accepted, not that an
 analysis has consumed it.
 
@@ -243,11 +270,14 @@ caller, across every store, in this order:
 1. **PostgreSQL, one transaction**, under `SET LOCAL groovemap.erasure = 'on'` (the bypass the
    immutability trigger on `activity.events`/`activity.impressions` requires, scoped to this
    transaction only so it cannot leak to the next statement on a pooled connection):
-   - Delete `activity.events` and `activity.impressions` by subject id, then
-     `activity.user_subjects` — so the pseudonym can never be re-associated with the account
-     even if a row survived somewhere else.
-   - Insert one `activity.erasures` row (`model_versions_before = []` until a model registry
-     exists — deleting rows does not retrain a model already trained on them).
+   - Count the subject's `activity.event_idempotency` keys, then delete `activity.events` and
+     `activity.impressions` by subject id, then `activity.user_subjects` — so the pseudonym can
+     never be re-associated with the account even if a row survived somewhere else. The keys
+     are not deleted by name: the schema releases a key when its event is deleted and the
+     subject's remaining keys when the subject link goes, which is why they are counted first.
+   - Insert one `activity.erasures` row carrying the three counts (`events_deleted`,
+     `impressions_deleted`, `idempotency_keys_deleted`) and `model_versions_before = []` until
+     a model registry exists — deleting rows does not retrain a model already trained on them.
    - Delete `catalog_item_moves` (the native-id merge's ledger of the user's re-pointed copies
      and artifacts), `observations`, `collection_snapshots`, `owned_copies`,
      `user_collections`, `user_wantlists`, `sync_history`, `app_tokens`, and OAuth tokens, in
