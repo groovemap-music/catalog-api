@@ -82,7 +82,7 @@ MATCH (p:Person)-[c:CREDITED_ON]->(r:Release)
 WHERE c.category = $category
 WITH p, count(DISTINCT r) AS credit_count
 RETURN p.name AS name, credit_count
-ORDER BY credit_count DESC
+ORDER BY credit_count DESC, p.name
 LIMIT $limit
 """
 
@@ -134,7 +134,7 @@ async def get_role_leaderboard(
     MATCH (p:Person)
     WHERE p.{prop} > 0
     RETURN p.name AS name, p.{prop} AS credit_count
-    ORDER BY p.{prop} DESC
+    ORDER BY p.{prop} DESC, p.name
     LIMIT $limit
     """
     return await run_query(driver, cypher, limit=limit)

@@ -128,7 +128,7 @@ class TestGetRoleLeaderboard:
         probe, main = rq.await_args_list
         assert "p.credit_count_mastering IS NOT NULL" in probe.args[1]
         assert "p.credit_count_mastering > 0" in main.args[1]
-        assert "ORDER BY p.credit_count_mastering DESC" in main.args[1]
+        assert "ORDER BY p.credit_count_mastering DESC, p.name" in main.args[1]
         assert "CREDITED_ON" not in main.args[1]
 
     @pytest.mark.asyncio
