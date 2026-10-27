@@ -58,7 +58,8 @@ def index_of(executed: list[str], fragment: str) -> int:
 @pytest.fixture
 def erasable(mock_cur: MagicMock, mock_valkey: AsyncMock) -> Any:
     """A caller whose password verifies, whose subject resolves, and whose erasure records."""
-    mock_cur.fetchone.side_effect = [credentials(), {"id": "99999999-9999-9999-9999-999999999999"}]
+    # Credentials, then the idempotency-key count, then the erasure record's id.
+    mock_cur.fetchone.side_effect = [credentials(), {"keys": 3}, {"id": "99999999-9999-9999-9999-999999999999"}]
     mock_cur.rowcount = 7
     # The cache sweep is verified after it runs, so the scan has to answer.
     mock_valkey.scan = AsyncMock(return_value=(0, []))
@@ -92,6 +93,7 @@ class TestErasureProcedure:
         executed = statements(mock_cur)
         ordered = [
             "SET LOCAL groovemap.erasure",
+            "SELECT count(*) AS keys FROM activity.event_idempotency",
             "DELETE FROM activity.events",
             "DELETE FROM activity.impressions",
             "DELETE FROM activity.user_subjects",
@@ -148,7 +150,8 @@ class TestErasureProcedure:
         assert parameters[0] == SUBJECT_ID
         assert parameters[2] == 7
         assert parameters[3] == 7
-        assert parameters[4] == [], "no model registry exists yet to name the versions"
+        assert parameters[4] == 3, "the keys counted before the triggers removed them"
+        assert parameters[5] == [], "no model registry exists yet to name the versions"
         assert response.json() == {
             "erasure_id": "99999999-9999-9999-9999-999999999999",
             "events_deleted": 7,
@@ -322,7 +325,7 @@ class TestErasureAuthentication:
         assert response.status_code == 400
 
     def test_a_correct_totp_code_lets_the_procedure_run(self, test_client: TestClient, auth_headers: dict[str, str], mock_cur: MagicMock) -> None:
-        mock_cur.fetchone.side_effect = [credentials(totp_enabled=True, totp_secret=ENCRYPTED_TOTP), {"id": "1"}]
+        mock_cur.fetchone.side_effect = [credentials(totp_enabled=True, totp_secret=ENCRYPTED_TOTP), {"keys": 0}, {"id": "1"}]
         mock_cur.rowcount = 0
 
         with (

@@ -274,6 +274,11 @@ EVENT_EXPORT_REQUESTED = "account.export_requested"
 # it to this transaction: it cannot leak to the next statement on a pooled connection.
 _ENABLE_ERASURE = "SET LOCAL groovemap.erasure = 'on'"
 
+# The subject's idempotency keys (`activity.event_idempotency`) are not deleted by name:
+# the schema releases a key when its event is deleted and the rest when the subject link
+# goes, so the closure stays the three statements below. They are counted first, because
+# by the time the erasure record is written the triggers have already removed them.
+_COUNT_IDEMPOTENCY_KEYS = "SELECT count(*) AS keys FROM activity.event_idempotency WHERE subject_id = %s"
 _DELETE_EVENTS = "DELETE FROM activity.events WHERE subject_id = %s"
 _DELETE_IMPRESSIONS = "DELETE FROM activity.impressions WHERE subject_id = %s"
 _DELETE_SUBJECT = "DELETE FROM activity.user_subjects WHERE user_id = %s::uuid"
@@ -283,8 +288,9 @@ _DELETE_SUBJECT = "DELETE FROM activity.user_subjects WHERE user_id = %s::uuid"
 # name the versions, which is what ADR 0010 defers rather than answers.
 _INSERT_ERASURE = """
 INSERT INTO activity.erasures (
-    subject_id, requested_at, completed_at, events_deleted, impressions_deleted, model_versions_before
-) VALUES (%s, %s, NOW(), %s, %s, %s)
+    subject_id, requested_at, completed_at, events_deleted, impressions_deleted, idempotency_keys_deleted,
+    model_versions_before
+) VALUES (%s, %s, NOW(), %s, %s, %s, %s)
 RETURNING id
 """
 
@@ -478,6 +484,10 @@ async def _erase_postgres(user_id: str, subject_id: UUID, requested_at: datetime
     async with pool.connection() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await execute_sql(cur, _ENABLE_ERASURE, ())
 
+        await execute_sql(cur, _COUNT_IDEMPOTENCY_KEYS, (subject_id,))
+        counted = await cur.fetchone()
+        keys_deleted = int(counted["keys"]) if counted else 0
+
         await execute_sql(cur, _DELETE_EVENTS, (subject_id,))
         events_deleted = cur.rowcount
         await execute_sql(cur, _DELETE_IMPRESSIONS, (subject_id,))
@@ -487,7 +497,7 @@ async def _erase_postgres(user_id: str, subject_id: UUID, requested_at: datetime
         # the account even if a row survived somewhere this procedure does not reach.
         await execute_sql(cur, _DELETE_SUBJECT, (user_id,))
 
-        await execute_sql(cur, _INSERT_ERASURE, (subject_id, requested_at, events_deleted, impressions_deleted, []))
+        await execute_sql(cur, _INSERT_ERASURE, (subject_id, requested_at, events_deleted, impressions_deleted, keys_deleted, []))
         record = await cur.fetchone()
 
         for statement in _USER_OWNED_DELETES:
@@ -500,7 +510,12 @@ async def _erase_postgres(user_id: str, subject_id: UUID, requested_at: datetime
         )
 
     erasure_id = str(record["id"]) if record else ""
-    logger.info("🧹 Erasure: PostgreSQL complete", events_deleted=events_deleted, impressions_deleted=impressions_deleted)
+    logger.info(
+        "🧹 Erasure: PostgreSQL complete",
+        events_deleted=events_deleted,
+        impressions_deleted=impressions_deleted,
+        idempotency_keys_deleted=keys_deleted,
+    )
     return erasure_id, max(events_deleted, 0), max(impressions_deleted, 0)
 
 
