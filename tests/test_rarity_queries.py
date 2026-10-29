@@ -961,6 +961,7 @@ class TestFetchAllRaritySignals:
         # Two independent OPTIONAL MATCH clauses, not one combined pattern that
         # conditions `m` on a sibling existing.
         assert "OPTIONAL MATCH (r)-[:DERIVED_FROM]->(m:Master)\n" in pressing_cypher
+        assert "WHERE m.id <> '0' AND m.id <> 0\n" in pressing_cypher
         assert "OPTIONAL MATCH (m)<-[:DERIVED_FROM]-(sibling:Release)" in pressing_cypher
         assert "OPTIONAL MATCH (r)-[:DERIVED_FROM]->(m:Master)<-[:DERIVED_FROM]-(sibling:Release)" not in pressing_cypher
         # The +1 must live inside the non-null branch, not in the aggregate —
@@ -973,8 +974,16 @@ class TestFetchAllRaritySignals:
         from api.queries.rarity_queries import _PRESSING_QUERY
 
         assert "OPTIONAL MATCH (r)-[:DERIVED_FROM]->(m:Master)\n" in _PRESSING_QUERY
+        assert "WHERE m.id <> '0' AND m.id <> 0\n" in _PRESSING_QUERY
         assert "OPTIONAL MATCH (m)<-[:DERIVED_FROM]-(sibling:Release)" in _PRESSING_QUERY
         assert "OPTIONAL MATCH (r)-[:DERIVED_FROM]->(m:Master)<-[:DERIVED_FROM]-(sibling:Release)" not in _PRESSING_QUERY
+
+    def test_temporal_query_filters_zero_master_before_sibling_expansion(self) -> None:
+        from api.queries.rarity_queries import _TEMPORAL_QUERY
+
+        assert "OPTIONAL MATCH (r)-[:DERIVED_FROM]->(m:Master)\nWHERE m.id <> '0' AND m.id <> 0\n" in _TEMPORAL_QUERY
+        assert "OPTIONAL MATCH (m)<-[:DERIVED_FROM]-(sibling:Release)" in _TEMPORAL_QUERY
+        assert "OPTIONAL MATCH (r)-[:DERIVED_FROM]->(m:Master)<-[:DERIVED_FROM]-(sibling:Release)" not in _TEMPORAL_QUERY
 
     @pytest.mark.asyncio
     async def test_sole_pressing_of_master_scores_as_unique_not_standalone(self) -> None:

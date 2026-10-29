@@ -49,6 +49,7 @@ PRESSING_QUERY: Final[str] = """
 UNWIND $ids AS rid
 MATCH (r:Release {id: rid})
 OPTIONAL MATCH (r)-[:DERIVED_FROM]->(m:Master)
+WHERE m.id <> '0' AND m.id <> 0
 OPTIONAL MATCH (m)<-[:DERIVED_FROM]-(sibling:Release)
 WHERE sibling <> r
 WITH r, m, count(DISTINCT sibling) AS sibling_count
