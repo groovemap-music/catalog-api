@@ -1249,3 +1249,14 @@ class TestRarityChunking:
             results = await fetch_all_rarity_signals(mock_driver, None)
 
         assert results == []
+
+
+@pytest.mark.parametrize("query_name", ["_PRESSING_QUERY", "_TEMPORAL_QUERY"])
+def test_masterless_hub_is_filtered_before_sibling_expansion(query_name: str) -> None:
+    """A page limit cannot bound work if zero-master neighbours expand first."""
+    from api.queries import rarity_queries
+
+    query = getattr(rarity_queries, query_name)
+    assert (
+        "OPTIONAL MATCH (r)-[:DERIVED_FROM]->(m:Master)\nWHERE NOT m.id IN ['0', 0]\nOPTIONAL MATCH (m)<-[:DERIVED_FROM]-(sibling:Release)" in query
+    )
