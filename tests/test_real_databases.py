@@ -935,3 +935,70 @@ async def test_style_cotags_count_tie_break_cap_and_self_pairs_on_a_seeded_graph
     assert set(cotags[0]) == {"style", "other", "release_count"}
     # Rows come back grouped by style, count descending, then name.
     assert [row["style"] for row in cotags] == sorted(row["style"] for row in cotags)
+
+
+async def test_rarity_masterless_hubs_and_duplicate_edges(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    """Both zero types stay standalone; real masters retain pressing/reissue semantics."""
+    from api.queries.rarity_queries import _PRESSING_QUERY, _TEMPORAL_QUERY
+    from api.rarity.families.grooved import compute_pressing_scarcity_score
+
+    await _consume(
+        neo4j_driver,
+        "CREATE (z:Master {id:'0'}), (nz:Master {id:0}), (u:Master {id:'u'}), (m:Master {id:'m'}), "
+        "(a:Release {id:'standalone',year:1999}), (b:Release {id:'zero',year:1999}), "
+        "(c:Release {id:'numeric-zero',year:1999}), (d:Release {id:'unique',year:1999}), "
+        "(e:Release {id:'multi',year:2000}), (f:Release {id:'sibling',year:2020}), "
+        "(g:Release {id:'false-reissue',year:2025}), (h:Release {id:'numeric-false-reissue',year:2025}), "
+        "(b)-[:DERIVED_FROM]->(z), (g)-[:DERIVED_FROM]->(z), (c)-[:DERIVED_FROM]->(nz), "
+        "(h)-[:DERIVED_FROM]->(nz), (d)-[:DERIVED_FROM]->(u), (e)-[:DERIVED_FROM]->(m), "
+        "(f)-[:DERIVED_FROM]->(m), (f)-[:DERIVED_FROM]->(m)",
+    )
+    ids = ["standalone", "zero", "numeric-zero", "unique", "multi", "sibling"]
+    pressing_rows = await run_query(neo4j_driver, _PRESSING_QUERY, database="neo4j", timeout=5, ids=ids)
+    pressing = {row["release_id"]: row["pressing_count"] for row in pressing_rows}
+    assert pressing == {"standalone": 0, "zero": 0, "numeric-zero": 0, "unique": 1, "multi": 2, "sibling": 2}
+    assert compute_pressing_scarcity_score(pressing["zero"]) == 90.0
+    assert compute_pressing_scarcity_score(pressing["unique"]) == 100.0
+    temporal_rows = await run_query(neo4j_driver, _TEMPORAL_QUERY, database="neo4j", timeout=5, ids=ids)
+    assert {row["release_id"]: row["latest_sibling_year"] for row in temporal_rows} == {
+        "standalone": None,
+        "zero": None,
+        "numeric-zero": None,
+        "unique": None,
+        "multi": 2020,
+        "sibling": 2000,
+    }
+
+
+async def test_rarity_zero_master_page_does_not_expand_hub(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    """A full 20k sentinel page must do linear work rather than 400m sibling rows."""
+    from neo4j import Query
+
+    from api.queries.rarity_queries import _PRESSING_QUERY, _TEMPORAL_QUERY, RARITY_PAGE_SIZE
+
+    await _consume(neo4j_driver, "CREATE CONSTRAINT rarity_release_id IF NOT EXISTS FOR (r:Release) REQUIRE r.id IS UNIQUE")
+    await _consume(
+        neo4j_driver,
+        "CREATE (m:Master {id:'0'}) WITH m UNWIND range(1, $size) AS id CREATE (:Release {id:toString(id),year:1999})-[:DERIVED_FROM]->(m)",
+        size=RARITY_PAGE_SIZE,
+    )
+    ids = [str(index) for index in range(1, RARITY_PAGE_SIZE + 1)]
+
+    def db_hits(plan) -> int:
+        return plan.get("dbHits", 0) + sum(db_hits(child) for child in plan.get("children", []))
+
+    async with neo4j_driver.session(database="neo4j") as session:
+        for query in (_PRESSING_QUERY, _TEMPORAL_QUERY):
+            started = perf_counter()
+            result = await session.run(Query("PROFILE " + query, timeout=120), ids=ids)
+            rows = [dict(row) async for row in result]
+            summary = await result.consume()
+            elapsed = perf_counter() - started
+            assert len(rows) == RARITY_PAGE_SIZE
+            assert all(row.get("pressing_count", 0) == 0 and row.get("latest_sibling_year") is None for row in rows)
+            hits = db_hits(summary.profile)
+            # A profile records actual storage work. This bound allows planner
+            # variation but rejects even a fraction of a quadratic 20k hub scan.
+            assert hits < RARITY_PAGE_SIZE * 50
+            assert elapsed < 120
+            print(f"rarity sentinel page: rows={len(rows)} db_hits={hits} seconds={elapsed:.3f}")
