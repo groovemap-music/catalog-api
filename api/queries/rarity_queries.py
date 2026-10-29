@@ -172,11 +172,14 @@ WITH r.id AS release_id, min(COALESCE(l.release_count, 0)) AS label_catalog_size
 RETURN release_id, label_catalog_size
 """
 
-# 4. Temporal: release year + latest sibling year
+# 4. Temporal: release year + latest sibling year. Exclude the masterless sentinel
+# before sibling expansion, just as the grooved pressing query does.
 _TEMPORAL_QUERY = """
 UNWIND $ids AS rid
 MATCH (r:Release {id: rid})
-OPTIONAL MATCH (r)-[:DERIVED_FROM]->(m:Master)<-[:DERIVED_FROM]-(sibling:Release)
+OPTIONAL MATCH (r)-[:DERIVED_FROM]->(m:Master)
+WHERE NOT m.id IN ['0', 0]
+OPTIONAL MATCH (m)<-[:DERIVED_FROM]-(sibling:Release)
 WHERE sibling.year IS NOT NULL AND sibling <> r
 WITH r.id AS release_id, r.year AS year,
      max(sibling.year) AS latest_sibling_year

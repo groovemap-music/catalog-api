@@ -43,12 +43,15 @@ PRESSING_WEIGHT: Final[float] = 0.25
 # therefore be applied INSIDE the non-null branch, to a plain sibling_count, rather than folded
 # into the aggregate.
 #
+# Discogs master ID zero (string or numeric) means no master. Reject it before
+# expanding siblings: legacy imports otherwise turn it into a graph-wide hub.
 # The `UNWIND $ids` page scoping is the chunking contract documented in
 # api/queries/rarity_queries.py — do not reintroduce a bare `MATCH (r:Release)` here.
 PRESSING_QUERY: Final[str] = """
 UNWIND $ids AS rid
 MATCH (r:Release {id: rid})
 OPTIONAL MATCH (r)-[:DERIVED_FROM]->(m:Master)
+WHERE NOT m.id IN ['0', 0]
 OPTIONAL MATCH (m)<-[:DERIVED_FROM]-(sibling:Release)
 WHERE sibling <> r
 WITH r, m, count(DISTINCT sibling) AS sibling_count
