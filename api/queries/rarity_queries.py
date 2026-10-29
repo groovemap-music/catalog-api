@@ -176,7 +176,9 @@ RETURN release_id, label_catalog_size
 _TEMPORAL_QUERY = """
 UNWIND $ids AS rid
 MATCH (r:Release {id: rid})
-OPTIONAL MATCH (r)-[:DERIVED_FROM]->(m:Master)<-[:DERIVED_FROM]-(sibling:Release)
+OPTIONAL MATCH (r)-[:DERIVED_FROM]->(m:Master)
+WHERE m.id <> '0' AND m.id <> 0
+OPTIONAL MATCH (m)<-[:DERIVED_FROM]-(sibling:Release)
 WHERE sibling.year IS NOT NULL AND sibling <> r
 WITH r.id AS release_id, r.year AS year,
      max(sibling.year) AS latest_sibling_year
