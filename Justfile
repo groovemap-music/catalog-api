@@ -38,6 +38,10 @@ test:
 test-integration:
     bash scripts/test-integration.sh
 
+# Explicitly owned disposable Neo4j control for rarity zero-master sentinels.
+integration-rarity-neo4j:
+    bash scripts/test-rarity-sentinel-neo4j.sh
+
 # Opt-in: write-rejection paths against throwaway real Valkey (noeviction) + PostgreSQL containers.
 integration-valkey *args:
     bash scripts/test-integration-valkey.sh {{ args }}
