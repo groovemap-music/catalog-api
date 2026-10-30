@@ -1104,8 +1104,8 @@ Natural language query interface for the knowledge graph. Translates plain Engli
 
 **Query parameters for `/api/nlq/suggestions`:**
 
-- `pane` — The client pane asking: `explore`, `trends`, `insights`, `genres`, or `credits`
-  (default: `explore`; an unknown pane gets the `explore` suggestions)
+- `pane` — The client pane asking: `explore`, `trends`, `genres`, `credits`, or the
+  analytics pane (names in `api/nlq/suggestions.py`) (default: `explore`; an unknown pane gets the `explore` suggestions)
 - `focus` — Name of the entity in focus; with `focus_type`, returns suggestions about it
 - `focus_type` — `artist`, `label`, `genre`, or `style` (anything else uses the artist templates)
 
