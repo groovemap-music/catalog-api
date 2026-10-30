@@ -40,7 +40,7 @@ PostgreSQL graph integration tests.
 Neo4j query families remain under `api/queries/*_queries.py` and are wired directly by
 the routers. Ordinary PostgreSQL persistence remains supported. In particular, the
 Explore router still uses `api/queries/release_media_queries.py` for release media and
-catalog-block reads, insights keeps its precomputed relational reads, and the shared
+catalog-block reads, the analytics service keeps its precomputed relational reads, and the shared
 PostgreSQL pool, persistence contracts, sync, identity, audit, and reattachment code are
 unchanged. Those consumers follow the schema package pinned by `pyproject.toml` and can
 be rolled back by reverting that dependency pin together with its generated persistence

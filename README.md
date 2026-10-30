@@ -1,8 +1,12 @@
 # GrooveMap catalog API
 
-Owns GrooveMap authentication, Discogs OAuth and synchronization, catalog search, graph
-queries, recommendations, natural-language queries, internal analytics endpoints, and
-operator setup CLIs.
+The FastAPI service behind GrooveMap. It owns authentication, Discogs OAuth and
+synchronization, catalog search, graph queries, recommendations, natural-language queries,
+internal analytics endpoints, and operator setup CLIs.
+
+This README is for developers and maintainers of this repository. Operators should start
+with the [documentation index](docs/README.md); API consumers should start with the
+[API service guide](api/README.md).
 
 ```mermaid
 flowchart LR
@@ -21,6 +25,54 @@ flowchart LR
     MC --> PG
     MC --> Neo4j
 ```
+
+## Quick start
+
+You need [mise](https://mise.jdx.dev/). Docker is needed only for `just image` and the
+integration recipes. `mise install` pins Python, `uv`, `just`, and `gitleaks`.
+
+```bash
+mise install    # toolchain from .mise.toml
+just setup      # install locked dependencies with uv
+just check      # the full pre-merge gate
+```
+
+`just check` uses fakes and needs no running databases. The integration recipes
+(`just test-integration`, `just integration-valkey`) start their own throwaway containers
+instead.
+
+### Run the service
+
+The service needs reachable PostgreSQL, Neo4j, and Valkey instances. The Compose stack in the
+[`deployment` repository](https://github.com/groovemap-music/deployment) provides them. Export
+the required settings from the
+[minimal local example](docs/configuration.md#minimal-local-example), then start the service:
+
+```bash
+uv run python -m api.api    # or the installed equivalent: catalog-api
+```
+
+The API listens on port 8004. A separate health server listens on port 8005:
+
+```bash
+curl http://localhost:8005/health
+```
+
+## Command-line tools
+
+The wheel installs these commands. Each is documented in the
+[API service guide](api/README.md#operator-setup) or the
+[administration guide](docs/admin-guide.md).
+
+| Command | Purpose |
+| --- | --- |
+| `catalog-api` | Start the API service (the container entry point) |
+| `catalog-setup` | Store the Discogs application credentials |
+| `catalog-admin-setup` | Create, list, or update administrator accounts |
+| `catalog-media-backfill` | Backfill `media` on synced collections and wantlists |
+| `catalog-identity-projection` | Project `gm_id` onto Neo4j nodes |
+| `catalog-identity-reattach` | Re-attach load-order-split catalog items |
+| `catalog-identity-ledger-backfill` | Backfill the Identity Ledger from the MusicBrainz full export |
 
 ## Development
 
@@ -56,11 +108,15 @@ automatic watcher, the Identity Ledger backfill and routes, barcode lookup, and 
 similar-artist reads. Pull-request CI supplies this command as the repository's separate
 integration lane; `just check` remains network-free.
 
+`just integration-rarity-neo4j` is a separate opt-in check. It starts a disposable Neo4j
+container to test the rarity zero-master sentinels.
+
 `just integration-valkey` is a separate opt-in check. It starts the production-pinned Valkey
 with a tiny `maxmemory` under `noeviction`, plus PostgreSQL, both as throwaway loopback
 containers. It fills Valkey and then exercises every write-rejection path against them: the
 503 mapping, the password-change rollback, the snapshot quota and the sync lock. It skips
-cleanly without Docker. See [docs/valkey-noeviction-verification.md](docs/valkey-noeviction-verification.md).
+cleanly without Docker. See
+[docs/valkey-noeviction-verification.md](docs/valkey-noeviction-verification.md).
 
 Pull requests, pushes to `main`, the weekly schedule, and Dependabot pull requests all use
 the same required validation graph from the public `groovemap-music/automation` repository.
@@ -74,8 +130,8 @@ exposes a Prometheus scrape endpoint of its own. It reads only the standard Open
 environment variables; with `OTEL_EXPORTER_OTLP_ENDPOINT` unset it installs a no-op meter
 provider and a no-op tracer provider and behaves exactly as it did before.
 
-Alongside the HTTP, database, cache, sync, NLQ, activity, and Identity Ledger refresh metrics
-it records, the service reports the process view and event-loop lag that `groovemap-runtime`
+The service records HTTP, database, cache, sync, NLQ, activity, and Identity Ledger refresh
+metrics. It also reports the process view and event-loop lag that `groovemap-runtime`
 installs, and it opens two domain root spans of its own: `api.sync` for a Discogs collection
 and wantlist sync, and `api.nlq` for a natural-language query. Request, outbound-HTTP, and
 database spans come from the instrumentations and the shared resilient wrappers. The
@@ -96,9 +152,9 @@ variables, the metrics, and the spans.
 ## Release and license
 
 This repository versions one service wheel and its two container images, `catalog-api`
-and `catalog-api-performance`. Commitizen reads the PEP 621 version and uses annotated `v$version` tags. `just release-dry-run` creates local
-checksums, an SBOM, notices, and provenance without tagging, pushing, publishing, or
-releasing.
+and `catalog-api-performance`. Commitizen reads the PEP 621 version and uses annotated
+`v$version` tags. `just release-dry-run` creates local checksums, an SBOM, notices, and
+provenance without tagging, pushing, publishing, or releasing.
 
 The current tree is licensed under the [GNU Affero General Public License v3 only](LICENSE).
 The AGPL permits commercial use when its terms are followed; commercial use by itself does

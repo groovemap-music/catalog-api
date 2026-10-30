@@ -1,9 +1,9 @@
 # Contracts
 
 `catalog-api` consumes two upstream contracts. Both are promoted from a reviewed,
-immutable commit of the owning repository rather than edited here; `scripts/check-
-contracts.py` (`just contract-check`, also run by `just source-check`) digest-verifies
-every promoted file against its `source.json` record.
+immutable commit of the owning repository rather than edited here. `scripts/check-contracts.py`
+(`just contract-check`, also run by `just source-check`) digest-verifies every promoted file
+against its `source.json` record.
 
 ## `persistence/v1`
 

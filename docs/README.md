@@ -1,5 +1,9 @@
 # Catalog API documentation
 
+Guides for operators and developers of the GrooveMap `catalog-api` service. New to the
+service? Start with [Configuration](configuration.md) and the
+[API service guide](../api/README.md).
+
 These guides cover only the `catalog-api` repository boundary. Deployment topology,
 infrastructure credentials, and cross-service orchestration are owned by their respective
 GrooveMap repositories.
@@ -31,6 +35,7 @@ flowchart TD
 - [Precomputed similar artists](similar-artists-precomputed.md)
 - [Transactional email decision](transactional-email-provider-decision.md)
 - [Architecture decisions](architecture-decisions.md)
+- [SQL/PGQ backend removal and recovery](pgq-removal.md)
 - [Release compliance](release-compliance.md)
 - [Test assertion audit](test-assertion-audit.md)
 - [History rewrite approval gate](history-rewrite-gate.md)
