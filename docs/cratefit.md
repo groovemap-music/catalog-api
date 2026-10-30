@@ -23,8 +23,8 @@ will eventually replace the guesses with learned weights.
     "title": "Blue Train",
     "artist": "John Coltrane",
     "year": 1957,
-    "media_families": ["grooved"],
-    "rarity": {"score": 72.5, "tier": "scarce"}
+    "media_families": ["vinyl"],
+    "rarity": {"score": 72.5, "tier": "rare"}
   },
   "fit": 1.0,
   "components": {
@@ -181,11 +181,6 @@ their entries are always listed beside the map rather than drawn on it.
 
 A title-only duplicate's `entity_id` is the lowest id among the held releases with that
 artist and title.
-
-For up to ten minutes after the deploy that adds these fields, a collection folded before
-it is still cached, and a title-only duplicate then lacks its `entity_id` and
-`entity_type`. The session profile is cached under a key of its own, so it never comes
-from a body cached before `evidence_entries` existed.
 
 ## What is a v0 heuristic, and why bridge is the loudest one
 

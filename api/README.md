@@ -5,6 +5,55 @@ Repository-wide configuration, operations, and design guidance is indexed in
 
 Provides user account management, JWT authentication, and Discogs OAuth 1.0a integration for GrooveMap.
 
+## Contents
+
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Configuration](#configuration)
+- [Operator Setup](#operator-setup)
+- [API Endpoints](#api-endpoints)
+  - [Authentication](#authentication)
+  - [Password Reset](#password-reset)
+  - [Two-Factor Authentication (TOTP 2FA)](#two-factor-authentication-totp-2fa)
+  - [Discogs OAuth](#discogs-oauth)
+  - [Graph Queries](#graph-queries)
+  - [Discography Strata](#discography-strata)
+  - [Collection Sync](#collection-sync)
+  - [User Collection](#user-collection)
+  - [Observations](#observations)
+  - [Activity, Consent, Erasure, and Export](#activity-consent-erasure-and-export)
+  - [App Tokens](#app-tokens)
+  - [Collection Gap Analysis](#collection-gap-analysis)
+  - [Snapshots](#snapshots)
+  - [Unified Search](#unified-search)
+  - [Identifier Lookup](#identifier-lookup)
+  - [Path Finder](#path-finder)
+  - [Collaborators](#collaborators)
+  - [Collaboration Network](#collaboration-network)
+  - [Recommendations](#recommendations)
+  - [Genre Tree](#genre-tree)
+  - [Graph Statistics](#graph-statistics)
+  - [Time travel](#time-travel)
+  - [Analytics results](#analytics-results)
+  - [Natural Language Queries (NLQ)](#natural-language-queries-nlq)
+  - [Release Rarity Scoring](#release-rarity-scoring)
+  - [Label DNA](#label-dna)
+  - [Taste Fingerprint](#taste-fingerprint)
+  - [Taste Projection](#taste-projection)
+  - [Collection Timeline](#collection-timeline)
+  - [Credits & Provenance](#credits--provenance)
+  - [MusicBrainz Enrichment](#musicbrainz-enrichment)
+  - [Media mapping coverage](#media-mapping-coverage)
+  - [The Identity Ledger](#the-identity-ledger)
+  - [Internal analytics computation](#internal-analytics-computation)
+  - [Health](#health)
+- [Development](#development)
+- [Container image](#container-image)
+- [Database Schema](#database-schema)
+- [Deprecations](#deprecations)
+- [Security](#security)
+- [Monitoring](#monitoring)
+
 ## Overview
 
 The API service:
@@ -61,7 +110,7 @@ DISCOGS_USER_AGENT="GrooveMap-catalog-api/1.0 +https://github.com/groovemap-musi
 # Required for TOTP 2FA. Without it, OAuth tokens are stored unencrypted and 2FA is disabled.
 ENCRYPTION_MASTER_KEY=your-base64-master-key-here
 
-# Optional — Resend email for password reset notifications (when not set, reset links are logged)
+# Optional — Resend email for password reset notifications (when not set, no email is sent; only a "reset link generated" log line is written and the link itself is never logged)
 # RESEND_API_KEY=your-resend-api-key
 # RESEND_SENDER_EMAIL=noreply@yourdomain.com
 # RESEND_SENDER_NAME=GrooveMap
@@ -796,6 +845,15 @@ No scope reaches `POST /api/user/erasure` or `GET /api/user/export`.
 | GET    | `/api/collection/gaps/artist/{artist_id}` | Yes           | Missing releases by an artist                        |
 | GET    | `/api/collection/gaps/master/{master_id}` | Yes           | Missing editions of a master release                 |
 
+**Query parameters (all three gap endpoints):**
+
+- `limit` — Releases per page (1–200, default: 50)
+- `offset` — Pagination offset (default: 0)
+- `exclude_wantlist` — Set to `true` to leave out releases already on the caller's wantlist
+  (default: `false`)
+- `media` — Repeatable media filter, described below
+- `formats` — Deprecated; see below
+
 **Media filter (ADR 0007):** each gap endpoint accepts a repeatable `media` query
 parameter of canonical family or medium ids (see `GET /api/collection/media` for the
 ids present in the user's own collection), validated against the taxonomy — an
@@ -1044,6 +1102,13 @@ Natural language query interface for the knowledge graph. Translates plain Engli
 | GET    | `/api/nlq/status`       | No            | —          | Check NLQ service availability                |
 | POST   | `/api/nlq/query`        | Optional      | 10/min     | Execute a natural language query (supports SSE streaming; personalized when a Bearer token is supplied) |
 
+**Query parameters for `/api/nlq/suggestions`:**
+
+- `pane` — The client pane asking: `explore`, `trends`, `insights`, `genres`, or `credits`
+  (default: `explore`; an unknown pane gets the `explore` suggestions)
+- `focus` — Name of the entity in focus; with `focus_type`, returns suggestions about it
+- `focus_type` — `artist`, `label`, `genre`, or `style` (anything else uses the artist templates)
+
 **Media as a filter dimension.** Per [ADR 0007](https://github.com/groovemap-music/design/blob/main/docs/adr/0007-canonical-media-taxonomy.md), the model can narrow a graph filter (`ui_filter_graph` with `by: "media"`) or the `get_collection_gaps` tool to a canonical media family or medium id — e.g. "cassette-only labels" or "what am I missing on CD". The system prompt lists the valid family ids and explains how a spoken format ("cassette", "CD") maps to a medium id (`tape_cassette`, `optical_cd`) or its family (`tape`, `optical`); the `get_collection_gaps` tool's `media` parameter is validated against the same taxonomy as the REST gap endpoints (`api/queries/media_filters.py`), and an unrecognised id comes back as a tool-level error the model can read and retry. The Ask pill's suggestion set includes one media example ("Which labels released the most on cassette?").
 
 ### Release Rarity Scoring
@@ -1057,6 +1122,19 @@ Rarity analysis for releases based on market scarcity, media, and collector dema
 | GET    | `/api/rarity/artist/{artist_id}` | No            | 30/min     | Rarity scores for an artist's releases |
 | GET    | `/api/rarity/label/{label_id}`   | No            | 30/min     | Rarity scores for a label's releases   |
 | GET    | `/api/rarity/{release_id}`       | No            | 30/min     | Rarity score for a specific release    |
+
+Releases whose master id is the Discogs zero-master sentinel (`'0'` or `0`) are masterless.
+The pressing and temporal queries exclude that sentinel before expanding siblings, so
+unrelated masterless releases are never counted as each other's siblings.
+
+**Query parameters:**
+
+- `page` — Page number (minimum 1, default: 1); every list route
+- `page_size` — Results per page (1–100, default: 20); every list route
+- `tier` (`/leaderboard` only) — Return only releases in one tier: `ultra-rare` (score 80 and
+  up), `rare` (60), `scarce` (40), `uncommon` (20), or `common`
+- `min_rarity` (`/hidden-gems` only) — Lowest rarity score to consider (0–100, default: 41);
+  results are ordered by `hidden_gem_score`, not by rarity score
 
 #### Media-neutral core and per-family extensions
 
@@ -1213,15 +1291,15 @@ designers) behind releases. The graph data is produced by
 | GET    | `/api/credits/person/{name}/profile`  | No            | 60/min     | Summary profile with role breakdown                   |
 | GET    | `/api/credits/release/{release_id}`   | No            | 60/min     | Full credits breakdown for a release                  |
 | GET    | `/api/credits/role/{role}/top`        | No            | 30/min     | Most prolific people in a given role category         |
+| GET    | `/api/credits/shared`                 | No            | 30/min     | Releases where two people are both credited           |
+| GET    | `/api/credits/connections/{name}`     | No            | 30/min     | People connected through shared releases              |
+| GET    | `/api/credits/autocomplete`           | No            | 120/min    | Search credits by person name (fulltext, min 2 chars) |
 
 `/api/credits/role/{role}/top` is served from the indexed `Person.credit_count_<category>`
 properties (distinct releases per role category) that `discogs-graph-enricher` recomputes after
 each import; people with a zero count are excluded. On a graph where those properties have never
 been written, it falls back to counting `CREDITED_ON` live and logs a warning once per process.
 The response is identical either way.
-| GET    | `/api/credits/shared`                 | No            | 30/min     | Releases where two people are both credited           |
-| GET    | `/api/credits/connections/{name}`     | No            | 30/min     | People connected through shared releases              |
-| GET    | `/api/credits/autocomplete`           | No            | 120/min    | Search credits by person name (fulltext, min 2 chars) |
 
 **Role categories:** `production`, `engineering`, `mastering`, `session`, `design`, `management`, `other`
 

@@ -95,7 +95,7 @@ by operations-console are pinned in
 | --- | --- | --- |
 | `GET` | `/api/admin/media/unmapped` | Report bounded unmapped-media coverage for one provider |
 
-The route accepts `provider=discogs|musicbrainz` and `limit=1..100` and returns the current
+The route accepts `provider=discogs|musicbrainz` and `limit=1..200` (default 20) and returns the current
 `UnmappedMediaResponse`: tagged-release count, releases with unmapped names, a bounded rate, and
 the top unmapped format or description names. It reads provider-owned loaded data; it does not
 alter either producer's taxonomy or source records.

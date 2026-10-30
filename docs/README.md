@@ -35,6 +35,7 @@ flowchart TD
 - [Precomputed similar artists](similar-artists-precomputed.md)
 - [Transactional email decision](transactional-email-provider-decision.md)
 - [Architecture decisions](architecture-decisions.md)
+- [SQL/PGQ backend removal and recovery](pgq-removal.md)
 - [Release compliance](release-compliance.md)
 - [Test assertion audit](test-assertion-audit.md)
 - [History rewrite approval gate](history-rewrite-gate.md)

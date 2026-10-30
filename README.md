@@ -28,30 +28,41 @@ flowchart LR
 
 ## Quick start
 
-You need [mise](https://mise.jdx.dev/) and Docker (Docker is needed only for `just image` and the
-integration recipes). `mise install` pins Python, `uv`, `just`, and `gitleaks`.
+You need [mise](https://mise.jdx.dev/). Docker is needed only for `just image` and the
+integration recipes. `mise install` pins Python, `uv`, `just`, and `gitleaks`.
 
 ```bash
 mise install    # toolchain from .mise.toml
 just setup      # install locked dependencies with uv
-just check      # the full pre-merge gate; needs no running databases
+just check      # the full pre-merge gate
 ```
 
-To run the service itself, export the required settings from the
-[minimal local example](docs/configuration.md#minimal-local-example) against reachable
-PostgreSQL, Neo4j, and Valkey instances, then start it:
+`just check` uses fakes and needs no running databases. The integration recipes
+(`just test-integration`, `just integration-valkey`) start their own throwaway containers
+instead.
+
+### Run the service
+
+The service needs reachable PostgreSQL, Neo4j, and Valkey instances. The Compose stack in the
+[`deployment` repository](https://github.com/groovemap-music/deployment) provides them. Export
+the required settings from the
+[minimal local example](docs/configuration.md#minimal-local-example), then start the service:
 
 ```bash
-uv run python -m api.api
+uv run python -m api.api    # or the installed equivalent: catalog-api
+```
+
+The API listens on port 8004. A separate health server listens on port 8005:
+
+```bash
 curl http://localhost:8005/health
 ```
 
-The API listens on port 8004. A separate health server listens on port 8005.
-
 ## Command-line tools
 
-The wheel installs these commands. Each is documented in the [API service guide](api/README.md#operator-setup)
-or the [administration guide](docs/admin-guide.md).
+The wheel installs these commands. Each is documented in the
+[API service guide](api/README.md#operator-setup) or the
+[administration guide](docs/admin-guide.md).
 
 | Command | Purpose |
 | --- | --- |
@@ -104,7 +115,8 @@ container to test the rarity zero-master sentinels.
 with a tiny `maxmemory` under `noeviction`, plus PostgreSQL, both as throwaway loopback
 containers. It fills Valkey and then exercises every write-rejection path against them: the
 503 mapping, the password-change rollback, the snapshot quota and the sync lock. It skips
-cleanly without Docker. See [docs/valkey-noeviction-verification.md](docs/valkey-noeviction-verification.md).
+cleanly without Docker. See
+[docs/valkey-noeviction-verification.md](docs/valkey-noeviction-verification.md).
 
 Pull requests, pushes to `main`, the weekly schedule, and Dependabot pull requests all use
 the same required validation graph from the public `groovemap-music/automation` repository.
@@ -141,8 +153,8 @@ variables, the metrics, and the spans.
 
 This repository versions one service wheel and its two container images, `catalog-api`
 and `catalog-api-performance`. Commitizen reads the PEP 621 version and uses annotated
-`v$version` tags. `just release-dry-run` creates local checksums, an SBOM, notices, and provenance without tagging, pushing, publishing, or
-releasing.
+`v$version` tags. `just release-dry-run` creates local checksums, an SBOM, notices, and
+provenance without tagging, pushing, publishing, or releasing.
 
 The current tree is licensed under the [GNU Affero General Public License v3 only](LICENSE).
 The AGPL permits commercial use when its terms are followed; commercial use by itself does
