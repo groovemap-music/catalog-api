@@ -4,7 +4,7 @@
   "application_runtime": {
     "package": "groovemap-runtime",
     "tested_version": "0.1.0",
-    "tested_commit": "771515349b592ff569b1b3e5712f7bef936bab58",
+    "tested_commit": "6d0425f908e01a446b040e2993045e2afe30460e",
     "required_capabilities": [
       "neo4j",
       "otel",

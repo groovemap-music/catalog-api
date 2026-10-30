@@ -109,6 +109,9 @@ docker run --rm \
 
 ### Preparing Clean Logs
 
+The commands below assume the containerized API, where logs live in `/logs`. A local process without `/logs` logs to the console, and query-profiling output is dropped
+with one warning. Set `LOG_FILE` and `PROFILING_LOG_FILE` to writable paths to capture files.
+
 Before running a performance test, truncate the API and profiling logs so results only contain queries from this run. This prevents stale data from prior sessions mixing into the profiling output:
 
 ```bash

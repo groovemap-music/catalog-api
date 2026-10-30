@@ -129,8 +129,10 @@ API does not schedule or coordinate ingestion.
 | `NLQ_RATE_LIMIT` | `10/minute` | Per-client rate limit |
 | `LOG_LEVEL` | `INFO` | API and server log level |
 | `ENVIRONMENT` | `development` | Deployment name written as the `environment` field of every log record |
-| `LOG_FILE_MAX_BYTES` | `104857600` | Size in bytes at which `/logs/api.log` rolls over |
-| `LOG_FILE_BACKUP_COUNT` | `5` | Number of rotated `/logs/api.log` backups retained |
+| `LOG_FILE` | `/logs/api.log` | Log file path; empty disables the file. An unwritable path falls back to console logging with one warning |
+| `PROFILING_LOG_FILE` | `/logs/profiling.log` | Query-profiling log path; empty disables it. An unwritable path logs one warning and profiling output is dropped (no console fallback) |
+| `LOG_FILE_MAX_BYTES` | `104857600` | Size in bytes at which the log file rolls over |
+| `LOG_FILE_BACKUP_COUNT` | `5` | Number of rotated log file backups retained |
 | `FORWARDED_ALLOW_IPS` | `172.20.0.0/16` | Trusted proxy addresses for Uvicorn |
 | `GROOVEMAP_SOURCE_REVISION` | build revision | Exact source revision linked from OpenAPI metadata |
 
