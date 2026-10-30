@@ -18,8 +18,9 @@ flowchart LR
 The file sink defaults to `/logs/api.log`, which containers provide (the image creates `/logs`).
 Set `LOG_FILE` to write elsewhere, or to an empty value to disable the file. If the file cannot
 be opened, for example running locally where `/logs` does not exist, the service logs a single
-warning and continues with console logging only. The query-profiling log follows the same rule
-through `PROFILING_LOG_FILE`.
+warning and continues with console logging only. `PROFILING_LOG_FILE` overrides the query-profiling log path (empty disables it). If that file
+cannot be opened, one warning is logged and profiling output is dropped; there is no console
+fallback.
 
 `LOG_LEVEL` controls both application logging and Uvicorn's configured level. It defaults to
 `INFO` and is normalized to lowercase for Uvicorn.
