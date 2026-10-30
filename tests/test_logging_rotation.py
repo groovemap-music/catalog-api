@@ -2,7 +2,7 @@
 
 ``api.api.main`` calls ``setup_logging("api", log_file=Path("/logs/api.log"))`` — see
 python-libraries commit 11cf764 (``fix(logging): bound application log files``), vendored
-here at ``groovemap-runtime`` revision 9bac022. That library now builds every ``setup_logging``
+here at ``groovemap-runtime`` revision 6d0425f. That library now builds every ``setup_logging``
 file sink through ``common.log_rotation.build_rotating_file_handler``, a size-capped
 ``RotatingFileHandler`` instead of an unbounded ``FileHandler``, bounded by the
 ``LOG_FILE_MAX_BYTES`` / ``LOG_FILE_BACKUP_COUNT`` environment variables.
