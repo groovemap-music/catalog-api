@@ -1104,9 +1104,8 @@ Natural language query interface for the knowledge graph. Translates plain Engli
 
 **Query parameters for `/api/nlq/suggestions`:**
 
-- `pane` — The client pane asking: `explore`, `trends`, `genres`, `credits`, or the
-  analytics pane (names in `api/nlq/suggestions.py`); default `explore`, and an unknown pane
-  gets the `explore` suggestions
+- `pane` — The client pane asking: `explore`, `trends`, `insights`, `genres`, or `credits`;
+  default `explore`, and an unknown pane gets the `explore` suggestions
 - `focus` — Name of the entity in focus; with `focus_type`, returns suggestions about it
 - `focus_type` — `artist`, `label`, `genre`, or `style` (anything else uses the artist templates)
 
@@ -1130,8 +1129,8 @@ unrelated masterless releases are never counted as each other's siblings.
 
 **Query parameters:**
 
-- `page` — Page number (minimum 1, default: 1); every list route
-- `page_size` — Results per page (1–100, default: 20); every list route
+- `page` — Page number (minimum 1, default: 1); the four list routes
+- `page_size` — Results per page (1–100, default: 20); the four list routes
 - `tier` (`/leaderboard` only) — Return only releases in one tier: `ultra-rare` (score 80 and
   up), `rare` (60), `scarce` (40), `uncommon` (20), or `common`
 - `min_rarity` (`/hidden-gems` only) — Lowest rarity score to consider (0–100, default: 41);
