@@ -1,5 +1,9 @@
 # Catalog API documentation
 
+Guides for operators and developers of the GrooveMap `catalog-api` service. New to the
+service? Start with [Configuration](configuration.md) and the
+[API service guide](../api/README.md).
+
 These guides cover only the `catalog-api` repository boundary. Deployment topology,
 infrastructure credentials, and cross-service orchestration are owned by their respective
 GrooveMap repositories.
