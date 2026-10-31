@@ -34,6 +34,7 @@ from api.queries.label_dna_queries import (
     get_label_media_profile,
 )
 from api.telemetry import CACHE_LABEL_DNA, CACHE_LABEL_SIMILAR, cache_get, record_cache_write_failure
+from api.valkey_keys import valkey_key
 
 
 logger = structlog.get_logger(__name__)
@@ -99,7 +100,7 @@ async def _build_dna(label_id: str) -> tuple[LabelDNA | None, str]:
     subsequent calls (e.g. from ``/api/label/dna/compare``) are instant.
     """
     # Check cache first — reuses the same key as the /dna endpoint
-    cache_key = f"label-dna:{label_id}"
+    cache_key = valkey_key(f"label-dna:{label_id}")
     if _valkey:
         try:
             cached = await cache_get(_valkey, cache_key, cache=CACHE_LABEL_DNA)
@@ -211,7 +212,7 @@ async def similar_labels(
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     # Check Valkey cache first (keyed by label_id + limit)
-    cache_key = f"label-similar:{label_id}:{limit}"
+    cache_key = valkey_key(f"label-similar:{label_id}:{limit}")
     if _valkey:
         try:
             cached = await cache_get(_valkey, cache_key, cache=CACHE_LABEL_SIMILAR)

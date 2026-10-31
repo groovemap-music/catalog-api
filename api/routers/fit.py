@@ -45,6 +45,7 @@ from api.identity import native_ids_for
 from api.limiter import limiter
 from api.models import FitProfile, FitSessionProfile
 from api.queries.fit_queries import get_collection_ids, get_release_context, get_release_rarity
+from api.valkey_keys import valkey_key
 
 
 logger = structlog.get_logger(__name__)
@@ -79,7 +80,7 @@ def _cache_key(user_id: str, release_id: str, *, with_entries: bool) -> str:
     to drop it. The session body, with its ``evidence_entries``, has a key of its own, so
     an app token can never be served one from the cache.
     """
-    key = f"recommend:explore:{user_id}:fit:release:{release_id}"
+    key = valkey_key(f"recommend:explore:{user_id}:fit:release:{release_id}")
     return f"{key}:entries" if with_entries else key
 
 

@@ -10,6 +10,7 @@ from typing import Any
 import structlog
 
 from api.telemetry import CACHE_RECOMMEND, cache_get, record_cache_write_failure
+from api.valkey_keys import valkey_pattern, with_legacy_patterns
 
 
 logger = structlog.get_logger(__name__)
@@ -45,10 +46,12 @@ class RecommendCache:
 
     async def invalidate_user(self, user_id: str) -> None:
         """Delete user-scoped recommendation cache keys via SCAN."""
-        patterns = [
-            f"recommend:explore:{user_id}:*",
-            f"recommend:enhanced:{user_id}",
-        ]
+        patterns = with_legacy_patterns(
+            [
+                valkey_pattern(f"recommend:explore:{user_id}:*"),
+                valkey_pattern(f"recommend:enhanced:{user_id}"),
+            ]
+        )
         try:
             for pattern in patterns:
                 cursor: str | int = "0"

@@ -54,6 +54,7 @@ from api.strata import (
     label_targets,
 )
 from api.telemetry import CACHE_EXPLORE, CACHE_STRATA, CACHE_TRENDS, cache_get, record_cache_write_failure
+from api.valkey_keys import valkey_key
 
 
 logger = structlog.get_logger(__name__)
@@ -167,7 +168,7 @@ async def explore(
 
     # Cache artist and label explore results in Valkey (expensive COUNT traversals)
     if _valkey and entity_type in ("artist", "label"):
-        cache_key = f"explore:{entity_type}:{name}"
+        cache_key = valkey_key(f"explore:{entity_type}:{name}")
         try:
             cached = await cache_get(_valkey, cache_key, cache=CACHE_EXPLORE)
             if cached:
@@ -183,7 +184,7 @@ async def explore(
     response = {"center": {"id": str(result["id"]), "name": result["name"], "type": entity_type}, "categories": categories}
 
     if _valkey and entity_type in ("artist", "label"):
-        cache_key = f"explore:{entity_type}:{name}"
+        cache_key = valkey_key(f"explore:{entity_type}:{name}")
         try:
             await _valkey.setex(cache_key, _EXPLORE_CACHE_TTL, json.dumps(response))
         except Exception as exc:
@@ -254,7 +255,7 @@ _STRATA_EDGES_PER_MASTER = 4
 
 
 def _strata_cache_key(artist_id: str) -> str:
-    return f"explore:strata:{artist_id}"
+    return valkey_key(f"explore:strata:{artist_id}")
 
 
 async def _cached_strata_catalog(artist_id: str) -> Catalog | None:
@@ -510,7 +511,7 @@ async def get_trends(
 
     # Cache genre, style, and label trends in Valkey (data changes only on import)
     if _valkey and entity_type in ("genre", "style", "label"):
-        cache_key = f"trends:{entity_type}:{name}"
+        cache_key = valkey_key(f"trends:{entity_type}:{name}")
         try:
             cached = await cache_get(_valkey, cache_key, cache=CACHE_TRENDS)
             if cached:
@@ -523,7 +524,7 @@ async def get_trends(
     response = {"name": name, "type": entity_type, "data": results}
 
     if _valkey and entity_type in ("genre", "style", "label"):
-        cache_key = f"trends:{entity_type}:{name}"
+        cache_key = valkey_key(f"trends:{entity_type}:{name}")
         try:
             await _valkey.setex(cache_key, _TRENDS_CACHE_TTL, json.dumps(response))
         except Exception as exc:

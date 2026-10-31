@@ -8,6 +8,8 @@ from typing import Any
 import orjson
 import valkey.asyncio as aiovalkey
 
+from api.valkey_keys import valkey_key
+
 
 class SnapshotTooLargeError(ValueError):
     """Raised when a snapshot's serialized payload exceeds the size cap."""
@@ -20,8 +22,19 @@ class SnapshotQuotaExceededError(ValueError):
 class SnapshotStore:
     """Valkey-backed store for graph snapshots with native TTL eviction."""
 
+    # Un-namespaced stems; the stored key is always ``valkey_key(stem + id)``.
     _KEY_PREFIX = "snapshot:"
     _USER_COUNT_KEY_PREFIX = "snapshot:usercount:"
+
+    @classmethod
+    def snapshot_key(cls, token: str) -> str:
+        """The namespaced Valkey key one snapshot is stored under."""
+        return valkey_key(f"{cls._KEY_PREFIX}{token}")
+
+    @classmethod
+    def user_count_key(cls, user_id: str) -> str:
+        """The namespaced Valkey key holding one user's live-snapshot counter."""
+        return valkey_key(f"{cls._USER_COUNT_KEY_PREFIX}{user_id}")
 
     def __init__(
         self,
@@ -93,12 +106,12 @@ class SnapshotStore:
         if len(payload) > self._max_payload_bytes:
             raise SnapshotTooLargeError(f"Snapshot payload is {len(payload)} bytes, maximum is {self._max_payload_bytes}")
 
-        snapshot_key = f"{self._KEY_PREFIX}{token}"
+        snapshot_key = self.snapshot_key(token)
         if not user_id:
             await self._valkey.set(snapshot_key, payload, ex=self._ttl_seconds)
             return token, expires_at
 
-        count_key = f"{self._USER_COUNT_KEY_PREFIX}{user_id}"
+        count_key = self.user_count_key(user_id)
         # Write-free fast path for a user already at the cap: no slot is
         # reserved and nothing needs undoing. The INCR below still enforces
         # the cap under concurrency.
@@ -144,7 +157,7 @@ class SnapshotStore:
 
     async def load(self, token: str) -> dict[str, Any] | None:
         """Load a snapshot by token, returning None if not found or expired."""
-        raw = await self._valkey.get(f"{self._KEY_PREFIX}{token}")
+        raw = await self._valkey.get(self.snapshot_key(token))
         if raw is None:
             return None
         result: dict[str, Any] = orjson.loads(raw)

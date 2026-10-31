@@ -37,6 +37,7 @@ from api.queries.similar_precomputed_queries import (
     get_embedding_cosines,
 )
 from api.queries.taste_queries import get_blind_spots, get_taste_heatmap
+from api.valkey_keys import valkey_key
 
 
 logger = structlog.get_logger(__name__)
@@ -95,8 +96,8 @@ async def _record_similar_impressions(
 
 def _similar_cache_key(artist_id: str, precomputed: PrecomputedList | None) -> str:
     if precomputed is None:
-        return f"recommend:similar:artist:{artist_id}"
-    return f"recommend:similar:artist:{artist_id}:precomputed:{precomputed.model_version}:{_fusion_alpha}"
+        return valkey_key(f"recommend:similar:artist:{artist_id}")
+    return valkey_key(f"recommend:similar:artist:{artist_id}:precomputed:{precomputed.model_version}:{_fusion_alpha}")
 
 
 async def _rank_precomputed(artist_id: str, precomputed: PrecomputedList) -> list[dict[str, Any]] | None:
@@ -247,7 +248,7 @@ async def explore_from_here(
     # Check cache — hops changes the traversal depth (not merely a truncation
     # like limit), so it MUST be part of the key or callers get results computed
     # for a different hop depth.
-    cache_key = f"recommend:explore:{user_id}:{entity_type}:{entity_id}:{hops}"
+    cache_key = valkey_key(f"recommend:explore:{user_id}:{entity_type}:{entity_id}:{hops}")
     if _cache:
         cached = await _cache.get(cache_key)
         if cached is not None:

@@ -35,6 +35,7 @@ from psycopg.rows import dict_row
 
 from api.identity import native_ids_for_pairs
 from api.telemetry import CACHE_SEARCH, cache_get, record_cache_write_failure
+from api.valkey_keys import valkey_key
 
 
 logger = structlog.get_logger(__name__)
@@ -105,7 +106,7 @@ def cache_key(
         "countries": sorted(countries) if countries else [],
     }
     digest = hashlib.md5(json.dumps(params, sort_keys=True).encode(), usedforsecurity=False).hexdigest()
-    return f"search:{digest}"
+    return valkey_key(f"search:{digest}")
 
 
 def _year_filter_clause(year_min: int | None, year_max: int | None, column: sql.Composable | None = None) -> tuple[sql.Composable, list[Any]]:

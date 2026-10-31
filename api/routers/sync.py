@@ -18,6 +18,7 @@ from api.dependencies import validate_token
 from api.limiter import limiter
 from api.syncer import run_full_sync
 from api.valkey_errors import valkey_write_guard
+from api.valkey_keys import valkey_key
 
 
 logger = structlog.get_logger(__name__)
@@ -74,7 +75,7 @@ async def trigger_sync(
         return response
 
     # Valkey-based per-user sync cooldown (prevents rapid re-triggers)
-    cooldown_key = f"sync:cooldown:{user_id}"
+    cooldown_key = valkey_key(f"sync:cooldown:{user_id}")
     in_cooldown = await _valkey.get(cooldown_key)
     if in_cooldown:
         return JSONResponse(
@@ -84,7 +85,7 @@ async def trigger_sync(
 
     # Atomic lock to prevent duplicate sync tasks from concurrent requests. A
     # rejected lock write (Valkey full) means nothing was started: 503.
-    lock_key = f"sync:lock:{user_id}"
+    lock_key = valkey_key(f"sync:lock:{user_id}")
     with valkey_write_guard(operation="sync_lock", detail=_SYNC_UNAVAILABLE_DETAIL, user_id=user_id):
         acquired = await _valkey.set(lock_key, "1", nx=True, ex=30)
     if not acquired:

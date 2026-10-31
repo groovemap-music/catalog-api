@@ -12,6 +12,8 @@ from typing import Any
 from common.query_debug import execute_sql
 from psycopg.rows import dict_row
 
+from api.valkey_keys import valkey_key_prefix, valkey_pattern
+
 
 logger = logging.getLogger(__name__)
 
@@ -288,14 +290,17 @@ async def get_valkey_storage(valkey: Any) -> dict[str, Any]:
         if isinstance(db_info, dict) and "keys" in db_info:
             total_keys += db_info["keys"]
 
+    namespace = valkey_key_prefix()
     prefix_counts: dict[str, int] = {}
     cursor = 0
     max_scan_keys = 10_000
     total_scanned = 0
     while True:
-        cursor, keys = await valkey.scan(cursor=cursor, count=500)
+        cursor, keys = await valkey.scan(cursor=cursor, match=valkey_pattern("*"), count=500)
         for key in keys:
             key_str = key if isinstance(key, str) else key.decode("utf-8", errors="replace")
+            if namespace and key_str.startswith(namespace):
+                key_str = key_str[len(namespace) :]
             prefix = key_str.split(":")[0] + ":" if ":" in key_str else key_str
             prefix_counts[prefix] = prefix_counts.get(prefix, 0) + 1
         total_scanned += len(keys)

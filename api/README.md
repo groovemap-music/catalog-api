@@ -678,7 +678,7 @@ additive under the graph-explorer contract `"version": 1`.
 
 **Caching.** The catalog side of a read (the root's ladder and its MusicBrainz-only
 releases) depends on the root alone, so it is cached the way `/api/explore` caches: in
-Valkey under `explore:strata:<artist_id>`, for the same 24 hours, because the catalog
+Valkey under `<prefix>explore:strata:<artist_id>` (`VALKEY_KEY_PREFIX`, default `groovemap:`), for the same 24 hours, because the catalog
 changes only on import. Nothing else invalidates it. The key holds no `budget`, `focus`,
 or `page` because the entry is the root's unfolded catalog, not a response: the fold
 that applies them runs on every request, so one entry serves every caller and every

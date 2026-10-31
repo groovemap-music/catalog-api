@@ -308,6 +308,23 @@ def test_client(
 
 
 @pytest.fixture(autouse=True)
+def unprefixed_valkey_keys(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
+    """Run the suite with the key namespace disabled so existing tests assert bare key shapes.
+
+    Namespacing, the legacy-key upgrade path and the guard against unprefixed literals are
+    covered by ``test_valkey_namespace.py`` and ``test_valkey_key_guard.py``, which set
+    ``VALKEY_KEY_PREFIX`` themselves.
+    """
+    from api import valkey_keys
+
+    monkeypatch.setenv("VALKEY_KEY_PREFIX", "")
+    monkeypatch.delenv("VALKEY_LEGACY_KEYS", raising=False)
+    valkey_keys.reset_state()
+    yield
+    valkey_keys.reset_state()
+
+
+@pytest.fixture(autouse=True)
 def reset_identity_pool() -> Generator[None]:
     """Drop the identity pool between tests.
 

@@ -60,9 +60,25 @@ postgres_port="${postgres_published##*:}"
 neo4j_published="$(docker port "${neo4j_container}" 7687/tcp)"
 neo4j_port="${neo4j_published##*:}"
 
+# The image's POSTGRES_USER is a superuser. The suite runs as a separate, unprivileged runtime role
+# that owns the database (the least-privilege provisioning in database-schema's
+# docs/runtime-configuration.md), so a statement that needs superuser fails here instead of in
+# production. The superuser only prepares what a plain role cannot: the extension is trusted
+# (PostgreSQL 13+) but the role must own the database, and the harness checks it is not a superuser.
+runtime_role="${CATALOG_INTEGRATION_RUNTIME_ROLE:-catalog_runtime}"
+docker exec "${postgres_container}" psql --username groovemap --dbname postgres --set ON_ERROR_STOP=1 \
+    --command "CREATE ROLE ${runtime_role} LOGIN PASSWORD '${password}' NOSUPERUSER NOCREATEDB NOCREATEROLE" \
+    --command "ALTER DATABASE groovemap OWNER TO ${runtime_role}" >/dev/null
+is_super="$(docker exec "${postgres_container}" psql --username groovemap --dbname groovemap --tuples-only --no-align \
+    --command "SELECT rolsuper OR rolcreaterole OR rolcreatedb FROM pg_roles WHERE rolname = '${runtime_role}'")"
+if [[ "${is_super}" != "f" ]]; then
+    echo "runtime role ${runtime_role} is not an unprivileged role" >&2
+    exit 1
+fi
+
 POSTGRES_HOST="127.0.0.1:${postgres_port}" \
 POSTGRES_DATABASE=groovemap \
-POSTGRES_USERNAME=groovemap \
+POSTGRES_USERNAME="${runtime_role}" \
 POSTGRES_PASSWORD="${password}" \
 NEO4J_HOST="bolt://127.0.0.1:${neo4j_port}" \
 NEO4J_USERNAME=neo4j \
