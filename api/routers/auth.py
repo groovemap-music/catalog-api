@@ -42,7 +42,7 @@ from api.models import (
     TwoFactorVerifyModel,
 )
 from api.valkey_errors import valkey_write_guard
-from api.valkey_keys import valkey_key
+from api.valkey_keys import REVOKED_FALLBACK_TTL_SECONDS, valkey_key
 
 
 logger = structlog.get_logger(__name__)
@@ -241,7 +241,7 @@ async def logout(
         exp: int | None = current_user.get("exp")
         if jti:
             now = int(datetime.now(UTC).timestamp())
-            ttl = max((exp - now), 60) if exp else 3600
+            ttl = max((exp - now), 60) if exp else REVOKED_FALLBACK_TTL_SECONDS
             # Fail loud: if the revocation is not stored the token stays valid,
             # so the client must not be told it was logged out.
             with valkey_write_guard(operation="logout", detail=_LOGOUT_UNAVAILABLE_DETAIL, user_id=current_user.get("sub")):

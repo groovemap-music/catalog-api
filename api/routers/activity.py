@@ -32,7 +32,7 @@ from api.cache import RecommendCache
 from api.dependencies import UnifiedAuth, require_user, require_user_or_app_token
 from api.models import ActivityOutcomeRequest, ConsentUpdateRequest, ErasureRequest
 from api.snapshot_store import SnapshotStore
-from api.valkey_keys import valkey_key, valkey_pattern, with_legacy_keys, with_legacy_patterns
+from api.valkey_keys import REVOKED_FALLBACK_TTL_SECONDS, valkey_key, valkey_pattern, with_legacy_keys, with_legacy_patterns
 
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -628,7 +628,7 @@ async def _revoke_caller_token(current_user: dict[str, Any]) -> None:
         return
     expires_at = current_user.get("exp")
     now = int(datetime.now(UTC).timestamp())
-    ttl = max(expires_at - now, 60) if expires_at else 3600
+    ttl = max(expires_at - now, 60) if expires_at else REVOKED_FALLBACK_TTL_SECONDS
     with contextlib.suppress(Exception):
         await valkey.setex(valkey_key(f"revoked:jti:{jti}"), ttl, "1")
 

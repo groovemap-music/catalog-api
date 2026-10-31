@@ -100,7 +100,7 @@ class TestUpgradeWithLegacyKeysPresent:
         self, valkey: fakeredis.FakeAsyncValkey, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         await valkey.setex("revoked:jti:old-jti", 600, "1")
-        await valkey.set(valkey_keys.valkey_key("legacy-keys:cutover"), str(int(time.time()) - 100))
+        await valkey.set(valkey_keys.valkey_key("legacy-keys:cutover"), str(int(time.time()) - 1000))
         monkeypatch.setenv("VALKEY_LEGACY_WINDOW_SECONDS", "50")
 
         assert await token_revocation_reason({"jti": "old-jti", "sub": "u1", "iat": 1}, valkey) is None
@@ -294,3 +294,110 @@ class TestErasure:
 
         keys = await _all_keys(wired)
         assert keys == set(self.NOT_U1)
+
+
+class TestWindowCoversTokenLifetimes:
+    @pytest.mark.asyncio
+    async def test_a_long_lived_token_stays_revoked_past_the_configured_window(
+        self, valkey: fakeredis.FakeAsyncValkey, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VALKEY_LEGACY_WINDOW_SECONDS", "60")
+        await valkey.setex("revoked:jti:long", 40 * 3600, "1")
+        await valkey.set(valkey_keys.valkey_key("legacy-keys:cutover"), str(int(time.time()) - 20 * 3600))
+        valkey_keys.configure_revocable_lifetime(40 * 3600)
+
+        assert valkey_keys.effective_window_seconds() == 40 * 3600 + valkey_keys.WINDOW_MARGIN_SECONDS
+        assert await token_revocation_reason({"jti": "long", "sub": "u1", "iat": 1}, valkey) == REASON_REVOKED
+
+    @pytest.mark.asyncio
+    async def test_the_configured_window_still_wins_when_it_is_longer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("VALKEY_LEGACY_WINDOW_SECONDS", "999999")
+        valkey_keys.configure_revocable_lifetime(1800)
+
+        assert valkey_keys.effective_window_seconds() == 999999
+
+    @pytest.mark.asyncio
+    async def test_startup_derives_the_floor_from_the_jwt_lifetime(self, valkey: fakeredis.FakeAsyncValkey, monkeypatch: pytest.MonkeyPatch) -> None:
+        from api import api as api_module
+        from api.config import ApiConfig
+
+        async def from_url(*_args: object, **_kwargs: object) -> fakeredis.FakeAsyncValkey:
+            return valkey
+
+        monkeypatch.setattr(api_module.aiovalkey, "from_url", from_url)
+        monkeypatch.setenv("VALKEY_LEGACY_WINDOW_SECONDS", "60")
+
+        config = ApiConfig(
+            postgres_host="h",
+            postgres_username="u",
+            postgres_password="p",  # noqa: S106
+            postgres_database="d",
+            jwt_secret_key="s",  # noqa: S106
+            neo4j_host="n",
+            neo4j_username="n",
+            neo4j_password="n",  # noqa: S106
+            jwt_expire_minutes=24 * 60,
+        )
+        await api_module._create_valkey(config)
+
+        assert valkey_keys.effective_window_seconds() == 24 * 3600 + valkey_keys.WINDOW_MARGIN_SECONDS
+
+    def test_every_jti_revoked_token_type_is_covered(self) -> None:
+        """User and admin JWTs are the only tokens revoked by jti; the fallback TTL has no exp to read."""
+        from api.admin_auth import ADMIN_TOKEN_EXPIRE_MINUTES
+
+        assert valkey_keys.effective_window_seconds() >= ADMIN_TOKEN_EXPIRE_MINUTES * 60
+        assert valkey_keys.effective_window_seconds() >= valkey_keys.REVOKED_FALLBACK_TTL_SECONDS
+
+
+class TestMigrationRunsOnce:
+    @pytest.fixture(autouse=True)
+    def _migrate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("VALKEY_LEGACY_KEYS", "migrate")
+
+    @pytest.mark.asyncio
+    async def test_a_key_written_after_the_migration_is_never_imported(self, valkey: fakeredis.FakeAsyncValkey) -> None:
+        await valkey.setex("reset:ours", 600, "{}")
+        await valkey_keys.prepare_legacy_keys(valkey)
+        assert await valkey.get("groovemap:reset:ours") == "{}"
+        assert await valkey.get("groovemap:legacy-keys:migrated") is not None
+
+        for name in ("reset:foreign", "snapshot:foreign", "2fa_challenge:foreign", "discogs:oauth:state:foreign"):
+            await valkey.setex(name, 600, "{}")
+        await valkey_keys.prepare_legacy_keys(valkey)  # a later startup
+
+        for name in ("reset:foreign", "snapshot:foreign", "2fa_challenge:foreign", "discogs:oauth:state:foreign"):
+            assert await valkey.get(name) == "{}"
+            assert await valkey.get(PREFIX + name) is None
+
+    @pytest.mark.asyncio
+    async def test_nothing_is_imported_once_the_window_has_passed(self, valkey: fakeredis.FakeAsyncValkey) -> None:
+        await valkey.set(valkey_keys.valkey_key("legacy-keys:cutover"), str(int(time.time()) - 10 * 86400))
+        await valkey.setex("reset:late", 600, "{}")
+
+        await valkey_keys.prepare_legacy_keys(valkey)
+
+        assert await valkey.get("reset:late") == "{}"
+        assert await valkey.get(PREFIX + "reset:late") is None
+        assert await valkey.get("groovemap:legacy-keys:migrated") is None
+
+    @pytest.mark.asyncio
+    async def test_an_incomplete_run_is_retried_inside_the_window(self, valkey: fakeredis.FakeAsyncValkey) -> None:
+        await valkey.setex("revoked:jti:j1", 600, "1")
+
+        class Rejecting:
+            def __getattr__(self, name: str):
+                return getattr(valkey, name)
+
+            async def set(self, key: str, *args: object, **kwargs: object):
+                if key == "groovemap:revoked:jti:j1":
+                    raise RuntimeError("OOM command not allowed")
+                return await valkey.set(key, *args, **kwargs)
+
+        await valkey_keys.prepare_legacy_keys(Rejecting())
+        assert await valkey.get("groovemap:legacy-keys:migrated") is None
+        assert await valkey.get("revoked:jti:j1") == "1"
+
+        await valkey_keys.prepare_legacy_keys(valkey)
+        assert await valkey.get("groovemap:revoked:jti:j1") == "1"
+        assert await valkey.get("groovemap:legacy-keys:migrated") is not None
