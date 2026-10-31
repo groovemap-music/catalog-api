@@ -32,6 +32,7 @@ from api.telemetry import (
     record_cache_write_failure,
     record_nlq_request,
 )
+from api.valkey_keys import valkey_key
 
 
 logger = structlog.get_logger(__name__)
@@ -95,7 +96,7 @@ def _cache_key(query: str, context: dict[str, Any] | None = None) -> str:
     entity_id = (context or {}).get("entity_id") or ""
     entity_type = (context or {}).get("entity_type") or ""
     digest = hashlib.sha256(f"{normalized}\x00{entity_type}\x00{entity_id}".encode()).hexdigest()[:16]
-    return f"nlq:{digest}"
+    return valkey_key(f"nlq:{digest}")
 
 
 @router.get("/api/nlq/suggestions")
@@ -107,7 +108,7 @@ async def nlq_suggestions(
     focus_type: str | None = None,
 ) -> JSONResponse:
     """Return dynamic suggested queries for the Ask pill."""
-    cache_key = f"nlq:suggest:{pane}:{focus or ''}:{focus_type or ''}"
+    cache_key = valkey_key(f"nlq:suggest:{pane}:{focus or ''}:{focus_type or ''}")
     if _valkey is not None:
         try:
             cached = await cache_get(_valkey, cache_key, cache=CACHE_NLQ_SUGGESTIONS)

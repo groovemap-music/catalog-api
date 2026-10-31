@@ -54,6 +54,7 @@ from api.queries.identity_ledger_queries import LedgerNotRefreshed, get_ledger_d
 from api.queries.media_coverage_queries import DEFAULT_LIMIT, MAX_LIMIT, get_unmapped_media, known_providers
 from api.reattach import apply_with_audit, run_reattachment
 from api.valkey_errors import valkey_write_guard
+from api.valkey_keys import valkey_key
 
 
 logger = structlog.get_logger(__name__)
@@ -172,7 +173,7 @@ async def admin_logout(
             # Fail loud: an unstored revocation leaves the admin token valid, so
             # neither the client nor the audit log may record a logout.
             with valkey_write_guard(operation="admin_logout", detail=_ADMIN_LOGOUT_UNAVAILABLE_DETAIL, admin_id=current_admin.get("sub")):
-                await _valkey.setex(f"revoked:jti:{jti}", ttl, "1")
+                await _valkey.setex(valkey_key(f"revoked:jti:{jti}"), ttl, "1")
     admin_email = current_admin.get("email", "unknown")
     if _pool is not None:
         await record_audit_entry(pool=_pool, admin_id=current_admin["sub"], action="admin.logout", target=admin_email)

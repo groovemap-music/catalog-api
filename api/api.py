@@ -89,6 +89,7 @@ from api.services.discogs import (
 from api.syncer import reconcile_stale_sync_history
 from api.telemetry import instrument_valkey
 from api.valkey_errors import valkey_write_guard
+from api.valkey_keys import prepare_legacy_keys, valkey_key
 
 
 logger = structlog.get_logger(__name__)
@@ -230,6 +231,7 @@ async def _create_valkey(config: ApiConfig) -> aiovalkey.Valkey:
     valkey = instrument_valkey(await aiovalkey.from_url(config.valkey_url, decode_responses=True))
     valkey_host = config.valkey_url.split("@")[-1] if "@" in config.valkey_url else config.valkey_url.split("://")[-1]
     logger.info("✅ Valkey connected", host=valkey_host)
+    await prepare_legacy_keys(valkey)
     return valkey
 
 
@@ -594,7 +596,7 @@ async def authorize_discogs(
     # Store request token in Valkey (keyed by state = request_token itself)
     # This acts as both a CSRF token and a lookup key for the token secret
     state = token_data["oauth_token"]
-    valkey_key = f"{VALKEY_STATE_PREFIX}{state}"
+    state_key = valkey_key(f"{VALKEY_STATE_PREFIX}{state}")
     # Store both the token secret and the initiating user_id to prevent cross-user OAuth binding
     state_data = json.dumps({"secret": token_data["oauth_token_secret"], "user_id": current_user.get("sub")})
     # Without the stored state the verify step can never succeed, so a rejected
@@ -604,7 +606,7 @@ async def authorize_discogs(
         detail="Connecting Discogs is temporarily unavailable; please try again shortly",
         user_id=current_user.get("sub"),
     ):
-        await _valkey.setex(valkey_key, VALKEY_OAUTH_STATE_TTL, state_data)
+        await _valkey.setex(state_key, VALKEY_OAUTH_STATE_TTL, state_data)
 
     authorize_url = f"{DISCOGS_AUTHORIZE_URL}?oauth_token={state}"
     callback_mode = "callback" if _config.discogs_oauth_callback_url else "oob"
@@ -658,8 +660,8 @@ async def verify_discogs(
     # Atomically consume the OAuth state to prevent replay attacks.
     # OAuth 1.0a request tokens are single-use at Discogs, so retrying with
     # the same state after a failed exchange is not possible anyway.
-    valkey_key = f"{VALKEY_STATE_PREFIX}{request.state}"
-    raw_state_data = await _valkey.getdel(valkey_key)
+    state_key = valkey_key(f"{VALKEY_STATE_PREFIX}{request.state}")
+    raw_state_data = await _valkey.getdel(state_key)
 
     if not raw_state_data:
         raise HTTPException(

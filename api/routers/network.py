@@ -15,6 +15,7 @@ from neo4j.exceptions import ClientError as Neo4jClientError
 from api.limiter import limiter
 from api.queries import network_queries
 from api.telemetry import CACHE_NETWORK_CENTRALITY, CACHE_NETWORK_CLUSTER, cache_get, record_cache_write_failure
+from api.valkey_keys import valkey_key
 
 
 logger = structlog.get_logger(__name__)
@@ -100,7 +101,7 @@ async def artist_centrality(
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     # Check Valkey cache
-    cache_key = f"network:centrality:{artist_id}"
+    cache_key = valkey_key(f"network:centrality:{artist_id}")
     if _valkey:
         try:
             cached = await cache_get(_valkey, cache_key, cache=CACHE_NETWORK_CENTRALITY)
@@ -160,7 +161,7 @@ async def artist_cluster(
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     # Check Valkey cache
-    cache_key = f"network:cluster:{artist_id}:{limit}"
+    cache_key = valkey_key(f"network:cluster:{artist_id}:{limit}")
     if _valkey:
         try:
             cached = await cache_get(_valkey, cache_key, cache=CACHE_NETWORK_CLUSTER)

@@ -41,6 +41,7 @@ from common import AsyncResilientNeo4jDriver
 from psycopg.rows import dict_row
 
 from api.queries.helpers import run_query, run_single
+from api.valkey_keys import valkey_key
 
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -74,7 +75,7 @@ def collection_cache_key(user_id: str) -> str:
     already calls it. A key outside that pattern would survive a sync and serve a fit
     profile computed against a collection the collector no longer has.
     """
-    return f"recommend:explore:{user_id}:fit:collection"
+    return valkey_key(f"recommend:explore:{user_id}:fit:collection")
 
 
 # One row per held release, carrying only the facets a fit component reads. `collect`

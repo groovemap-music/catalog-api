@@ -42,6 +42,7 @@ from api.models import (
     TwoFactorVerifyModel,
 )
 from api.valkey_errors import valkey_write_guard
+from api.valkey_keys import valkey_key
 
 
 logger = structlog.get_logger(__name__)
@@ -209,7 +210,7 @@ async def login(request: Request, body: LoginRequest) -> JSONResponse:  # noqa: 
         # challenge can never be verified, so a rejected write is a 503 —
         # nothing was issued and the user simply signs in again.
         with valkey_write_guard(operation="login_2fa_challenge", detail=_LOGIN_UNAVAILABLE_DETAIL, user_id=str(user["id"])):
-            await _valkey.setex(f"2fa_challenge:{jti}", 300, str(user["id"]))
+            await _valkey.setex(valkey_key(f"2fa_challenge:{jti}"), 300, str(user["id"]))
         return JSONResponse(
             content={
                 "requires_2fa": True,
@@ -244,7 +245,7 @@ async def logout(
             # Fail loud: if the revocation is not stored the token stays valid,
             # so the client must not be told it was logged out.
             with valkey_write_guard(operation="logout", detail=_LOGOUT_UNAVAILABLE_DETAIL, user_id=current_user.get("sub")):
-                await _valkey.setex(f"revoked:jti:{jti}", ttl, "1")
+                await _valkey.setex(valkey_key(f"revoked:jti:{jti}"), ttl, "1")
     return JSONResponse(content={"logged_out": True})
 
 
@@ -325,7 +326,7 @@ async def _process_reset_request(user: dict[str, Any] | None) -> None:
     try:
         token = secrets.token_urlsafe(32)
         await _valkey.setex(
-            f"reset:{token}",
+            valkey_key(f"reset:{token}"),
             _RESET_TOKEN_TTL_SECONDS,
             json.dumps({"user_id": user_id, "email": user["email"]}),
         )
@@ -359,7 +360,7 @@ async def _write_password_changed_marker(user_id: str) -> None:
     if _valkey is None or _config is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
     now_ts = int(datetime.now(UTC).timestamp())
-    await _valkey.setex(f"password_changed:{user_id}", _config.jwt_expire_minutes * 60, str(now_ts))
+    await _valkey.setex(valkey_key(f"password_changed:{user_id}"), _config.jwt_expire_minutes * 60, str(now_ts))
 
 
 async def _commit_password_change(user_id: str, hashed_password: str, *, operation: str, reset_token_key: str | None = None) -> None:
@@ -457,7 +458,7 @@ async def reset_confirm(request: Request, body: ResetConfirmModel) -> JSONRespon
     # Read (do NOT consume) the token: it is consumed with GETDEL only once the
     # session-revocation marker is safely written, so a rejected marker write
     # leaves the token usable for a retry (see _commit_password_change).
-    token_key = f"reset:{body.token}"
+    token_key = valkey_key(f"reset:{body.token}")
     raw = await _valkey.get(token_key)
     if not raw:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired reset token")
@@ -654,7 +655,7 @@ async def twofa_verify(request: Request, body: TwoFactorVerifyModel) -> JSONResp
 
     # Verify challenge exists (without consuming) before checking lockout,
     # so locked-out users don't waste their challenge token.
-    challenge_key = f"2fa_challenge:{jti}"
+    challenge_key = valkey_key(f"2fa_challenge:{jti}")
     challenge_data = await _valkey.get(challenge_key)
     if not challenge_data:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Challenge expired or already used")
@@ -797,7 +798,7 @@ async def twofa_recovery(request: Request, body: TwoFactorRecoveryModel) -> JSON
     # Verify the challenge EXISTS (without consuming) before validating the code,
     # so a mistyped recovery code does not burn the challenge token. The challenge
     # is consumed only after the recovery code is successfully redeemed below.
-    challenge_key = f"2fa_challenge:{jti}"
+    challenge_key = valkey_key(f"2fa_challenge:{jti}")
     challenge_data = await _valkey.get(challenge_key)
     if not challenge_data:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Challenge expired or already used")
