@@ -16,11 +16,14 @@ from datetime import UTC, datetime, timedelta
 from api.auth import _verify_password, b64url_encode
 
 
+ADMIN_TOKEN_EXPIRE_MINUTES = 30
+
+
 def create_admin_token(
     admin_id: str,
     email: str,
     jwt_secret: str,
-    expire_minutes: int = 30,
+    expire_minutes: int = ADMIN_TOKEN_EXPIRE_MINUTES,
 ) -> tuple[str, int]:
     """Create a HS256 JWT for an admin user.
 

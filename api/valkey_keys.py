@@ -27,11 +27,14 @@ Modes:
     Never touch an unprefixed key.
 ``read`` (default)
     Deny-direction point lookups of the exact legacy key (the two families above) for a bounded
-    window (``VALKEY_LEGACY_WINDOW_SECONDS``, default 24h, longer than their TTLs) that opens
+    window (``VALKEY_LEGACY_WINDOW_SECONDS``, default 24h, never shorter than the longest revocable
+    token lifetime plus a margin) that opens
     when the first upgraded process starts. Reads only; nothing unprefixed is written, scanned
     or deleted.
 ``migrate``
-    Explicit opt-in for a **dedicated** Valkey: ``read``, plus a startup migration that copies
+    Explicit opt-in for a **dedicated** Valkey: ``read``, plus a one-time startup migration (only while the
+    cutover marker is inside the window and until one run completes, recorded as
+    ``legacy-keys:migrated``) that copies
     each legacy key of the known families (``LEGACY_KEY_PATTERNS``) to its prefixed name with its
     remaining TTL (``SET NX PX``, idempotent, never overwrites a newer prefixed value) and then
     deletes the legacy copy, so nothing is left on a ``noeviction`` instance. Account erasure
@@ -60,6 +63,9 @@ __all__ = [
     "MODE_MIGRATE",
     "MODE_OFF",
     "MODE_READ",
+    "REVOKED_FALLBACK_TTL_SECONDS",
+    "configure_revocable_lifetime",
+    "effective_window_seconds",
     "get_deny_with_legacy",
     "legacy_mode",
     "legacy_name",
@@ -79,7 +85,12 @@ MODE_MIGRATE = "migrate"
 _MODES = frozenset({MODE_OFF, MODE_READ, MODE_MIGRATE})
 
 DEFAULT_LEGACY_WINDOW_SECONDS = 86_400
+# Rolling-deploy slack: an old replica may write a legacy revocation just after the cutover.
+WINDOW_MARGIN_SECONDS = 300
+# TTL given to a ``revoked:jti`` key when the token carries no ``exp``.
+REVOKED_FALLBACK_TTL_SECONDS = 3600
 _MARKER_NAME = "legacy-keys:cutover"
+_MIGRATED_NAME = "legacy-keys:migrated"
 
 # The exact legacy families. Each is paired with the shape the remainder must have, so a
 # foreign key such as ``reset:foo:bar`` that merely shares a leading word is never touched.
@@ -109,6 +120,7 @@ ERASURE_LEGACY_SHAPES: tuple[re.Pattern[str], ...] = (
 
 _cutover: float | None = None
 _window_closed = False
+_revocable_lifetime = 0
 
 
 def legacy_mode() -> str:
@@ -119,7 +131,17 @@ def legacy_mode() -> str:
     return raw
 
 
-def _window_seconds() -> int:
+def configure_revocable_lifetime(seconds: int) -> None:
+    """Record the longest lifetime of any token that ``revoked:jti`` can revoke.
+
+    A legacy revocation must outlive the token it revokes, so the deny window may never be
+    shorter than this (plus a rolling-deploy margin), whatever ``VALKEY_LEGACY_WINDOW_SECONDS`` says.
+    """
+    global _revocable_lifetime
+    _revocable_lifetime = max(int(seconds), 0)
+
+
+def _configured_window_seconds() -> int:
     raw = (os.environ.get("VALKEY_LEGACY_WINDOW_SECONDS") or "").strip()
     if not raw:
         return DEFAULT_LEGACY_WINDOW_SECONDS
@@ -132,11 +154,17 @@ def _window_seconds() -> int:
     return seconds
 
 
+def effective_window_seconds() -> int:
+    """The configured window, raised to cover the longest revocable token lifetime."""
+    return max(_configured_window_seconds(), _revocable_lifetime + WINDOW_MARGIN_SECONDS)
+
+
 def reset_state() -> None:
     """Forget the cached cutover (tests, and re-configuration)."""
-    global _cutover, _window_closed
+    global _cutover, _window_closed, _revocable_lifetime
     _cutover = None
     _window_closed = False
+    _revocable_lifetime = 0
 
 
 def legacy_name(key: str, shapes: tuple[re.Pattern[str], ...] | None = None) -> str | None:
@@ -159,21 +187,52 @@ def _marker_key() -> str:
 
 
 async def prepare_legacy_keys(valkey: Any) -> None:
-    """Open the legacy-read window and, in ``migrate`` mode, run the migration.
+    """Open the legacy-read window and, in ``migrate`` mode, run the one-time migration.
 
     Called once at startup. A window marker is set with NX so the first upgraded process
     fixes the cutover for the whole fleet. Failures are logged and never block startup:
-    an unreadable marker leaves the window open, which is the secure direction.
+    an unreadable marker leaves the deny window open (the secure direction) but skips the
+    migration (the direction that imports nothing).
     """
     mode = legacy_mode()
     if mode == MODE_OFF or not valkey_key_prefix():
         return
+    logger.info(
+        "🔐 Legacy Valkey key handling", mode=mode, window_seconds=effective_window_seconds(), configured_window_seconds=_configured_window_seconds()
+    )
     try:
         await valkey.set(_marker_key(), str(int(time.time())), nx=True)
     except Exception as exc:
         logger.warning("⚠️ Could not record the legacy-key cutover; legacy reads stay open", error_type=type(exc).__name__)
     if mode == MODE_MIGRATE:
-        await migrate_legacy_keys(valkey)
+        await _migrate_once(valkey)
+
+
+async def _migrate_once(valkey: Any) -> None:
+    """Import legacy keys only inside the cutover window, and only until one run has completed.
+
+    The migration also imports positive-authorization families (``2fa_challenge``,
+    OAuth state, ``reset``, ``snapshot``), so it must not run on every startup: a key of that
+    shape written later, by another application, would be imported as ours. A completion
+    marker (``legacy-keys:migrated``) makes every later start import nothing.
+    """
+    try:
+        if await valkey.get(valkey_key(_MIGRATED_NAME)) is not None:
+            logger.info("🧹 Legacy Valkey key migration already completed; importing nothing")
+            return
+        raw = await valkey.get(_marker_key())
+        if raw is None or time.time() > float(raw) + effective_window_seconds():
+            logger.info("🧹 Legacy Valkey key migration skipped: outside the cutover window")
+            return
+    except Exception as exc:
+        logger.warning("⚠️ Could not read the migration markers; migration skipped", error_type=type(exc).__name__)
+        return
+    stats = await migrate_legacy_keys(valkey)
+    if stats["failed"] == 0:
+        try:
+            await valkey.set(valkey_key(_MIGRATED_NAME), str(int(time.time())), nx=True)
+        except Exception as exc:
+            logger.warning("⚠️ Could not record migration completion; it will be retried", error_type=type(exc).__name__)
 
 
 async def _legacy_active(valkey: Any) -> bool:
@@ -187,7 +246,7 @@ async def _legacy_active(valkey: Any) -> bool:
             _cutover = float(raw) if raw else time.time()
         except Exception:
             return True
-    if time.time() > _cutover + _window_seconds():
+    if time.time() > _cutover + effective_window_seconds():
         _window_closed = True
         return False
     return True
