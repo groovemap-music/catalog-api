@@ -2,6 +2,66 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v0.6.0 (2026-10-30)
+
+### Feat
+
+- **valkey**: adopt shared Valkey TLS settings from python-libraries
+- **valkey**: namespace every key and keep pre-namespace security keys working across the upgrade
+- **admin**: refresh the precomputed Identity Ledger after identity runs and loads
+- **admin**: read the Identity Ledger list and density from the precomputed views
+- **admin**: purge dead-letter queues over AMQP instead of the management API
+- **admin**: serve the Identity Ledger as three read-only admin_identity_ledger_* routes
+- **identity**: backfill the Identity Ledger's link history from the MusicBrainz full export
+- **admin**: persist the extraction source on extraction_history
+- **insights**: publish style co-tag pairs and proxy the per-style read, contract 1.5.0
+- **insights**: publish landmark masters per style, contract 1.4.0
+- **metrics**: read queue history from RabbitMQ /metrics/detailed
+- **admin**: add GET /api/admin/auth/session and publish it as admin_session
+- **strata**: accept pressing focus cursors and add owned copy ids to signed-in release nodes
+- **fit**: add session-only evidence_entries with typed entity ids
+- **taste**: add GET /api/user/taste-projection for Taste Strata
+- **insights**: add genre_years to style-year-counts, contract 1.3.0
+- **insights**: proxy GET /api/insights/style-atlas and add it to the graph-explorer contract
+- **insights**: add internal style-year-counts endpoint, contract 1.2.0
+- **explore**: cache strata catalogs, refuse roots above 134,051 releases, bound every read
+- **explore**: add the strata builder, reads, and GET /api/explore/strata
+- **recommend**: serve similar artists from precomputed lists behind a switch
+- **telemetry**: make Valkey cache-write failures visible
+
+### Fix
+
+- **valkey**: size the legacy deny window to token lifetimes and run migration once
+- **rarity**: exclude zero-master hubs before sibling expansion (#37)
+- **rarity**: exclude zero-master sentinel siblings
+- **deps**: upgrade msgpack past CVE-2026-114613
+- **rarity**: exclude zero-master hubs before sibling expansion
+- **activity**: key erasure and export request events on the request, not the account
+- **erasure**: record how many idempotency keys an erasure removed
+- **activity**: count a retry the schema skipped as a duplicate, not a write
+- **insights**: make the analytics-engine client URL configurable
+- **performance**: send /api/expand the entity name and flag empty results
+- **deps**: regenerate the dependency license inventory after the uv-version bump (#29)
+- **admin**: record the extraction run's own source entity types
+- **admin**: require explicit extraction source, reject unknown in _extractor_base_url
+- **admin**: dispatch extraction triggers to the requested source's extractor
+- **deps**: upgrade filelock to 4.2.1 past CVE-2026-112940
+- **deps**: upgrade certifi and opentelemetry past PYSEC-2026-4320 and CVE-2026-114603
+- **syncer**: keep stored date_added when a synced item omits it
+- **valkey**: return 503 and keep state consistent when Valkey rejects writes
+- **auth**: write password_changed marker before committing password changes
+- **licenses**: synchronize locked dependency notice versions
+
+### Refactor
+
+- **identity**: expose the identity-maintenance system actor helper
+- **admin**: retire the PostgreSQL metrics collector and history routes
+
+### Perf
+
+- **credits**: serve the role leaderboard from precomputed credit counts
+- **admin**: add a deterministic Identity Ledger scale generator and harness
+
 ## v0.5.0 (2026-10-05)
 
 ### Feat
