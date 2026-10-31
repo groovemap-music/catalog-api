@@ -52,6 +52,14 @@ the required settings from the
 uv run python -m api.api    # or the installed equivalent: catalog-api
 ```
 
+Deployment notes: PgBouncer in front of PostgreSQL must use **session** pool mode (the automatic
+re-attachment trigger holds a session-level advisory lock), the runtime role needs no superuser,
+and every Valkey key is namespaced with `VALKEY_KEY_PREFIX` (default `groovemap:`) so a Valkey
+can be shared. Upgrading a stack that already holds unprefixed keys is safe by default
+(`VALKEY_LEGACY_KEYS=read` keeps revoked tokens revoked; `migrate` is the explicit dedicated-stack opt-in). See [PostgreSQL pooling and role
+privileges](docs/configuration.md#postgresql-pooling-and-role-privileges) and [Valkey database,
+key namespace and upgrading an existing stack](docs/configuration.md#valkey-database-key-namespace-and-upgrading-an-existing-stack).
+
 The API listens on port 8004. A separate health server listens on port 8005:
 
 ```bash

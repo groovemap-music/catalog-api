@@ -8,9 +8,9 @@ from urllib.parse import quote
 from common.config import (
     _build_neo4j_uri,
     _build_postgres_connstr,
-    _build_valkey_url,
     _coerce_port,
     get_secret,
+    get_valkey_url,
     resolve_postgres_pool_sizes,
 )
 
@@ -146,7 +146,7 @@ class ApiConfig:
             neo4j_password=cast("str", neo4j_password),
             postgres_pool_min_size=pool_min,
             postgres_pool_max_size=pool_max,
-            valkey_url=_build_valkey_url(),
+            valkey_url=get_valkey_url(),
             jwt_algorithm=jwt_algorithm,
             jwt_expire_minutes=_env_int("JWT_EXPIRE_MINUTES", 30),
             discogs_user_agent=getenv("DISCOGS_USER_AGENT", DEFAULT_DISCOGS_USER_AGENT),

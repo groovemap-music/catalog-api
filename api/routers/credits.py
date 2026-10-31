@@ -37,6 +37,7 @@ from api.queries.credits_queries import (
     get_shared_credits,
 )
 from api.telemetry import CACHE_CREDITS_LEADERBOARD, CACHE_CREDITS_PERSON, cache_get, record_cache_write_failure
+from api.valkey_keys import valkey_key
 
 
 logger = structlog.get_logger(__name__)
@@ -117,7 +118,7 @@ async def person_credits(
     if not _neo4j_driver:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
-    cache_key = f"credits:person:{name}"
+    cache_key = valkey_key(f"credits:person:{name}")
     if _valkey:
         try:
             cached = await cache_get(_valkey, cache_key, cache=CACHE_CREDITS_PERSON)
@@ -199,7 +200,7 @@ async def role_leaderboard(
             status_code=400,
         )
 
-    cache_key = f"credits:leaderboard:{role}:{limit}"
+    cache_key = valkey_key(f"credits:leaderboard:{role}:{limit}")
     if _valkey:
         try:
             cached = await cache_get(_valkey, cache_key, cache=CACHE_CREDITS_LEADERBOARD)

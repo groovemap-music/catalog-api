@@ -51,9 +51,117 @@ password in the environment. Do not set both forms to conflicting values.
 | `VALKEY_PASSWORD` | unset | Optional plain password; empty disables authentication when no nonempty password-file path is set |
 | `VALKEY_PASSWORD_FILE` | unset | Nonempty file path takes precedence over the plain password; unreadable files fail closed |
 
-The API uses valkey-py with its libvalkey parser and constructs a `valkey://` URL for
-database 0 from these component settings. Passwords are percent-quoted and never
-printed in the startup log; that log reports the host only.
+The API uses valkey-py with its libvalkey parser and constructs a `valkey://` URL from
+these component settings and `VALKEY_DB` (`common.config.get_valkey_url()`). Passwords are
+percent-quoted and never printed in the startup log; that log reports the host only.
+
+### Valkey database, key namespace and upgrading an existing stack
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `VALKEY_DB` | `0` | Valkey database index (`0..255`); anything else fails at startup |
+| `VALKEY_KEY_PREFIX` | `groovemap:` | Namespace for every key the API writes, reads, deletes or scans. Empty disables it. Letters, digits and `_-.:` only |
+| `VALKEY_LEGACY_KEYS` | `read` | How keys written before namespacing are treated: `off`, `read` or `migrate` (below) |
+| `VALKEY_LEGACY_WINDOW_SECONDS` | `86400` | How long, from the first upgraded start, `read`/`migrate` consult unprefixed keys |
+
+Every key is built with `valkey_key()` and every SCAN glob with `valkey_pattern()`, so the API can
+share a Valkey with other applications: it never lists, counts or deletes keys outside its
+namespace. `tests/test_valkey_key_guard.py` fails if a key literal reaches the client without
+those helpers. The admin storage report counts only keys inside the namespace (the keyspace total
+it also shows is the whole database).
+
+The key families are `revoked:jti:*`, `password_changed:*`, `2fa_challenge:*`,
+`discogs:oauth:state:*`, `reset:*`, `snapshot:*`, `sync:lock:*`, `sync:cooldown:*` and the response
+caches (`recommend:*`, `search:*`, `nlq:*`, `explore:*`, `trends:*`, `network:*`, `credits:*`,
+`label-dna:*`, `label-similar:*`, and the data-completeness cache), each now stored as `<prefix><name>`. Rate limits are
+held in process memory and use no Valkey keys.
+
+**Upgrading a stack that ran before namespacing.** The long-lived keys exist unprefixed, and on a
+shared Valkey an unprefixed key may belong to another application. Legacy access is therefore split
+by what a foreign key could do:
+
+- **Deny-direction checks fall back to the legacy key by default**: `revoked:jti:{jti}` (the jti
+  comes from a signed JWT) and `password_changed:{user id from the token}`. A hit can only make
+  access stricter, and a missing key fails open, so without the fallback an upgraded dedicated
+  stack would accept logged-out tokens and pre-password-change sessions again.
+- **Positive-authorization lookups keyed by a requester-supplied value are never read from a legacy
+  key**: `reset:{token}`, `snapshot:{token}`, `2fa_challenge:{jti}`, `discogs:oauth:state:{state}`.
+  Another application with the same key names must not be able to satisfy them. They are
+  short-lived (2FA challenge 5 minutes, OAuth state 10 minutes, reset token 15 minutes), so after
+  an upgrade the user requests a new one; unfinished snapshot links saved before the upgrade
+  (up to 28 days old) stop resolving unless `migrate` is used.
+
+`VALKEY_LEGACY_KEYS`:
+
+- `off`: never touch an unprefixed key.
+- `read` (default): the deny-direction fallback above, as point lookups only (never a scan), for a
+  window that opens when the first upgraded process records a marker
+  (`<prefix>legacy-keys:cutover`, `SET NX`) and closes `VALKEY_LEGACY_WINDOW_SECONDS` later,
+  longer than the TTL of those keys (JWTs default to 30 minutes). If the marker cannot be read the
+  window stays open. Nothing unprefixed is ever written, scanned or deleted.
+- `migrate`: explicit opt-in for a **dedicated** Valkey. It does what `read` does, plus a startup
+  migration that scans only the exact legacy patterns (`revoked:jti:*`, `password_changed:*`,
+  `2fa_challenge:*`, `discogs:oauth:state:*`, `reset:*`, `snapshot:*`, each with an id-shaped
+  remainder), copies each key to its prefixed name with its remaining TTL (`SET NX PX`), then
+  deletes the legacy copy, so a `noeviction` instance is left with no orphans. Migrated keys are
+  then read from their prefixed names. It is idempotent, never overwrites a newer prefixed value,
+  skips keys without a TTL and keys whose copy is rejected (logged and counted), and never uses
+  `FLUSH*` or `CONFIG SET`. Response caches are not migrated; they expire within 24 hours.
+
+Every legacy name is checked against these shapes before it is read, copied or deleted.
+
+**Account erasure and legacy keys.** Erasure always deletes the namespaced per-user keys and checks
+they are gone. It deletes unprefixed per-user keys (`snapshot:usercount:{id}`, `sync:lock:{id}`,
+`sync:cooldown:{id}`, `recommend:enhanced:{id}`, `recommend:explore:{id}:*`) only under
+`VALKEY_LEGACY_KEYS=migrate`, because without that opt-in the Valkey may be shared and an
+unprefixed key may be another application's. A dedicated stack that never opts in keeps its legacy
+copies only until their TTL: sync lock 30 seconds, sync cooldown 60 seconds, the recommendation
+caches at most 24 hours, and the snapshot quota counter at most `SNAPSHOT_TTL_DAYS` (28 days).
+A stack that must erase within that bound sets `migrate` for the upgrade (the counter then moves to
+a prefixed key that erasure covers; the short-lived caches either expire or are swept by erasure
+while it stays on). Choosing the opt-in over deleting by default is deliberate: a missed 24-hour
+cache entry is a bounded gap, while deleting a foreign application's key is not recoverable.
+`VALKEY_KEY_PREFIX=` (empty) keeps the old key names and turns all of this off.
+
+## PostgreSQL pooling and role privileges
+
+**PgBouncer must run in session pool mode** (or the API must connect to PostgreSQL directly).
+`api/reattach_trigger.py` takes a session-level `pg_try_advisory_lock` so exactly one replica runs
+the automatic re-attachment and releases it with `pg_advisory_unlock` on the same connection. In
+transaction pooling the lock and the unlock can land on different server connections: the lock is
+then held by a backend that is returned to the pool and is never released, or is "released" on
+a session that does not hold it, so the trigger either never runs again or runs on several
+replicas. The transaction-level locks (`pg_advisory_xact_lock` in `api/ledger_refresh.py`) are
+released with their transaction and are safe under any pool mode.
+
+**Runtime role privileges.** The API needs no superuser, `CREATEROLE` or `CREATEDB`. It needs:
+
+| Need | Why |
+| --- | --- |
+| `CONNECT` on the database; `USAGE` on the schemas it queries | Everything |
+| `SELECT`, `INSERT`, `UPDATE`, `DELETE` on the application tables | Auth, sync, activity, identity, admin audit |
+| Ownership of the four identity-ledger materialized views, or `MAINTAIN` on them (PostgreSQL 17+) | `REFRESH MATERIALIZED VIEW` inside `public.identity_ledger_refresh()` (`SECURITY INVOKER`) |
+| `SELECT`, `INSERT`, `UPDATE` on `identity_ledger_refresh_state` | The refresh upserts its watermark and `ON CONFLICT DO UPDATE` reads the row |
+| `EXECUTE` on `public.identity_ledger_refresh` | Granted to `PUBLIC` by default |
+| Nothing extra for advisory locks | `pg_try_advisory_lock` and `pg_advisory_xact_lock` need no privilege |
+| Nothing extra for `pg_stat_user_tables` | The ledger poll sums `n_tup_ins + n_tup_upd + n_tup_del`; those counters are readable by every role |
+
+The simplest correct setup is the database-schema repository's least-privilege provisioning (the
+runtime role owns the database), which `deployment` uses as the one login that owns `public`.
+
+`DB_PROFILING=true` (with debug logging) logs `EXPLAIN (ANALYZE, BUFFERS, VERBOSE)` for `SELECT`
+statements; it needs no extra privilege beyond the `SELECT` the statement already requires, and it
+does **not** read `pg_stat_statements`, so that extension and the `pg_read_all_stats` /
+`pg_monitor` roles are not needed. Note that `EXPLAIN ANALYZE` runs the query a second time.
+
+What was verified: the code was searched for `SUPERUSER`-only operations (`CREATE EXTENSION`,
+`CREATE ROLE`, `ALTER SYSTEM`, `pg_terminate_backend`, `pg_stat_statements`, `pg_stat_activity`) and
+the API issues none of them at runtime. `just test-integration` now creates an unprivileged
+`catalog_runtime` role (`NOSUPERUSER NOCREATEDB NOCREATEROLE`, owner of the database), asserts it
+is unprivileged, and runs the whole real-PostgreSQL integration suite as that role, including the
+advisory-lock, ledger-refresh and re-attachment tests. The grants in the table above for a
+role that does not own the database are taken from database-schema's own integration suite, which
+shows that grant set is sufficient; they are not exercised by this repository's tests.
 
 Use `neo4j+s://...` in `NEO4J_HOST` for a managed Neo4j endpoint that already expresses its
 TLS policy. Deployment-specific certificate and network guidance belongs in `deployment`.

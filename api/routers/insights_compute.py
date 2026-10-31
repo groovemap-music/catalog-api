@@ -33,6 +33,7 @@ from api.queries.insights_pg_queries import query_data_completeness
 from api.queries.rarity_queries import fetch_all_rarity_signals
 from api.syncer import DISCOGS_API_BASE, MAX_RATE_LIMIT_RETRIES, SYNC_DELAY_SECONDS, _auth_header
 from api.telemetry import CACHE_INSIGHTS_COMPLETENESS, cache_get, record_cache_write_failure
+from api.valkey_keys import valkey_key
 
 
 logger = structlog.get_logger(__name__)
@@ -227,7 +228,7 @@ async def data_completeness(request: Request) -> JSONResponse:  # noqa: ARG001
     if not _pool:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
-    cache_key = "insights:data-completeness"
+    cache_key = valkey_key("insights:data-completeness")
     if _valkey:
         try:
             cached = await cache_get(_valkey, cache_key, cache=CACHE_INSIGHTS_COMPLETENESS)

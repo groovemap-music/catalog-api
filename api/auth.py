@@ -15,6 +15,8 @@ from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes as _hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF as _HKDF
 
+from api.valkey_keys import get_deny_with_legacy, valkey_key
+
 
 def b64url_encode(data: bytes) -> str:
     """Base64url encode bytes without padding."""
@@ -67,12 +69,12 @@ async def token_revocation_reason(payload: Mapping[str, Any], valkey: Any) -> st
         return None
 
     jti = payload.get("jti")
-    if jti and await valkey.get(f"revoked:jti:{jti}"):
+    if jti and await get_deny_with_legacy(valkey, valkey_key(f"revoked:jti:{jti}")):
         return REASON_REVOKED
 
     user_id = payload.get("sub")
     if user_id:
-        pw_changed = await valkey.get(f"password_changed:{user_id}")
+        pw_changed = await get_deny_with_legacy(valkey, valkey_key(f"password_changed:{user_id}"))
         if pw_changed:
             issued_at = payload.get("iat", 0)
             # Inclusive: a token issued in the same second as the password change

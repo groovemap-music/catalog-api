@@ -32,6 +32,7 @@ from api.cache import RecommendCache
 from api.dependencies import UnifiedAuth, require_user, require_user_or_app_token
 from api.models import ActivityOutcomeRequest, ConsentUpdateRequest, ErasureRequest
 from api.snapshot_store import SnapshotStore
+from api.valkey_keys import valkey_key, valkey_pattern, with_legacy_keys, with_legacy_patterns
 
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -566,10 +567,11 @@ _RECOMMENDATION_KEY_PATTERNS: tuple[str, ...] = ("recommend:explore:{user_id}:*"
 async def _surviving_recommendation_keys(valkey: Any, user_id: str) -> int:
     """Count the per-user recommendation keys still present after the invalidation."""
     surviving = 0
-    for pattern in _RECOMMENDATION_KEY_PATTERNS:
+    patterns = with_legacy_patterns([valkey_pattern(pattern.format(user_id=user_id)) for pattern in _RECOMMENDATION_KEY_PATTERNS])
+    for pattern in patterns:
         cursor: str | int = "0"
         while True:
-            cursor, keys = await valkey.scan(cursor=int(cursor), match=pattern.format(user_id=user_id), count=100)
+            cursor, keys = await valkey.scan(cursor=int(cursor), match=pattern, count=100)
             surviving += len(keys)
             if str(cursor) == "0":
                 break
@@ -594,9 +596,13 @@ async def _erase_valkey(user_id: str) -> str | None:
     try:
         await RecommendCache(valkey=valkey).invalidate_user(user_id)
         await valkey.delete(
-            f"{SnapshotStore._USER_COUNT_KEY_PREFIX}{user_id}",
-            f"sync:lock:{user_id}",
-            f"sync:cooldown:{user_id}",
+            *with_legacy_keys(
+                [
+                    SnapshotStore.user_count_key(user_id),
+                    valkey_key(f"sync:lock:{user_id}"),
+                    valkey_key(f"sync:cooldown:{user_id}"),
+                ]
+            )
         )
         surviving = await _surviving_recommendation_keys(valkey, user_id)
     except Exception as exc:
@@ -624,7 +630,7 @@ async def _revoke_caller_token(current_user: dict[str, Any]) -> None:
     now = int(datetime.now(UTC).timestamp())
     ttl = max(expires_at - now, 60) if expires_at else 3600
     with contextlib.suppress(Exception):
-        await valkey.setex(f"revoked:jti:{jti}", ttl, "1")
+        await valkey.setex(valkey_key(f"revoked:jti:{jti}"), ttl, "1")
 
 
 @router.post("/api/user/erasure", status_code=status.HTTP_202_ACCEPTED)
