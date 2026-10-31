@@ -443,7 +443,7 @@ class TestExtractionTriggerSourceRouting:
             extractor_discogs_host="dg", extractor_discogs_port=8000, extractor_musicbrainz_host="mb", extractor_musicbrainz_port=8000
         )
         mock_pool, mock_cur = TestTrackExtractionResilience._pool()
-        # Both extractors report the full shared progress struct; the other source's type is 0.
+        # The payload carries a stray key for the other source's type (0); a run must not record it.
         progress = {"artists": 100, "labels": 50, "masters": 25, "release_groups": 75, "releases": 200}
         progress[{"discogs": "release_groups", "musicbrainz": "masters"}[source]] = 0
         expected_payload = {k: v for k, v in progress.items() if k in expected}

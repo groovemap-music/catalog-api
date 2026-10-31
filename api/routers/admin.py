@@ -406,9 +406,9 @@ def _extractor_base_url(config: ApiConfig, source: str) -> str:
     raise ValueError(f"Unknown extraction source: {source!r}")
 
 
-# Entity types each source's extractor produces, named as its /health extraction_progress
-# reports them. Both extractors share one progress struct, so the other source's types are
-# present in the payload (always 0); a run must record only its own source's types.
+# Entity types each source's extractor reports in its /health extraction_progress, named as
+# that payload names them. Each extractor reports only its own types, and a run records exactly
+# its source's types, so this list also decides which payload keys a run reads.
 _SOURCE_ENTITY_TYPES: dict[str, tuple[str, ...]] = {
     "discogs": ("artists", "labels", "masters", "releases"),
     "musicbrainz": ("artists", "labels", "release_groups", "releases"),
