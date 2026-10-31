@@ -93,12 +93,12 @@ exclude-newer-package = { certifi = "2026-10-20T02:24:17Z" }
 # The schema dev dependency retains an older direct runtime URL. Resolve every
 # runtime edge to the independently reviewed Valkey helper commit, not two sources.
 override-dependencies = [
-    "groovemap-runtime[neo4j,otel,otel-http,postgres,rabbitmq] @ git+https://github.com/groovemap-music/python-libraries.git@fd0e5487f8e7e791099b3d3587abdd712f77eff1",
+    "groovemap-runtime[neo4j,otel,otel-http,postgres,rabbitmq] @ git+https://github.com/groovemap-music/python-libraries.git@5f35c03f68b0dd2c1955c731886c0ad8d8f9de63",
 ]
 
 [tool.uv.sources]
-groovemap-runtime = { git = "https://github.com/groovemap-music/python-libraries.git", rev = "fd0e5487f8e7e791099b3d3587abdd712f77eff1" }
-groovemap-agent-tools = { git = "https://github.com/groovemap-music/python-libraries.git", subdirectory = "agent-tools", rev = "fd0e5487f8e7e791099b3d3587abdd712f77eff1" }
+groovemap-runtime = { git = "https://github.com/groovemap-music/python-libraries.git", rev = "5f35c03f68b0dd2c1955c731886c0ad8d8f9de63" }
+groovemap-agent-tools = { git = "https://github.com/groovemap-music/python-libraries.git", subdirectory = "agent-tools", rev = "5f35c03f68b0dd2c1955c731886c0ad8d8f9de63" }
 groovemap-database-schema = { git = "https://github.com/groovemap-music/database-schema.git", rev = "6c8a1598e3402335e3f5f195d58c32c953cea091" }
 
 [tool.ruff]

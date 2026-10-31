@@ -50,10 +50,21 @@ password in the environment. Do not set both forms to conflicting values.
 | `VALKEY_PORT` | `6379` | Valkey port |
 | `VALKEY_PASSWORD` | unset | Optional plain password; empty disables authentication when no nonempty password-file path is set |
 | `VALKEY_PASSWORD_FILE` | unset | Nonempty file path takes precedence over the plain password; unreadable files fail closed |
+| `VALKEY_TLS` | `false` | Enable TLS. Accepts only `true/1/yes/on` or `false/0/no/off`; any other value fails at startup |
+| `VALKEY_TLS_CA_FILE` | unset | PEM CA bundle that signs the Valkey server certificate; unset trusts the system CAs. The file must exist |
+| `VALKEY_TLS_CERT_FILE` | unset | Client certificate for mutual TLS; must be set together with `VALKEY_TLS_KEY_FILE`. The file must exist |
+| `VALKEY_TLS_KEY_FILE` | unset | Private key for `VALKEY_TLS_CERT_FILE`; must be set together with it. The file must exist |
+| `VALKEY_TLS_VERIFY_HOSTNAME` | `true` | Check that the server certificate matches `VALKEY_HOST`. Accepts the same boolean forms as `VALKEY_TLS`; `false` still verifies the certificate chain and logs a warning |
 
 The API uses valkey-py with its libvalkey parser and constructs a `valkey://` URL from
 these component settings and `VALKEY_DB` (`common.config.get_valkey_url()`). Passwords are
 percent-quoted and never printed in the startup log; that log reports the host only.
+
+With `VALKEY_TLS=true` the URL scheme becomes `valkeys://` and carries the verification settings as
+`ssl_*` query parameters, so the client verifies the server certificate (`ssl_cert_reqs=required`)
+and, unless `VALKEY_TLS_VERIFY_HOSTNAME=false`, the hostname too. The plaintext URL is unchanged when
+`VALKEY_TLS` is unset. Set `VALKEY_TLS_CA_FILE` when Valkey uses a private CA; use the
+`VALKEY_TLS_CERT_FILE` and `VALKEY_TLS_KEY_FILE` pair only when Valkey requires client certificates.
 
 ### Valkey database, key namespace and upgrading an existing stack
 
