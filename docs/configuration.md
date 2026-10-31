@@ -62,7 +62,7 @@ percent-quoted and never printed in the startup log; that log reports the host o
 | `VALKEY_DB` | `0` | Valkey database index (`0..255`); anything else fails at startup |
 | `VALKEY_KEY_PREFIX` | `groovemap:` | Namespace for every key the API writes, reads, deletes or scans. Empty disables it. Letters, digits and `_-.:` only |
 | `VALKEY_LEGACY_KEYS` | `read` | How keys written before namespacing are treated: `off`, `read` or `migrate` (below) |
-| `VALKEY_LEGACY_WINDOW_SECONDS` | `86400` | How long, from the first upgraded start, `read`/`migrate` consult unprefixed keys |
+| `VALKEY_LEGACY_WINDOW_SECONDS` | `86400` | Minimum time, from the first upgraded start, that `read`/`migrate` consult unprefixed deny keys; raised automatically to cover the longest revocable token lifetime |
 
 Every key is built with `valkey_key()` and every SCAN glob with `valkey_pattern()`, so the API can
 share a Valkey with other applications: it never lists, counts or deletes keys outside its
@@ -96,17 +96,28 @@ by what a foreign key could do:
 - `off`: never touch an unprefixed key.
 - `read` (default): the deny-direction fallback above, as point lookups only (never a scan), for a
   window that opens when the first upgraded process records a marker
-  (`<prefix>legacy-keys:cutover`, `SET NX`) and closes `VALKEY_LEGACY_WINDOW_SECONDS` later,
-  longer than the TTL of those keys (JWTs default to 30 minutes). If the marker cannot be read the
-  window stays open. Nothing unprefixed is ever written, scanned or deleted.
-- `migrate`: explicit opt-in for a **dedicated** Valkey. It does what `read` does, plus a startup
-  migration that scans only the exact legacy patterns (`revoked:jti:*`, `password_changed:*`,
+  (`<prefix>legacy-keys:cutover`, `SET NX`) and closes after the **effective window**:
+  `max(VALKEY_LEGACY_WINDOW_SECONDS, longest revocable token lifetime + 300 s)`. A legacy
+  revocation must outlive the token it revokes, so the window cannot be shorter than that lifetime.
+  The tokens revoked by `jti` are user JWTs (`JWT_EXPIRE_MINUTES`, default 30), admin JWTs
+  (fixed 30 minutes) and any revocation written without an `exp` (3600 s); a 2FA challenge token is
+  not revoked through Valkey and app tokens are revoked in PostgreSQL. The effective value is
+  logged at startup (`window_seconds`). If the marker cannot be read the window stays open. Nothing unprefixed is ever written, scanned or deleted.
+- `migrate`: explicit opt-in for a **dedicated** Valkey. It does what `read` does, plus a **one-time**
+  migration at the upgrade that scans only the exact legacy patterns (`revoked:jti:*`, `password_changed:*`,
   `2fa_challenge:*`, `discogs:oauth:state:*`, `reset:*`, `snapshot:*`, each with an id-shaped
   remainder), copies each key to its prefixed name with its remaining TTL (`SET NX PX`), then
   deletes the legacy copy, so a `noeviction` instance is left with no orphans. Migrated keys are
   then read from their prefixed names. It is idempotent, never overwrites a newer prefixed value,
   skips keys without a TTL and keys whose copy is rejected (logged and counted), and never uses
   `FLUSH*` or `CONFIG SET`. Response caches are not migrated; they expire within 24 hours.
+
+The migration runs only while the cutover marker is inside the effective window and until one run
+has finished with no failures, which is recorded as `<prefix>legacy-keys:migrated`. Every later
+start imports nothing, so an unprefixed `reset:*`, `snapshot:*`, `2fa_challenge:*` or OAuth-state key
+written afterwards (for example by another application) is never imported as ours. A run that
+fails is retried at the next start while the window is open. Set `migrate` at the upgrade itself:
+enabling it after the window has passed imports nothing.
 
 Every legacy name is checked against these shapes before it is read, copied or deleted.
 

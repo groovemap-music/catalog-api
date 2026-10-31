@@ -70,6 +70,7 @@ import api.routers.taste as _taste_router
 import api.routers.user as _user_router
 import api.syncer as _syncer
 from api import __version__
+from api.admin_auth import ADMIN_TOKEN_EXPIRE_MINUTES
 from api.auth import b64url_encode, decrypt_oauth_token, encrypt_oauth_token, get_oauth_encryption_key
 from api.config import ApiConfig
 from api.ledger_refresh import run_refresh_loop
@@ -89,7 +90,7 @@ from api.services.discogs import (
 from api.syncer import reconcile_stale_sync_history
 from api.telemetry import instrument_valkey
 from api.valkey_errors import valkey_write_guard
-from api.valkey_keys import prepare_legacy_keys, valkey_key
+from api.valkey_keys import REVOKED_FALLBACK_TTL_SECONDS, configure_revocable_lifetime, prepare_legacy_keys, valkey_key
 
 
 logger = structlog.get_logger(__name__)
@@ -231,6 +232,7 @@ async def _create_valkey(config: ApiConfig) -> aiovalkey.Valkey:
     valkey = instrument_valkey(await aiovalkey.from_url(config.valkey_url, decode_responses=True))
     valkey_host = config.valkey_url.split("@")[-1] if "@" in config.valkey_url else config.valkey_url.split("://")[-1]
     logger.info("✅ Valkey connected", host=valkey_host)
+    configure_revocable_lifetime(max(config.jwt_expire_minutes * 60, ADMIN_TOKEN_EXPIRE_MINUTES * 60, REVOKED_FALLBACK_TTL_SECONDS))
     await prepare_legacy_keys(valkey)
     return valkey
 

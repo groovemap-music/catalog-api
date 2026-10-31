@@ -54,7 +54,7 @@ from api.queries.identity_ledger_queries import LedgerNotRefreshed, get_ledger_d
 from api.queries.media_coverage_queries import DEFAULT_LIMIT, MAX_LIMIT, get_unmapped_media, known_providers
 from api.reattach import apply_with_audit, run_reattachment
 from api.valkey_errors import valkey_write_guard
-from api.valkey_keys import valkey_key
+from api.valkey_keys import REVOKED_FALLBACK_TTL_SECONDS, valkey_key
 
 
 logger = structlog.get_logger(__name__)
@@ -169,7 +169,7 @@ async def admin_logout(
         exp: int | None = current_admin.get("exp")
         if jti:
             now = int(datetime.now(UTC).timestamp())
-            ttl = max((exp - now), 60) if exp else 3600
+            ttl = max((exp - now), 60) if exp else REVOKED_FALLBACK_TTL_SECONDS
             # Fail loud: an unstored revocation leaves the admin token valid, so
             # neither the client nor the audit log may record a logout.
             with valkey_write_guard(operation="admin_logout", detail=_ADMIN_LOGOUT_UNAVAILABLE_DETAIL, admin_id=current_admin.get("sub")):
