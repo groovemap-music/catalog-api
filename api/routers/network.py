@@ -64,7 +64,7 @@ async def artist_collaborators(
         if not identity:
             return JSONResponse(content={"error": f"Artist '{artist_id}' not found"}, status_code=404)
 
-        collaborators, total = await network_queries.get_collaborator_page(
+        collaborators, total, truncated = await network_queries.get_collaborator_page(
             _neo4j,
             artist_id,
             depth=effective_depth,
@@ -86,6 +86,7 @@ async def artist_collaborators(
             "depth": effective_depth,
             "collaborators": collaborators,
             "total": total,
+            "truncated": truncated,
         }
     )
 

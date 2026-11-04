@@ -32,7 +32,9 @@ async def get_artist_identity(driver: AsyncResilientNeo4jDriver, artist_id: str)
 # expanding through it reaches every artist on 1.5M releases. Such an artist still appears as a direct
 # collaborator. 5,000 keeps 164 of David Bowie's 187 neighbours as bridges.
 BRIDGE_ARTIST_MAX_CREDITS = 5_000
-# A root with more credits than this is itself a hub: it returns direct collaborators only.
+# A root with more credits than this is itself a hub (Various has 1.53M): only its first
+# HUB_ROOT_MAX_CREDITS releases are read, it returns direct collaborators only, and the result is
+# flagged ``truncated``. This bounds the rows and memory a hub root can make one statement hold.
 HUB_ROOT_MAX_CREDITS = 100_000
 # Only two hops are traversed. The route accepts depth up to 3 for compatibility and clamps it.
 MAX_COLLABORATOR_DEPTH = 2
@@ -45,12 +47,15 @@ async def get_collaborator_page(
     artist_id: str,
     depth: int = 2,
     limit: int = 50,
-) -> tuple[list[dict[str, Any]], int]:
-    """Return one page of collaborators within ``depth`` hops and the total, from one statement.
+) -> tuple[list[dict[str, Any]], int, bool]:
+    """Return one page of collaborators within ``depth`` hops, the total and whether it was truncated.
 
     Distance 1 is a shared release; distance 2 is a collaborator of a bridge collaborator that the
     artist has not shared a release with. ``collaboration_count`` is the shared releases at distance 1
     and the number of distinct bridge artists at distance 2. Ranking is distance, then count, then id.
+
+    ``truncated`` is true only for a hub root, whose releases beyond the first 100,000 were not read, so
+    the page and total describe that sample.
 
     The direct set is collected once and expanded one bridge at a time, so a neighbour reached through
     several releases is walked once and the root is never re-expanded per row.
@@ -60,11 +65,14 @@ async def get_collaborator_page(
     MATCH (a:Artist {id: $artist_id})
     CALL {
         WITH a
-        MATCH (a)<-[:BY]-(r:Release)-[:BY]->(n:Artist)
+        MATCH (a)<-[:BY]-(sampled:Release)
+        WITH a, sampled LIMIT $hub_root_max_credits
+        MATCH (sampled)-[:BY]->(n:Artist)
         WHERE n <> a
-        RETURN n AS collaborator, 1 AS hops, count(DISTINCT r) AS shared
+        RETURN n AS collaborator, 1 AS hops, count(DISTINCT sampled) AS shared
     }
-    WITH a, collect({collaborator: collaborator, hops: hops, shared: shared}) AS direct
+    WITH a, collect({collaborator: collaborator, hops: hops, shared: shared}) AS direct,
+         COUNT { (a)<-[:BY]-() } > $hub_root_max_credits AS truncated
     CALL {
         WITH a, direct
         UNWIND direct AS d
@@ -84,14 +92,15 @@ async def get_collaborator_page(
         RETURN collect({collaborator: far, hops: 2, shared: shared}) AS indirect
     }
     UNWIND direct + indirect AS row
-    WITH row.collaborator AS collaborator,
+    WITH truncated, row.collaborator AS collaborator,
          min(row.hops) AS distance,
          sum(CASE row.hops WHEN 1 THEN row.shared ELSE 0 END) AS direct_count,
          sum(CASE row.hops WHEN 2 THEN row.shared ELSE 0 END) AS indirect_count
-    WITH collaborator, distance, CASE distance WHEN 1 THEN direct_count ELSE indirect_count END AS collaboration_count
+    WITH truncated, collaborator, distance, CASE distance WHEN 1 THEN direct_count ELSE indirect_count END AS collaboration_count
     ORDER BY distance ASC, collaboration_count DESC, collaborator.id ASC
-    WITH collect([collaborator, distance, collaboration_count]) AS ranked
+    WITH truncated, collect([collaborator, distance, collaboration_count]) AS ranked
     RETURN size(ranked) AS total,
+           truncated,
            [r IN ranked[0..$limit] | {
                artist_id: (r[0]).id,
                artist_name: (r[0]).name,
@@ -110,8 +119,8 @@ async def get_collaborator_page(
         bridge_max_credits=BRIDGE_ARTIST_MAX_CREDITS,
     )
     if row is None:
-        return [], 0
-    return list(row["page"]), int(row["total"])
+        return [], 0, False
+    return list(row["page"]), int(row["total"]), bool(row["truncated"])
 
 
 async def get_artist_centrality(

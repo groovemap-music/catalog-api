@@ -19,7 +19,7 @@ class TestCollaboratorsEndpoint:
         ]
         with (
             patch("api.queries.network_queries.get_artist_identity", new_callable=AsyncMock, return_value=identity),
-            patch("api.queries.network_queries.get_collaborator_page", new_callable=AsyncMock, return_value=(collaborators, 15)),
+            patch("api.queries.network_queries.get_collaborator_page", new_callable=AsyncMock, return_value=(collaborators, 15, False)),
         ):
             response = test_client.get("/api/network/artist/123/collaborators?depth=2&limit=50")
         assert response.status_code == 200
@@ -29,6 +29,7 @@ class TestCollaboratorsEndpoint:
         assert data["depth"] == 2
         assert len(data["collaborators"]) == 2
         assert data["total"] == 15
+        assert data["truncated"] is False
 
     def test_not_found(self, test_client: TestClient) -> None:
         """Returns 404 when artist does not exist."""
@@ -88,7 +89,7 @@ class TestCollaboratorsEndpoint:
     def test_depth_3_is_answered_as_depth_2_and_reported_as_such(self, test_client: TestClient) -> None:
         """Only two hops are traversed, so depth=3 must not claim three."""
         identity = {"artist_id": "123", "artist_name": "Test Artist"}
-        page = AsyncMock(return_value=([], 0))
+        page = AsyncMock(return_value=([], 0, False))
         with (
             patch("api.queries.network_queries.get_artist_identity", new_callable=AsyncMock, return_value=identity),
             patch("api.queries.network_queries.get_collaborator_page", page),
@@ -111,7 +112,7 @@ class TestCollaboratorsEndpoint:
         ]
         with (
             patch("api.queries.network_queries.get_artist_identity", new_callable=AsyncMock, return_value=identity),
-            patch("api.queries.network_queries.get_collaborator_page", new_callable=AsyncMock, return_value=(collaborators, 1)),
+            patch("api.queries.network_queries.get_collaborator_page", new_callable=AsyncMock, return_value=(collaborators, 1, False)),
         ):
             response = test_client.get("/api/network/artist/123/collaborators?depth=1")
         assert response.status_code == 200
@@ -469,9 +470,11 @@ class TestGetCollaboratorPage:
         from api.queries import network_queries
 
         page = [{"artist_id": "456", "artist_name": "John Coltrane", "distance": 1, "collaboration_count": 5}]
-        with patch("api.queries.network_queries.run_single", new_callable=AsyncMock, return_value={"total": 9, "page": page}) as mock_run:
+        with patch(
+            "api.queries.network_queries.run_single", new_callable=AsyncMock, return_value={"total": 9, "page": page, "truncated": False}
+        ) as mock_run:
             result = await network_queries.get_collaborator_page(AsyncMock(), "123", depth=2, limit=50)
-        assert result == (page, 9)
+        assert result == (page, 9, False)
         mock_run.assert_awaited_once()
         kwargs = mock_run.call_args[1]
         assert kwargs["artist_id"] == "123"
@@ -483,7 +486,9 @@ class TestGetCollaboratorPage:
     async def test_depth_is_clamped_to_two_hops(self) -> None:
         from api.queries.network_queries import get_collaborator_page
 
-        with patch("api.queries.network_queries.run_single", new_callable=AsyncMock, return_value={"total": 0, "page": []}) as mock_run:
+        with patch(
+            "api.queries.network_queries.run_single", new_callable=AsyncMock, return_value={"total": 0, "page": [], "truncated": False}
+        ) as mock_run:
             await get_collaborator_page(AsyncMock(), "123", depth=3)
         assert mock_run.call_args[1]["depth"] == 2
 
@@ -492,7 +497,7 @@ class TestGetCollaboratorPage:
         from api.queries.network_queries import get_collaborator_page
 
         with patch("api.queries.network_queries.run_single", new_callable=AsyncMock, return_value=None):
-            assert await get_collaborator_page(AsyncMock(), "missing") == ([], 0)
+            assert await get_collaborator_page(AsyncMock(), "missing") == ([], 0, False)
 
 
 class TestGetArtistCentrality:

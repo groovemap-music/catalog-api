@@ -74,15 +74,16 @@ async def _old(driver: AsyncResilientNeo4jDriver, depth: int) -> list[dict[str, 
 
 async def test_depth_1_matches_the_old_statement(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
     await _seed(neo4j_driver)
-    page, total = await network_queries.get_collaborator_page(neo4j_driver, "a", depth=1, limit=50)
+    page, total, truncated = await network_queries.get_collaborator_page(neo4j_driver, "a", depth=1, limit=50)
     assert page == await _old(neo4j_driver, 1)
     assert total == len(page) == 4  # b, c, e and the hub itself
+    assert truncated is False
 
 
 async def test_depth_2_matches_the_old_statement_except_through_the_hub(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
     await _seed(neo4j_driver)
     old = await _old(neo4j_driver, 2)
-    page, total = await network_queries.get_collaborator_page(neo4j_driver, "a", depth=2, limit=50)
+    page, total, truncated = await network_queries.get_collaborator_page(neo4j_driver, "a", depth=2, limit=50)
 
     assert {r["artist_id"] for r in old} == {"b", "c", "e", "h", "d", "f"}
     # Only f is lost: it is reachable solely through the nameless hub.
@@ -96,20 +97,29 @@ async def test_depth_2_matches_the_old_statement_except_through_the_hub(neo4j_dr
 
 async def test_page_is_a_prefix_of_the_ranking_and_total_covers_all(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
     await _seed(neo4j_driver)
-    full, _ = await network_queries.get_collaborator_page(neo4j_driver, "a", depth=2, limit=50)
-    page, total = await network_queries.get_collaborator_page(neo4j_driver, "a", depth=2, limit=2)
+    full, _, _ = await network_queries.get_collaborator_page(neo4j_driver, "a", depth=2, limit=50)
+    page, total, _ = await network_queries.get_collaborator_page(neo4j_driver, "a", depth=2, limit=2)
     assert page == full[:2]
     assert total == len(full)
 
 
 async def test_unknown_artist_is_empty(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
     await _seed(neo4j_driver)
-    assert await network_queries.get_collaborator_page(neo4j_driver, "nobody") == ([], 0)
+    assert await network_queries.get_collaborator_page(neo4j_driver, "nobody") == ([], 0, False)
 
 
 async def test_bridge_over_the_credit_cap_is_not_walked(neo4j_driver: AsyncResilientNeo4jDriver, monkeypatch: pytest.MonkeyPatch) -> None:
     await _seed(neo4j_driver)
     monkeypatch.setattr(network_queries, "BRIDGE_ARTIST_MAX_CREDITS", 3)  # b has 4 credits, c has 2
-    page, _ = await network_queries.get_collaborator_page(neo4j_driver, "a", depth=2, limit=50)
+    page, _, _ = await network_queries.get_collaborator_page(neo4j_driver, "a", depth=2, limit=50)
     d = next(r for r in page if r["artist_id"] == "d")
     assert d["collaboration_count"] == 1  # only through c
+
+
+async def test_hub_root_reads_a_bounded_sample_and_says_so(neo4j_driver: AsyncResilientNeo4jDriver, monkeypatch: pytest.MonkeyPatch) -> None:
+    await _seed(neo4j_driver)
+    monkeypatch.setattr(network_queries, "HUB_ROOT_MAX_CREDITS", 3)  # a has 6 credits
+    page, total, truncated = await network_queries.get_collaborator_page(neo4j_driver, "a", depth=2, limit=50)
+    assert truncated is True
+    assert all(r["distance"] == 1 for r in page)  # a hub root returns direct collaborators only
+    assert total == len(page) <= 3  # three sampled releases, one co-credit each
