@@ -399,6 +399,53 @@ async def _run_results(
 _TOTAL_COUNT_CAP = 10000
 
 
+def _build_count_union(
+    types: list[str],
+    *,
+    year_min: int | None = None,
+    year_max: int | None = None,
+    genres: list[str] | None = None,
+    media_families: list[str] | None = None,
+    media_mediums: list[str] | None = None,
+    countries: list[str] | None = None,
+) -> tuple[sql.Composable, list[Any]]:
+    """Build the UNION ALL that :func:`_run_total` counts, without ranking or sorting.
+
+    A capped count does not depend on which rows the cap keeps, so each branch just
+    stops after ``_TOTAL_COUNT_CAP`` matches. Ranking them first (as the results
+    statement must) reads every matching document and sorts it, only to throw the order
+    away (audit H2). The filters are applied in each branch before the cap, with the same
+    clauses and column expressions as :func:`_entity_select`, so the total is unchanged.
+    """
+    if not types:  # would produce invalid SQL
+        raise ValueError("types must not be empty")
+    parts: list[sql.Composable] = []
+    params: list[Any] = []
+    for t in types:
+        table, name_field, has_year, has_genres, has_media, has_country = _ENTITY_CONFIG[t]
+        year_clause, year_params = _year_filter_clause(year_min, year_max, column=sql.SQL("(data->>'year')") if has_year else sql.SQL("NULL::text"))
+        genre_clause, genre_params = _genre_filter_clause(genres or [], column=sql.SQL("(data->'genres')") if has_genres else sql.SQL("NULL::jsonb"))
+        media_clause, media_params = _media_filter_clause(
+            media_families or [], media_mediums or [], column=sql.SQL("media") if has_media else sql.SQL("NULL::jsonb")
+        )
+        country_clause, country_params = _country_filter_clause(
+            countries or [], column=sql.SQL("(data->>'country')") if has_country else sql.SQL("NULL::text")
+        )
+        branch_params = [*year_params, *genre_params, *media_params, *country_params]
+        filter_clause = (
+            sql.SQL(" AND {y} AND {g} AND {m} AND {c}").format(y=year_clause, g=genre_clause, m=media_clause, c=country_clause)
+            if branch_params
+            else sql.SQL("")
+        )
+        parts.append(
+            sql.SQL(
+                "(SELECT 1 FROM {table}, q WHERE to_tsvector('english', COALESCE(data->>{name}, '')) @@ q.tsq{filter_clause} LIMIT {cap})"
+            ).format(table=sql.Identifier(table), name=sql.Literal(name_field), filter_clause=filter_clause, cap=sql.Literal(_TOTAL_COUNT_CAP))
+        )
+        params.extend(branch_params)
+    return sql.SQL(" UNION ALL ").join(parts), params
+
+
 async def _run_total(
     pool: AsyncPostgreSQLPool,
     q: str,
@@ -419,9 +466,8 @@ async def _run_total(
     year/genre/media filters are pushed INTO each per-table subquery (before
     its rank LIMIT) for the same reason as _run_results — see its docstring.
     """
-    union_sql, union_params = _build_union(
+    union_sql, union_params = _build_count_union(
         types,
-        per_table_limit=_TOTAL_COUNT_CAP,
         year_min=year_min,
         year_max=year_max,
         genres=genres,
@@ -431,7 +477,7 @@ async def _run_total(
     )
 
     query = sql.SQL(
-        "WITH q AS NOT MATERIALIZED (SELECT plainto_tsquery('english', %s) AS tsq), results AS ({union_sql}) SELECT COUNT(*) AS total FROM results"
+        "WITH q AS NOT MATERIALIZED (SELECT plainto_tsquery('english', %s) AS tsq) SELECT COUNT(*) AS total FROM ({union_sql}) matched"
     ).format(union_sql=union_sql)
     params = [q, *union_params]
     async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
