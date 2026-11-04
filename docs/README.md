@@ -30,6 +30,7 @@ flowchart TD
 - [Valkey write rejection, verified against real servers](valkey-noeviction-verification.md)
 - [Performance](performance-guide.md)
 - [Coverage policy](coverage-policy.md)
+- [Cypher performance audit, 2026-11-04](cypher-performance-audit-2026-11-04.md)
 - [Query performance optimizations](query-performance-optimizations.md)
 - [Offline evaluation harness](evaluation.md)
 - [Precomputed similar artists](similar-artists-precomputed.md)
