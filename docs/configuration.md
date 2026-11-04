@@ -43,6 +43,8 @@ password in the environment. Do not set both forms to conflicting values.
 | `POSTGRES_PORT` | `5432` | PostgreSQL port when it is not embedded in `POSTGRES_HOST` |
 | `POSTGRES_POOL_MIN_SIZE` | `2` | Minimum API pool size |
 | `POSTGRES_POOL_MAX_SIZE` | `8` | Maximum API pool size |
+| `SEARCH_STATEMENT_TIMEOUT_SECONDS` | `20` | Per-statement timeout for `/api/search`; a cancelled search answers 504 |
+| `SEARCH_QUEUE_TIMEOUT_SECONDS` | `5` | How long a search statement waits for a slot before `/api/search` answers 503 with `Retry-After`. Searches share the pool size minus 2 slots, so login and token routes always have connections |
 | `NEO4J_PORT` | `7687` | Bolt port used when `NEO4J_HOST` is a bare host; ignored for a full URI |
 | `NEO4J_TLS_ENABLED` | `false` | Enable Bolt TLS for a host without a TLS URI scheme |
 | `NEO4J_TLS_VERIFY` | `true` | Verify the Bolt certificate when TLS is enabled |

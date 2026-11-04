@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 import api.activity as activity
 from api.dependencies import get_optional_user
 from api.limiter import limiter
-from api.queries.search_queries import ALL_TYPES, execute_search, split_media_filter
+from api.queries.search_queries import ALL_TYPES, SearchBusy, SearchTimedOut, execute_search, split_media_filter
 
 
 logger = structlog.get_logger(__name__)
@@ -177,20 +177,29 @@ async def search(
         country=country_list,
     )
 
-    result = await execute_search(
-        pool=_pool,
-        valkey=_valkey,
-        q=q,
-        types=requested_types,
-        genres=genre_list,
-        year_min=year_min,
-        year_max=year_max,
-        limit=limit,
-        offset=offset,
-        media_families=media_families,
-        media_mediums=media_mediums,
-        countries=country_list,
-    )
+    try:
+        result = await execute_search(
+            pool=_pool,
+            valkey=_valkey,
+            q=q,
+            types=requested_types,
+            genres=genre_list,
+            year_min=year_min,
+            year_max=year_max,
+            limit=limit,
+            offset=offset,
+            media_families=media_families,
+            media_mediums=media_mediums,
+            countries=country_list,
+        )
+    except SearchBusy:
+        # Every search slot stayed taken: shed the load with a defined, retryable answer.
+        logger.warning("search busy: no slot within the queue timeout", q=q)
+        return JSONResponse(content={"error": "Search is busy, retry shortly"}, status_code=503, headers={"Retry-After": "5"})
+    except SearchTimedOut:
+        # A statement was cancelled at its timeout. Never an empty success, and never cached.
+        logger.warning("search timed out", q=q)
+        return JSONResponse(content={"error": "Search timed out, narrow the query or retry"}, status_code=504)
 
     # ADR 0010 records the search only for a caller the service can pseudonymise. An
     # anonymous search has no subject, so it leaves no behavioural record at all rather

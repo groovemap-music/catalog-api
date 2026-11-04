@@ -7,6 +7,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+def _transaction() -> MagicMock:
+    """An async context manager standing in for ``conn.transaction()`` (search statements run inside one)."""
+    transaction = MagicMock()
+    transaction.__aenter__ = AsyncMock(return_value=None)
+    transaction.__aexit__ = AsyncMock(return_value=False)
+    return transaction
+
+
 class TestSearchEndpointBasic:
     """Basic search endpoint behaviour."""
 
@@ -343,6 +351,7 @@ class TestSearchQueryModuleHelpers:
         mock_conn = AsyncMock()
         mock_conn.cursor = MagicMock(return_value=mock_cursor)
         mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_conn.transaction = MagicMock(return_value=_transaction())
         mock_conn.__aexit__ = AsyncMock(return_value=False)
 
         mock_pool = MagicMock()
@@ -377,6 +386,7 @@ class TestSearchQueryModuleHelpers:
         mock_conn = AsyncMock()
         mock_conn.cursor = MagicMock(return_value=mock_cursor)
         mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_conn.transaction = MagicMock(return_value=_transaction())
         mock_conn.__aexit__ = AsyncMock(return_value=False)
 
         mock_pool = MagicMock()
@@ -784,6 +794,7 @@ class TestSearchQueryAsyncFunctions:
         mock_conn = AsyncMock()
         mock_conn.cursor = MagicMock(return_value=mock_cursor)
         mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_conn.transaction = MagicMock(return_value=_transaction())
         mock_conn.__aexit__ = AsyncMock(return_value=False)
 
         mock_pool = MagicMock()
@@ -805,6 +816,7 @@ class TestSearchQueryAsyncFunctions:
         mock_conn = AsyncMock()
         mock_conn.cursor = MagicMock(return_value=mock_cursor)
         mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_conn.transaction = MagicMock(return_value=_transaction())
         mock_conn.__aexit__ = AsyncMock(return_value=False)
 
         mock_pool = MagicMock()
@@ -826,6 +838,7 @@ class TestSearchQueryAsyncFunctions:
         mock_conn = AsyncMock()
         mock_conn.cursor = MagicMock(return_value=mock_cursor)
         mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_conn.transaction = MagicMock(return_value=_transaction())
         mock_conn.__aexit__ = AsyncMock(return_value=False)
 
         mock_pool = MagicMock()
@@ -847,6 +860,7 @@ class TestSearchQueryAsyncFunctions:
         mock_conn = AsyncMock()
         mock_conn.cursor = MagicMock(return_value=mock_cursor)
         mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_conn.transaction = MagicMock(return_value=_transaction())
         mock_conn.__aexit__ = AsyncMock(return_value=False)
 
         mock_pool = MagicMock()
@@ -868,6 +882,7 @@ class TestSearchQueryAsyncFunctions:
         mock_conn = AsyncMock()
         mock_conn.cursor = MagicMock(return_value=mock_cursor)
         mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_conn.transaction = MagicMock(return_value=_transaction())
         mock_conn.__aexit__ = AsyncMock(return_value=False)
 
         mock_pool = MagicMock()
@@ -912,6 +927,7 @@ class TestSearchQueryAsyncFunctions:
         mock_conn = AsyncMock()
         mock_conn.cursor = MagicMock(return_value=mock_cursor)
         mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_conn.transaction = MagicMock(return_value=_transaction())
         mock_conn.__aexit__ = AsyncMock(return_value=False)
 
         mock_pool = MagicMock()
@@ -944,6 +960,7 @@ class TestSearchQueryAsyncFunctions:
         mock_conn = AsyncMock()
         mock_conn.cursor = MagicMock(return_value=mock_cursor)
         mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_conn.transaction = MagicMock(return_value=_transaction())
         mock_conn.__aexit__ = AsyncMock(return_value=False)
 
         mock_pool = MagicMock()
@@ -965,6 +982,7 @@ class TestSearchQueryAsyncFunctions:
         mock_conn = AsyncMock()
         mock_conn.cursor = MagicMock(return_value=mock_cursor)
         mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_conn.transaction = MagicMock(return_value=_transaction())
         mock_conn.__aexit__ = AsyncMock(return_value=False)
         mock_pool = MagicMock()
         mock_pool.connection = MagicMock(return_value=mock_conn)
@@ -1041,6 +1059,7 @@ class TestSearchQueryAsyncFunctions:
         mock_conn = AsyncMock()
         mock_conn.cursor = MagicMock(return_value=mock_cursor)
         mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_conn.transaction = MagicMock(return_value=_transaction())
         mock_conn.__aexit__ = AsyncMock(return_value=False)
 
         mock_pool = MagicMock()
@@ -1268,3 +1287,39 @@ class TestSearchCountryEndpoint:
             "country:UK",
             "type:release",
         ]
+
+
+class TestSearchBackpressureResponses:
+    """A shed or timed-out search is a defined error, never an empty success, and is never recorded."""
+
+    def test_a_busy_search_is_503_with_retry_after(self, test_client: TestClient) -> None:
+        from api.queries.search_queries import SearchBusy
+
+        with patch("api.routers.search.execute_search", AsyncMock(side_effect=SearchBusy())):
+            response = test_client.get("/api/search?q=love")
+        assert response.status_code == 503
+        # The limiter's header injection may overwrite the value, but a retry hint is always present.
+        assert "retry-after" in response.headers
+        assert "results" not in response.json()
+
+    def test_a_timed_out_search_is_504(self, test_client: TestClient) -> None:
+        from api.queries.search_queries import SearchTimedOut
+
+        with patch("api.routers.search.execute_search", AsyncMock(side_effect=SearchTimedOut())):
+            response = test_client.get("/api/search?q=love")
+        assert response.status_code == 504
+        assert "results" not in response.json()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_statement_is_not_cached_and_surfaces(self) -> None:
+        from api.queries.search_queries import SearchTimedOut, execute_search
+
+        valkey = AsyncMock()
+        valkey.get = AsyncMock(return_value=None)
+        pool = TestSearchQueryAsyncFunctions._db_mocks()
+        with (
+            patch("api.queries.search_queries.execute_sql", AsyncMock(side_effect=SearchTimedOut())),
+            pytest.raises(SearchTimedOut),
+        ):
+            await execute_search(pool, valkey, "love", ["release"], [], None, None, 20, 0)
+        valkey.setex.assert_not_called()
