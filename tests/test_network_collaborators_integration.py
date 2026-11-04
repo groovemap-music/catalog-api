@@ -89,6 +89,7 @@ async def test_depth_2_matches_the_old_statement_except_through_the_hub(neo4j_dr
     # Only f is lost: it is reachable solely through the nameless hub.
     assert page == [r for r in old if r["artist_id"] != "f"]
     assert total == len(page) == 5
+    assert truncated is False
     by_id = {r["artist_id"]: r for r in page}
     assert by_id["b"]["distance"] == 1 and by_id["b"]["collaboration_count"] == 2
     assert by_id["e"]["distance"] == 1 and by_id["e"]["collaboration_count"] == 1  # not re-counted at hop 2
