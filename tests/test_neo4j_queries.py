@@ -5,10 +5,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+from tests.cypher_text import cypher_text
 
 
 class _AsyncIter:
@@ -271,7 +271,7 @@ class TestExploreQueries:
 
         await explore_artist(driver, "Radiohead")
 
-        cypher = mock_session.run.call_args[0][0]
+        cypher = cypher_text(mock_session.run.call_args[0][0])
         assert "alias_ids + group_ids + member_ids" in cypher
         assert "DISTINCT related_id" in cypher
         assert "COUNT { (a)-[:ALIAS_OF]->(:Artist) }" not in cypher
@@ -669,7 +669,7 @@ def _make_capturing_driver(total: int = 10) -> tuple[MagicMock, list[str], list[
     mock_session.__aexit__ = AsyncMock(return_value=False)
 
     async def capturing_run(cypher: str, params: dict[str, Any] | None = None, **kwargs: Any) -> CapturingMockResult:
-        captured_cypher.append(cypher)
+        captured_cypher.append(cypher_text(cypher))
         captured_params.append(params or kwargs)
         return CapturingMockResult()
 
@@ -890,7 +890,7 @@ class TestExpandBeforeYear:
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
         async def _run_side_effect(cypher: str, params: Any, **_kwargs: Any) -> _MockResult:
-            calls.append((cypher, params))
+            calls.append((cypher_text(cypher), params))
             return mock_result
 
         mock_session.run = AsyncMock(side_effect=_run_side_effect)
@@ -1349,7 +1349,7 @@ class TestExpandReleasesNullYearOrdering:
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
         async def _run_side_effect(cypher: str, params: Any, **_kwargs: Any) -> _MockResult:
-            calls.append((cypher, params))
+            calls.append((cypher_text(cypher), params))
             return mock_result
 
         mock_session.run = AsyncMock(side_effect=_run_side_effect)
@@ -1415,7 +1415,7 @@ class TestExpandQueriesHaveUniqueOrderByTiebreaker:
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
         async def _run_side_effect(cypher: str, params: Any, **_kwargs: Any) -> _MockResult:
-            calls.append((cypher, params))
+            calls.append((cypher_text(cypher), params))
             return mock_result
 
         mock_session.run = AsyncMock(side_effect=_run_side_effect)

@@ -11,10 +11,10 @@ from api.queries.recommend_queries import (
     get_candidate_artists,
 )
 
-
 # ---------------------------------------------------------------------------
 # Mock helpers (matching test_neo4j_queries.py patterns)
 # ---------------------------------------------------------------------------
+from tests.cypher_text import cypher_text
 
 
 class _AsyncIter:
@@ -637,7 +637,7 @@ class TestGetCollectorCounts:
 
         await get_collector_counts(driver, ["r1"])
 
-        cypher = calls[0][0]
+        cypher = cypher_text(calls[0][0])
         assert "count(DISTINCT u)" in cypher
         assert "count(u)" not in cypher.replace("count(DISTINCT u)", "")
 
@@ -732,7 +732,7 @@ class TestGetExploreTraversal:
         driver = _make_driver(records=[])
         await get_explore_traversal(driver, "genre", "Rock")
         call_args = driver.session.return_value.__aenter__.return_value.run.call_args
-        cypher = call_args[0][0]
+        cypher = cypher_text(call_args[0][0])
         assert "Genre" in cypher
         assert "name:" in cypher
 
@@ -743,7 +743,7 @@ class TestGetExploreTraversal:
         driver = _make_driver(records=[])
         await get_explore_traversal(driver, "artist", "a1", hops=0)
         call_args = driver.session.return_value.__aenter__.return_value.run.call_args
-        cypher = call_args[0][0]
+        cypher = cypher_text(call_args[0][0])
         assert "*1..2" in cypher
 
     @pytest.mark.asyncio
@@ -753,7 +753,7 @@ class TestGetExploreTraversal:
         driver = _make_driver(records=[])
         await get_explore_traversal(driver, "artist", "a1", hops=10)
         call_args = driver.session.return_value.__aenter__.return_value.run.call_args
-        cypher = call_args[0][0]
+        cypher = cypher_text(call_args[0][0])
         assert "*1..2" in cypher
 
     @pytest.mark.asyncio
@@ -766,7 +766,7 @@ class TestGetExploreTraversal:
         driver = _make_driver(records=[])
         await get_explore_traversal(driver, "artist", "a1", hops=2)
         call_args = driver.session.return_value.__aenter__.return_value.run.call_args
-        cypher = call_args[0][0]
+        cypher = cypher_text(call_args[0][0])
         assert "coalesce(discovered.id, discovered.name) AS id" in cypher
 
     @pytest.mark.asyncio
@@ -801,7 +801,7 @@ class TestGetExploreTraversal:
         driver = _make_driver(records=[])
         await get_explore_traversal(driver, "artist", "a1", hops=2)
         call_args = driver.session.return_value.__aenter__.return_value.run.call_args
-        cypher = call_args[0][0]
+        cypher = cypher_text(call_args[0][0])
 
         assert "WITH DISTINCT discovered," not in cypher
 
