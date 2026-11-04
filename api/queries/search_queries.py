@@ -261,15 +261,24 @@ def _entity_select(
         else sql.SQL("")
     )
 
+    # Rank first, read documents after the LIMIT (audit H1). The inner query touches
+    # each match's document once, for the rank; name, year, genres, country and the
+    # headline are read only for the rows that survive the cap, via a primary-key join.
+    # The tsquery comes from the caller's ``q`` CTE, which must be NOT MATERIALIZED: a CTE
+    # referenced by every branch otherwise materializes, and a CTE scan is
+    # parallel-restricted, which forces a serial plan.
     select_sql = sql.SQL(
-        "(SELECT {entity_type}::text AS type, data_id AS id, data->>{name} AS name,"
-        " ts_rank(to_tsvector('english', COALESCE(data->>{name}, '')), q.tsq) AS rank,"
-        " ts_headline('english', COALESCE(data->>{name}, ''), q.tsq) AS highlight,"
+        "(SELECT {entity_type}::text AS type, d.data_id AS id, d.data->>{name} AS name,"
+        " top.rank AS rank,"
+        " ts_headline('english', COALESCE(d.data->>{name}, ''), q.tsq) AS highlight,"
         " {year_col} AS year, {genres_col} AS genres, {country_col} AS country"
+        " FROM q, (SELECT data_id,"
+        " ts_rank(to_tsvector('english', COALESCE(data->>{name}, '')), q.tsq) AS rank"
         " FROM {table}, q"
         " WHERE to_tsvector('english', COALESCE(data->>{name}, '')) @@ q.tsq"
         "{filter_clause}"
-        "{limit_clause})"
+        "{limit_clause}) top"
+        " JOIN {table} d ON d.data_id = top.data_id)"
     ).format(
         entity_type=sql.Literal(entity_type),
         name=name_lit,
@@ -373,7 +382,7 @@ async def _run_results(
     )
 
     query = sql.SQL(
-        "WITH q AS (SELECT plainto_tsquery('english', %s) AS tsq),"
+        "WITH q AS NOT MATERIALIZED (SELECT plainto_tsquery('english', %s) AS tsq),"
         " results AS ({union_sql})"
         " SELECT type, id, name, rank, highlight, year, genres, country"
         " FROM results"
