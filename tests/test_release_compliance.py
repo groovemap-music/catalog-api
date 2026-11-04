@@ -286,6 +286,7 @@ def test_every_indexed_document_respects_repository_ownership() -> None:
         ),
         "docs/configuration.md": ("`extractor-discogs`", "`extractor-musicbrainz`", "`http://insights:8008`", "`/api/insights/*`"),
         "docs/database-resilience.md": ("`/api/insights/*`",),
+        "docs/sql-performance-audit-2026-11-04.md": ("insights.release_rarity", "insights.community_counts", "/api/internal/insights/"),
         "docs/usage-examples.md": ("/api/insights/",),
     }
     for relative_path, content in documents.items():
