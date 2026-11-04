@@ -31,6 +31,7 @@ flowchart TD
 - [Performance](performance-guide.md)
 - [Coverage policy](coverage-policy.md)
 - [Query performance optimizations](query-performance-optimizations.md)
+- [SQL performance audit, 2026-11-04](sql-performance-audit-2026-11-04.md)
 - [Offline evaluation harness](evaluation.md)
 - [Precomputed similar artists](similar-artists-precomputed.md)
 - [Transactional email decision](transactional-email-provider-decision.md)
