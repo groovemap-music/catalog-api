@@ -977,7 +977,7 @@ Multi-hop collaborator traversal, centrality scoring, and community detection vi
 
 **Query parameters for `/api/network/artist/{artist_id}/collaborators`:**
 
-- `depth` — Number of hops to traverse (1–3, default: 2)
+- `depth` — Number of hops to traverse (1–3, default: 2; only two hops are traversed, so 3 is answered as 2)
 - `limit` — Maximum collaborators to return (1–200, default: 50)
 
 **Query parameters for `/api/network/cluster/{artist_id}`:**
@@ -1001,7 +1001,7 @@ Artist similarity and personalized graph-traversal discovery, ranked by multi-di
 **Query parameters for `/api/recommend/explore/{entity_type}/{entity_id}`:**
 
 - `entity_type` — One of `artist`, `label`, `genre`, `style`
-- `hops` — Number of hops to traverse (1–3, default: 2)
+- `hops` — Number of hops to traverse (1–3, default: 2; only two hops are traversed, so 3 is answered as 2)
 - `limit` — Maximum discoveries to return (1–50, default: 10)
 
 **Impression tracking ([ADR 0010](https://github.com/groovemap-music/design/blob/main/docs/adr/0010-first-party-events-consent-and-deletion.md)):**
@@ -1318,7 +1318,7 @@ The response is identical either way.
 
 **Query parameters for `/api/credits/connections/{name}`:**
 
-- `depth` — Connection depth (1–3, default: 2)
+- `depth` — Connection depth (1–3, default: 2; only two hops are traversed, so 3 is answered as 2)
 - `limit` — Maximum connections (1–200, default: 50)
 
 **Query parameters for `/api/credits/autocomplete`:**
