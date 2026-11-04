@@ -49,8 +49,13 @@ async def artist_collaborators(
     Depth controls how many hops to traverse:
     - depth=1: direct collaborators only
     - depth=2: collaborators of collaborators (default)
-    - depth=3: three hops out
+    - depth=3: accepted for compatibility; only two hops are traversed, so it is
+      answered as depth=2 and the response reports ``depth: 2``
+
+    Collaborators of collaborators are reached only through bridge artists with at most
+    5,000 credits and a name, so placeholders such as "Various" do not connect everyone.
     """
+    effective_depth = min(depth, network_queries.MAX_COLLABORATOR_DEPTH)
     if not _neo4j:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
@@ -59,16 +64,11 @@ async def artist_collaborators(
         if not identity:
             return JSONResponse(content={"error": f"Artist '{artist_id}' not found"}, status_code=404)
 
-        collaborators = await network_queries.get_multi_hop_collaborators(
+        collaborators, total, truncated = await network_queries.get_collaborator_page(
             _neo4j,
             artist_id,
-            depth=depth,
+            depth=effective_depth,
             limit=limit,
-        )
-        total = await network_queries.count_multi_hop_collaborators(
-            _neo4j,
-            artist_id,
-            depth=depth,
         )
     except Neo4jClientError as exc:
         if "TransactionTimedOut" in str(exc):
@@ -83,9 +83,10 @@ async def artist_collaborators(
         content={
             "artist_id": identity["artist_id"],
             "artist_name": identity["artist_name"],
-            "depth": depth,
+            "depth": effective_depth,
             "collaborators": collaborators,
             "total": total,
+            "truncated": truncated,
         }
     )
 
