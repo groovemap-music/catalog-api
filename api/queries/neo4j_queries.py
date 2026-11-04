@@ -141,7 +141,7 @@ async def find_shortest_path(
            }}] AS nodes,
            [rel IN relationships(p) | type(rel)] AS rels
     """
-    return await run_single(driver, cypher, timeout=120, from_id=from_id, to_id=to_id)
+    return await run_single(driver, cypher, from_id=from_id, to_id=to_id)
 
 
 # --- Autocomplete ---

@@ -121,14 +121,26 @@ class TestRunQuery:
         assert sent_query.text == "MATCH (n) RETURN n"
 
     @pytest.mark.asyncio
-    async def test_no_query_wrapper_without_timeout(self) -> None:
+    async def test_no_query_wrapper_when_timeout_is_explicitly_none(self) -> None:
         from api.queries.helpers import run_query
 
         driver = _make_driver(records=[])
-        await run_query(driver, "MATCH (n) RETURN n")
+        await run_query(driver, "MATCH (n) RETURN n", timeout=None)
         session = driver.session.return_value
         _call_args = session.__aenter__.return_value.run.call_args
         assert _call_args.args[0] == "MATCH (n) RETURN n"
+
+    @pytest.mark.asyncio
+    async def test_default_timeout_when_none_given(self) -> None:
+        from neo4j import Query
+
+        from api.queries.helpers import DEFAULT_READ_TIMEOUT_SECONDS, run_query
+
+        driver = _make_driver(records=[])
+        await run_query(driver, "MATCH (n) RETURN n")
+        sent_query = driver.session.return_value.__aenter__.return_value.run.call_args.args[0]
+        assert isinstance(sent_query, Query)
+        assert sent_query.timeout == DEFAULT_READ_TIMEOUT_SECONDS
 
     @pytest.mark.asyncio
     async def test_passes_database(self) -> None:
@@ -180,7 +192,7 @@ class TestRunQuery:
             await run_query(driver, "MATCH (n) RETURN n")
             session = driver.session.return_value
             run_call = session.__aenter__.return_value.run.call_args
-            assert run_call.args[0].startswith("PROFILE ")
+            assert run_call.args[0].text.startswith("PROFILE ")
             mock_profile.assert_called_once()
 
     @pytest.mark.asyncio
@@ -192,7 +204,7 @@ class TestRunQuery:
             await run_query(driver, "MATCH (n) RETURN n")
             session = driver.session.return_value
             run_call = session.__aenter__.return_value.run.call_args
-            assert run_call.args[0] == "MATCH (n) RETURN n"
+            assert run_call.args[0].text == "MATCH (n) RETURN n"
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +265,7 @@ class TestRunSingle:
             await run_single(driver, "MATCH (a) RETURN a LIMIT 1")
             session = driver.session.return_value
             run_call = session.__aenter__.return_value.run.call_args
-            assert run_call.args[0].startswith("PROFILE ")
+            assert run_call.args[0].text.startswith("PROFILE ")
             mock_profile.assert_called_once()
 
     @pytest.mark.asyncio
@@ -335,7 +347,7 @@ class TestRunCount:
             await run_count(driver, "RETURN count(*) AS total")
             session = driver.session.return_value
             run_call = session.__aenter__.return_value.run.call_args
-            assert run_call.args[0].startswith("PROFILE ")
+            assert run_call.args[0].text.startswith("PROFILE ")
             mock_profile.assert_called_once()
 
     @pytest.mark.asyncio

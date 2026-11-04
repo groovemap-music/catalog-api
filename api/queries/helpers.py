@@ -28,7 +28,31 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 
-def _build_query(cypher: str, timeout: float | None) -> Query | str:
+class _DefaultTimeout:
+    """Type of :data:`DEFAULT_TIMEOUT`, the "caller did not choose a budget" marker."""
+
+    def __repr__(self) -> str:
+        return "DEFAULT_TIMEOUT"
+
+
+DEFAULT_TIMEOUT = _DefaultTimeout()
+
+# Server-side budget for a read that names none. lux's db.transaction.timeout is 10 minutes, so before
+# this default 119 of 150 request-path statements held Neo4j that long and the routers' 504 handlers
+# could not fire in useful time (docs/cypher-performance-audit-2026-11-04.md, C1).
+DEFAULT_READ_TIMEOUT_SECONDS = 30.0
+
+Timeout = float | None | _DefaultTimeout
+
+
+def resolve_timeout(timeout: Timeout) -> float | None:
+    """Return the budget in seconds for ``timeout``; ``None`` means the caller opted out explicitly."""
+    if isinstance(timeout, _DefaultTimeout):
+        return DEFAULT_READ_TIMEOUT_SECONDS
+    return timeout
+
+
+def _build_query(cypher: str, timeout: Timeout) -> Query | str:
     """Wrap ``cypher`` in a :class:`neo4j.Query` when a timeout is requested.
 
     ``session.run()`` has no ``timeout`` keyword argument — passing one merges
@@ -36,8 +60,9 @@ def _build_query(cypher: str, timeout: float | None) -> Query | str:
     transaction timeout (see neo4j._async.work.session.AsyncSession.run). A
     per-query timeout must be set via ``Query(cypher, timeout=...)``.
     """
-    if timeout is not None:
-        return Query(cypher, timeout=timeout)
+    seconds = resolve_timeout(timeout)
+    if seconds is not None:
+        return Query(cypher, timeout=seconds)
     return cypher
 
 
@@ -70,7 +95,7 @@ async def run_query(
     driver: AsyncResilientNeo4jDriver,
     cypher: str,
     *,
-    timeout: float | None = None,
+    timeout: Timeout = DEFAULT_TIMEOUT,
     database: str | None = None,
     **params: Any,
 ) -> list[dict[str, Any]]:
@@ -79,7 +104,8 @@ async def run_query(
     Args:
         driver: The async Neo4j driver.
         cypher: The Cypher query string.
-        timeout: Optional query timeout in seconds.
+        timeout: Server-side budget in seconds. Omitted, it is ``DEFAULT_READ_TIMEOUT_SECONDS``; pass
+            ``None`` only for an internal batch read or write that must outlive a request.
         database: Optional Neo4j database name.
         **params: Query parameters forwarded to ``session.run()``.
 
@@ -114,7 +140,7 @@ async def run_single(
     driver: AsyncResilientNeo4jDriver,
     cypher: str,
     *,
-    timeout: float | None = None,
+    timeout: Timeout = DEFAULT_TIMEOUT,
     database: str | None = None,
     **params: Any,
 ) -> dict[str, Any] | None:
@@ -123,7 +149,8 @@ async def run_single(
     Args:
         driver: The async Neo4j driver.
         cypher: The Cypher query string.
-        timeout: Optional query timeout in seconds.
+        timeout: Server-side budget in seconds. Omitted, it is ``DEFAULT_READ_TIMEOUT_SECONDS``; pass
+            ``None`` only for an internal batch read or write that must outlive a request.
         database: Optional Neo4j database name.
         **params: Query parameters forwarded to ``session.run()``.
 
@@ -158,7 +185,7 @@ async def run_count(
     driver: AsyncResilientNeo4jDriver,
     cypher: str,
     *,
-    timeout: float | None = None,
+    timeout: Timeout = DEFAULT_TIMEOUT,
     database: str | None = None,
     **params: Any,
 ) -> int:
@@ -169,7 +196,8 @@ async def run_count(
     Args:
         driver: The async Neo4j driver.
         cypher: The Cypher query string.
-        timeout: Optional query timeout in seconds.
+        timeout: Server-side budget in seconds. Omitted, it is ``DEFAULT_READ_TIMEOUT_SECONDS``; pass
+            ``None`` only for an internal batch read or write that must outlive a request.
         database: Optional Neo4j database name.
         **params: Query parameters forwarded to ``session.run()``.
 

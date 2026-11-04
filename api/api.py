@@ -75,6 +75,7 @@ from api.auth import b64url_encode, decrypt_oauth_token, encrypt_oauth_token, ge
 from api.config import ApiConfig
 from api.ledger_refresh import run_refresh_loop
 from api.limiter import limiter
+from api.neo4j_timeouts import install_neo4j_timeout_handler
 from api.notifications import LogNotificationChannel, ResendNotificationChannel
 from api.queries.search_queries import ALL_TYPES, execute_search
 from api.reattach_trigger import run_trigger_loop
@@ -494,6 +495,7 @@ def _create_application() -> FastAPI:
     )
     application.state.limiter = limiter
     application.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
+    install_neo4j_timeout_handler(application)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=_cors_origins or ["http://localhost:3000", "http://localhost:8003"],
