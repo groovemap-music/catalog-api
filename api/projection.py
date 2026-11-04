@@ -98,7 +98,8 @@ async def run_gm_id_projection(pool: Any, driver: Any, *, batch_size: int = DEFA
                 break
 
             payload = [{"id": row["external_id"], "gm_id": str(row["native_id"])} for row in rows]
-            await run_query(driver, cypher, rows=payload)
+            # Internal batch write, not a request-path read: it is bounded by batch_size, not the 30 s read budget.
+            await run_query(driver, cypher, timeout=None, rows=payload)
 
             total += len(rows)
             cursor_external_id = rows[-1]["external_id"]

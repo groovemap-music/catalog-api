@@ -5,10 +5,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Helpers (mirrors pattern from test_neo4j_queries.py)
 # ---------------------------------------------------------------------------
+from tests.cypher_text import cypher_text
 
 
 class _AsyncIter:
@@ -221,7 +221,7 @@ class TestGetUserCollection:
         seen_cypher: list[str] = []
 
         async def _capture_run(*args: Any, **_kw: Any) -> _MockResult:
-            seen_cypher.append(args[0] if args else "")
+            seen_cypher.append(cypher_text(args[0]) if args else "")
             if "count(r)" in seen_cypher[-1]:
                 return _MockResult(single={"total": 0})
             return _MockResult(records=[])
@@ -250,7 +250,7 @@ class TestGetUserCollection:
         seen_cypher: list[str] = []
 
         async def _capture_run(*args: Any, **_kw: Any) -> _MockResult:
-            seen_cypher.append(args[0] if args else "")
+            seen_cypher.append(cypher_text(args[0]) if args else "")
             if "count(r)" in seen_cypher[-1]:
                 return _MockResult(single={"total": 0})
             return _MockResult(records=[])
@@ -314,7 +314,7 @@ class TestGetUserWantlist:
         seen_cypher: list[str] = []
 
         async def _capture_run(*args: Any, **_kw: Any) -> _MockResult:
-            seen_cypher.append(args[0] if args else "")
+            seen_cypher.append(cypher_text(args[0]) if args else "")
             if "count(r)" in seen_cypher[-1]:
                 return _MockResult(single={"total": 0})
             return _MockResult(records=[])
@@ -502,7 +502,7 @@ class TestGetUserCollectionTimeline:
         driver = _simple_driver(records=[])
         await get_user_collection_timeline(driver, "user-1")
 
-        cypher = driver.session.return_value.__aenter__.return_value.run.call_args[0][0]
+        cypher = cypher_text(driver.session.return_value.__aenter__.return_value.run.call_args[0][0])
         assert "collect(DISTINCT rg)" not in cypher
         assert "collect(DISTINCT rl)" not in cypher
         assert "collect(rg) AS genre_lists" in cypher
