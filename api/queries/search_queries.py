@@ -22,6 +22,9 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import os
+import weakref
+from collections.abc import AsyncIterator
 from functools import lru_cache
 from typing import Any
 
@@ -31,6 +34,7 @@ from common.media import family_ids as _media_family_ids
 from common.media import medium_ids as _media_medium_ids
 from common.query_debug import execute_sql
 from psycopg import sql
+from psycopg.errors import QueryCanceled
 from psycopg.rows import dict_row
 
 from api.identity import native_ids_for_pairs
@@ -53,6 +57,68 @@ _ENTITY_CONFIG: dict[str, tuple[str, str, bool, bool, bool, bool]] = {
     "master": ("masters", "title", True, False, False, False),
     "release": ("releases", "title", True, True, True, True),
 }
+
+
+class SearchBusy(Exception):
+    """Every search slot stayed taken for the whole wait: the caller should retry shortly (HTTP 503)."""
+
+
+class SearchTimedOut(Exception):
+    """A search statement ran past its statement timeout and was cancelled (HTTP 504)."""
+
+
+def _env_seconds(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+# Audit H3. An uncached search opens six connections from a pool of eight, so a handful of cold
+# searches can hold every connection past the checkout budget and fail unrelated routes such as
+# login. Searches therefore share a bounded set of slots (one per connection, less a reserve that
+# searches never take), and every search statement carries a timeout so one slow plan cannot hold
+# its slot indefinitely. Both are a backstop: the statement rewrites are what make searches fast.
+SEARCH_STATEMENT_TIMEOUT_SECONDS = _env_seconds("SEARCH_STATEMENT_TIMEOUT_SECONDS", 20.0)
+SEARCH_QUEUE_TIMEOUT_SECONDS = _env_seconds("SEARCH_QUEUE_TIMEOUT_SECONDS", 5.0)
+# Connections left for everything that is not a search. Two keeps login and token routes alive.
+SEARCH_POOL_RESERVE = 2
+
+# Keyed weakly by pool: the slots belong to one pool (and its event loop) and die with it.
+_slots: weakref.WeakKeyDictionary[Any, asyncio.Semaphore] = weakref.WeakKeyDictionary()
+
+
+def _search_slots(pool: AsyncPostgreSQLPool) -> asyncio.Semaphore:
+    """The slot semaphore for ``pool``: its connections minus the reserve, never fewer than one."""
+    slots = _slots.get(pool)
+    if slots is None:
+        size = max(1, int(getattr(pool, "max_connections", 8)) - SEARCH_POOL_RESERVE)
+        slots = _slots[pool] = asyncio.Semaphore(size)
+    return slots
+
+
+@contextlib.asynccontextmanager
+async def _search_cursor(pool: AsyncPostgreSQLPool) -> AsyncIterator[Any]:
+    """A dict-row cursor for one search statement, inside a slot and under a statement timeout.
+
+    Waiting for a slot is bounded by ``SEARCH_QUEUE_TIMEOUT_SECONDS`` (``SearchBusy``); the
+    statement is bounded by ``SEARCH_STATEMENT_TIMEOUT_SECONDS``, scoped to this transaction so the
+    pooled connection keeps no setting (``SearchTimedOut``). Neither is ever an empty success.
+    """
+    slots = _search_slots(pool)
+    try:
+        await asyncio.wait_for(slots.acquire(), timeout=SEARCH_QUEUE_TIMEOUT_SECONDS)
+    except TimeoutError:
+        raise SearchBusy from None
+    try:
+        async with pool.connection() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT set_config('statement_timeout', %s, true)", (f"{int(SEARCH_STATEMENT_TIMEOUT_SECONDS * 1000)}ms",))
+            yield cur
+    except QueryCanceled:
+        raise SearchTimedOut from None
+    finally:
+        slots.release()
 
 
 @lru_cache(maxsize=1)
@@ -390,7 +456,7 @@ async def _run_results(
         " LIMIT %s OFFSET %s"
     ).format(union_sql=union_sql)
     params = [q, *union_params, limit, offset]
-    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+    async with _search_cursor(pool) as cur:
         await execute_sql(cur, query, params)  # nosemgrep
         rows = await cur.fetchall()
     return [dict(r) for r in rows]
@@ -434,7 +500,7 @@ async def _run_total(
         "WITH q AS NOT MATERIALIZED (SELECT plainto_tsquery('english', %s) AS tsq), results AS ({union_sql}) SELECT COUNT(*) AS total FROM results"
     ).format(union_sql=union_sql)
     params = [q, *union_params]
-    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+    async with _search_cursor(pool) as cur:
         await execute_sql(cur, query, params)  # nosemgrep
         row = await cur.fetchone()
     return int(row["total"]) if row else 0
@@ -464,7 +530,7 @@ async def _run_type_counts(pool: AsyncPostgreSQLPool, q: str, types: list[str]) 
         )
     union_sql = sql.SQL(" UNION ALL ").join(union_parts)
     query = sql.SQL("WITH q AS (SELECT plainto_tsquery('english', %s) AS tsq) {union_sql}").format(union_sql=union_sql)
-    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+    async with _search_cursor(pool) as cur:
         await execute_sql(cur, query, [q])  # nosemgrep
         rows = await cur.fetchall()
     return {row["type"]: int(row["cnt"]) for row in rows}
@@ -488,7 +554,7 @@ async def _run_genre_facets(pool: AsyncPostgreSQLPool, q: str) -> dict[str, int]
         " ORDER BY cnt DESC"
         " LIMIT 20"
     ).format(cap=sql.Literal(_TOTAL_COUNT_CAP))
-    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+    async with _search_cursor(pool) as cur:
         await execute_sql(cur, query, [q])
         rows = await cur.fetchall()
     return {row["genre"]: int(row["cnt"]) for row in rows}
@@ -517,7 +583,7 @@ async def _run_decade_facets(pool: AsyncPostgreSQLPool, q: str) -> dict[str, int
         " GROUP BY decade"
         " ORDER BY decade"
     ).format(cap=sql.Literal(_TOTAL_COUNT_CAP))
-    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+    async with _search_cursor(pool) as cur:
         await execute_sql(cur, query, [q])
         rows = await cur.fetchall()
     return {row["decade"]: int(row["cnt"]) for row in rows}
@@ -543,7 +609,7 @@ async def _run_media_facets(pool: AsyncPostgreSQLPool, q: str) -> dict[str, int]
         " GROUP BY family"
         " ORDER BY cnt DESC"
     ).format(cap=sql.Literal(_TOTAL_COUNT_CAP))
-    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+    async with _search_cursor(pool) as cur:
         await execute_sql(cur, query, [q])
         rows = await cur.fetchall()
     return {row["family"]: int(row["cnt"]) for row in rows}
@@ -629,14 +695,21 @@ async def execute_search(
 
     logger.debug("🔍 Search cache miss, querying DB", q=q, types=types)
 
-    results_rows, total, type_counts, genre_facets, decade_facets, media_facets = await asyncio.gather(
+    settled = await asyncio.gather(
         _run_results(pool, q, types, genres, year_min, year_max, limit, offset, media_families, media_mediums, countries),
         _run_total(pool, q, types, genres, year_min, year_max, media_families, media_mediums, countries),
         _run_type_counts(pool, q, types),
         _run_genre_facets(pool, q),
         _run_decade_facets(pool, q),
         _run_media_facets(pool, q),
+        return_exceptions=True,
     )
+    # Let every sibling statement finish (each is bounded by its timeout) before raising, so none
+    # is left running unobserved while holding a slot and a connection.
+    for outcome in settled:
+        if isinstance(outcome, BaseException):
+            raise outcome
+    results_rows, total, type_counts, genre_facets, decade_facets, media_facets = settled
 
     # One alias lookup for the whole page, after the six searches settle: the hits carry
     # mixed kinds, so the batch is keyed by (type, id) rather than by id alone.
