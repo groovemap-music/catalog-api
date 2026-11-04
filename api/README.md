@@ -1050,7 +1050,11 @@ Full genre/style hierarchy derived from release co-occurrence in the knowledge g
 | ------ | ----------------- | ------------- | ---------- | --------------------------------------------- |
 | GET    | `/api/genre-tree` | No            | 30/min     | Genre hierarchy with nested styles and counts |
 
-The genre tree is cached in-memory for 5 minutes since the hierarchy changes only on data import.
+The tree is built in the background (`api/genre_tree_store.py`), never per request: a refresh rebuilds it when the
+genre counts change or it is 24 hours old, keeps it in process memory and in Valkey (`genre-tree:v1`, no expiry), and
+keeps serving the previous tree if a rebuild fails. A cold start with nothing stored answers `503` with `Retry-After`
+until the first build finishes (about a minute on the full graph). `GENRE_TREE_REFRESH_ENABLED`,
+`GENRE_TREE_REFRESH_INTERVAL` and `GENRE_TREE_MAX_AGE` tune it (see `docs/configuration.md`).
 
 ### Graph Statistics
 
