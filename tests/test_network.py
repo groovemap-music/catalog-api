@@ -19,8 +19,7 @@ class TestCollaboratorsEndpoint:
         ]
         with (
             patch("api.queries.network_queries.get_artist_identity", new_callable=AsyncMock, return_value=identity),
-            patch("api.queries.network_queries.get_multi_hop_collaborators", new_callable=AsyncMock, return_value=collaborators),
-            patch("api.queries.network_queries.count_multi_hop_collaborators", new_callable=AsyncMock, return_value=15),
+            patch("api.queries.network_queries.get_collaborator_page", new_callable=AsyncMock, return_value=(collaborators, 15)),
         ):
             response = test_client.get("/api/network/artist/123/collaborators?depth=2&limit=50")
         assert response.status_code == 200
@@ -62,7 +61,7 @@ class TestCollaboratorsEndpoint:
         with (
             patch("api.queries.network_queries.get_artist_identity", new_callable=AsyncMock, return_value=identity),
             patch(
-                "api.queries.network_queries.get_multi_hop_collaborators",
+                "api.queries.network_queries.get_collaborator_page",
                 new_callable=AsyncMock,
                 side_effect=Neo4jClientError("TransactionTimedOut"),
             ),
@@ -78,13 +77,26 @@ class TestCollaboratorsEndpoint:
         with (
             patch("api.queries.network_queries.get_artist_identity", new_callable=AsyncMock, return_value=identity),
             patch(
-                "api.queries.network_queries.get_multi_hop_collaborators",
+                "api.queries.network_queries.get_collaborator_page",
                 new_callable=AsyncMock,
                 side_effect=Neo4jClientError("SomeOtherError"),
             ),
         ):
             response = test_client.get("/api/network/artist/123/collaborators")
         assert response.status_code == 500
+
+    def test_depth_3_is_answered_as_depth_2_and_reported_as_such(self, test_client: TestClient) -> None:
+        """Only two hops are traversed, so depth=3 must not claim three."""
+        identity = {"artist_id": "123", "artist_name": "Test Artist"}
+        page = AsyncMock(return_value=([], 0))
+        with (
+            patch("api.queries.network_queries.get_artist_identity", new_callable=AsyncMock, return_value=identity),
+            patch("api.queries.network_queries.get_collaborator_page", page),
+        ):
+            response = test_client.get("/api/network/artist/123/collaborators?depth=3")
+        assert response.status_code == 200
+        assert response.json()["depth"] == 2
+        assert page.await_args.kwargs["depth"] == 2
 
     def test_limit_validation(self, test_client: TestClient) -> None:
         """Rejects limit > 200."""
@@ -99,8 +111,7 @@ class TestCollaboratorsEndpoint:
         ]
         with (
             patch("api.queries.network_queries.get_artist_identity", new_callable=AsyncMock, return_value=identity),
-            patch("api.queries.network_queries.get_multi_hop_collaborators", new_callable=AsyncMock, return_value=collaborators),
-            patch("api.queries.network_queries.count_multi_hop_collaborators", new_callable=AsyncMock, return_value=1),
+            patch("api.queries.network_queries.get_collaborator_page", new_callable=AsyncMock, return_value=(collaborators, 1)),
         ):
             response = test_client.get("/api/network/artist/123/collaborators?depth=1")
         assert response.status_code == 200
@@ -450,63 +461,38 @@ class TestGetArtistIdentity:
         assert result is None
 
 
-class TestGetMultiHopCollaborators:
-    """Tests for the get_multi_hop_collaborators query function."""
+class TestGetCollaboratorPage:
+    """Tests for the get_collaborator_page query function (mapping only; semantics: integration test)."""
 
     @pytest.mark.asyncio
-    async def test_returns_collaborator_list(self) -> None:
-        """Returns list of collaborators with distance and count."""
-        from api.queries.network_queries import get_multi_hop_collaborators
+    async def test_returns_page_and_total_from_one_statement(self) -> None:
+        from api.queries import network_queries
 
-        mock_driver = AsyncMock()
-        expected = [
-            {"artist_id": "456", "artist_name": "John Coltrane", "distance": 1, "collaboration_count": 5},
-        ]
-        with patch("api.queries.network_queries.run_query", new_callable=AsyncMock, return_value=expected) as mock_run:
-            result = await get_multi_hop_collaborators(mock_driver, "123", depth=2, limit=50)
-        assert result == expected
-        mock_run.assert_called_once()
-        call_kwargs = mock_run.call_args[1]
-        assert call_kwargs["artist_id"] == "123"
-        assert call_kwargs["depth"] == 2
-        assert call_kwargs["limit"] == 50
+        page = [{"artist_id": "456", "artist_name": "John Coltrane", "distance": 1, "collaboration_count": 5}]
+        with patch("api.queries.network_queries.run_single", new_callable=AsyncMock, return_value={"total": 9, "page": page}) as mock_run:
+            result = await network_queries.get_collaborator_page(AsyncMock(), "123", depth=2, limit=50)
+        assert result == (page, 9)
+        mock_run.assert_awaited_once()
+        kwargs = mock_run.call_args[1]
+        assert kwargs["artist_id"] == "123"
+        assert kwargs["limit"] == 50
+        assert kwargs["bridge_max_credits"] == network_queries.BRIDGE_ARTIST_MAX_CREDITS
+        assert kwargs["timeout"] <= 30.0
 
     @pytest.mark.asyncio
-    async def test_empty_results(self) -> None:
-        """Returns empty list when no collaborators found."""
-        from api.queries.network_queries import get_multi_hop_collaborators
+    async def test_depth_is_clamped_to_two_hops(self) -> None:
+        from api.queries.network_queries import get_collaborator_page
 
-        mock_driver = AsyncMock()
-        with patch("api.queries.network_queries.run_query", new_callable=AsyncMock, return_value=[]):
-            result = await get_multi_hop_collaborators(mock_driver, "123")
-        assert result == []
-
-
-class TestCountMultiHopCollaborators:
-    """Tests for the count_multi_hop_collaborators query function."""
+        with patch("api.queries.network_queries.run_single", new_callable=AsyncMock, return_value={"total": 0, "page": []}) as mock_run:
+            await get_collaborator_page(AsyncMock(), "123", depth=3)
+        assert mock_run.call_args[1]["depth"] == 2
 
     @pytest.mark.asyncio
-    async def test_returns_count(self) -> None:
-        """Returns integer count of collaborators."""
-        from api.queries.network_queries import count_multi_hop_collaborators
+    async def test_no_row_is_empty(self) -> None:
+        from api.queries.network_queries import get_collaborator_page
 
-        mock_driver = AsyncMock()
-        with patch("api.queries.network_queries.run_count", new_callable=AsyncMock, return_value=42) as mock_run:
-            result = await count_multi_hop_collaborators(mock_driver, "123", depth=2)
-        assert result == 42
-        call_kwargs = mock_run.call_args[1]
-        assert call_kwargs["artist_id"] == "123"
-        assert call_kwargs["depth"] == 2
-
-    @pytest.mark.asyncio
-    async def test_returns_zero_for_no_collaborators(self) -> None:
-        """Returns 0 when artist has no collaborators."""
-        from api.queries.network_queries import count_multi_hop_collaborators
-
-        mock_driver = AsyncMock()
-        with patch("api.queries.network_queries.run_count", new_callable=AsyncMock, return_value=0):
-            result = await count_multi_hop_collaborators(mock_driver, "123")
-        assert result == 0
+        with patch("api.queries.network_queries.run_single", new_callable=AsyncMock, return_value=None):
+            assert await get_collaborator_page(AsyncMock(), "missing") == ([], 0)
 
 
 class TestGetArtistCentrality:

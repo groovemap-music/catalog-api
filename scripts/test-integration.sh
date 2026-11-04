@@ -96,4 +96,5 @@ NEO4J_PASSWORD="${password}" \
         tests/test_role_leaderboard_integration.py \
         tests/test_search_integration.py \
         tests/test_search_pool_integration.py \
-        tests/test_search_total_integration.py
+        tests/test_search_total_integration.py \
+        tests/test_network_collaborators_integration.py

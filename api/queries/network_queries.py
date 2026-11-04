@@ -9,7 +9,7 @@ from typing import Any
 import structlog
 from common import AsyncResilientNeo4jDriver
 
-from api.queries.helpers import run_count, run_query, run_single
+from api.queries.helpers import run_query, run_single
 
 
 logger = structlog.get_logger(__name__)
@@ -24,73 +24,94 @@ async def get_artist_identity(driver: AsyncResilientNeo4jDriver, artist_id: str)
     return await run_single(driver, cypher, artist_id=artist_id)
 
 
-async def get_multi_hop_collaborators(
+# Collaborator traversal bounds (audit H1, ``docs/cypher-performance-audit-2026-11-04.md``).
+#
+# Bridge artists: an artist credited on more than this many releases (or with no name: Discogs
+# placeholders such as "Various", 194, and "Unknown Artist", 355) is not used as a stepping stone to a
+# second-hop collaborator. Sharing a release with Various says nothing about who works with whom, and
+# expanding through it reaches every artist on 1.5M releases. Such an artist still appears as a direct
+# collaborator. 5,000 keeps 164 of David Bowie's 187 neighbours as bridges.
+BRIDGE_ARTIST_MAX_CREDITS = 5_000
+# A root with more credits than this is itself a hub: it returns direct collaborators only.
+HUB_ROOT_MAX_CREDITS = 100_000
+# Only two hops are traversed. The route accepts depth up to 3 for compatibility and clamps it.
+MAX_COLLABORATOR_DEPTH = 2
+# Server budget for the collaborator statement, in seconds.
+COLLABORATOR_QUERY_TIMEOUT_SECONDS = 30.0
+
+
+async def get_collaborator_page(
     driver: AsyncResilientNeo4jDriver,
     artist_id: str,
     depth: int = 2,
     limit: int = 50,
-) -> list[dict[str, Any]]:
-    """Get collaborators within N hops via shared releases.
+) -> tuple[list[dict[str, Any]], int]:
+    """Return one page of collaborators within ``depth`` hops and the total, from one statement.
 
-    Depth 1 = direct collaborators (shared a release).
-    Depth 2+ = collaborators of collaborators, etc.
-    Returns collaboration_count (shared releases at closest hop) and
-    the shortest hop distance.
+    Distance 1 is a shared release; distance 2 is a collaborator of a bridge collaborator that the
+    artist has not shared a release with. ``collaboration_count`` is the shared releases at distance 1
+    and the number of distinct bridge artists at distance 2. Ranking is distance, then count, then id.
+
+    The direct set is collected once and expanded one bridge at a time, so a neighbour reached through
+    several releases is walked once and the root is never re-expanded per row.
     """
+    effective_depth = max(1, min(depth, MAX_COLLABORATOR_DEPTH))
     cypher = """
     MATCH (a:Artist {id: $artist_id})
     CALL {
         WITH a
-        MATCH path = (a)<-[:BY]-(:Release)-[:BY]->(hop1:Artist)
-        WHERE hop1 <> a
-        WITH a, hop1, count(DISTINCT nodes(path)[1]) AS shared
-        RETURN hop1 AS collaborator, 1 AS hops, shared
-        UNION
-        WITH a
-        MATCH (a)<-[:BY]-(:Release)-[:BY]->(mid:Artist)<-[:BY]-(:Release)-[:BY]->(hop2:Artist)
-        WHERE mid <> a AND hop2 <> a AND $depth >= 2
-              AND NOT EXISTS { MATCH (a)<-[:BY]-(:Release)-[:BY]->(hop2) }
-        WITH hop2 AS collaborator, 2 AS hops, count(DISTINCT mid) AS shared
-        WHERE hops <= $depth
-        RETURN collaborator, hops, shared
+        MATCH (a)<-[:BY]-(r:Release)-[:BY]->(n:Artist)
+        WHERE n <> a
+        RETURN n AS collaborator, 1 AS hops, count(DISTINCT r) AS shared
     }
-    WITH collaborator, min(hops) AS distance, sum(shared) AS collaboration_count
-    ORDER BY distance ASC, collaboration_count DESC
-    LIMIT $limit
-    RETURN collaborator.id AS artist_id,
-           collaborator.name AS artist_name,
-           distance,
-           collaboration_count
-    """
-    return await run_query(driver, cypher, artist_id=artist_id, depth=depth, limit=limit)
-
-
-async def count_multi_hop_collaborators(
-    driver: AsyncResilientNeo4jDriver,
-    artist_id: str,
-    depth: int = 2,
-) -> int:
-    """Count total collaborators within N hops."""
-    cypher = """
-    MATCH (a:Artist {id: $artist_id})
+    WITH a, collect({collaborator: collaborator, hops: hops, shared: shared}) AS direct
     CALL {
-        WITH a
-        MATCH (a)<-[:BY]-(:Release)-[:BY]->(hop1:Artist)
-        WHERE hop1 <> a
-        RETURN hop1 AS collaborator, 1 AS hops
-        UNION
-        WITH a
-        MATCH (a)<-[:BY]-(:Release)-[:BY]->(mid:Artist)<-[:BY]-(:Release)-[:BY]->(hop2:Artist)
-        WHERE mid <> a AND hop2 <> a AND $depth >= 2
-              AND NOT EXISTS { MATCH (a)<-[:BY]-(:Release)-[:BY]->(hop2) }
-        WITH hop2 AS collaborator, 2 AS hops
-        WHERE hops <= $depth
-        RETURN collaborator, hops
+        WITH a, direct
+        UNWIND direct AS d
+        WITH a, d.collaborator AS bridge
+        WHERE $depth >= 2
+              AND COUNT { (a)<-[:BY]-() } <= $hub_root_max_credits
+              AND bridge.name IS NOT NULL
+              AND COUNT { (bridge)<-[:BY]-() } <= $bridge_max_credits
+        CALL {
+            WITH a, bridge
+            MATCH (bridge)<-[:BY]-(:Release)-[:BY]->(far:Artist)
+            WHERE far <> a
+            RETURN DISTINCT far
+        }
+        WITH far, count(*) AS shared
+        // A global aggregate always yields one row, so depth 1 (no bridges) still returns the direct set.
+        RETURN collect({collaborator: far, hops: 2, shared: shared}) AS indirect
     }
-    WITH collaborator, min(hops) AS distance
-    RETURN count(collaborator) AS total
+    UNWIND direct + indirect AS row
+    WITH row.collaborator AS collaborator,
+         min(row.hops) AS distance,
+         sum(CASE row.hops WHEN 1 THEN row.shared ELSE 0 END) AS direct_count,
+         sum(CASE row.hops WHEN 2 THEN row.shared ELSE 0 END) AS indirect_count
+    WITH collaborator, distance, CASE distance WHEN 1 THEN direct_count ELSE indirect_count END AS collaboration_count
+    ORDER BY distance ASC, collaboration_count DESC, collaborator.id ASC
+    WITH collect([collaborator, distance, collaboration_count]) AS ranked
+    RETURN size(ranked) AS total,
+           [r IN ranked[0..$limit] | {
+               artist_id: (r[0]).id,
+               artist_name: (r[0]).name,
+               distance: r[1],
+               collaboration_count: r[2]
+           }] AS page
     """
-    return await run_count(driver, cypher, artist_id=artist_id, depth=depth)
+    row = await run_single(
+        driver,
+        cypher,
+        timeout=COLLABORATOR_QUERY_TIMEOUT_SECONDS,
+        artist_id=artist_id,
+        depth=effective_depth,
+        limit=limit,
+        hub_root_max_credits=HUB_ROOT_MAX_CREDITS,
+        bridge_max_credits=BRIDGE_ARTIST_MAX_CREDITS,
+    )
+    if row is None:
+        return [], 0
+    return list(row["page"]), int(row["total"])
 
 
 async def get_artist_centrality(
