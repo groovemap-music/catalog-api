@@ -106,14 +106,16 @@ FROM pg_stat_user_tables
 WHERE (schemaname, relname) IN ({", ".join(f"('{schema}', '{table}')" for schema, table in SOURCE_TABLES)})
 """  # noqa: S608 — SOURCE_TABLES is a module constant, not caller input
 
-# Whether every view is populated (found by name, whatever its kind: materialized views through
-# v0.6.3, plain tables from gm-database-schema-xen5), the watermark the last refresh stored (NULL when there was
+# Whether every view is populated and a refresh has committed (found by name, whatever its kind:
+# materialized views through v0.6.3, plain tables from gm-database-schema-xen5, where relispopulated is
+# always true and only the state row says "refreshed yet"), the watermark the last refresh stored (NULL when there was
 # none, or it is not one this module wrote), and that refresh's age in seconds by the server's
 # clock (NULL before the first refresh).
 _STORED: Final = """
 SELECT (SELECT count(*) FILTER (WHERE relispopulated) = cardinality(%(views)s::text[])
         FROM pg_class
-        WHERE relnamespace = 'public'::regnamespace AND relname = ANY(%(views)s::text[])),
+        WHERE relnamespace = 'public'::regnamespace AND relname = ANY(%(views)s::text[]))
+       AND EXISTS (SELECT 1 FROM identity_ledger_refresh_state),
        (SELECT CASE WHEN jsonb_typeof(source_watermark -> 'writes') = 'number' THEN (source_watermark ->> 'writes')::bigint END
         FROM identity_ledger_refresh_state),
        (SELECT extract(epoch FROM now() - refreshed_at)::float8 FROM identity_ledger_refresh_state)

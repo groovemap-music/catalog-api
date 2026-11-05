@@ -491,17 +491,16 @@ async def test_a_refresh_shows_what_was_written_since_the_last(http: httpx.Async
     assert datetime.fromisoformat(after["refreshed_at"]) > datetime.fromisoformat(before["refreshed_at"])
 
 
-_VIEWS = ("identity_ledger_edition_events", "identity_ledger_edition_parents", "identity_ledger_work_summary", "identity_ledger_density")
+async def _forget_refresh(pool: AsyncPostgreSQLPool) -> None:
+    """Return the ledger to "never refreshed": since database-schema v0.7.0 the four relations are
+    tables that are always populated, so the absence of the state row is the only such signal."""
+    await _execute(pool, "DELETE FROM identity_ledger_refresh_state")
 
 
-@pytest.mark.parametrize("forget_state", [True, False], ids=["never-refreshed", "view-recreated"])
-async def test_unpopulated_views_answer_503_with_retry_after_never_an_empty_list(
-    http: httpx.AsyncClient, postgres_pool: AsyncPostgreSQLPool, *, forget_state: bool
+async def test_a_ledger_without_a_state_row_answers_503_with_retry_after_never_an_empty_list(
+    http: httpx.AsyncClient, postgres_pool: AsyncPostgreSQLPool
 ) -> None:
-    for view in _VIEWS:
-        await _execute(postgres_pool, f"REFRESH MATERIALIZED VIEW {view} WITH NO DATA")
-    if forget_state:
-        await _execute(postgres_pool, "DELETE FROM identity_ledger_refresh_state")
+    await _forget_refresh(postgres_pool)
 
     for path in ("/api/admin/identity/ledger/works", "/api/admin/identity/ledger/density"):
         response = await http.get(path)
@@ -512,7 +511,7 @@ async def test_unpopulated_views_answer_503_with_retry_after_never_an_empty_list
     # One work reads the base tables live, so it still answers.
     work = await _work(http, W1)
     assert [edition["gm_id"] for edition in work["editions"]] == [E1, E2, E4, E3, E5]
-    assert (work["refreshed_at"] is None) is forget_state
+    assert work["refreshed_at"] is None
 
     await _refresh(postgres_pool)
     assert (await http.get("/api/admin/identity/ledger/works")).json()["total"] == 3
@@ -582,9 +581,10 @@ async def test_a_reattachment_runs_supersession_is_in_the_works_list_without_a_p
     assert refreshed_at > started
 
 
-async def test_the_poll_builds_unpopulated_views_and_stores_the_source_watermark(http: httpx.AsyncClient, postgres_pool: AsyncPostgreSQLPool) -> None:
-    for view in _VIEWS:
-        await _execute(postgres_pool, f"REFRESH MATERIALIZED VIEW {view} WITH NO DATA")
+async def test_the_poll_builds_a_never_refreshed_ledger_and_stores_the_source_watermark(
+    http: httpx.AsyncClient, postgres_pool: AsyncPostgreSQLPool
+) -> None:
+    await _forget_refresh(postgres_pool)
     assert (await http.get("/api/admin/identity/ledger/works")).status_code == 503
 
     assert await poll_once(postgres_pool, ChangeTracker(), quiet=10**6, max_staleness=10**6) == REASON_UNPOPULATED

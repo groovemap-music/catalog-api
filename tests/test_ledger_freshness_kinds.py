@@ -18,3 +18,8 @@ def test_the_freshness_check_does_not_filter_on_materialized_view_kind() -> None
 def test_the_stored_state_check_does_not_filter_on_materialized_view_kind() -> None:
     assert "relkind" not in ledger_refresh._STORED
     assert "relname = ANY(%(views)s::text[])" in ledger_refresh._STORED
+
+
+def test_the_stored_state_check_requires_the_state_row_because_tables_are_always_populated() -> None:
+    """relispopulated is always true on the v0.7.0 tables, so the state row says "refreshed yet"."""
+    assert "EXISTS (SELECT 1 FROM identity_ledger_refresh_state)" in ledger_refresh._STORED

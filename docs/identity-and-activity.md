@@ -85,6 +85,23 @@ ledgered in `catalog_item_moves`, and the `gm_item_id` caches are recomputed. Ac
 are never rewritten: readers resolve their `item_id` at read time. See [Re-attaching Load-Order-Split Catalog Items](../api/README.md#re-attaching-load-order-split-catalog-items);
 run the `gm_id` projection after an applying run.
 
+## Deploy order with `database-schema` v0.7.0
+
+`database-schema` v0.7.0 turns the four `identity_ledger_*` materialized views into plain tables
+with the same names, columns and indexes, and adds `idx_release_rarity_tier_score` for the rarity
+tier page. catalog-api reads the ledger by name whatever its relkind, and "not refreshed yet" is
+the absence of the `identity_ledger_refresh_state` row, which holds on both shapes (the poller
+and the routes both require it). The order is therefore:
+
+1. Deploy this catalog-api release (pinned to v0.7.0) first. It runs on the v0.6.x views and on
+   the v0.7.0 tables.
+2. Only then apply the v0.7.0 schema on lux. A catalog-api older than the relkind change would
+   filter `relkind = 'm'`, find nothing, and answer 503 on the ledger routes until it is replaced.
+3. The first refresh after the schema upgrade rebuilds the tables from the base tables.
+
+Rollback is the schema's `IDENTITY_LEDGER_ROLLBACK_STATEMENTS` plus the previous schema apply and
+one refresh; this catalog-api still works on the views.
+
 ## The activity recorder (ADR 0010)
 
 `api/activity.py` is the one writer for every first-party event and recommendation impression,
@@ -119,7 +136,7 @@ partitioned by month on `occurred_at`, so its own `UNIQUE (occurred_at, idempote
 include the partition column and only sees a retry stamped with the original's exact instant;
 an `occurred_at` that defaults to now gives a retry a second, a minute, or a month later a
 different key, in a possibly different partition. The deduplication is therefore the schema's
-(`database-schema` v0.5.0): `activity.event_idempotency`, a non-partitioned table keyed
+(`database-schema` from v0.5.0): `activity.event_idempotency`, a non-partitioned table keyed
 `(subject_id, idempotency_key)`, is claimed by a `BEFORE INSERT` trigger on `activity.events`,
 which skips the row when the key is held by a stored event. Concurrent retries are serialised on
 that primary key, so racing copies of one report still produce one row.

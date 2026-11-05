@@ -146,12 +146,10 @@ async def test_the_keyset_page_is_one_index_range_scan_with_no_sort(pool: AsyncP
     from api.queries.rarity_queries import _TIER_KEYSET_PAGE
 
     async with pool.connection() as conn:
-        # The index comes from the schema package, never from this test. database-schema 0.5.0 (the dev pin) and v0.6.3 lack it;
-        # it is on database-schema main. Results are correct without it, so only this plan check waits for the pin to move.
+        # The index comes from the schema package (database-schema v0.7.0 and later), never from this test.
         cur = await conn.execute("SELECT indexdef FROM pg_indexes WHERE schemaname = 'insights' AND indexname = 'idx_release_rarity_tier_score'")
         definition = await cur.fetchone()
-        if definition is None:
-            pytest.skip("the pinned database-schema has no idx_release_rarity_tier_score yet (it is on database-schema main)")
+        assert definition is not None, "the pinned database-schema must create idx_release_rarity_tier_score"
         assert "(tier, rarity_score DESC, release_id)" in definition[0]
         await conn.execute("ANALYZE insights.release_rarity")
         await conn.execute("SET LOCAL enable_seqscan = off")
