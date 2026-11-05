@@ -73,6 +73,7 @@ from api import __version__
 from api.admin_auth import ADMIN_TOKEN_EXPIRE_MINUTES
 from api.auth import b64url_encode, decrypt_oauth_token, encrypt_oauth_token, get_oauth_encryption_key
 from api.config import ApiConfig
+from api.import_cache import run_import_cache_watch
 from api.ledger_refresh import run_refresh_loop
 from api.limiter import limiter
 from api.neo4j_timeouts import install_neo4j_timeout_handler
@@ -375,6 +376,7 @@ async def _start_service(_app: FastAPI) -> _LifecycleResources:
     _app.state.prewarm_task = asyncio.create_task(_prewarm_search_cache())
     _start_identity_maintenance(_app, config, pool, _neo4j)
     _start_ledger_refresh(_app, config, pool)
+    _start_import_cache_watch(_app, config, pool, valkey)
     return _LifecycleResources(health_server=health_server, anthropic_client=anthropic_client)
 
 
@@ -388,6 +390,15 @@ def _start_identity_maintenance(_app: FastAPI, config: ApiConfig, pool: Any, neo
         return
     _app.state.identity_maintenance_task = asyncio.create_task(run_trigger_loop(pool, neo4j, config.identity_auto_reattach_interval))
     logger.info("🔗 Automatic identity maintenance watcher started", interval=config.identity_auto_reattach_interval)
+
+
+def _start_import_cache_watch(_app: FastAPI, config: ApiConfig, pool: Any, valkey: Any) -> None:
+    """Start the watcher that drops the Explore and trends caches when an import completes (api/import_cache.py)."""
+    _app.state.import_cache_task = None
+    if valkey is None:
+        return
+    _app.state.import_cache_task = asyncio.create_task(run_import_cache_watch(pool, valkey, config.import_cache_watch_interval))
+    logger.info("🧹 Import cache watch started", interval=config.import_cache_watch_interval)
 
 
 def _start_ledger_refresh(_app: FastAPI, config: ApiConfig, pool: Any) -> None:
@@ -430,6 +441,9 @@ async def _stop_service(_app: FastAPI, resources: _LifecycleResources) -> None:
     ledger_refresh_task = getattr(_app.state, "ledger_refresh_task", None)
     if isinstance(ledger_refresh_task, asyncio.Task):
         await _cancel_tasks([ledger_refresh_task])
+    import_cache_task = getattr(_app.state, "import_cache_task", None)
+    if isinstance(import_cache_task, asyncio.Task):
+        await _cancel_tasks([import_cache_task])
     if _neo4j:
         await _neo4j.close()
     if _pool:
