@@ -137,13 +137,16 @@ _WORKS_VIEWS = ("identity_ledger_edition_events", "identity_ledger_edition_paren
 _DENSITY_VIEWS = ("identity_ledger_density",)
 
 # Whether every named view has been refreshed at least once, and when the last refresh started.
+# The relation is found by name, whatever its kind: the views are materialized views through
+# database-schema v0.6.3 and plain tables from gm-database-schema-xen5, which keeps the same names.
+# A missing state row leaves refreshed_at NULL, which is also not refreshed.
 # `pg_class.relispopulated` takes no lock on a view, so a request that arrives during the first
 # build (a plain REFRESH under ACCESS EXCLUSIVE) is answered at once instead of queuing behind it.
 _FRESHNESS = """
 SELECT count(*) FILTER (WHERE view.relispopulated) = cardinality(%(views)s::text[]),
        (SELECT refreshed_at FROM identity_ledger_refresh_state)
 FROM pg_class AS view
-WHERE view.relnamespace = 'public'::regnamespace AND view.relkind = 'm' AND view.relname = ANY(%(views)s::text[])
+WHERE view.relnamespace = 'public'::regnamespace AND view.relname = ANY(%(views)s::text[])
 """
 
 _REFRESHED_AT = "SELECT refreshed_at FROM identity_ledger_refresh_state"
