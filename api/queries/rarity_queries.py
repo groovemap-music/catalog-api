@@ -18,6 +18,8 @@ Graph model:
 """
 
 import bisect
+from collections import Counter
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
@@ -75,6 +77,7 @@ __all__ = [
     "get_rarity_for_release",
     "get_rarity_hidden_gems",
     "get_rarity_leaderboard",
+    "iter_rarity_signals",
     "medium_rarity_score",
 ]
 
@@ -308,33 +311,110 @@ def _index_by_release(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {row["release_id"]: row for row in rows}
 
 
-async def fetch_all_rarity_signals(
+class _Distribution:
+    """The positive values of one quality signal across the catalog, held as value counts.
+
+    The signals are integer degrees and catalog sizes, so the number of distinct values stays small
+    however many releases there are. ``percentile_rank`` returns exactly what :func:`_percentile_rank`
+    returns over the full sorted list of the same values: the share of values strictly below ``value``.
+    """
+
+    def __init__(self) -> None:
+        self._counts: Counter[float] = Counter()
+        self._values: list[float] = []
+        self._below: list[int] = []
+        self._total = 0
+
+    def add(self, value: float | None) -> None:
+        """Count ``value`` if it is truthy, as the sorted list always did."""
+        if value:
+            self._counts[value] += 1
+
+    def freeze(self) -> None:
+        """Order the distinct values and precompute how many values lie below each."""
+        self._values = sorted(self._counts)
+        self._below = []
+        running = 0
+        for value in self._values:
+            self._below.append(running)
+            running += self._counts[value]
+        self._total = running
+
+    def percentile_rank(self, value: float) -> float:
+        """Return the percentile rank (0.0 to 1.0) of ``value`` in the frozen distribution."""
+        if not self._total or value <= 0:
+            return 0.0
+        index = bisect.bisect_left(self._values, value)
+        below = self._below[index] if index < len(self._values) else self._total
+        return below / self._total
+
+
+async def _release_id_pages(driver: Any, page_size: int) -> AsyncIterator[list[str]]:
+    """Walk the Release ids in keyset-paginated pages, in id order."""
+    cursor = ""
+    while True:
+        ids = await _fetch_release_id_page(driver, cursor, page_size)
+        if not ids:
+            return
+        cursor = ids[-1]
+        yield ids
+
+
+_QUALITY_FACTS = ("artist_degree", "label_size", "genre_count")
+
+
+async def _quality_distributions(driver: Any, page_size: int) -> dict[str, _Distribution]:
+    """First pass: the global quality-signal distributions, from the three quality queries alone.
+
+    Hidden-gem scoring ranks each release against the whole catalog, so no row can be finished before
+    every page has been seen. Holding every finished row until then is what grew the API process by
+    about 1.7 KB per release. Counting values instead keeps this pass at the size of the number of
+    distinct values, and the scoring pass below then finishes one page at a time.
+    """
+    distributions = {"artist": _Distribution(), "label": _Distribution(), "genre": _Distribution()}
+    keys = {
+        "artist_degree": ("artist", "artist_max_degree"),
+        "label_size": ("label", "label_max_catalog"),
+        "genre_count": ("genre", "genre_max_release_count"),
+    }
+    async for ids in _release_id_pages(driver, page_size):
+        for fact in _QUALITY_FACTS:
+            cypher = _CORE_QUERIES[fact]
+            rows = await run_query(driver, cypher, database="neo4j", timeout=RARITY_QUERY_TIMEOUT_SECONDS, ids=ids)
+            name, column = keys[fact]
+            for row in rows:
+                distributions[name].add(row[column])
+    for distribution in distributions.values():
+        distribution.freeze()
+    return distributions
+
+
+async def iter_rarity_signals(
     driver: Any,
     pool: Any = None,
     *,
     page_size: int = RARITY_PAGE_SIZE,
-) -> list[dict[str, Any]]:
-    """Fetch all rarity signals from Neo4j and compute scores.
+) -> AsyncIterator[dict[str, Any]]:
+    """Yield every release's rarity row in release-id order, holding one page of rows at a time.
 
-    Walks the Release set in keyset-paginated chunks of ``page_size``. For each page it runs
-    the core signal queries plus those every installed family extension declares, scoped to
-    that page's ids, joins them by release_id, and composes the rarity score through
-    :func:`api.rarity.score_release`. Community counts (have/want) are loaded once from
+    Same rows, same order and same values as :func:`fetch_all_rarity_signals` returns, without
+    the list: the process holds one page of signals instead of one row per release in the graph.
+
+    Hidden-gem scoring needs percentile ranks over the *global* quality-signal distributions,
+    so a first pass reads only the three quality signals to build them (see
+    :func:`_quality_distributions`), and a second pass walks the Release set in keyset-paginated chunks
+    of ``page_size``. For each page it runs the core signal queries plus those every installed family
+    extension declares, scoped to that page's ids, joins them by release_id, and composes the rarity
+    score through :func:`api.rarity.score_release`. Community counts (have/want) are loaded once from
     PostgreSQL when a pool is provided.
 
-    Hidden-gem scoring needs percentile ranks over the *global* quality-signal
-    distributions, so those are accumulated while paging and applied in a final
-    pass — no second trip to Neo4j.
+    Both passes read the live graph, so a release added between them is ranked against distributions
+    that did not include it; the effect is one release's weight in a percentile.
 
     Args:
         driver: The async Neo4j driver.
         pool: Optional PostgreSQL pool for community counts.
         page_size: Releases per chunk. Bounds per-transaction working set.
-
-    Returns:
-        A list of dicts ready for PostgreSQL insertion. Each carries the historical keys plus
-        ``media_families``, ``family_signals``, and ``medium_rarity``. ``pressing_scarcity`` is
-        ``None`` for a release no family extension claims — a CD has no pressings to count.
     """
     current_year = datetime.now(UTC).year
 
@@ -342,25 +422,11 @@ async def fetch_all_rarity_signals(
 
     community_map = await _load_community_counts(pool)
     family_facts = tuple(family_queries())
+    distributions = await _quality_distributions(driver, page_size)
 
-    results: list[dict[str, Any]] = []
-    # Deferred hidden-gem inputs, positionally parallel to `results`:
-    # (unrounded rarity_score, artist_max_degree, label_max_catalog,
-    # genre_max_release_count). The UNROUNDED score is kept deliberately —
-    # hidden_gem_score has always been derived from it, not from the rounded
-    # value stored in the result dict.
-    quality_inputs: list[tuple[float, float, float, float]] = []
-    all_artist_degrees: list[float] = []
-    all_label_sizes: list[float] = []
-    all_genre_counts: list[float] = []
-
-    cursor = ""
+    scored_count = 0
     pages = 0
-    while True:
-        ids = await _fetch_release_id_page(driver, cursor, page_size)
-        if not ids:
-            break
-        cursor = ids[-1]
+    async for ids in _release_id_pages(driver, page_size):
         pages += 1
 
         signals = await _fetch_page_signals(driver, ids)
@@ -373,10 +439,6 @@ async def fetch_all_rarity_signals(
         label_size_map = {r["release_id"]: r["label_max_catalog"] for r in signals["label_size"]}
         genre_count_map = {r["release_id"]: r["genre_max_release_count"] for r in signals["genre_count"]}
         fact_maps = {fact: _index_by_release(signals.get(fact, [])) for fact in family_facts}
-
-        all_artist_degrees.extend(r["artist_max_degree"] for r in signals["artist_degree"] if r["artist_max_degree"])
-        all_label_sizes.extend(r["label_max_catalog"] for r in signals["label_size"] if r["label_max_catalog"])
-        all_genre_counts.extend(r["genre_max_release_count"] for r in signals["genre_count"] if r["genre_max_release_count"])
 
         for row in signals["release"]:
             rid = row["release_id"]
@@ -415,63 +477,59 @@ async def fetch_all_rarity_signals(
                 core_signals,
             )
 
-            quality_inputs.append(
-                (
-                    scored.score,
-                    artist_deg_map.get(rid, 0) or 0,
-                    label_size_map.get(rid, 0) or 0,
-                    genre_count_map.get(rid, 0) or 0,
-                )
+            quality_multiplier = (
+                0.4 * distributions["artist"].percentile_rank(artist_deg_map.get(rid, 0) or 0)
+                + 0.3 * distributions["label"].percentile_rank(label_size_map.get(rid, 0) or 0)
+                + 0.3 * distributions["genre"].percentile_rank(genre_count_map.get(rid, 0) or 0)
             )
 
-            results.append(
-                {
-                    "release_id": rid,
-                    "title": row.get("title") or "",
-                    "artist_name": row.get("artist_name") or "",
-                    "year": row.get("year"),
-                    "rarity_score": round(scored.score, 1),
-                    "tier": scored.tier,
-                    # Filled in below, once the global distributions are known.
-                    "hidden_gem_score": 0.0,
-                    # None when no family extension claimed this release.
-                    "pressing_scarcity": scored.signals.get("pressing_scarcity"),
-                    "label_catalog": core_signals["label_catalog"],
-                    # Deprecated, unscored, retained for one minor version.
-                    "format_rarity": compute_format_rarity_score(formats),
-                    "temporal_scarcity": core_signals["temporal_scarcity"],
-                    "graph_isolation": core_signals["graph_isolation"],
-                    "collection_prevalence": core_signals["collection_prevalence"],
-                    "medium_rarity": core_signals["medium_rarity"],
-                    "media_families": list(media.families),
-                    "family_signals": scored.family_signals,
-                }
-            )
+            scored_count += 1
+            yield {
+                "release_id": rid,
+                "title": row.get("title") or "",
+                "artist_name": row.get("artist_name") or "",
+                "year": row.get("year"),
+                "rarity_score": round(scored.score, 1),
+                "tier": scored.tier,
+                # Derived from the UNROUNDED score, as it always has been.
+                "hidden_gem_score": round(scored.score * quality_multiplier, 1),
+                # None when no family extension claimed this release.
+                "pressing_scarcity": scored.signals.get("pressing_scarcity"),
+                "label_catalog": core_signals["label_catalog"],
+                # Deprecated, unscored, retained for one minor version.
+                "format_rarity": compute_format_rarity_score(formats),
+                "temporal_scarcity": core_signals["temporal_scarcity"],
+                "graph_isolation": core_signals["graph_isolation"],
+                "collection_prevalence": core_signals["collection_prevalence"],
+                "medium_rarity": core_signals["medium_rarity"],
+                "media_families": list(media.families),
+                "family_signals": scored.family_signals,
+            }
 
-        logger.debug("📄 Rarity page scored", page=pages, ids=len(ids), scored=len(results))
-
-    # Percentile normalization for quality signals, over the global distributions.
-    all_artist_degrees.sort()
-    all_label_sizes.sort()
-    all_genre_counts.sort()
-
-    for entry, (rarity_score, artist_deg, label_sz, genre_ct) in zip(results, quality_inputs, strict=True):
-        quality_multiplier = (
-            0.4 * _percentile_rank(artist_deg, all_artist_degrees)
-            + 0.3 * _percentile_rank(label_sz, all_label_sizes)
-            + 0.3 * _percentile_rank(genre_ct, all_genre_counts)
-        )
-        entry["hidden_gem_score"] = round(rarity_score * quality_multiplier, 1)
+        logger.debug("📄 Rarity page scored", page=pages, ids=len(ids), scored=scored_count)
 
     # Coverage check. The keyset walk compares `r.id > $cursor` against a string
     # cursor; if the graph ever held non-string Release ids the comparison would
     # yield null and silently truncate the walk. count(r) is served from Neo4j's
     # label count store (O(1), not a scan), so this costs nothing and turns a
     # silent partial result into a loud one.
-    await _warn_on_incomplete_coverage(driver, scored=len(results))
+    await _warn_on_incomplete_coverage(driver, scored=scored_count)
 
-    logger.info("✅ Rarity scores computed", total=len(results), pages=pages)
-    return results
+    logger.info("✅ Rarity scores computed", total=scored_count, pages=pages)
+
+
+async def fetch_all_rarity_signals(
+    driver: Any,
+    pool: Any = None,
+    *,
+    page_size: int = RARITY_PAGE_SIZE,
+) -> list[dict[str, Any]]:
+    """Return every rarity row as a list.
+
+    Holds one dict per release in memory, so it is for fixtures and small graphs. A request path
+    over the real catalog iterates :func:`iter_rarity_signals` instead.
+    """
+    return [row async for row in iter_rarity_signals(driver, pool, page_size=page_size)]
 
 
 async def _warn_on_incomplete_coverage(driver: Any, scored: int) -> None:
