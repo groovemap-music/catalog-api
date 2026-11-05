@@ -17,7 +17,11 @@ Graph model:
   (Release)-[:ISSUED_ON {qty, source}]->(Medium {id, family})
 """
 
+import base64
+import binascii
 import bisect
+import json
+import math
 from collections import Counter
 from collections.abc import AsyncIterator, Iterable
 from datetime import UTC, datetime
@@ -64,6 +68,7 @@ __all__ = [
     "RARITY_PAGE_SIZE",
     "RARITY_QUERY_TIMEOUT_SECONDS",
     "RARITY_TIERS",
+    "TIER_PAGE_MAX_LIMIT",
     "compute_collection_prevalence_score",
     "compute_format_rarity_score",
     "compute_graph_isolation_score",
@@ -72,6 +77,8 @@ __all__ = [
     "compute_pressing_scarcity_score",
     "compute_rarity_tier",
     "compute_temporal_scarcity_score",
+    "decode_tier_cursor",
+    "encode_tier_cursor",
     "fetch_all_rarity_signals",
     "fetch_rarity_page",
     "fetch_rarity_quality_counts",
@@ -706,6 +713,33 @@ LIMIT %(limit)s
 """
 
 
+# The page size the leaderboard route already allows (Query le=100); the query clamps to it too, so a caller that skips the
+# route cannot ask Postgres for an unbounded page.
+TIER_PAGE_MAX_LIMIT = 100
+
+
+def encode_tier_cursor(score: float, release_id: int) -> str:
+    """The opaque cursor for the page after the row (``score``, ``release_id``).
+
+    The server makes it and the client only hands it back, so the score keeps every digit of the REAL it was read as
+    (``repr`` of the float is exact) and a client cannot round it to a neighbouring REAL.
+    """
+    raw = json.dumps([repr(float(score)), int(release_id)]).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def decode_tier_cursor(token: str) -> tuple[float, int]:
+    """Read a cursor made by :func:`encode_tier_cursor`; ``ValueError`` for anything else."""
+    try:
+        score_text, release_id = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
+        score = float(score_text)
+        if not isinstance(score_text, str) or isinstance(release_id, bool) or not isinstance(release_id, int) or not math.isfinite(score):
+            raise ValueError
+    except (ValueError, TypeError, binascii.Error, UnicodeDecodeError) as exc:
+        raise ValueError("invalid cursor") from exc
+    return score, release_id
+
+
 async def get_rarity_tier_page(
     pool: Any,
     tier: str,
@@ -720,6 +754,7 @@ async def get_rarity_tier_page(
     the walk then repeats a tie group, which on real Postgres ran without ending.
     """
     after_score, after_id = after if after is not None else (None, None)
+    limit = max(1, min(limit, TIER_PAGE_MAX_LIMIT + 1))  # one more than a page lets the route see whether another follows
     async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             _TIER_KEYSET_PAGE,

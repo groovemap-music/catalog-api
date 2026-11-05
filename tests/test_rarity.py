@@ -172,6 +172,48 @@ class TestRarityLeaderboard:
             rarity_router._pg_pool = original
 
 
+class TestRarityLeaderboardKeyset:
+    def _rows(self, count: int) -> list[dict[str, object]]:
+        return [{**_MOCK_LIST_ITEM, "release_id": 10 + index, "rarity_score": 41.5} for index in range(count)]
+
+    def test_a_tier_page_carries_a_cursor_that_the_next_request_accepts(self, test_client: TestClient) -> None:
+        with patch("api.routers.rarity.get_rarity_leaderboard", new=AsyncMock(return_value=(self._rows(2), 5))):
+            first = test_client.get("/api/rarity/leaderboard?tier=common&page_size=2").json()
+        assert first["next_cursor"]
+        keyset = AsyncMock(return_value=self._rows(3))  # page_size + 1 rows: another page follows
+        with patch("api.routers.rarity.get_rarity_tier_page", new=keyset):
+            second = test_client.get(f"/api/rarity/leaderboard?tier=common&page_size=2&cursor={first['next_cursor']}").json()
+        assert keyset.await_args.args[1:] == ("common", (41.5, 11), 3)
+        assert len(second["items"]) == 2
+        assert second["next_cursor"]
+        assert "total" not in second
+
+    def test_the_last_page_has_no_cursor(self, test_client: TestClient) -> None:
+        from api.queries.rarity_queries import encode_tier_cursor
+
+        token = encode_tier_cursor(41.5, 11)
+        with patch("api.routers.rarity.get_rarity_tier_page", new=AsyncMock(return_value=self._rows(2))):
+            body = test_client.get(f"/api/rarity/leaderboard?tier=common&page_size=2&cursor={token}").json()
+        assert body["next_cursor"] is None
+        assert len(body["items"]) == 2
+
+    def test_an_offset_page_that_reaches_the_end_has_no_cursor(self, test_client: TestClient) -> None:
+        with patch("api.routers.rarity.get_rarity_leaderboard", new=AsyncMock(return_value=(self._rows(2), 2))):
+            body = test_client.get("/api/rarity/leaderboard?tier=common&page_size=2").json()
+        assert body["next_cursor"] is None
+
+    def test_a_request_without_a_tier_has_no_cursor_field(self, test_client: TestClient) -> None:
+        with patch("api.routers.rarity.get_rarity_leaderboard", new=AsyncMock(return_value=(self._rows(2), 9))):
+            body = test_client.get("/api/rarity/leaderboard?page_size=2").json()
+        assert "next_cursor" not in body
+
+    def test_a_cursor_without_a_tier_is_a_400(self, test_client: TestClient) -> None:
+        assert test_client.get("/api/rarity/leaderboard?cursor=abc").status_code == 400
+
+    def test_a_cursor_the_server_did_not_make_is_a_400(self, test_client: TestClient) -> None:
+        assert test_client.get("/api/rarity/leaderboard?tier=common&cursor=abc").status_code == 400
+
+
 class TestHiddenGems:
     def test_success(self, test_client: TestClient) -> None:
         with patch(

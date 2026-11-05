@@ -15,13 +15,14 @@ import pytest_asyncio
 from common import AsyncPostgreSQLPool, parse_postgres_host_port
 from groovemap_schema.postgres import create_postgres_schema
 
-from api.queries.rarity_queries import get_rarity_tier_page
+from api.queries.rarity_queries import decode_tier_cursor, encode_tier_cursor, get_rarity_tier_page
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 TIER = "rarity-walk-test"
 ROWS_PER_SCORE = 67
+ID_BASE = 7_000_000  # clear of the ids other integration files insert into the same table
 SCORES = (0.3, 0.7, 1.1, 0.123456789, 2.5)  # 0.3 and 0.123456789 are not exact in binary
 
 
@@ -55,9 +56,9 @@ async def pool() -> AsyncIterator[AsyncPostgreSQLPool]:
             """
             INSERT INTO insights.release_rarity (release_id, title, artist_name, year, rarity_score, tier, hidden_gem_score)
             SELECT n, 'T' || n, 'A', 1990, (%(scores)s::real[])[1 + (n %% %(k)s)], %(tier)s, 0.5
-            FROM generate_series(1, %(total)s) AS n
+            FROM generate_series(%(base)s + 1, %(base)s + %(total)s) AS n
             """,
-            {"scores": list(SCORES), "k": len(SCORES), "tier": TIER, "total": ROWS_PER_SCORE * len(SCORES)},
+            {"scores": list(SCORES), "k": len(SCORES), "tier": TIER, "total": ROWS_PER_SCORE * len(SCORES), "base": ID_BASE},
         )
         await conn.execute(
             "INSERT INTO insights.release_rarity (release_id, title, artist_name, year, rarity_score, tier, hidden_gem_score) VALUES (999999, 'Other', 'A', 1990, 0.3, 'other-tier', 0.5) ON CONFLICT (release_id) DO NOTHING"
@@ -124,3 +125,36 @@ async def test_other_tiers_are_never_returned(pool: AsyncPostgreSQLPool) -> None
     seen = await _walk(pool, round_trip=lambda score: score)
 
     assert 999999 not in seen
+
+
+async def test_a_walk_through_the_opaque_cursor_returns_every_tied_row_exactly_once(pool: AsyncPostgreSQLPool) -> None:
+    """The route's own loop: page_size + 1 rows tell whether another page follows; the cursor is the server's token."""
+    page_size = 17
+    seen: list[int] = []
+    after = None
+    while True:
+        rows = await get_rarity_tier_page(pool, TIER, after, page_size + 1)
+        seen.extend(row["release_id"] for row in rows[:page_size])
+        if len(rows) <= page_size:
+            break
+        last = rows[page_size - 1]
+        after = decode_tier_cursor(encode_tier_cursor(float(last["rarity_score"]), int(last["release_id"])))
+
+    assert len(seen) == ROWS_PER_SCORE * len(SCORES)
+    assert len(set(seen)) == len(seen)
+
+
+async def test_the_keyset_page_is_one_index_range_scan_with_no_sort(pool: AsyncPostgreSQLPool) -> None:
+    """Against the index definition groovemap_schema creates: (tier, rarity_score DESC, release_id)."""
+    from api.queries.rarity_queries import _TIER_KEYSET_PAGE
+
+    async with pool.connection() as conn:
+        await conn.execute("ANALYZE insights.release_rarity")
+        await conn.execute("SET LOCAL enable_seqscan = off")
+        cur = await conn.execute(
+            "EXPLAIN (FORMAT JSON) " + _TIER_KEYSET_PAGE,
+            {"tier": TIER, "after_score": 0.7, "after_id": 100, "limit": 18},
+        )
+        plan = str((await cur.fetchone())[0])
+    assert "idx_release_rarity_tier_score" in plan
+    assert "'Sort'" not in plan
