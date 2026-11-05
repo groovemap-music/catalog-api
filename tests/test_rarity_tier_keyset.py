@@ -92,11 +92,24 @@ async def test_the_page_size_is_clamped_to_what_the_route_allows(asked: int, sen
     assert cursor.execute.await_args.args[1]["limit"] == sent
 
 
-@pytest.mark.parametrize("score", [0.3, 0.30000001192092896, 41.5, 100.0, 1e-07])
+def _forged(tier: object, score: object, release_id: object) -> str:
+    import base64
+    import json
+
+    return base64.urlsafe_b64encode(json.dumps([tier, score, release_id]).encode()).decode().rstrip("=")
+
+
+@pytest.mark.parametrize("score", [0.0, 0.3, 0.30000001192092896, 41.5, 100.0, 1e-07])
 def test_a_cursor_round_trips_the_exact_score_and_id(score: float) -> None:
-    token = rarity_queries.encode_tier_cursor(score, 1639)
-    assert rarity_queries.decode_tier_cursor(token) == (score, 1639)
+    token = rarity_queries.encode_tier_cursor("rare", score, 1639)
+    assert rarity_queries.decode_tier_cursor(token, "rare") == (score, 1639)
     assert "=" not in token
+
+
+def test_a_cursor_from_one_tier_is_refused_on_another() -> None:
+    token = rarity_queries.encode_tier_cursor("rare", 41.5, 11)
+    with pytest.raises(ValueError, match="invalid cursor"):
+        rarity_queries.decode_tier_cursor(token, "common")
 
 
 @pytest.mark.parametrize(
@@ -105,13 +118,27 @@ def test_a_cursor_round_trips_the_exact_score_and_id(score: float) -> None:
         "",
         "not-base64!!",
         "e30",  # {}
-        "WzEsIDJd",  # [1, 2]: the score must be text
-        "WyJuYW4iLCAxXQ",  # ["nan", 1]
-        "WyIwLjMiLCB0cnVlXQ",  # ["0.3", true]
-        "WyIwLjMiLCAiMSJd",  # ["0.3", "1"]
-        "WyJ4IiwgMV0",  # ["x", 1]
+        "WzEsIDJd",  # [1, 2]
+        _forged("rare", 0.3, 1),  # the score must be text
+        _forged("rare", "nan", 1),
+        _forged("rare", "inf", 1),
+        _forged("rare", "x", 1),
+        _forged("rare", "0.3", True),
+        _forged("rare", "0.3", "1"),
+        _forged("rare", "0.3", 1.5),
+        _forged(7, "0.3", 1),
+        _forged("rare", "0.3", -1),  # a negative id
+        _forged("rare", "0.3", 10**30),  # past BIGINT: Postgres would raise, a 500
+        _forged("rare", "0.3", 2**63),
+        _forged("rare", "1e39", 1),  # overflows REAL
+        _forged("rare", "-1e39", 1),
+        _forged("rare", "1e-60", 1),  # underflows REAL
     ],
 )
 def test_anything_but_a_server_made_cursor_is_rejected(token: str) -> None:
     with pytest.raises(ValueError, match="invalid cursor"):
-        rarity_queries.decode_tier_cursor(token)
+        rarity_queries.decode_tier_cursor(token, "rare")
+
+
+def test_the_largest_values_postgres_accepts_still_decode() -> None:
+    assert rarity_queries.decode_tier_cursor(_forged("rare", "3.4028234663852886e+38", 2**63 - 1), "rare")[1] == 2**63 - 1

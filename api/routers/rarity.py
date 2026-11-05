@@ -123,8 +123,8 @@ def _format_list_item(row: dict[str, Any]) -> dict[str, Any]:
 # ── Static path endpoints FIRST (before /{release_id}) ─────────────
 
 
-def _tier_cursor_of(row: dict[str, Any]) -> str:
-    return encode_tier_cursor(float(row["rarity_score"]), int(row["release_id"]))
+def _tier_cursor_of(tier: str, row: dict[str, Any]) -> str:
+    return encode_tier_cursor(tier, float(row["rarity_score"]), int(row["release_id"]))
 
 
 @router.get("/leaderboard")
@@ -149,7 +149,7 @@ async def rarity_leaderboard(
         if not tier:
             raise HTTPException(status_code=400, detail="cursor needs tier")
         try:
-            after = decode_tier_cursor(cursor)
+            after = decode_tier_cursor(cursor, tier)
         except ValueError:
             raise HTTPException(status_code=400, detail="invalid cursor") from None
         rows = await get_rarity_tier_page(_pg_pool, tier, after, page_size + 1)
@@ -159,7 +159,7 @@ async def rarity_leaderboard(
             content={
                 "items": [_format_list_item(r) for r in rows],
                 "page_size": page_size,
-                "next_cursor": _tier_cursor_of(rows[-1]) if has_more else None,
+                "next_cursor": _tier_cursor_of(tier, rows[-1]) if has_more else None,
             }
         )
 
@@ -172,7 +172,7 @@ async def rarity_leaderboard(
     }
     if tier:
         # Another page follows exactly when this offset page ends before the tier's last row.
-        content["next_cursor"] = _tier_cursor_of(items[-1]) if items and page * page_size < total else None
+        content["next_cursor"] = _tier_cursor_of(tier, items[-1]) if items and page * page_size < total else None
     return JSONResponse(content=content)
 
 

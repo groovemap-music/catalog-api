@@ -718,25 +718,38 @@ LIMIT %(limit)s
 TIER_PAGE_MAX_LIMIT = 100
 
 
-def encode_tier_cursor(score: float, release_id: int) -> str:
-    """The opaque cursor for the page after the row (``score``, ``release_id``).
+_BIGINT_MAX = 2**63 - 1
+_REAL_MAX = 3.4028234663852886e38
+_REAL_MIN_NORMAL = 1.1754943508222875e-38
+
+
+def encode_tier_cursor(tier: str, score: float, release_id: int) -> str:
+    """The opaque cursor for the page after the row (``score``, ``release_id``) of ``tier``.
 
     The server makes it and the client only hands it back, so the score keeps every digit of the REAL it was read as
-    (``repr`` of the float is exact) and a client cannot round it to a neighbouring REAL.
+    (``repr`` of the float is exact) and a client cannot round it to a neighbouring REAL. The tier is in the token so a cursor
+    from one tier is refused on another.
     """
-    raw = json.dumps([repr(float(score)), int(release_id)]).encode()
+    raw = json.dumps([tier, repr(float(score)), int(release_id)]).encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
-def decode_tier_cursor(token: str) -> tuple[float, int]:
-    """Read a cursor made by :func:`encode_tier_cursor`; ``ValueError`` for anything else."""
+def decode_tier_cursor(token: str, tier: str) -> tuple[float, int]:
+    """Read a cursor made by :func:`encode_tier_cursor` for ``tier``; ``ValueError`` for anything else.
+
+    A token that decodes cleanly can still carry values Postgres refuses (a release id past BIGINT, a score outside REAL's range
+    or one that underflows it), which would surface as a 500 from the query, so those are rejected here.
+    """
     try:
-        score_text, release_id = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
-        score = float(score_text)
-        if not isinstance(score_text, str) or isinstance(release_id, bool) or not isinstance(release_id, int) or not math.isfinite(score):
+        cursor_tier, score_text, release_id = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
+        if not (isinstance(cursor_tier, str) and isinstance(score_text, str)) or isinstance(release_id, bool) or not isinstance(release_id, int):
             raise ValueError
+        score = float(score_text)
     except (ValueError, TypeError, binascii.Error, UnicodeDecodeError) as exc:
         raise ValueError("invalid cursor") from exc
+    in_real_range = math.isfinite(score) and abs(score) <= _REAL_MAX and (score == 0 or abs(score) >= _REAL_MIN_NORMAL)
+    if cursor_tier != tier or not in_real_range or not 0 <= release_id <= _BIGINT_MAX:
+        raise ValueError("invalid cursor")
     return score, release_id
 
 

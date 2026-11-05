@@ -191,7 +191,7 @@ class TestRarityLeaderboardKeyset:
     def test_the_last_page_has_no_cursor(self, test_client: TestClient) -> None:
         from api.queries.rarity_queries import encode_tier_cursor
 
-        token = encode_tier_cursor(41.5, 11)
+        token = encode_tier_cursor("common", 41.5, 11)
         with patch("api.routers.rarity.get_rarity_tier_page", new=AsyncMock(return_value=self._rows(2))):
             body = test_client.get(f"/api/rarity/leaderboard?tier=common&page_size=2&cursor={token}").json()
         assert body["next_cursor"] is None
@@ -212,6 +212,20 @@ class TestRarityLeaderboardKeyset:
 
     def test_a_cursor_the_server_did_not_make_is_a_400(self, test_client: TestClient) -> None:
         assert test_client.get("/api/rarity/leaderboard?tier=common&cursor=abc").status_code == 400
+
+    def test_a_cursor_from_another_tier_is_a_400(self, test_client: TestClient) -> None:
+        from api.queries.rarity_queries import encode_tier_cursor
+
+        token = encode_tier_cursor("rare", 41.5, 11)
+        assert test_client.get(f"/api/rarity/leaderboard?tier=common&cursor={token}").status_code == 400
+
+    @pytest.mark.parametrize(("score", "release_id"), [("1e39", 1), ("1e-60", 1), ("0.3", 10**30)])
+    def test_a_forged_cursor_that_decodes_but_postgres_would_refuse_is_a_400(self, test_client: TestClient, score: str, release_id: int) -> None:
+        import base64
+        import json
+
+        token = base64.urlsafe_b64encode(json.dumps(["common", score, release_id]).encode()).decode().rstrip("=")
+        assert test_client.get(f"/api/rarity/leaderboard?tier=common&cursor={token}").status_code == 400
 
 
 class TestHiddenGems:
