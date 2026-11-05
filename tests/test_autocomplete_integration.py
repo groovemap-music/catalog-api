@@ -47,6 +47,24 @@ _NAMES = [
     "Joh",
     "Johnny Cash",
     "Joh Joh Music",
+    "Jay-Z",
+    "Jay-Z (2)",
+    "Jay Zimmerman",
+    "Big Jay",
+    "Z",
+    "Zebra",
+    "Wiz Z",
+    "AC/DC",
+    "AC/DC Tribute",
+    "DC",
+    "ACDC",
+    "Dcs Band",
+    "D'Angelo",
+    "Nino D'Angelo",
+    "Angelo",
+    "Guns N' Roses",
+    "Guns Of Navarone",
+    "Roses",
 ]
 _INDEXES = [
     ("artist_name_fulltext", "Artist"),
@@ -86,11 +104,18 @@ async def _old_matches(driver: AsyncResilientNeo4jDriver, typed: str) -> set[str
 
 
 @pytest.mark.parametrize("typed", ["David Bowie", "the", "joh", "The Beatles", "indecent n", "bowie", "david bo"])
-async def test_the_boosted_query_matches_exactly_the_names_the_old_one_did(neo4j_driver: AsyncResilientNeo4jDriver, typed: str) -> None:
+async def test_the_new_query_matches_a_subset_of_the_old_one_dropping_only_prefix_only_earlier_words(
+    neo4j_driver: AsyncResilientNeo4jDriver, typed: str
+) -> None:
+    """Every word but the last must now be a whole word; the old query accepted a prefix there ('Davidson Bowie')."""
     await _seed(neo4j_driver)
     got = {r["name"] for r in await q.autocomplete_artist(neo4j_driver, typed, limit=1000)}
-    assert got == await _old_matches(neo4j_driver, typed)
+    old = await _old_matches(neo4j_driver, typed)
     assert got
+    assert got <= old
+    first = typed.split()[0].lower()
+    for dropped in old - got:
+        assert first not in dropped.lower().replace("&", " ").split(), dropped
 
 
 @pytest.mark.parametrize(
@@ -138,3 +163,44 @@ async def test_metacharacters_and_quotes_do_not_break_the_query(neo4j_driver: As
     await _seed(neo4j_driver)
     for typed in ['say "hi" now', "back\\slash x", "AC/DC live", "C++ band", "a:b c", "(unclosed paren"]:
         assert isinstance(await q.autocomplete_artist(neo4j_driver, typed, limit=5), list)
+
+
+async def _names(driver: AsyncResilientNeo4jDriver, typed: str, limit: int = 1000) -> list[str]:
+    return [r["name"] for r in await q.autocomplete_artist(driver, typed, limit=limit)]
+
+
+async def test_hyphenated_input_requires_both_tokens(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    """'jay-z' is jay + z in the index. OR semantics would also return Zebra, Z, Big Jay and Wiz Z."""
+    await _seed(neo4j_driver)
+    names = await _names(neo4j_driver, "jay-z")
+    assert names[0] == "Jay-Z"
+    assert set(names) == {"Jay-Z", "Jay-Z (2)", "Jay Zimmerman"}  # both tokens, the last as a prefix: not Zebra, Z, Big Jay, Wiz Z
+
+
+async def test_slashed_input_requires_both_tokens(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    await _seed(neo4j_driver)
+    names = await _names(neo4j_driver, "ac/dc")
+    assert names[0] == "AC/DC"
+    assert set(names) == {"AC/DC", "AC/DC Tribute", "Dcs Band"} - {"Dcs Band"}  # not DC, ACDC or Dcs Band
+
+
+async def test_apostrophe_names_stay_one_token(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    await _seed(neo4j_driver)
+    names = await _names(neo4j_driver, "d'angelo")
+    assert names[0] == "D'Angelo"
+    assert "Angelo" not in names  # the analyzer keeps d'angelo whole, so a bare "angelo" does not match it
+    guns = await _names(neo4j_driver, "guns n' roses")
+    assert guns[0] == "Guns N' Roses"
+    assert "Guns Of Navarone" not in guns and "Roses" not in guns
+
+
+async def test_multiword_input_with_punctuation(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    await _seed(neo4j_driver)
+    names = await _names(neo4j_driver, "the jay-z")
+    assert "Jay-Z" not in names  # a name without 'the' does not match
+    assert await _names(neo4j_driver, "jay z") == await _names(neo4j_driver, "jay-z")  # punctuation and space are the same
+
+
+async def test_input_without_word_characters_is_an_empty_result_not_an_error(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    await _seed(neo4j_driver)
+    assert await _names(neo4j_driver, "!!") == []

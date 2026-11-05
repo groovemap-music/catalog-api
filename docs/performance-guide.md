@@ -120,13 +120,21 @@ silently rewrite another repository's schema, image, or runtime configuration.
 
 Artist, label, genre, style and person autocomplete (`gm-catalog-api-4wgh`, audit H15) send `{limit}` to the Lucene
 fulltext procedure, so only the best `limit` names are scored and returned (`the*`: 163 ms before, 3 to 7 ms warm).
+
+The typed text is cut into tokens the way the index analyzer cuts names (letters and digits; an apostrophe or dot
+inside a word stays in it), so `jay-z` is `jay` and `z`, `ac/dc` is `ac` and `dc`, and `d'angelo` is one token.
+Every token is required and the last is a prefix (`jay AND z*`): only names holding all of them match. The old query
+sent `jay-z` to Lucene as one escaped prefix, which matched nothing, so punctuated names could not be found at all.
+On lux: `jay-z` 79 matches (Jay-Z first), `ac/dc` 10 (AC/DC first), `d'angelo` 412 (D'Angelo first).
+
 Prefix terms are constant-score in Lucene, so the query adds boosts that decide who is "best":
 
-* two or more words: the whole phrase is boosted x100, so a name equal to what was typed outranks longer names that
+* two or more tokens: the whole phrase is boosted x100, so a name equal to what was typed outranks longer names that
   merely start with it (`David Bowie` before `David Bowie Tribute`);
-* one word: a name containing that whole word is boosted over one that only starts with it.
+* one token: a name containing that whole word is boosted over one that only starts with it.
 
-The set of names matched is unchanged (verified against the old query on a real Neo4j). Known limits: Lucene cannot
-see how well known a name is, so among names with the same score the order is by shorter name, then id; names that
-differ only by punctuation score the same (`David Bowie` and `David Bowie,`; a name equal to the typed text wins the
-tie); and a name that repeats the typed word (`The The The`) can outscore the single word (`The`).
+Every word but the last must now be a whole word; the old query also accepted a prefix there (`david bowie` matched
+`Davidson Bowie`). Known limits: Lucene cannot see how well known a name is, so among names with the same score the order
+is shorter name, then id (accepted by the operator); names that differ only by punctuation score the same (`David Bowie` and
+`David Bowie,`; a name equal to the typed text wins the tie); and a name that repeats the typed word (`The The The`) can
+outscore the single word (`The`).

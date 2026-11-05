@@ -45,24 +45,39 @@ def _escape_lucene_phrase(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"')
 
 
+# The standard analyzer splits on everything but letters, digits and apostrophes or dots inside a word, so
+# "jay-z" is indexed as jay + z and "ac/dc" as ac + dc. The query is cut the same way.
+_ANALYZER_TOKEN_RE = re.compile(r"\w+(?:['\u2019.]\w+)*")
+
+
+def _analyzer_tokens(query: str) -> list[str]:
+    return _ANALYZER_TOKEN_RE.findall(query)
+
+
 def _build_autocomplete_query(query: str) -> str:
-    """Build a Lucene fulltext query: every name that starts with the terms, best matches boosted.
+    """Build a Lucene fulltext query: names holding every typed token, the last as a prefix, best matches boosted.
 
-    The set of names matched is exactly what ``t1* AND t2*`` matched before. On top of that:
+    Input is cut into tokens the way the index analyzer cuts names (``jay-z`` is ``jay`` and ``z``, ``ac/dc`` is
+    ``ac`` and ``dc``) and every token is required: ``jay AND z*``. Splitting is what makes punctuated names
+    findable at all (the old query matched none) and ANDing is what keeps names containing only one of the tokens
+    out. On top of that:
 
-    * with two or more terms, the whole phrase is boosted, so a name that is those words and nothing else
+    * with two or more tokens, the whole phrase is boosted, so a name that is those words and nothing else
       outranks a longer name that merely starts with them (Lucene's length normalisation then puts the
       shorter name first);
-    * with one term, a name containing that whole word is boosted over one that only starts with it.
+    * with one token, a name containing that whole word is boosted over one that only starts with it.
+
+    Input with no word characters at all falls back to the escaped terms as prefixes, which match nothing.
     """
-    terms = query.split()
-    if not terms:
-        return ""
-    prefixes = " AND ".join(_escape_lucene_query(term) + "*" for term in terms)
-    if len(terms) == 1:
-        return f"({_escape_lucene_query(terms[0])}^{_EXACT_BOOST} OR {prefixes})"
-    phrase = _escape_lucene_phrase(" ".join(terms))
-    return f'"{phrase}"^{_EXACT_BOOST} OR ({prefixes})'
+    tokens = _analyzer_tokens(query)
+    if not tokens:
+        return " AND ".join(_escape_lucene_query(term) + "*" for term in query.split())
+    *head, last = (_escape_lucene_query(token) for token in tokens)
+    if not head:
+        return f"({last}^{_EXACT_BOOST} OR {last}*)"
+    required = " AND ".join([*head, f"{last}*"])
+    phrase = _escape_lucene_phrase(" ".join(tokens))
+    return f'"{phrase}"^{_EXACT_BOOST} OR ({required})'
 
 
 @dataclass(frozen=True, slots=True)
