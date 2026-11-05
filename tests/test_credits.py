@@ -1,12 +1,21 @@
 """Unit tests for Credits & Provenance router endpoints."""
 
 import json
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 
 # --- Tests ---
+
+
+@pytest.fixture(autouse=True)
+def _credit_total() -> Any:
+    """One credit in total unless a test sets its own; the paging itself is proven on a real Neo4j."""
+    with patch("api.routers.credits.count_person_credits", AsyncMock(return_value=1)) as count:
+        yield count
 
 
 class TestPersonCreditsEndpoint:
@@ -34,8 +43,9 @@ class TestPersonCreditsEndpoint:
         assert data["credits"][0]["role"] == "Mastered By"
 
     @patch("api.routers.credits.get_person_credits")
-    def test_person_credits_not_found(self, mock_query: AsyncMock, test_client: TestClient) -> None:
+    def test_person_credits_not_found(self, mock_query: AsyncMock, test_client: TestClient, _credit_total: AsyncMock) -> None:
         mock_query.return_value = []
+        _credit_total.return_value = 0
         response = test_client.get("/api/credits/person/Nobody")
         assert response.status_code == 404
 
@@ -294,8 +304,9 @@ class TestCreditsValkeyCaching:
             credits_router._valkey = original_valkey
 
     @patch("api.routers.credits.get_person_credits")
-    def test_person_credits_cache_miss_sets_cache(self, mock_query: AsyncMock, test_client: TestClient) -> None:
-        """Test that cache miss queries Neo4j and stores result."""
+    def test_person_credits_cache_miss_sets_cache(self, mock_query: AsyncMock, test_client: TestClient, _credit_total: AsyncMock) -> None:
+        """Test that cache miss queries Neo4j and stores result (an expensive person's default page)."""
+        _credit_total.return_value = 5000
         import api.routers.credits as credits_router
 
         mock_query.return_value = [
@@ -367,3 +378,107 @@ class TestCreditsValkeyCaching:
             assert response.status_code == 200
         finally:
             credits_router._valkey = original_valkey
+
+
+class TestPersonCreditsPaging:
+    """Pagination of GET /api/credits/person/{name}: every credit stays reachable through ``total_credits``."""
+
+    ROW: ClassVar[dict[str, Any]] = {
+        "release_id": "1",
+        "title": "T",
+        "year": 2000,
+        "role": "Producer",
+        "category": "production",
+        "artists": [],
+        "labels": [],
+    }
+
+    def _get(self, test_client: TestClient, query: str, total: int, rows: int) -> Any:
+        with (
+            patch("api.routers.credits.get_person_credits", AsyncMock(return_value=[dict(self.ROW) for _ in range(rows)])) as page,
+            patch("api.routers.credits.count_person_credits", AsyncMock(return_value=total)),
+        ):
+            response = test_client.get(f"/api/credits/person/Bob{query}")
+        return response, page
+
+    def test_first_page_reports_the_whole_total_and_more_to_come(self, test_client: TestClient) -> None:
+        response, page = self._get(test_client, "", total=250, rows=100)
+        data = response.json()
+        assert (data["total_credits"], len(data["credits"]), data["limit"], data["offset"], data["has_more"]) == (250, 100, 100, 0, True)
+        assert page.await_args.args[1:] == ("Bob", 100, 0)
+
+    def test_last_page_has_no_more(self, test_client: TestClient) -> None:
+        response, _ = self._get(test_client, "?limit=100&offset=200", total=250, rows=50)
+        assert response.json()["has_more"] is False
+
+    def test_an_offset_past_the_end_is_an_empty_page_not_a_404(self, test_client: TestClient) -> None:
+        response, _ = self._get(test_client, "?offset=5000", total=250, rows=0)
+        assert response.status_code == 200
+        assert response.json()["credits"] == []
+        assert response.json()["total_credits"] == 250
+
+    def test_no_credits_at_all_is_404(self, test_client: TestClient) -> None:
+        response, _ = self._get(test_client, "", total=0, rows=0)
+        assert response.status_code == 404
+
+    @pytest.mark.parametrize("query", ["?limit=0", "?limit=501", "?offset=-1"])
+    def test_bounds_are_validated(self, test_client: TestClient, query: str) -> None:
+        assert test_client.get(f"/api/credits/person/Bob{query}").status_code == 422
+
+    def test_a_walk_over_offset_reaches_every_credit_once(self, test_client: TestClient) -> None:
+        everything = [{**self.ROW, "release_id": str(i)} for i in range(230)]
+
+        async def page(_driver: Any, _name: str, limit: int, offset: int) -> list[dict[str, Any]]:
+            return everything[offset : offset + limit]
+
+        seen: list[str] = []
+        offset = 0
+        with (
+            patch("api.routers.credits.get_person_credits", page),
+            patch("api.routers.credits.count_person_credits", AsyncMock(return_value=230)),
+        ):
+            while True:
+                data = test_client.get(f"/api/credits/person/Bob?limit=100&offset={offset}").json()
+                seen += [c["release_id"] for c in data["credits"]]
+                if not data["has_more"]:
+                    break
+                offset += 100
+        assert seen == [str(i) for i in range(230)]
+
+    def test_only_expensive_default_pages_are_cached(self, test_client: TestClient) -> None:
+        import api.routers.credits as credits_router
+
+        valkey = AsyncMock()
+        valkey.get = AsyncMock(return_value=None)
+        valkey.setex = AsyncMock()
+        original = credits_router._valkey
+        credits_router._valkey = valkey
+        try:
+            self._get(test_client, "", total=50, rows=50)  # a small person: not cached
+            assert valkey.setex.await_count == 0
+            self._get(test_client, "?limit=50", total=5000, rows=50)  # not the default page size
+            self._get(test_client, "?offset=100000", total=5000, rows=0)  # past the first pages
+            assert valkey.setex.await_count == 0
+            self._get(test_client, "", total=5000, rows=100)  # default page of a big person
+            assert valkey.setex.await_count == 1
+        finally:
+            credits_router._valkey = original
+
+
+class TestConnectionsDepth:
+    @patch("api.routers.credits.get_person_connections")
+    def test_depth_3_is_rejected_not_answered_as_2(self, mock_query: AsyncMock, test_client: TestClient) -> None:
+        response = test_client.get("/api/credits/connections/Bob?depth=3")
+        assert response.status_code == 422
+        mock_query.assert_not_called()
+
+    @patch("api.routers.credits.get_person_connections")
+    def test_second_hops_reach_the_response(self, mock_query: AsyncMock, test_client: TestClient) -> None:
+        mock_query.return_value = [{"name": "Alice", "shared_count": 4, "second_hops": [{"name": "Carol", "via": "Alice", "shared": 2}]}]
+        data = test_client.get("/api/credits/connections/Bob?depth=2").json()
+        assert data["connections"][0]["second_hops"] == [{"name": "Carol", "via": "Alice", "shared": 2}]
+
+    @patch("api.routers.credits.get_person_connections")
+    def test_depth_1_rows_have_no_second_hops(self, mock_query: AsyncMock, test_client: TestClient) -> None:
+        mock_query.return_value = [{"name": "Alice", "shared_count": 4}]
+        assert test_client.get("/api/credits/connections/Bob?depth=1").json()["connections"][0]["second_hops"] == []

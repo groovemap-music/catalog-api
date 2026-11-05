@@ -182,56 +182,25 @@ class TestGetPersonConnections:
         assert len(result) == 1
 
     @pytest.mark.asyncio
-    async def test_clamps_depth(self) -> None:
+    @pytest.mark.parametrize("depth", [0, 3, 5])
+    async def test_rejects_depths_that_have_no_hops(self, depth: int) -> None:
         driver = _make_mock_driver(query_returns=[])
-        result = await get_person_connections(driver, "Test", depth=0, limit=50)
-        assert result == []
-
-        result = await get_person_connections(driver, "Test", depth=5, limit=50)
-        assert result == []
+        with pytest.raises(ValueError, match="depth must be between 1 and 2"):
+            await get_person_connections(driver, "Test", depth=depth, limit=50)
 
     @pytest.mark.asyncio
-    async def test_depth_2_cypher_is_valid_grouping_not_just_mocked(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Depth>=2 Cypher must group validly, not only pass against a mock.
+    async def test_depth_2_sends_the_second_hop_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The ranking itself (best ten before the slice) is proven on a real Neo4j in test_credits_integration.py."""
+        captured: dict[str, Any] = {}
 
-        The depth>=2 branch used to wrap `collect(DISTINCT {...})` in a CASE
-        that referenced `hop2` OUTSIDE the aggregation, which Neo4j rejects at
-        compile time ("Aggregation column contains implicit grouping
-        expressions: hop2") — a real ClientError the mocked driver in the
-        other tests here can never surface. Verified against a live Neo4j 5
-        instance (both that the pre-fix Cypher raises exactly that error and
-        that the fixed Cypher executes and returns the expected rows).
-
-        Pin the structural fix in source form: the CASE referencing `hop2`
-        must be nested INSIDE the collect(...) call's argument list, not
-        wrapped around it.
-        """
-        captured: dict[str, str] = {}
-
-        async def _fake_run_query(_driver: Any, cypher: str, **_params: Any) -> list[dict[str, Any]]:
-            captured["cypher"] = cypher
+        async def _fake_run_query(_driver: Any, cypher: str, **params: Any) -> list[dict[str, Any]]:
+            captured.update(cypher=cypher, **params)
             return []
 
         monkeypatch.setattr("api.queries.credits_queries.run_query", _fake_run_query)
-
-        driver = _make_mock_driver(query_returns=[])
-        await get_person_connections(driver, "Test", depth=2, limit=50)
-
-        cypher = captured["cypher"]
-        collect_start = cypher.index("collect(DISTINCT")
-        collect_end = cypher.index(")", cypher.index("END", collect_start)) + 1
-        case_idx = cypher.index("CASE WHEN hop2 IS NOT NULL")
-
-        # The CASE referencing hop2 must be nested inside collect(...)'s
-        # argument list, not wrapped around it — otherwise hop2 is a bare
-        # grouping-key violation outside the aggregate.
-        assert collect_start < case_idx < collect_end, (
-            "The `CASE WHEN hop2 IS NOT NULL` branch must be INSIDE "
-            "collect(DISTINCT ...)'s arguments, not wrapped around the whole "
-            "collect(...) call — the latter is the exact pre-fix defect "
-            "that Neo4j rejects as an implicit "
-            "grouping expression."
-        )
+        await get_person_connections(_make_mock_driver(query_returns=[]), "Test", depth=2, limit=50)
+        assert captured["second_hops"] == 10
+        assert captured["cypher"].index("ORDER BY shared DESC, hop2.name") < captured["cypher"].index("collect(")
 
 
 class TestAutocompletePerson:

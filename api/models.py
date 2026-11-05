@@ -819,11 +819,14 @@ class CreditEntry(BaseModel):
 
 
 class PersonCreditsResponse(BaseModel):
-    """All credits for a person, grouped by role."""
+    """One page of a person's credits, newest first. ``total_credits`` counts every credit, not just this page."""
 
     name: str
     total_credits: int
     credits: list[CreditEntry]
+    limit: int
+    offset: int
+    has_more: bool
 
 
 class TimelineEntry(BaseModel):
@@ -891,11 +894,20 @@ class SharedCreditsResponse(BaseModel):
     shared_releases: list[SharedCreditEntry]
 
 
+class SecondHopEntry(BaseModel):
+    """A person reached through a connection, with the releases that connection shares with them."""
+
+    name: str
+    via: str
+    shared: int
+
+
 class ConnectionEntry(BaseModel):
-    """A person connected through shared releases."""
+    """A person connected through shared releases. ``second_hops`` is filled at ``depth=2``, best first."""
 
     name: str
     shared_count: int
+    second_hops: list[SecondHopEntry] = Field(default_factory=list)
 
 
 class PersonConnectionsResponse(BaseModel):
