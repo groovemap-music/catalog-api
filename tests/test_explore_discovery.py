@@ -7,6 +7,7 @@ small in-memory adjacency list answering the same statements, so the logic aroun
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -38,14 +39,21 @@ def _neighbours(eid: str, types: set[str]) -> list[dict[str, Any]]:
         if rel in types and eid in (a, b):
             other = b if a == eid else a
             label, name, key = NODES[other]
-            out.append({"fid": eid, "eid": other, "label": label, "name": name, "id": key, "rel": rel})
+            out.append({"fid": eid, "eid": other, "label": label, "name": name, "id": key, "nameless": False, "rel": rel})
     return out
 
 
 async def fake_run_query(_driver: Any, cypher: str, **params: Any) -> list[dict[str, Any]]:
-    if "UNWIND $frontier" in cypher:
+    if "UNWIND range(0, size($frontier)" in cypher:
         types = set(cypher.split("[rel:")[1].split("]")[0].split("|"))
-        return [row for fid in params["frontier"] for row in _neighbours(fid, types)]
+        codes = {"ALIAS_OF": 0, "BY": 1, "DERIVED_FROM": 2, "IS": 3, "MEMBER_OF": 4, "ON": 5}
+        best: dict[str, dict[str, Any]] = {}
+        for i, fid in enumerate(params["frontier"]):
+            for row in _neighbours(fid, types):
+                code = i * 8 + codes[row["rel"]]
+                if row["eid"] not in best or code < best[row["eid"]]["best"]:
+                    best[row["eid"]] = {**{k: v for k, v in row.items() if k not in ("fid", "rel")}, "best": code}
+        return list(best.values())
     if "AS pop" in cypher and "$eids" in cypher:
         return [{"eid": e, "pop": {"A": 9, "B": 3, "L": 5, "AL": 1}.get(e, 0)} for e in params["eids"]]
     raise AssertionError(cypher)
@@ -146,6 +154,12 @@ class FakeValkey:
         self.data[key] = value
 
 
+def _reset() -> None:
+    ed.configure(None)
+    ed._failures.clear()
+    ed._stages.clear()
+
+
 def _hub_queries(release_count: int = 60_000) -> Any:
     async def run(_driver: Any, cypher: str, **params: Any) -> list[dict[str, Any]]:
         if "n.release_count) >= $min" in cypher.replace(" ", "").replace("coalesce(", "").replace("\n", "") or "AS releases" in cypher:
@@ -153,9 +167,12 @@ def _hub_queries(release_count: int = 60_000) -> Any:
         if "o:Genre OR o:Style" in cypher:
             return [{"label": "Style", "id": "Punk", "name": "Punk", "witness": "First"}]
         if "AS pop" in cypher and "Artist" in cypher:
-            return [{"label": "Artist", "id": "a", "name": "Alpha", "pop": 9}, {"label": "Artist", "id": "b", "name": "Beta", "pop": 3}]
+            return [
+                {"label": "Artist", "id": "a", "name": "Alpha", "pop": 9, "placeholder": False},
+                {"label": "Artist", "id": "b", "name": "Beta", "pop": 3, "placeholder": False},
+            ]
         if "AS pop" in cypher and "Label" in cypher:
-            return [{"label": "Label", "id": "l", "name": "One", "pop": 5}]
+            return [{"label": "Label", "id": "l", "name": "One", "pop": 5, "placeholder": False}]
         if "UNWIND $ids" in cypher:
             return [{"id": i, "witness": f"W-{i}"} for i in params["ids"]]
         raise AssertionError(cypher)
@@ -168,8 +185,8 @@ async def test_refresh_builds_stores_and_survives_a_restart() -> None:
     valkey = FakeValkey()
     ed.configure(valkey)
     with patch.object(ed, "run_query", _hub_queries()):
-        assert await ed.refresh_hubs(object()) == 1
-        assert await ed.refresh_hubs(object()) == 0  # unchanged
+        assert (await ed.refresh_hubs(object()))[0] == 1
+        assert (await ed.refresh_hubs(object()))[0] == 0  # unchanged
     held = ed._hubs[("genre", "Rock")]
     assert [r["id"] for r in held.rows] == ["Punk", "a", "l", "b"]  # genres/styles, then people by credits
     assert held.rows[1]["path_names"] == ["Rock", "W-a", "Alpha"]
@@ -185,8 +202,8 @@ async def test_a_changed_release_count_or_age_rebuilds() -> None:
     with patch.object(ed, "run_query", _hub_queries(60_000)):
         await ed.refresh_hubs(object())
     with patch.object(ed, "run_query", _hub_queries(61_000)):
-        assert await ed.refresh_hubs(object()) == 1
-        assert await ed.refresh_hubs(object(), max_age=-1) == 1
+        assert (await ed.refresh_hubs(object()))[0] == 1
+        assert (await ed.refresh_hubs(object(), max_age=-1))[0] == 1
     ed.configure(None)
 
 
@@ -200,9 +217,10 @@ async def test_a_failing_hub_is_skipped_and_logged_and_the_listing_failure_retur
         raise RuntimeError("neo4j restarting")
 
     with patch.object(ed, "run_query", boom):
-        assert await ed.refresh_hubs(object()) == 0
+        assert (await ed.refresh_hubs(object()))[0] == 0
+        ed._failures.clear()
     with patch.object(ed, "run_query", AsyncMock(side_effect=RuntimeError("down"))):
-        assert await ed.refresh_hubs(object()) == 0
+        assert (await ed.refresh_hubs(object())) == (0, 1)
     ed.configure(None)
 
 
@@ -212,7 +230,7 @@ async def test_valkey_failures_never_fail_a_hub_read_or_write() -> None:
     valkey.fail = True
     ed.configure(valkey)
     with patch.object(ed, "run_query", _hub_queries()):
-        assert await ed.refresh_hubs(object()) == 1  # the write failed, memory still holds it
+        assert (await ed.refresh_hubs(object()))[0] == 1  # the write failed, memory still holds it
     assert await ed._hub_result("genre", "Rock") is not None
     ed._hubs.clear()
     assert await ed._hub_result("genre", "Rock") is None  # the read failed too
@@ -223,8 +241,9 @@ async def test_valkey_failures_never_fail_a_hub_read_or_write() -> None:
 
 
 @pytest.mark.asyncio
-async def test_loop_retries_quickly_until_every_hub_exists_then_uses_the_interval() -> None:
-    ed.configure(None)
+async def test_loop_retries_quickly_until_every_hub_exists_then_uses_the_interval(monkeypatch: pytest.MonkeyPatch) -> None:
+    _reset()
+    monkeypatch.setattr(ed, "_RETRY_BASE_SECONDS", 0.0)  # the per-hub backoff is tested on its own
     delays: list[float] = []
 
     async def fake_sleep(seconds: float) -> None:
@@ -249,6 +268,134 @@ async def test_loop_retries_quickly_until_every_hub_exists_then_uses_the_interva
 
 
 @pytest.mark.asyncio
-async def test_missing_hubs_is_true_when_the_listing_fails() -> None:
-    with patch.object(ed, "run_query", AsyncMock(side_effect=RuntimeError("down"))):
-        assert await ed._missing_hubs(object()) is True
+async def test_a_failed_stage_is_retried_alone_and_the_hub_backs_off() -> None:
+    _reset()
+    healthy = _hub_queries()
+    calls: dict[str, int] = {"gs": 0, "artist": 0, "label": 0}
+
+    async def label_fails_once(driver: Any, cypher: str, **params: Any) -> list[dict[str, Any]]:
+        if "o:Genre OR o:Style" in cypher:
+            calls["gs"] += 1
+        if "AS pop" in cypher and "Artist" in cypher:
+            calls["artist"] += 1
+        if "AS pop" in cypher and "Label" in cypher:
+            calls["label"] += 1
+            if calls["label"] == 1:
+                raise RuntimeError("scan exceeded its budget")
+        return await healthy(driver, cypher, **params)
+
+    with patch.object(ed, "run_query", label_fails_once):
+        assert await ed.refresh_hubs(object()) == (0, 1)
+        failures, retry_at = ed._failures[("genre", "Rock")]
+        assert failures == 1 and retry_at > time.time() + 3000  # a slower, capped retry
+        assert await ed.refresh_hubs(object()) == (0, 1)  # still backing off: no new scan
+        assert calls == {"gs": 1, "artist": 1, "label": 1}
+        ed._failures[("genre", "Rock")] = (1, 0.0)  # the backoff has passed
+        assert await ed.refresh_hubs(object()) == (1, 0)
+    assert calls == {"gs": 1, "artist": 1, "label": 2}  # genres/styles and artists were not scanned again
+    _reset()
+
+
+@pytest.mark.asyncio
+async def test_backoff_doubles_and_is_capped() -> None:
+    _reset()
+
+    async def always_fails(_driver: Any, cypher: str, **_params: Any) -> list[dict[str, Any]]:
+        if "AS releases" in cypher:
+            return [{"type": "genre", "id": "Rock", "releases": 60_000}]
+        raise RuntimeError("too slow")
+
+    with patch.object(ed, "run_query", always_fails):
+        for expected in (3600, 7200, 14400, 28800, 57600, 86400, 86400):
+            await ed.refresh_hubs(object())
+            failures, retry_at = ed._failures[("genre", "Rock")]
+            assert abs((retry_at - time.time()) - expected) < 5, (failures, expected)
+            ed._failures[("genre", "Rock")] = (failures, 0.0)
+    _reset()
+
+
+@pytest.mark.asyncio
+async def test_a_hub_another_replica_is_building_is_skipped_and_one_stored_meanwhile_is_not_rebuilt() -> None:
+    valkey = FakeValkey()
+    ed.configure(valkey)
+    ed._failures.clear()
+    ed._stages.clear()
+
+    class LockingValkey(FakeValkey):
+        async def set(self, key: str, value: str, nx: bool = False, ex: int | None = None) -> bool | None:  # noqa: ARG002
+            if nx:
+                if key in self.data:
+                    return None
+                self.data[key] = value
+                return True
+            return await super().set(key, value)
+
+        async def delete(self, key: str) -> None:
+            self.data.pop(key, None)
+
+    locking = LockingValkey()
+    ed.configure(locking)
+    locking.data[ed._lock_key("genre", "Rock")] = "1"  # replica B holds it
+    builds = {"n": 0}
+    healthy = _hub_queries()
+
+    async def counting(driver: Any, cypher: str, **params: Any) -> list[dict[str, Any]]:
+        if "o:Genre OR o:Style" in cypher:
+            builds["n"] += 1
+        return await healthy(driver, cypher, **params)
+
+    with patch.object(ed, "run_query", counting):
+        assert await ed.refresh_hubs(object()) == (0, 1)  # skipped
+        assert builds["n"] == 0
+        del locking.data[ed._lock_key("genre", "Rock")]
+        assert await ed.refresh_hubs(object()) == (1, 0)  # lock taken, built, released
+        assert ed._lock_key("genre", "Rock") not in locking.data
+        assert builds["n"] == 1
+    _reset()
+
+
+@pytest.mark.asyncio
+async def test_placeholder_artists_go_last_not_out() -> None:
+    discovered = [
+        {
+            "eid": "ph",
+            "label": "Artist",
+            "id": "194",
+            "name": "194",
+            "path_names": ["s", "r", "194"],
+            "rel_types": ["BY", "BY"],
+            "dist": 2,
+            "placeholder": True,
+        },
+        {
+            "eid": "a",
+            "label": "Artist",
+            "id": "a",
+            "name": "A",
+            "path_names": ["s", "r", "A"],
+            "rel_types": ["BY", "BY"],
+            "dist": 2,
+            "placeholder": False,
+        },
+        {
+            "eid": "b",
+            "label": "Artist",
+            "id": "b",
+            "name": "B",
+            "path_names": ["s", "r", "B"],
+            "rel_types": ["BY", "BY"],
+            "dist": 2,
+            "placeholder": False,
+        },
+    ]
+    assert [r["id"] for r in await ed._select(object(), discovered)] == ["a", "b", "194"]
+
+    async def pops(_driver: Any, _cypher: str, eids: list[str]) -> list[dict[str, Any]]:
+        return [{"eid": e, "pop": {"ph": 1_500_000, "a": 5, "b": 9, "c": 1}[e]} for e in eids]
+
+    with patch.object(ed, "run_query", pops), patch.object(ed, "ARTIST_LABEL_LIMIT", 3):
+        many = [*discovered, {**discovered[1], "eid": "c", "id": "c", "name": "C"}]
+        picked = [r["id"] for r in await ed._select(object(), many)]
+    assert picked[-1] != "194" or len(picked) == 3
+    assert picked.index("b") < picked.index("a")  # established first among real names
+    assert "194" not in picked  # cut by the limit only after every real name is in, never ahead of one

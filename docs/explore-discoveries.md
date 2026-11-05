@@ -12,7 +12,12 @@ because it would have exhausted it. This page says what the route returns now an
 | Genres and styles | **All** within `hops`, with shortest distance and path. Never sampled or dropped | distance, type, name |
 | Artists and labels | The nearest **100**, as before | distance, then most established first, then id |
 
-Nothing is cut beyond the 100-artist-and-label limit the route already had. "Most established" means
+Nothing is cut beyond the 100-artist-and-label limit the route already had. **Placeholder artists go to the end of
+the artist order; they are not excluded.** A placeholder is an artist with no name: Discogs records "Various" (id 194)
+and "Unknown Artist" (id 355) that way, and 16,727 artists on lux have no name. The rule reads the data (`name IS NULL`)
+instead of a list of ids, so every placeholder is covered, including ones added later. They have the most credits of
+anyone, so without this they led the artist list for most genres; now every real name at a given distance comes first,
+and a placeholder appears only if the limit leaves room for it. "Most established" means
 `release_count` (stored on the label) for a label and the number of credits for an artist, which has no stored
 count. Before, the 100 were whichever the planner met first among equals, so they changed between runs; now they
 are stable. **This is a bias toward well-known names** at a given distance, by design. One consequence to know
@@ -36,6 +41,18 @@ shows one linking release, the alphabetically first by title.
 * For a hub, `hops=3` equals `hops=2`: the only eligible nodes three steps away are alias and member artists of
   artists already at distance 2, and a hub has far more than 100 of those. `hops=1` is empty, as before: a hub's
   neighbours one step away are releases, which are never discoveries.
+* Hub scans go through Masters as well as releases: a Master carries `IS` and `BY` edges, so the old traversal passed
+  through them, and so does the live walk (a Master is expanded at the last hop). Only the nameless-artist demotion
+  and the ordering are new; the discovered set is the old one.
+* A hub is built in three scans (genres and styles, artists, labels). On lux, with a 300 s budget per scan: Rock 26.5 s,
+  13.9 s and 10.6 s; Pop Rock 4.3 s, 2.8 s and 2.3 s; Columbia 2.6 s and 1.0 s. A scan that still exceeds its budget fails
+  that hub: the stages that finished are kept (a retry reruns only the failed one), the hub retries after 1 h, then 2 h,
+  doubling to 24 h, with an `explore_hub_refresh_failed` error log naming the hub and the next retry, and other hubs keep
+  building. Replicas take a per-hub Valkey lock (`SET NX`), so N replicas do not run N heavy scans at a cold start.
+* The hub list is one label scan per loop (Label has no index on `release_count`: 4.87M hits, about 0.4 s on lux; an index
+  on `Label.release_count` in database-schema would make it free).
+* The last hop of the live walk returns one row per distinct neighbour, not per edge (a start just under the hub size had
+  about 490,000 edge rows, 290 MB in Python).
 * Until a hub is computed (a cold start; about a minute per large hub) its request answers `503` with
   `Retry-After`. A hub whose release count changed is recomputed on the next hourly check, or after 7 days.
 * Every request-path statement has the 30 s server timeout.

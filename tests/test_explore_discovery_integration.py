@@ -39,11 +39,14 @@ CREATE (a1:Artist {id: 'A1', name: 'Alpha'}), (a2:Artist {id: 'A2', name: 'Beta'
        (rock:Genre {name: 'Rock', release_count: 2}), (jazz:Genre {name: 'Jazz', release_count: 1}), (punk:Style {name: 'Punk', release_count: 1}),
        (bop:Style {name: 'Bop', release_count: 1}),
        (r1:Release {id: 'r1', title: 'First'}), (r2:Release {id: 'r2', title: 'Second'}), (r3:Release {id: 'r3', title: 'Third'}),
-       (m1:Master {id: 'm1', title: 'Master One'}),
+       (m1:Master {id: 'm1', title: 'Master One'}), (m2:Master {id: 'm2', title: 'Master Two'}),
+       (ph:Artist {id: '194'}), (a6:Artist {id: 'A6', name: 'Zeta'}),
        (r1)-[:BY]->(a1), (r1)-[:BY]->(a2), (r2)-[:BY]->(a1), (r2)-[:BY]->(a3), (r3)-[:BY]->(a3), (r3)-[:BY]->(a5),
        (r1)-[:ON]->(l1), (r2)-[:ON]->(l1), (r3)-[:ON]->(l2),
        (r1)-[:IS]->(rock), (r2)-[:IS]->(rock), (r3)-[:IS]->(jazz), (r1)-[:IS]->(punk), (r3)-[:IS]->(bop),
-       (a4)-[:ALIAS_OF]->(a1), (a3)-[:MEMBER_OF]->(g1), (r1)-[:DERIVED_FROM]->(m1)
+       (a4)-[:ALIAS_OF]->(a1), (a3)-[:MEMBER_OF]->(g1), (r1)-[:DERIVED_FROM]->(m1),
+       (m1)-[:IS]->(jazz), (m1)-[:BY]->(a5), (m2)-[:IS]->(rock), (m2)-[:IS]->(bop), (m2)-[:BY]->(a6), (m2)-[:BY]->(ph), (m2)-[:BY]->(a1),
+       (r1)-[:BY]->(ph), (r2)-[:BY]->(ph), (r3)-[:BY]->(ph)
 """
 
 _STARTS = [("artist", "A1"), ("label", "L1"), ("genre", "Rock"), ("style", "Punk"), ("release", "r1"), ("master", "m1")]
@@ -104,7 +107,7 @@ async def test_artists_and_labels_are_capped_at_100_nearest_then_most_establishe
     rows = await ed.get_explore_traversal(neo4j_driver, "release", "r1", 2)
     people = [r for r in rows if r["type"] in ("artist", "label")]
     assert len(people) == 100
-    assert {r["name"] for r in rows if r["type"] in ("genre", "style")} == {"Rock", "Punk"}
+    assert {r["name"] for r in rows if r["type"] in ("genre", "style")} == {"Rock", "Punk", "Jazz"}  # Jazz through the master r1 is derived from
     dists = [r["dist"] for r in people]
     assert dists == sorted(dists)
     # Within the distance that is cut, the most credited come first, ties by id.
@@ -131,12 +134,36 @@ async def test_hub_results_computed_in_the_background_equal_the_live_walk(
         ed.configure(None)
         with pytest.raises(ed.HubNotReadyError):
             await ed.get_explore_traversal(neo4j_driver, entity_type, entity_id, 2)
-        assert await ed.refresh_hubs(neo4j_driver) >= 1
+        assert (await ed.refresh_hubs(neo4j_driver))[0] >= 1
         stored = await ed.get_explore_traversal(neo4j_driver, entity_type, entity_id, 3)  # 3 == 2 for a hub
         assert _keys(stored) == _keys(live), (entity_type, entity_id)
         assert stored == await ed.get_explore_traversal(neo4j_driver, entity_type, entity_id, 2)
         for row in stored:
             assert row["path_names"][0] == entity_id and row["path_names"][-1] == row["name"] and row["dist"] == 2
         assert await ed.get_explore_traversal(neo4j_driver, entity_type, entity_id, 1) == []
-        assert await ed.refresh_hubs(neo4j_driver) == 0  # unchanged hubs are not rebuilt
+        assert (await ed.refresh_hubs(neo4j_driver))[0] == 0  # unchanged hubs are not rebuilt
         monkeypatch.setattr(ed, "HUB_MIN_RELEASES", 50_000)
+
+
+async def test_hubs_reach_artists_and_genres_through_masters_and_demote_placeholders(
+    neo4j_driver: AsyncResilientNeo4jDriver, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rock holds the master m2, which carries IS and BY edges: its artists and styles are discoveries at distance 2."""
+    await _seed(neo4j_driver)
+    monkeypatch.setattr(ed, "HUB_MIN_RELEASES", 1)
+    ed.configure(None)
+    await ed.refresh_hubs(neo4j_driver)
+    live = await ed.get_explore_traversal(neo4j_driver, "artist", "A1", 2)
+    assert {"Bop"} <= {r["name"] for r in live if r["type"] == "style"}  # A1 -BY- m2 -IS- Bop, through a Master
+    stored = await ed.get_explore_traversal(neo4j_driver, "genre", "Rock", 2)
+    names = [r["name"] for r in stored]
+    assert "Zeta" in names  # an artist known only through the master m2
+    assert "Bop" in names
+    people = [r for r in stored if r["type"] in ("artist", "label")]
+    assert people[-1]["id"] == "194"  # the nameless placeholder is last, though it has the most credits
+    assert [r["id"] for r in people].count("194") == 1  # demoted, not removed
+    live_rock = await ed.get_explore_traversal(neo4j_driver, "label", "L1", 2)
+    assert any(r["id"] == "194" for r in live_rock if r["type"] == "artist")
+    assert [r["id"] for r in live_rock if r["type"] == "artist"][-1] == "194"
+    ed.configure(None)
+    monkeypatch.setattr(ed, "HUB_MIN_RELEASES", 50_000)
