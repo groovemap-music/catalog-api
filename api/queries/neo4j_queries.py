@@ -408,11 +408,16 @@ async def _expand_releases(
     driver: AsyncResilientNeo4jDriver, match_clause: str, name: str, limit: int, offset: int, *, before_year: int | None = None
 ) -> list[dict[str, Any]]:
     """Get paginated releases matching a MATCH clause (shared by artist/genre/label/style)."""
+    # With before_year the filter keeps only 0 < year <= before_year, so no year is null and
+    # ``year IS NULL ASC, year DESC, id`` is exactly ``r.year DESC, r.id``. Ordering by the
+    # properties themselves lets Neo4j keep a bounded top-N instead of sorting every release
+    # (Brass & Military: 8.6 s and 336 MB before; Rock: 336 MB).
+    order_by = "r.year DESC, r.id" if before_year else "year IS NULL ASC, year DESC, id"
     cypher = f"""
     MATCH {match_clause}{_year_filter(before_year)}
     RETURN r.id AS id, r.title AS name, 'release' AS type,
            CASE WHEN r.year > 0 THEN r.year ELSE null END AS year
-    ORDER BY year IS NULL ASC, year DESC, id
+    ORDER BY {order_by}
     SKIP $offset
     LIMIT $limit
     """
