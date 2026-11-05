@@ -765,9 +765,12 @@ class NLQToolRunner:
     async def _handle_get_genre_tree(self, _params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:
         import common.agent_tools as agent_tools  # noqa: PLC0415
 
-        from api.queries import genre_tree_queries  # noqa: PLC0415
+        from api import genre_tree_store  # noqa: PLC0415
 
-        return await agent_tools.get_genre_tree(driver=self._driver, tree_fn=genre_tree_queries.get_genre_tree)
+        try:
+            return await agent_tools.get_genre_tree(driver=self._driver, tree_fn=genre_tree_store.get_genre_tree)
+        except genre_tree_store.GenreTreeNotReadyError:
+            return {"error": "The genre tree is being built — try again shortly"}
 
     async def _handle_get_graph_stats(self, _params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:
         import common.agent_tools as agent_tools  # noqa: PLC0415

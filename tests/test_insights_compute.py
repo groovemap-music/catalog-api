@@ -1,7 +1,9 @@
 """Tests for the insights compute router endpoints."""
 
 import json
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import yaml
@@ -17,6 +19,32 @@ def _neo4j_error(code: str, message: str = "boom") -> Neo4jError:
     the right subclass (ClientError / TransientError) from the code itself.
     """
     return Neo4jError._hydrate_neo4j(code=code, message=message)
+
+
+def _rows(rows: list[dict[str, Any]]) -> Callable[..., AsyncIterator[dict[str, Any]]]:
+    """A stand-in for ``iter_rarity_signals`` that yields ``rows``."""
+
+    def _iter(*_args: object, **_kwargs: object) -> AsyncIterator[dict[str, Any]]:
+        async def _gen() -> AsyncIterator[dict[str, Any]]:
+            for row in rows:
+                yield row
+
+        return _gen()
+
+    return _iter
+
+
+def _failing(error: BaseException) -> Callable[..., AsyncIterator[dict[str, Any]]]:
+    """A stand-in for ``iter_rarity_signals`` that raises ``error`` before its first row."""
+
+    def _iter(*_args: object, **_kwargs: object) -> AsyncIterator[dict[str, Any]]:
+        async def _gen() -> AsyncIterator[dict[str, Any]]:
+            raise error
+            yield {}
+
+        return _gen()
+
+    return _iter
 
 
 def test_community_enrichment_contract_covers_producer_worst_case() -> None:
@@ -449,14 +477,49 @@ class TestRarityScoresEndpoint:
     def test_success(self, test_client: TestClient) -> None:
         """Returns 200 with rarity score results."""
         mock_results = [{"release_id": "1", "rarity_score": 85.0, "tier": "ultra-rare"}]
-        with patch(
-            "api.routers.insights_compute.fetch_all_rarity_signals",
-            new=AsyncMock(return_value=mock_results),
-        ):
+        with patch("api.routers.insights_compute.iter_rarity_signals", new=_rows(mock_results)):
             response = test_client.get("/api/internal/insights/rarity-scores")
         assert response.status_code == 200
         data = response.json()
         assert data["items"] == mock_results
+
+    def test_body_is_byte_identical_to_the_json_response_it_replaced(self, test_client: TestClient) -> None:
+        """Streaming changes how the body is written, not a byte of it, across chunk boundaries."""
+        from fastapi.responses import JSONResponse
+
+        import api.routers.insights_compute as ic_router
+
+        rows = [
+            {"release_id": f"{i:05d}", "title": f'Ünï "{i}"', "rarity_score": i / 7, "family_signals": {"a": [1, None]}}
+            for i in range(ic_router._RARITY_CHUNK_ROWS * 2 + 3)
+        ]
+        with patch("api.routers.insights_compute.iter_rarity_signals", new=_rows(rows)):
+            response = test_client.get("/api/internal/insights/rarity-scores")
+        assert response.status_code == 200
+        assert response.content == JSONResponse(content={"items": rows}).body
+
+    def test_no_releases_is_an_empty_list(self, test_client: TestClient) -> None:
+        with patch("api.routers.insights_compute.iter_rarity_signals", new=_rows([])):
+            response = test_client.get("/api/internal/insights/rarity-scores")
+        assert response.status_code == 200
+        assert response.json() == {"items": []}
+
+    def test_rows_are_pulled_as_the_body_is_written_not_collected_first(self, test_client: TestClient) -> None:
+        """The route never asks for a row it has not yet written, which is what bounds the process."""
+        pulled: list[int] = []
+
+        def _counting(*_args: object, **_kwargs: object) -> AsyncIterator[dict[str, int]]:
+            async def _gen() -> AsyncIterator[dict[str, int]]:
+                for i in range(3):
+                    pulled.append(i)
+                    yield {"release_id": i}
+
+            return _gen()
+
+        with patch("api.routers.insights_compute.iter_rarity_signals", new=_counting):
+            response = test_client.get("/api/internal/insights/rarity-scores")
+        assert response.json() == {"items": [{"release_id": 0}, {"release_id": 1}, {"release_id": 2}]}
+        assert pulled == [0, 1, 2]
 
     def test_503_when_not_ready(self, test_client: TestClient) -> None:
         """Returns 503 when Neo4j is not configured."""
@@ -475,10 +538,7 @@ class TestRarityScoresEndpoint:
         from neo4j.exceptions import TransientError
 
         err = TransientError("MemoryPoolOutOfMemoryError")
-        with patch(
-            "api.routers.insights_compute.fetch_all_rarity_signals",
-            new=AsyncMock(side_effect=err),
-        ):
+        with patch("api.routers.insights_compute.iter_rarity_signals", new=_failing(err)):
             response = test_client.get("/api/internal/insights/rarity-scores")
         assert response.status_code == 503
         assert "error" in response.json()
@@ -490,10 +550,7 @@ class TestRarityScoresEndpoint:
         unhandled 500 on every production run.
         """
         err = _neo4j_error("Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration", "transaction timed out")
-        with patch(
-            "api.routers.insights_compute.fetch_all_rarity_signals",
-            new=AsyncMock(side_effect=err),
-        ):
+        with patch("api.routers.insights_compute.iter_rarity_signals", new=_failing(err)):
             response = test_client.get("/api/internal/insights/rarity-scores")
         assert response.status_code == 503
         body = response.json()
@@ -503,10 +560,7 @@ class TestRarityScoresEndpoint:
         """The driver can surface the failure wrapped in an ExceptionGroup."""
         err = _neo4j_error("Neo.ClientError.Transaction.TransactionTimedOut", "transaction timed out")
         group = ExceptionGroup("unhandled errors in a TaskGroup", [err])
-        with patch(
-            "api.routers.insights_compute.fetch_all_rarity_signals",
-            new=AsyncMock(side_effect=group),
-        ):
+        with patch("api.routers.insights_compute.iter_rarity_signals", new=_failing(group)):
             response = test_client.get("/api/internal/insights/rarity-scores")
         assert response.status_code == 503
 
@@ -516,10 +570,7 @@ class TestRarityScoresEndpoint:
 
         err = _neo4j_error("Neo.ClientError.Statement.SyntaxError", "invalid syntax")
         assert isinstance(err, ClientError)  # same class, non-retryable code
-        with patch(
-            "api.routers.insights_compute.fetch_all_rarity_signals",
-            new=AsyncMock(side_effect=err),
-        ):
+        with patch("api.routers.insights_compute.iter_rarity_signals", new=_failing(err)):
             # The fixture's TestClient uses raise_server_exceptions=False, so an
             # unhandled exception surfaces as a 500 rather than propagating.
             response = test_client.get("/api/internal/insights/rarity-scores")
