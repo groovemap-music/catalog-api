@@ -234,3 +234,45 @@ def test_a_watcher_that_cannot_start_is_reported_as_an_error_with_an_alert(valke
         _start_import_cache_watch(app, SimpleNamespace(import_cache_watch_interval=60), object(), valkey, neo4j)  # type: ignore[arg-type]
     assert app.state.import_cache_task is None
     assert [(entry["log_level"], entry["alert"], entry["reason"]) for entry in logs] == [("error", "import_cache_watch_not_started", reason)]
+
+
+@pytest.mark.asyncio
+async def test_a_version_waiting_hours_on_maintenance_raises_an_alert_and_a_short_wait_does_not() -> None:
+    valkey = _store()
+    await valkey.set(import_cache._MARKER_KEY, "1")
+    with (
+        patch.object(import_cache, "latest_discogs_version", AsyncMock(return_value="2")),
+        patch.object(import_cache, "graph_maintenance", AsyncMock(return_value=(False, None))),
+    ):
+        with structlog.testing.capture_logs() as first:
+            assert await import_cache.check_import_cache(AsyncMock(), valkey, None) is False  # the clock starts
+        assert not [entry for entry in first if entry.get("alert")]
+        with structlog.testing.capture_logs() as soon, patch.object(import_cache.time, "time", return_value=__import__("time").time() + 600):
+            await import_cache.check_import_cache(AsyncMock(), valkey, None)
+        assert not [entry for entry in soon if entry.get("alert")]  # ten minutes is a normal pass
+        with structlog.testing.capture_logs() as late, patch.object(import_cache.time, "time", return_value=__import__("time").time() + 3 * 3600):
+            await import_cache.check_import_cache(AsyncMock(), valkey, None)
+        alerts = [entry for entry in late if entry.get("alert")]
+        assert [(entry["log_level"], entry["alert"], entry["version"]) for entry in alerts] == [("error", "import_cache_maintenance_stuck", "2")]
+        assert alerts[0]["waited_hours"] >= 3
+
+
+@pytest.mark.asyncio
+async def test_the_wait_clock_is_cleared_once_the_version_is_maintained_and_restarts_for_a_new_version() -> None:
+    valkey = _store()
+    await valkey.set(import_cache._MARKER_KEY, "1")
+    with patch.object(import_cache, "latest_discogs_version", AsyncMock(return_value="2")):
+        with patch.object(import_cache, "graph_maintenance", AsyncMock(return_value=(False, None))):
+            await import_cache.check_import_cache(AsyncMock(), valkey, None)
+        assert await _get(valkey, import_cache._WAIT_KEY) is not None
+        await import_cache.check_import_cache(AsyncMock(), valkey, None)  # maintained now
+        assert await _get(valkey, import_cache._WAIT_KEY) is None
+    await valkey.set(import_cache._WAIT_KEY, "1|0.0")  # a stale clock from an older version
+    with (
+        patch.object(import_cache, "latest_discogs_version", AsyncMock(return_value="3")),
+        patch.object(import_cache, "graph_maintenance", AsyncMock(return_value=(False, None))),
+        structlog.testing.capture_logs() as logs,
+    ):
+        await import_cache.check_import_cache(AsyncMock(), valkey, None)
+    assert not [entry for entry in logs if entry.get("alert")]  # version 3 starts its own clock
+    assert (await _get(valkey, import_cache._WAIT_KEY) or "").startswith("3|")

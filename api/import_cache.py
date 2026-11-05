@@ -24,6 +24,7 @@ It is always on and cheap: one indexed lookup per poll, and a SCAN only when a n
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Final
 
 import structlog
@@ -38,6 +39,12 @@ from api.valkey_keys import valkey_key, valkey_pattern, with_legacy_keys, with_l
 logger = structlog.get_logger(__name__)
 
 _MARKER_KEY: Final = valkey_key("import_cache:discogs_version")
+# When the watcher first found a version loaded in both stores but not maintained: "<version>|<epoch seconds>". Kept in Valkey so
+# a restart does not reset the clock, and cleared once the version is maintained.
+_WAIT_KEY: Final = valkey_key("import_cache:maintenance_wait_since")
+# A maintenance pass that has not finished this long after the load is stuck, or the enricher is not running. The watcher
+# logs an error with an alert for it on every poll after the threshold, so a pass that stalls does not sit unnoticed.
+MAINTENANCE_WAIT_ALERT_SECONDS: Final = 2 * 3600
 # expand:* holds the paged /api/explore expansions and their budget index (expand:index, a sorted set),
 # which the same pattern covers, so the index is reset with the pages it counts.
 _INVALIDATED_FAMILIES: Final = ("explore:*", "trends:*", "expand:*")
@@ -116,6 +123,30 @@ async def invalidate_explore_and_trends(valkey: Any) -> int:
     return deleted
 
 
+async def _note_maintenance_wait(valkey: Any, version: str) -> None:
+    """Remember when this version started waiting on the enricher, and raise an alert once it has waited for hours."""
+    raw = await valkey.get(_WAIT_KEY)
+    text = raw.decode() if isinstance(raw, bytes) else raw
+    since: float | None = None
+    if text and text.split("|", 1)[0] == version:
+        try:
+            since = float(text.split("|", 1)[1])
+        except IndexError, ValueError:
+            since = None
+    now = time.time()
+    if since is None:
+        await valkey.set(_WAIT_KEY, f"{version}|{now}")
+        return
+    waited = now - since
+    if waited >= MAINTENANCE_WAIT_ALERT_SECONDS:
+        logger.error(
+            "❌ Import cache is waiting on the enricher's maintenance pass; Explore and trends counts stay stale until it finishes",
+            version=version,
+            waited_hours=round(waited / 3600, 1),
+            alert="import_cache_maintenance_stuck",
+        )
+
+
 async def check_import_cache(pool: Any, valkey: Any, driver: Any) -> bool:
     """One poll: invalidate once a new import is complete in both stores. Returns whether it invalidated.
 
@@ -133,7 +164,9 @@ async def check_import_cache(pool: Any, valkey: Any, driver: Any) -> bool:
     # graph loaded but not yet maintained leaves the marker alone, so the poll after maintenance invalidates.
     maintained, stats_version = await graph_maintenance(driver, version)
     if not maintained:
+        await _note_maintenance_wait(valkey, version)
         return False
+    await valkey.delete(_WAIT_KEY)
     # stats_version (the artist and label sweeps) arrives after maintained_at on the same node; its arrival is a new state.
     state = version if stats_version is None else f"{version}:{stats_version}"
     stored = await valkey.get(_MARKER_KEY)
