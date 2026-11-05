@@ -60,10 +60,17 @@ async def get_user_collection(
 ) -> tuple[list[dict[str, Any]], int]:
     """Get releases in user's Discogs collection from Neo4j.
 
+    The page is cut first (ORDER BY, SKIP, LIMIT over the collection edges) and only then are the
+    artist, label, genre and style of those rows read, so a page costs its own size and not the size
+    of the collection. The final ORDER BY restores the order the aggregation loses.
+
     Returns (results, total_count).
     """
     cypher = """
     MATCH (u:User {id: $user_id})-[c:COLLECTED]->(r:Release)
+    WITH r, c
+    ORDER BY c.date_added DESC, r.id
+    SKIP $offset LIMIT $limit
     OPTIONAL MATCH (r)-[:BY]->(a:Artist)
     OPTIONAL MATCH (r)-[:ON]->(l:Label)
     OPTIONAL MATCH (r)-[:IS]->(g:Genre)
@@ -80,7 +87,6 @@ async def get_user_collection(
            c.rating AS rating, c.date_added AS date_added,
            c.folder_id AS folder_id
     ORDER BY c.date_added DESC, r.id
-    SKIP $offset LIMIT $limit
     """
     count_cypher = """
     MATCH (u:User {id: $user_id})-[:COLLECTED]->(r:Release)
@@ -105,6 +111,9 @@ async def get_user_wantlist(
     """
     cypher = """
     MATCH (u:User {id: $user_id})-[w:WANTS]->(r:Release)
+    WITH r, w
+    ORDER BY w.date_added DESC, r.id
+    SKIP $offset LIMIT $limit
     OPTIONAL MATCH (r)-[:BY]->(a:Artist)
     OPTIONAL MATCH (r)-[:ON]->(l:Label)
     OPTIONAL MATCH (r)-[:IS]->(g:Genre)
@@ -120,7 +129,6 @@ async def get_user_wantlist(
            genres, styles,
            w.rating AS rating, w.date_added AS date_added
     ORDER BY w.date_added DESC, r.id
-    SKIP $offset LIMIT $limit
     """
     count_cypher = """
     MATCH (u:User {id: $user_id})-[:WANTS]->(r:Release)
