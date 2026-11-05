@@ -125,6 +125,7 @@ class _Instruments:
     activity_events: Any
     activity_failures: Any
     cache: Any
+    cache_budget_evicted: Any
     cache_budget_full: Any
     cache_write_failures: Any
     db_operation_duration: Any
@@ -161,6 +162,11 @@ def _build_instruments() -> _Instruments:
             "groovemap.api.cache",
             unit="{event}",
             description="Valkey cache-aside lookups by logical cache and outcome",
+        ),
+        cache_budget_evicted=meter.create_counter(
+            "groovemap.api.cache.budget_evictions",
+            unit="{event}",
+            description="Cache entries removed so a costlier result could take their slot in a full key budget",
         ),
         cache_budget_full=meter.create_counter(
             "groovemap.api.cache.budget_full",
@@ -304,6 +310,11 @@ def record_cache_write_failure(cache: str, exc: BaseException) -> None:
         return
     _write_failure_log[cache] = (now, 0)
     logger.warning("⚠️ Cache write failed", cache=cache, error_type=error_type, suppressed=suppressed)
+
+
+def record_cache_budget_evicted(cache: str) -> None:
+    """Count one entry removed from ``cache`` so a costlier one could take its slot (a state of the cache, not a failure)."""
+    instruments().cache_budget_evicted.add(1, {"cache": cache})
 
 
 def record_cache_budget_full(cache: str) -> None:
