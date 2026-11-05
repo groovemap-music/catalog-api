@@ -2,6 +2,80 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v0.7.0 (2026-11-05)
+
+### Release notes
+
+Deploy order: **catalog-api v0.7.0 first, then database-schema v0.7.0 on lux, then analytics-engine v0.6.0.**
+
+- This release pins database-schema v0.7.0 and reads the Identity Ledger by relation name, whatever its kind, so it runs on the v0.6.x materialized views and on the v0.7.0 tables. A catalog-api older than this one answers 503 on the ledger routes once the schema is applied. Applying the schema first is therefore wrong; the first ledger refresh after the schema upgrade rebuilds the tables.
+- analytics-engine v0.6.0 writes `label_ids` and `artist_ids` into `insights.release_rarity` and needs contract 1.7.0 (this release) and schema v0.7.0. Run before the schema is live and every rarity run fails with `UndefinedColumn`.
+- The rarity table stays empty, and the rarity routes return no rows, until one complete analytics-engine rarity run finishes after both upgrades. The previous table is replaced in one transaction, so nothing partial is ever visible.
+
+### Feat
+
+- **schema**: pin database-schema v0.7.0 and treat the ledger state row as "refreshed"
+- **rarity**: emit label_ids and artist_ids in the rarity rows
+- **rarity**: page a tier on the leaderboard by an opaque server-made keyset cursor
+- **cache**: let a costlier entry evict the lightest one when a cache budget is full
+- **insights**: serve the rarity walk as stateless pages, contract 1.6.0
+- **import-cache**: alert when a version waits hours on the enricher's maintenance pass
+- **telemetry**: time each Cypher statement by its query function name
+- **search**: bound search slots and statement time so cold searches cannot starve logins
+
+### Fix
+
+- **rarity**: bind the leaderboard cursor to its tier and reject values Postgres would refuse
+- **rarity**: page a tier by keyset with the score bound as REAL
+- **autocomplete**: keep a prefix on every token so plain input matches what it did before
+- **autocomplete**: lower-case tokens so a typed AND, OR or NOT is a word, not an operator
+- **autocomplete**: cut input into analyzer tokens and require all of them
+- **cache**: admit on the entity's release count, not on measured latency
+- **cache**: keep cheap results from taking cache budget slots
+- **recommend**: start label hub paths at the label name and release hub locks by token
+- **recommend**: masters in hub scans, placeholder demotion, resumable hub build, lock, one row per neighbour
+- **collection**: break gap-page ties on release id
+- **credits**: page over distinct credits so every credit appears exactly once; record limit/offset in the contract
+- **import-cache**: reset budget indexes, wait for enricher maintenance, make a watcher that cannot start loud
+- **insights**: leave the always-zero image field out of the completeness percentage
+- **cache**: bound the budgeted caches in bytes as well as keys
+- **cache**: apply a key budget to the Explore, trends and strata caches
+- **ledger**: find the identity ledger views by name, whatever their relkind
+- **telemetry**: name a statement by its first public caller and tag its operation
+- **expand**: import time for the cache budget after the genre tree cache left explore.py
+- **insights**: stream rarity-scores instead of holding a row per release
+- **genre-tree**: retry the first build on a short backoff while no tree exists
+- **expand**: cap the number of live expand cache keys globally
+- **expand**: write only bounded, expensive expand pages to the shared Valkey
+- **explore**: invalidate only once the graph's own extraction latch is complete too
+- **explore**: drop Explore and trends caches when a Discogs import completes
+- **neo4j**: give every request-path read a 30 s server timeout and map timeouts to 504
+- **network**: bound the direct expansion of a hub root and flag the result truncated
+
+### Perf
+
+- **autocomplete**: boost whole-name matches in the Lucene query and pass the limit to Lucene
+- **label-dna**: stored identity counts, one year read, one genre and style pass, HAS_STYLE for similar labels behind a completeness marker
+- **label-dna**: stored identity counts, one year read, one genre and style pass, HAS_STYLE for similar labels
+- **recommend**: exact genres and styles and a stable nearest-100 of artists and labels in explore
+- **musicbrainz**: count enrichment status one relationship type at a time, and cache it
+- **collection**: cut the page before enriching it in collection, wantlist and gap queries
+- **credits**: paginate /api/credits/person with a total and rank second hops before the slice
+- **explore**: read an artist's release and label counts from stored stats
+- **rarity**: answer by-label and by-artist from an empty rarity table without reading ids from Neo4j
+- **network**: skip the live genre read for artists the enricher already swept
+- **network**: rank cluster neighbours first, then read primary genre
+- **insights**: read each document once in the data-completeness counts
+- **explore**: read the enricher's stored counts for node details and expand totals
+- **strata**: cache shared-personnel edges by the drawn masters and limit
+- **graph**: count each label with a bare aggregation so get_graph_stats uses the count store
+- **musicbrainz**: type the artist relationships query on the enricher's types
+- **genre-tree**: serve /api/genre-tree from a stored tree rebuilt in the background
+- **expand**: order before_year pages by index and cache expand pages in Valkey
+- **network**: collect the collaborator set once and return page and total from one statement
+- **search**: count totals without ranking or sorting
+- **search**: rank before reading documents so common terms stop taking seconds
+
 ## v0.6.0 (2026-10-30)
 
 ### Feat
