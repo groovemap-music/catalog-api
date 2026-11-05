@@ -18,6 +18,7 @@ class FakeValkey:
     def __init__(self) -> None:
         self.data: dict[str, str] = {}
         self.gets = 0
+        self.index: dict[str, dict[str, float]] = {}
 
     async def get(self, key: str) -> str | None:
         self.gets += 1
@@ -25,6 +26,18 @@ class FakeValkey:
 
     async def setex(self, key: str, _ttl: int, value: str) -> None:
         self.data[key] = value
+
+    async def zremrangebyscore(self, key: str, _low: str, high: float) -> None:
+        self.index[key] = {k: v for k, v in self.index.get(key, {}).items() if v > high}
+
+    async def zcard(self, key: str) -> int:
+        return len(self.index.get(key, {}))
+
+    async def zadd(self, key: str, mapping: dict[str, float]) -> None:
+        self.index.setdefault(key, {}).update(mapping)
+
+    async def expire(self, _key: str, _seconds: int) -> None:
+        return None
 
 
 @pytest.fixture
@@ -154,3 +167,23 @@ def test_the_default_page_with_a_year_filter_is_stored_at_offset_zero(test_clien
     with a, b:
         test_client.get(URL + "&before_year=1970")
     assert len(valkey.data) == 1
+
+
+def test_the_global_key_budget_stops_writes_but_not_responses(test_client: TestClient, valkey: FakeValkey) -> None:
+    query, _count, a, b = _dispatch([{"id": "r1"}], 5000)
+    with a, b, patch.object(explore, "_EXPAND_CACHE_MAX_KEYS", 2):
+        for node in ("A", "B", "C", "D"):
+            response = test_client.get(URL.replace("node_id=Rock", f"node_id={node}"))
+            assert response.status_code == 200
+            assert response.json()["total"] == 5000
+    assert len([k for k in valkey.data if "index" not in k]) == 2  # the third and fourth were served, not stored
+    assert query.await_count == 4
+
+
+def test_expired_index_entries_free_the_budget(test_client: TestClient, valkey: FakeValkey) -> None:
+    _query, _count, a, b = _dispatch([{"id": "r1"}], 5000)
+    valkey.index[explore._EXPAND_INDEX_KEY] = {"old-1": 1.0, "old-2": 2.0}  # long expired
+    with a, b, patch.object(explore, "_EXPAND_CACHE_MAX_KEYS", 2):
+        test_client.get(URL)
+    assert len(valkey.data) == 1
+    assert len(valkey.index[explore._EXPAND_INDEX_KEY]) == 1

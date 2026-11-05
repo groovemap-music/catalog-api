@@ -204,6 +204,24 @@ _EXPAND_CACHE_PAGE_SIZE = 50
 _EXPAND_CACHE_MAX_PAGES = 20
 
 
+# A global budget on top of the per-page rules: an index of live expand keys (a sorted set scored by expiry)
+# caps how many exist at once. At about 10 KB a page this is on the order of 100 MB, whatever callers send.
+_EXPAND_CACHE_MAX_KEYS = 10_000
+_EXPAND_INDEX_KEY = valkey_key("expand:index")
+
+
+async def _store_expand_page(cache_key: str, body: dict[str, Any]) -> None:
+    """Write one page unless the live-key budget is spent. Expired index entries are dropped first."""
+    now = time.time()
+    await _valkey.zremrangebyscore(_EXPAND_INDEX_KEY, "-inf", now)
+    if await _valkey.zcard(_EXPAND_INDEX_KEY) >= _EXPAND_CACHE_MAX_KEYS:
+        record_cache_write_failure(CACHE_EXPAND, RuntimeError("expand cache budget spent"))
+        return
+    await _valkey.zadd(_EXPAND_INDEX_KEY, {cache_key: now + _EXPLORE_CACHE_TTL})
+    await _valkey.expire(_EXPAND_INDEX_KEY, _EXPLORE_CACHE_TTL)
+    await _valkey.setex(cache_key, _EXPLORE_CACHE_TTL, json.dumps(body))
+
+
 def _expand_page_is_cacheable(limit: int, offset: int, before_year: int | None) -> bool:
     if limit != _EXPAND_CACHE_PAGE_SIZE or offset % _EXPAND_CACHE_PAGE_SIZE or offset >= _EXPAND_CACHE_PAGE_SIZE * _EXPAND_CACHE_MAX_PAGES:
         return False
@@ -255,7 +273,7 @@ async def expand(
     # Only pages worth caching are written (see _expand_page_is_cacheable); an empty page never is.
     if _valkey and cacheable and results and total >= _EXPAND_CACHE_MIN_TOTAL:
         try:
-            await _valkey.setex(cache_key, _EXPLORE_CACHE_TTL, json.dumps(body))
+            await _store_expand_page(cache_key, body)
         except Exception as exc:
             record_cache_write_failure(CACHE_EXPAND, exc)
     return JSONResponse(content=body)
