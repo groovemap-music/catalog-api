@@ -570,6 +570,8 @@ class _CountSpec:
     match_clause: str
     target: str
     compact: bool = False
+    # ("Genre", "artist_count"): the node label and the enricher-written property that holds this count.
+    stored: tuple[str, str] | None = None
 
 
 async def _count(
@@ -579,6 +581,12 @@ async def _count(
     *,
     before_year: int | None,
 ) -> int:
+    if before_year is None and spec.stored is not None:
+        label, prop = spec.stored
+        row = await run_single(driver, f"MATCH (n:{label} {{name: $name}}) RETURN n.{prop} AS total", name=name)
+        if row is not None and row["total"] is not None:
+            return int(row["total"])
+        # Node absent or the property not written yet: count live, as before.
     year_filter = _year_filter(before_year, compact=spec.compact)
     if spec.compact:
         cypher = f"MATCH {spec.match_clause}{year_filter} RETURN count(DISTINCT {spec.target}) AS total"
@@ -592,17 +600,17 @@ async def _count(
 
 _ARTIST_RELEASES_COUNT = _CountSpec("(r:Release)-[:BY]->(a:Artist {name: $name})", "r", compact=True)
 _ARTIST_LABELS_COUNT = _CountSpec("(r:Release)-[:BY]->(a:Artist {name: $name}), (r)-[:ON]->(l:Label)", "l")
-_GENRE_RELEASES_COUNT = _CountSpec("(r:Release)-[:IS]->(g:Genre {name: $name})", "r", compact=True)
-_GENRE_ARTISTS_COUNT = _CountSpec("(r:Release)-[:IS]->(g:Genre {name: $name}), (r)-[:BY]->(a:Artist)", "a")
-_GENRE_LABELS_COUNT = _CountSpec("(r:Release)-[:IS]->(g:Genre {name: $name}), (r)-[:ON]->(l:Label)", "l")
-_GENRE_STYLES_COUNT = _CountSpec("(r:Release)-[:IS]->(g:Genre {name: $name}), (r)-[:IS]->(s:Style)", "s")
-_LABEL_RELEASES_COUNT = _CountSpec("(r:Release)-[:ON]->(l:Label {name: $name})", "r", compact=True)
-_LABEL_ARTISTS_COUNT = _CountSpec("(r:Release)-[:ON]->(l:Label {name: $name}), (r)-[:BY]->(a:Artist)", "a")
-_LABEL_GENRES_COUNT = _CountSpec("(r:Release)-[:ON]->(l:Label {name: $name}), (r)-[:IS]->(g:Genre)", "g")
-_STYLE_RELEASES_COUNT = _CountSpec("(r:Release)-[:IS]->(s:Style {name: $name})", "r", compact=True)
-_STYLE_ARTISTS_COUNT = _CountSpec("(r:Release)-[:IS]->(s:Style {name: $name}), (r)-[:BY]->(a:Artist)", "a")
-_STYLE_LABELS_COUNT = _CountSpec("(r:Release)-[:IS]->(s:Style {name: $name}), (r)-[:ON]->(l:Label)", "l")
-_STYLE_GENRES_COUNT = _CountSpec("(r:Release)-[:IS]->(s:Style {name: $name}), (r)-[:IS]->(g:Genre)", "g")
+_GENRE_RELEASES_COUNT = _CountSpec("(r:Release)-[:IS]->(g:Genre {name: $name})", "r", compact=True, stored=("Genre", "release_count"))
+_GENRE_ARTISTS_COUNT = _CountSpec("(r:Release)-[:IS]->(g:Genre {name: $name}), (r)-[:BY]->(a:Artist)", "a", stored=("Genre", "artist_count"))
+_GENRE_LABELS_COUNT = _CountSpec("(r:Release)-[:IS]->(g:Genre {name: $name}), (r)-[:ON]->(l:Label)", "l", stored=("Genre", "label_count"))
+_GENRE_STYLES_COUNT = _CountSpec("(r:Release)-[:IS]->(g:Genre {name: $name}), (r)-[:IS]->(s:Style)", "s", stored=("Genre", "style_count"))
+_LABEL_RELEASES_COUNT = _CountSpec("(r:Release)-[:ON]->(l:Label {name: $name})", "r", compact=True, stored=("Label", "release_count"))
+_LABEL_ARTISTS_COUNT = _CountSpec("(r:Release)-[:ON]->(l:Label {name: $name}), (r)-[:BY]->(a:Artist)", "a", stored=("Label", "artist_count"))
+_LABEL_GENRES_COUNT = _CountSpec("(r:Release)-[:ON]->(l:Label {name: $name}), (r)-[:IS]->(g:Genre)", "g", stored=("Label", "genre_count"))
+_STYLE_RELEASES_COUNT = _CountSpec("(r:Release)-[:IS]->(s:Style {name: $name})", "r", compact=True, stored=("Style", "release_count"))
+_STYLE_ARTISTS_COUNT = _CountSpec("(r:Release)-[:IS]->(s:Style {name: $name}), (r)-[:BY]->(a:Artist)", "a", stored=("Style", "artist_count"))
+_STYLE_LABELS_COUNT = _CountSpec("(r:Release)-[:IS]->(s:Style {name: $name}), (r)-[:ON]->(l:Label)", "l", stored=("Style", "label_count"))
+_STYLE_GENRES_COUNT = _CountSpec("(r:Release)-[:IS]->(s:Style {name: $name}), (r)-[:IS]->(g:Genre)", "g", stored=("Style", "genre_count"))
 
 
 async def count_artist_releases(driver: AsyncResilientNeo4jDriver, artist_name: str, *, before_year: int | None = None) -> int:
@@ -741,6 +749,13 @@ async def get_release_details(driver: AsyncResilientNeo4jDriver, node_id: str) -
 
 async def get_label_details(driver: AsyncResilientNeo4jDriver, node_id: str) -> dict[str, Any] | None:
     """Get full details for a label node."""
+    stored = await run_single(
+        driver,
+        "MATCH (l:Label {id: $id}) RETURN l.id AS id, l.name AS name, l.release_count AS release_count",
+        id=node_id,
+    )
+    if stored is None or stored["release_count"] is not None:
+        return stored  # absent, or the enricher's count: no traversal
     cypher = """
     MATCH (l:Label {id: $id})
     OPTIONAL MATCH (r:Release)-[:ON]->(l)
@@ -752,6 +767,13 @@ async def get_label_details(driver: AsyncResilientNeo4jDriver, node_id: str) -> 
 
 async def get_genre_details(driver: AsyncResilientNeo4jDriver, node_id: str) -> dict[str, Any] | None:
     """Get full details for a genre node."""
+    stored = await run_single(
+        driver,
+        "MATCH (g:Genre {name: $id}) RETURN g.name AS id, g.name AS name, g.artist_count AS artist_count",
+        id=node_id,
+    )
+    if stored is None or stored["artist_count"] is not None:
+        return stored  # absent, or the enricher's count: no traversal
     cypher = """
     MATCH (g:Genre {name: $id})
     OPTIONAL MATCH (r:Release)-[:IS]->(g), (r)-[:BY]->(a:Artist)
@@ -763,6 +785,13 @@ async def get_genre_details(driver: AsyncResilientNeo4jDriver, node_id: str) -> 
 
 async def get_style_details(driver: AsyncResilientNeo4jDriver, node_id: str) -> dict[str, Any] | None:
     """Get full details for a style node."""
+    stored = await run_single(
+        driver,
+        "MATCH (s:Style {name: $id}) RETURN s.name AS id, s.name AS name, s.artist_count AS artist_count",
+        id=node_id,
+    )
+    if stored is None or stored["artist_count"] is not None:
+        return stored  # absent, or the enricher's count: no traversal
     cypher = """
     MATCH (s:Style {name: $id})
     OPTIONAL MATCH (r:Release)-[:IS]->(s), (r)-[:BY]->(a:Artist)
@@ -1005,17 +1034,17 @@ async def get_graph_stats(driver: AsyncResilientNeo4jDriver) -> dict[str, int]:
     """Return aggregate node counts for each entity type in the graph."""
     cypher = """
     CALL {
-        MATCH (a:Artist) RETURN 'artists' AS label, count(a) AS cnt
+        MATCH (a:Artist) WITH count(a) AS cnt RETURN 'artists' AS label, cnt
         UNION ALL
-        MATCH (l:Label) RETURN 'labels' AS label, count(l) AS cnt
+        MATCH (l:Label) WITH count(l) AS cnt RETURN 'labels' AS label, cnt
         UNION ALL
-        MATCH (r:Release) RETURN 'releases' AS label, count(r) AS cnt
+        MATCH (r:Release) WITH count(r) AS cnt RETURN 'releases' AS label, cnt
         UNION ALL
-        MATCH (m:Master) RETURN 'masters' AS label, count(m) AS cnt
+        MATCH (m:Master) WITH count(m) AS cnt RETURN 'masters' AS label, cnt
         UNION ALL
-        MATCH (g:Genre) RETURN 'genres' AS label, count(g) AS cnt
+        MATCH (g:Genre) WITH count(g) AS cnt RETURN 'genres' AS label, cnt
         UNION ALL
-        MATCH (s:Style) RETURN 'styles' AS label, count(s) AS cnt
+        MATCH (s:Style) WITH count(s) AS cnt RETURN 'styles' AS label, cnt
     }
     RETURN label, cnt
     """
