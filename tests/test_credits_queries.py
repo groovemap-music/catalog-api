@@ -259,8 +259,8 @@ class TestAutocompletePerson:
         driver = _make_mock_driver(query_returns=[])
         assert await autocomplete_person(driver, "Bob*") == []
         params = driver.session().__aenter__.return_value.run.await_args.args[1]
-        # Input * is literal; exactly one unescaped prefix wildcard is appended.
-        assert params["query"] == r"Bob\**"
+        # Input * is literal in the boosted whole-word term and in the prefix; one unescaped wildcard is appended.
+        assert params["query"] == r"(Bob\*^100 OR Bob\**)"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

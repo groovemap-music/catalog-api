@@ -114,3 +114,19 @@ silently rewrite another repository's schema, image, or runtime configuration.
 - New database work has explicit pagination or timeout behavior.
 - The default test suite remains isolated from live services.
 - Performance results do not contain credentials, tokens, or private URLs.
+
+
+## Autocomplete ranking
+
+Artist, label, genre, style and person autocomplete (`gm-catalog-api-4wgh`, audit H15) send `{limit}` to the Lucene
+fulltext procedure, so only the best `limit` names are scored and returned (`the*`: 163 ms before, 3 to 7 ms warm).
+Prefix terms are constant-score in Lucene, so the query adds boosts that decide who is "best":
+
+* two or more words: the whole phrase is boosted x100, so a name equal to what was typed outranks longer names that
+  merely start with it (`David Bowie` before `David Bowie Tribute`);
+* one word: a name containing that whole word is boosted over one that only starts with it.
+
+The set of names matched is unchanged (verified against the old query on a real Neo4j). Known limits: Lucene cannot
+see how well known a name is, so among names with the same score the order is by shorter name, then id; names that
+differ only by punctuation score the same (`David Bowie` and `David Bowie,`; a name equal to the typed text wins the
+tie); and a name that repeats the typed word (`The The The`) can outscore the single word (`The`).

@@ -35,10 +35,34 @@ def _escape_lucene_query(query: str) -> str:
     return _LUCENE_SPECIAL_RE.sub(r"\\\1", query)
 
 
+# Score boost for a whole-name match. Prefix (wildcard) terms are constant-score in Lucene, so without this
+# every match scored 1.0 and ``ORDER BY score LIMIT n`` kept an arbitrary n (audit H15).
+_EXACT_BOOST = 100
+
+
+def _escape_lucene_phrase(text: str) -> str:
+    """Escape what is special inside a quoted Lucene phrase: the quote and the backslash."""
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def _build_autocomplete_query(query: str) -> str:
-    """Build a Lucene fulltext query with wildcard on each term for prefix matching."""
+    """Build a Lucene fulltext query: every name that starts with the terms, best matches boosted.
+
+    The set of names matched is exactly what ``t1* AND t2*`` matched before. On top of that:
+
+    * with two or more terms, the whole phrase is boosted, so a name that is those words and nothing else
+      outranks a longer name that merely starts with them (Lucene's length normalisation then puts the
+      shorter name first);
+    * with one term, a name containing that whole word is boosted over one that only starts with it.
+    """
     terms = query.split()
-    return " AND ".join(_escape_lucene_query(term) + "*" for term in terms)
+    if not terms:
+        return ""
+    prefixes = " AND ".join(_escape_lucene_query(term) + "*" for term in terms)
+    if len(terms) == 1:
+        return f"({_escape_lucene_query(terms[0])}^{_EXACT_BOOST} OR {prefixes})"
+    phrase = _escape_lucene_phrase(" ".join(terms))
+    return f'"{phrase}"^{_EXACT_BOOST} OR ({prefixes})'
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,14 +77,17 @@ async def _autocomplete(
     query: str,
     limit: int,
 ) -> list[dict[str, Any]]:
+    # The limit goes to Lucene, which then keeps the highest-scoring names instead of scoring every match
+    # ('the*' matches tens of thousands; 119 ms warm before, 4 to 7 ms now). The tie-break only orders names
+    # Lucene scored equally: a name equal to what was typed, then the shorter, then the lower id.
     cypher = f"""
-    CALL db.index.fulltext.queryNodes('{spec.index}', $query)
+    CALL db.index.fulltext.queryNodes('{spec.index}', $query, {{limit: $limit}})
     YIELD node, score
     RETURN {spec.id_expression} AS id, node.name AS name, score
-    ORDER BY score DESC
+    ORDER BY score DESC, toLower(node.name) = $typed DESC, size(node.name), id
     LIMIT $limit
     """
-    return await run_query(driver, cypher, query=_build_autocomplete_query(query), limit=limit)
+    return await run_query(driver, cypher, query=_build_autocomplete_query(query), limit=limit, typed=" ".join(query.split()).lower())
 
 
 _ARTIST_AUTOCOMPLETE = _AutocompleteSpec("artist_name_fulltext", "node.id")
