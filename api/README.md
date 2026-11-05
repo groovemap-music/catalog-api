@@ -685,8 +685,10 @@ that applies them runs on every request, so one entry serves every caller and ev
 view of that root. The caller's
 `COLLECTED` and `WANTS` edges are read on every request and never cached, so the shared
 entry holds no caller id, state, recorded time, or copy id. A hit skips the root, ladder, and
-PostgreSQL reads; drawn labels and shared-personnel edges are still read, bounded by the
-budget. When Valkey is down or not configured, or an entry was written in an older cached
+PostgreSQL reads. Drawn labels are still read, bounded by the budget. Shared-personnel edges
+are cached under `<prefix>explore:strata:personnel:<sha256>`, keyed on the ordered drawn master ids
+and the edge limit, for the same 24 hours, so a repeated draw of the same masters skips that read.
+The key holds no caller data. When Valkey is down or not configured, or an entry was written in an older cached
 form, the read goes to the graph and the response is the same. A failed cache write is
 counted under the `strata` cache and does not fail the request.
 
