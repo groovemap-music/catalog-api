@@ -88,6 +88,7 @@ parent AS (
 parents AS (SELECT edition_id, count(*) AS works FROM parent GROUP BY edition_id)
 SELECT
     (SELECT count(*) FROM provider_aliases) AS provider_aliases,
+    (SELECT count(*) FROM provider_aliases WHERE provider IN ('barcode', 'catalog_number', 'isrc', 'matrix')) AS identifier_aliases,
     (SELECT count(*) FROM edition) AS editions,
     (SELECT count(*) FROM catalog_items AS item WHERE item.kind = 'master'
        AND NOT EXISTS (SELECT 1 FROM catalog_item_supersessions AS s WHERE s.superseded_id = item.id AND s.valid_to IS NULL)) AS works,
