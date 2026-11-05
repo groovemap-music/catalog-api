@@ -13,6 +13,11 @@ complete version differs, it deletes every ``explore:*`` and ``trends:*`` key, w
 the strata catalog and personnel entries, and the expand pages with their budget index. On the first run, with no marker, it records the
 version and deletes nothing, since an empty cache has nothing stale in it.
 
+It invalidates only when the enricher has finished maintaining the stored counts (`maintained_at` on the version's
+``ExtractionCompletion`` node): a cache refilled earlier would hold pre-maintenance counts for its whole TTL. The arrival of
+``stats_version`` (the artist and label sweeps) is a new state and invalidates once more. The budget indexes of the budgeted caches
+(`budget:<cache>:index`, api/cache_budget.py) are reset with the pages they count.
+
 It is always on and cheap: one indexed lookup per poll, and a SCAN only when a new import lands.
 """
 
@@ -23,9 +28,11 @@ from typing import Any, Final
 
 import structlog
 
+from api.cache_budget import index_key
 from api.queries.helpers import run_single
 from api.reattach_trigger import _LATCH_PRESENT, _LATEST_COMPLETE, DISCOGS_DATA_TYPES, _scalar
-from api.valkey_keys import valkey_key, valkey_pattern, with_legacy_patterns
+from api.telemetry import CACHE_EXPAND, CACHE_EXPLORE, CACHE_STRATA, CACHE_TRENDS
+from api.valkey_keys import valkey_key, valkey_pattern, with_legacy_keys, with_legacy_patterns
 
 
 logger = structlog.get_logger(__name__)
@@ -34,6 +41,10 @@ _MARKER_KEY: Final = valkey_key("import_cache:discogs_version")
 # expand:* holds the paged /api/explore expansions and their budget index (expand:index, a sorted set),
 # which the same pattern covers, so the index is reset with the pages it counts.
 _INVALIDATED_FAMILIES: Final = ("explore:*", "trends:*", "expand:*")
+# Each budgeted cache keeps its live-key index at <prefix>budget:<cache>:index (api/cache_budget.py). It lives outside the
+# families above, so it is deleted by name: left behind, a full budget stays full for up to 24 h after the pages it counts
+# are gone, and every new write is refused.
+_BUDGETED_CACHES: Final = (CACHE_EXPLORE, CACHE_TRENDS, CACHE_STRATA, CACHE_EXPAND)
 
 
 async def latest_discogs_version(pool: Any) -> str | None:
@@ -47,8 +58,16 @@ async def latest_discogs_version(pool: Any) -> str | None:
 
 _GRAPH_LATCH: Final = """
 MATCH (m:ExtractionCompletion {version: $version})
-RETURN coalesce(m.signals, []) AS signals
+RETURN coalesce(m.signals, []) AS signals,
+       m.maintained_at IS NOT NULL AS maintained,
+       m.stats_version AS stats_version
 """
+
+
+async def _graph_latch(driver: Any, version: str) -> dict[str, Any] | None:
+    if driver is None:
+        return None
+    return await run_single(driver, _GRAPH_LATCH, version=version)
 
 
 async def graph_extraction_complete(driver: Any, version: str) -> bool:
@@ -59,16 +78,32 @@ async def graph_extraction_complete(driver: Any, version: str) -> bool:
     means the graph's writes for this extraction have landed. Until then the counts can still
     move, so the watcher waits.
     """
-    if driver is None:
-        return False
-    record = await run_single(driver, _GRAPH_LATCH, version=version)
+    record = await _graph_latch(driver, version)
     signals = set(record["signals"]) if record else set()
     return set(DISCOGS_DATA_TYPES) <= signals
+
+
+async def graph_maintenance(driver: Any, version: str) -> tuple[bool, int | None]:
+    """Whether the enricher has finished maintaining the stored counts for this version, and its ``stats_version``.
+
+    ``maintained_at`` is written after the enricher's maintenance pass, which is what makes ``Genre.release_count`` and the other
+    stored counts final. A cache refilled before that holds pre-maintenance counts for its whole 24 h TTL, so the watcher waits for
+    it. ``stats_version`` is set later, once the enricher's artist and label sweeps (``primary_genre``, ``HAS_STYLE``) finish; it is
+    part of the marker so that its arrival invalidates once more.
+    """
+    record = await _graph_latch(driver, version)
+    if record is None:
+        return False, None
+    stats_version = record.get("stats_version")
+    return bool(record.get("maintained")), None if stats_version is None else int(stats_version)
 
 
 async def invalidate_explore_and_trends(valkey: Any) -> int:
     """Delete every Explore and trends key by SCAN, and return how many were deleted."""
     deleted = 0
+    # Built per call: the key prefix is configuration, not a constant of the module.
+    for index in with_legacy_keys([index_key(cache) for cache in _BUDGETED_CACHES]):
+        deleted += int(await valkey.delete(index))
     patterns = with_legacy_patterns([valkey_pattern(family) for family in _INVALIDATED_FAMILIES])
     for pattern in patterns:
         cursor: str | int = "0"
@@ -94,14 +129,21 @@ async def check_import_cache(pool: Any, valkey: Any, driver: Any) -> bool:
         return False
     if not await graph_extraction_complete(driver, version):
         return False
+    # The counts a cache would be refilled with must be final: wait for the enricher's maintenance pass. A poll that finds the
+    # graph loaded but not yet maintained leaves the marker alone, so the poll after maintenance invalidates.
+    maintained, stats_version = await graph_maintenance(driver, version)
+    if not maintained:
+        return False
+    # stats_version (the artist and label sweeps) arrives after maintained_at on the same node; its arrival is a new state.
+    state = version if stats_version is None else f"{version}:{stats_version}"
     stored = await valkey.get(_MARKER_KEY)
     stored_text = stored.decode() if isinstance(stored, bytes) else stored
-    if stored_text == version:
+    if stored_text == state:
         return False
     if stored_text is not None:
         deleted = await invalidate_explore_and_trends(valkey)
-        logger.info("🧹 Import completed; Explore and trends caches invalidated", version=version, deleted=deleted)
-    await valkey.set(_MARKER_KEY, version)
+        logger.info("🧹 Import completed; Explore and trends caches invalidated", version=version, state=state, deleted=deleted)
+    await valkey.set(_MARKER_KEY, state)
     return stored_text is not None
 
 

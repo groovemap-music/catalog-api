@@ -8,14 +8,23 @@ from unittest.mock import AsyncMock, patch
 
 import fakeredis as fake_store
 import pytest
+import structlog
 from common.config import valkey_key
 
 import api.import_cache as import_cache
+from api.cache_budget import index_key, store_within_budget
+from api.telemetry import CACHE_EXPLORE, CACHE_STRATA, CACHE_TRENDS
+
+
+_REAL_GRAPH_MAINTENANCE = import_cache.graph_maintenance
 
 
 @pytest.fixture(autouse=True)
 def graph_done() -> object:
-    with patch.object(import_cache, "graph_extraction_complete", AsyncMock(return_value=True)) as graph:
+    with (
+        patch.object(import_cache, "graph_extraction_complete", AsyncMock(return_value=True)) as graph,
+        patch.object(import_cache, "graph_maintenance", AsyncMock(return_value=(True, None))),
+    ):
         yield graph
 
 
@@ -145,3 +154,83 @@ async def test_a_finished_sql_load_waits_for_the_graph_then_invalidates_once() -
         assert await import_cache.check_import_cache(AsyncMock(), valkey, None) is False
 
     assert await _get(valkey, valkey_key("explore:artist:David Bowie")) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cache", [CACHE_EXPLORE, CACHE_TRENDS, CACHE_STRATA])
+async def test_a_full_budget_accepts_new_writes_after_invalidation(cache: str) -> None:
+    """The budget index sits outside the invalidated families: left behind, a full cache stayed full and refused writes."""
+    valkey = _store()
+    for n in range(3):
+        assert await store_within_budget(valkey, cache=cache, key=valkey_key(f"{cache}:k{n}"), value="{}", ttl=86400, max_keys=3)
+    assert not await store_within_budget(valkey, cache=cache, key=valkey_key(f"{cache}:new"), value="{}", ttl=86400, max_keys=3)  # full
+    assert await valkey.zcard(index_key(cache)) == 3
+    await valkey.set(import_cache._MARKER_KEY, "1")
+
+    with patch.object(import_cache, "latest_discogs_version", AsyncMock(return_value="2")):
+        assert await import_cache.check_import_cache(AsyncMock(), valkey, None) is True
+
+    assert await valkey.zcard(index_key(cache)) == 0
+    assert await store_within_budget(valkey, cache=cache, key=valkey_key(f"{cache}:new"), value="{}", ttl=86400, max_keys=3)  # accepted
+
+
+@pytest.mark.asyncio
+async def test_the_watcher_waits_for_the_enricher_maintenance_before_invalidating() -> None:
+    """A cache refilled before maintained_at holds pre-maintenance counts for its whole TTL."""
+    valkey = _store()
+    await valkey.set(import_cache._MARKER_KEY, "1")
+    await valkey.set(valkey_key("explore:artist:David Bowie"), '{"release_count": 8850}')
+
+    with (
+        patch.object(import_cache, "latest_discogs_version", AsyncMock(return_value="2")),
+        patch.object(import_cache, "graph_maintenance", AsyncMock(return_value=(False, None))),
+    ):
+        assert await import_cache.check_import_cache(AsyncMock(), valkey, None) is False
+        assert await _get(valkey, import_cache._MARKER_KEY) == "1"  # untouched: the next poll tries again
+    assert await _get(valkey, valkey_key("explore:artist:David Bowie")) == '{"release_count": 8850}'
+
+    with patch.object(import_cache, "latest_discogs_version", AsyncMock(return_value="2")):
+        assert await import_cache.check_import_cache(AsyncMock(), valkey, None) is True  # maintained now
+    assert await _get(valkey, valkey_key("explore:artist:David Bowie")) is None
+
+
+@pytest.mark.asyncio
+async def test_the_arrival_of_stats_version_invalidates_once_more() -> None:
+    """The artist and label sweeps (primary_genre, HAS_STYLE) finish after maintained_at; caches filled in between are stale."""
+    valkey = _store()
+    await valkey.set(import_cache._MARKER_KEY, "1")
+    with patch.object(import_cache, "latest_discogs_version", AsyncMock(return_value="2")):
+        assert await import_cache.check_import_cache(AsyncMock(), valkey, None) is True  # maintained, no stats_version yet
+        assert await _get(valkey, import_cache._MARKER_KEY) == "2"
+        await valkey.set(valkey_key("explore:artist:Filled in between"), "{}")
+        assert await import_cache.check_import_cache(AsyncMock(), valkey, None) is False  # nothing new
+        with patch.object(import_cache, "graph_maintenance", AsyncMock(return_value=(True, 1))):
+            assert await import_cache.check_import_cache(AsyncMock(), valkey, None) is True
+            assert await _get(valkey, import_cache._MARKER_KEY) == "2:1"
+            assert await import_cache.check_import_cache(AsyncMock(), valkey, None) is False  # same state again
+        assert await _get(valkey, valkey_key("explore:artist:Filled in between")) is None
+
+
+@pytest.mark.asyncio
+async def test_graph_maintenance_reads_the_marker_from_the_graph_node() -> None:
+    record = {"signals": [], "maintained": True, "stats_version": 3}
+    with patch.object(import_cache, "run_single", AsyncMock(return_value=record)):
+        assert await _REAL_GRAPH_MAINTENANCE(object(), "2") == (True, 3)
+    with patch.object(import_cache, "run_single", AsyncMock(return_value={"signals": [], "maintained": False, "stats_version": None})):
+        assert await _REAL_GRAPH_MAINTENANCE(object(), "2") == (False, None)
+    with patch.object(import_cache, "run_single", AsyncMock(return_value=None)):
+        assert await _REAL_GRAPH_MAINTENANCE(object(), "2") == (False, None)
+    assert await _REAL_GRAPH_MAINTENANCE(None, "2") == (False, None)
+
+
+@pytest.mark.parametrize(("valkey", "neo4j", "reason"), [(None, object(), "no_valkey"), (object(), None, "no_neo4j")])
+def test_a_watcher_that_cannot_start_is_reported_as_an_error_with_an_alert(valkey: object, neo4j: object, reason: str) -> None:
+    from types import SimpleNamespace
+
+    from api.api import _start_import_cache_watch
+
+    app = SimpleNamespace(state=SimpleNamespace())
+    with structlog.testing.capture_logs() as logs:
+        _start_import_cache_watch(app, SimpleNamespace(import_cache_watch_interval=60), object(), valkey, neo4j)  # type: ignore[arg-type]
+    assert app.state.import_cache_task is None
+    assert [(entry["log_level"], entry["alert"], entry["reason"]) for entry in logs] == [("error", "import_cache_watch_not_started", reason)]

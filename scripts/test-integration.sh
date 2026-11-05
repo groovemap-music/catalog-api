@@ -98,6 +98,7 @@ NEO4J_PASSWORD="${password}" \
         tests/test_search_pool_integration.py \
         tests/test_search_total_integration.py \
         tests/test_neo4j_timeout_integration.py \
+        tests/test_import_cache_integration.py \
         tests/test_cluster_integration.py \
         tests/test_expand_order_integration.py \
         tests/test_precomputed_counts_integration.py \

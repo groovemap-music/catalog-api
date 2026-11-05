@@ -399,9 +399,17 @@ def _start_import_cache_watch(_app: FastAPI, config: ApiConfig, pool: Any, valke
     """Start the watcher that drops the Explore and trends caches when an import completes (api/import_cache.py)."""
     _app.state.import_cache_task = None
     if valkey is None:
+        logger.error(
+            "❌ Import cache watch is not running: there is no Valkey to hold the marker", alert="import_cache_watch_not_started", reason="no_valkey"
+        )
         return
     if neo4j is None:
-        logger.warning("⚠️ Import cache watch needs Neo4j to see the graph finish; it is not started")
+        # Without it the Explore and trends caches are never dropped when an import completes: counts stay stale for the whole TTL.
+        logger.error(
+            "❌ Import cache watch is not running: it needs Neo4j to see the graph finish, so Explore and trends caches will not be dropped after an import",
+            alert="import_cache_watch_not_started",
+            reason="no_neo4j",
+        )
         return
     _app.state.import_cache_task = asyncio.create_task(run_import_cache_watch(pool, valkey, neo4j, config.import_cache_watch_interval))
     logger.info("🧹 Import cache watch started", interval=config.import_cache_watch_interval)
