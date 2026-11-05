@@ -107,6 +107,9 @@ LEDGER_REFRESH_SUCCESS = "success"
 # `db.system.name` for the Valkey client, which is not one of the shared resilient wrappers
 # and therefore reports `db.client.operation.duration` itself.
 VALKEY_SYSTEM = "valkey"
+NEO4J_SYSTEM = "neo4j"
+# The wrapper samples in the same histogram use "session"; a statement is an "execute".
+NEO4J_OPERATION = "execute"
 
 # Valkey client methods that manage the connection rather than issue a command. Timing them
 # would put lifecycle latency into the database-operation histogram.
@@ -315,6 +318,22 @@ def record_sync_duration(seconds: float, outcome: str) -> None:
 def record_valkey_operation(operation: str, seconds: float, error_type: str | None = None) -> None:
     """Record one Valkey command as `db.client.operation.duration`."""
     attributes: dict[str, str] = {"db.system.name": VALKEY_SYSTEM, "db.operation.name": operation}
+    if error_type is not None:
+        attributes["error.type"] = error_type
+    instruments().db_operation_duration.record(seconds, attributes)
+
+
+def record_neo4j_query(query: str, seconds: float, error_type: str | None = None) -> None:
+    """Record one named Cypher statement as `db.client.operation.duration`.
+
+    ``query`` is the code name of the query function that issued the statement, so the
+    attribute set is fixed by the code and never carries a parameter value or the Cypher text.
+    """
+    attributes: dict[str, str] = {
+        "db.system.name": NEO4J_SYSTEM,
+        "db.operation.name": NEO4J_OPERATION,
+        "db.query.summary": query,
+    }
     if error_type is not None:
         attributes["error.type"] = error_type
     instruments().db_operation_duration.record(seconds, attributes)
