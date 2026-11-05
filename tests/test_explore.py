@@ -1055,147 +1055,42 @@ class TestCollaboratorsEndpoint:
 
 
 class TestGenreTreeEndpoint:
-    """Tests for GET /api/genre-tree."""
+    """Tests for GET /api/genre-tree: served from the stored tree, never a scan."""
 
     def test_genre_tree_success(self, test_client: TestClient) -> None:
-        import api.routers.explore as explore_module
-
-        # Ensure cache is empty
-        explore_module._genre_tree_cache = None
-
         genres = [{"name": "Rock", "release_count": 1000, "styles": [{"name": "Punk", "release_count": 200}]}]
-        with patch("api.routers.explore.genre_tree_queries.get_genre_tree", AsyncMock(return_value=genres)):
+        with patch("api.routers.explore.genre_tree_store.get_genre_tree", AsyncMock(return_value=genres)):
             response = test_client.get("/api/genre-tree")
 
         assert response.status_code == 200
-        data = response.json()
-        assert data["genres"] == genres
+        assert response.json() == {"genres": genres}
 
-        # Clean up
-        explore_module._genre_tree_cache = None
-
-    def test_genre_tree_empty_database(self, test_client: TestClient) -> None:
-        import api.routers.explore as explore_module
-
-        explore_module._genre_tree_cache = None
-        with patch("api.routers.explore.genre_tree_queries.get_genre_tree", AsyncMock(return_value=[])):
+    def test_genre_tree_empty(self, test_client: TestClient) -> None:
+        with patch("api.routers.explore.genre_tree_store.get_genre_tree", AsyncMock(return_value=[])):
             response = test_client.get("/api/genre-tree")
         assert response.status_code == 200
         assert response.json() == {"genres": []}
-        explore_module._genre_tree_cache = None
 
-    def test_genre_tree_cache_hit(self, test_client: TestClient) -> None:
-        import time
+    def test_genre_tree_not_built_yet_is_503_with_retry_after(self, test_client: TestClient) -> None:
+        from api.genre_tree_store import GenreTreeNotReadyError
 
-        import api.routers.explore as explore_module
-
-        cached = {"genres": [{"name": "Jazz", "release_count": 500, "styles": []}]}
-        explore_module._genre_tree_cache = cached
-        explore_module._genre_tree_cache_time = time.monotonic()  # fresh
-
-        try:
+        with patch("api.routers.explore.genre_tree_store.get_genre_tree", AsyncMock(side_effect=GenreTreeNotReadyError("cold"))):
             response = test_client.get("/api/genre-tree")
-            assert response.status_code == 200
-            assert response.json() == cached
-        finally:
-            explore_module._genre_tree_cache = None
+        assert response.status_code == 503
+        assert "retry-after" in response.headers
 
-    def test_genre_tree_cache_expired(self, test_client: TestClient) -> None:
-        import time
+    def test_genre_tree_request_never_queries_neo4j(self, test_client: TestClient) -> None:
+        import api.genre_tree_store as store
 
-        import api.routers.explore as explore_module
-
-        explore_module._genre_tree_cache = {"genres": []}
-        # Set cache time far enough in the past to guarantee expiry (TTL is 300s)
-        explore_module._genre_tree_cache_time = time.monotonic() - 600
-
-        fresh = [{"name": "Electronic", "release_count": 800, "styles": []}]
-        try:
-            with patch("api.routers.explore.genre_tree_queries.get_genre_tree", AsyncMock(return_value=fresh)):
-                response = test_client.get("/api/genre-tree")
-            assert response.status_code == 200
-            assert response.json()["genres"] == fresh
-        finally:
-            explore_module._genre_tree_cache = None
-
-    def test_genre_tree_no_driver_503(self, test_client: TestClient) -> None:
-        import api.routers.explore as explore_module
-
-        original = explore_module._neo4j_driver
-        explore_module._neo4j_driver = None
-        try:
+        snapshot = store.Snapshot(genres=[{"name": "Jazz", "release_count": 5, "styles": []}], signature="1:5:0", built_at=0.0)
+        with (
+            patch.object(store, "_snapshot", snapshot),
+            patch("api.queries.genre_tree_queries.build_genre_tree", AsyncMock(side_effect=AssertionError("scan on the request path"))),
+            patch("api.queries.helpers.run_query", AsyncMock(side_effect=AssertionError("query on the request path"))),
+        ):
             response = test_client.get("/api/genre-tree")
-            assert response.status_code == 503
-        finally:
-            explore_module._neo4j_driver = original
-
-    def test_genre_tree_timeout_504(self, test_client: TestClient) -> None:
-        from neo4j.exceptions import ClientError as Neo4jClientError
-
-        import api.routers.explore as explore_module
-
-        explore_module._genre_tree_cache = None
-
-        exc = Neo4jClientError("TransactionTimedOut")
-        with patch("api.routers.explore.genre_tree_queries.get_genre_tree", AsyncMock(side_effect=exc)):
-            response = test_client.get("/api/genre-tree")
-
-        assert response.status_code == 504
-        assert "timed out" in response.json()["error"]
-
-    def test_genre_tree_other_neo4j_error_returns_500(self, test_client: TestClient) -> None:
-        from neo4j.exceptions import ClientError as Neo4jClientError
-
-        import api.routers.explore as explore_module
-
-        explore_module._genre_tree_cache = None
-
-        exc = Neo4jClientError("SomeOtherError")
-        with patch("api.routers.explore.genre_tree_queries.get_genre_tree", AsyncMock(side_effect=exc)):
-            response = test_client.get("/api/genre-tree")
-        assert response.status_code == 500
-
-    def test_genre_tree_lock_recheck_returns_cache(self, test_client: TestClient) -> None:
-        """After acquiring the lock, if cache was refreshed by another coroutine, return cached result."""
-        import asyncio
-        import time
-
-        import api.routers.explore as explore_module
-
-        cached_data = {"genres": [{"name": "Rock", "release_count": 500, "styles": []}]}
-
-        # Set cache to expired so the outer check passes
-        explore_module._genre_tree_cache = {"genres": []}
-        explore_module._genre_tree_cache_time = time.monotonic() - 600
-
-        # Create a lock wrapper that refreshes cache on acquire, simulating
-        # another coroutine refreshing it while we waited for the lock
-        class _CacheRefreshingLock:
-            def __init__(self) -> None:
-                self._lock = asyncio.Lock()
-
-            async def __aenter__(self) -> None:
-                await self._lock.__aenter__()
-                # Simulate: cache was refreshed by another holder before we got the lock
-                explore_module._genre_tree_cache = cached_data
-                explore_module._genre_tree_cache_time = time.monotonic()
-
-            async def __aexit__(self, *args: Any) -> None:
-                await self._lock.__aexit__(*args)
-
-        explore_module._genre_tree_lock = _CacheRefreshingLock()
-        mock_query = AsyncMock(return_value=[])
-
-        try:
-            with patch("api.routers.explore.genre_tree_queries.get_genre_tree", mock_query):
-                response = test_client.get("/api/genre-tree")
-            assert response.status_code == 200
-            assert response.json() == cached_data
-            # The Neo4j query should NOT have been called — cache was already fresh
-            mock_query.assert_not_called()
-        finally:
-            explore_module._genre_tree_cache = None
-            explore_module._genre_tree_lock = None
+        assert response.status_code == 200
+        assert response.json()["genres"][0]["name"] == "Jazz"
 
 
 class TestGraphStatsEndpoint:
@@ -1268,17 +1163,34 @@ class TestCollaboratorQueries:
 
 
 class TestGenreTreeQueries:
-    """Tests for api/queries/genre_tree_queries.py functions."""
+    """Tests for api/queries/genre_tree_queries.py (the scan semantics are proven on a real Neo4j)."""
 
     @pytest.mark.asyncio
-    async def test_get_genre_tree(self) -> None:
-        expected = [{"name": "Rock", "release_count": 1000, "styles": []}]
-        with patch("api.queries.genre_tree_queries.run_query", AsyncMock(return_value=expected)) as mock_run:
-            result = await genre_tree_queries.get_genre_tree(MagicMock())
-        assert result == expected
-        mock_run.assert_called_once()
-        _, kwargs = mock_run.call_args
-        assert kwargs["timeout"] == 30.0
+    async def test_build_reads_counts_from_the_genre_nodes_and_scans_one_genre_at_a_time(self) -> None:
+        genres = [{"name": "Jazz", "release_count": 5}, {"name": "Rock", "release_count": 9}]
+        styles = {"Jazz": [{"name": "Bop", "release_count": 3}], "Rock": [{"name": "Punk", "release_count": 4}]}
+
+        async def fake_run_query(_driver: Any, cypher: str, **params: Any) -> list[dict[str, Any]]:
+            return genres if "RETURN g.name AS name, g.release_count" in cypher else styles[params["genre"]]
+
+        with patch("api.queries.genre_tree_queries.run_query", AsyncMock(side_effect=fake_run_query)) as mock_run:
+            tree = await genre_tree_queries.build_genre_tree(MagicMock())
+        assert [g["name"] for g in tree] == ["Rock", "Jazz"]
+        assert tree[0] == {"name": "Rock", "release_count": 9, "styles": styles["Rock"]}
+        assert mock_run.await_count == 3  # one genre list, then one scan per genre
+        assert all(c.kwargs["timeout"] <= 120.0 for c in mock_run.await_args_list)
+
+    @pytest.mark.asyncio
+    async def test_build_counts_a_genre_with_no_stored_count(self) -> None:
+        async def fake_run_query(_driver: Any, cypher: str, **_params: Any) -> list[dict[str, Any]]:
+            return [{"name": "Odd", "release_count": None}] if "RETURN g.name AS name" in cypher else []
+
+        with (
+            patch("api.queries.genre_tree_queries.run_query", AsyncMock(side_effect=fake_run_query)),
+            patch("api.queries.genre_tree_queries.run_single", AsyncMock(return_value={"release_count": 7})),
+        ):
+            tree = await genre_tree_queries.build_genre_tree(MagicMock())
+        assert tree == [{"name": "Odd", "release_count": 7, "styles": []}]
 
 
 _NEO4J_RELEASE: dict[str, Any] = {"id": "10", "name": "Selected Ambient Works", "year": 1992, "formats": ["Vinyl"]}

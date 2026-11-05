@@ -235,6 +235,9 @@ origin in production so password-reset links do not point at localhost.
 | `EXPLORE_HUBS_REFRESH_ENABLED` | `true` | Compute `/api/recommend/explore` discoveries for hub genres, styles and labels in the background (see `docs/explore-discoveries.md`) |
 | `EXPLORE_HUBS_REFRESH_INTERVAL` | `3600` | Seconds between checks for missing or changed hubs |
 | `EXPLORE_HUBS_MAX_AGE` | `604800` | Seconds after which a hub is recomputed even if its release count did not change |
+| `GENRE_TREE_REFRESH_ENABLED` | `true` | Rebuild the stored `/api/genre-tree` in the background; off means the route answers 503 until a tree is stored by another replica |
+| `GENRE_TREE_REFRESH_INTERVAL` | `3600` | How often the refresh checks the genre counts (one 46-hit statement), in seconds |
+| `GENRE_TREE_MAX_AGE` | `86400` | Seconds after which the tree is rebuilt even when the counts did not change |
 | `SIMILAR_ARTISTS_PRECOMPUTED_ENABLED` | `false` | Serve `/api/recommend/similar/artist/{id}` from the current release of the precomputed `artist_similar_artists` lists; the heuristic path serves whenever this is off or no list is usable (see `docs/similar-artists-precomputed.md`) |
 | `SIMILAR_ARTISTS_FUSION_ALPHA` | `0.8` | Weight on the embedding cosine in `alpha * cosine + (1 - alpha) * heuristic`; `1.0` ranks by the precomputed list alone. Must be within 0 and 1 |
 
