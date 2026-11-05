@@ -1026,17 +1026,17 @@ async def get_graph_stats(driver: AsyncResilientNeo4jDriver) -> dict[str, int]:
     """Return aggregate node counts for each entity type in the graph."""
     cypher = """
     CALL {
-        MATCH (a:Artist) RETURN 'artists' AS label, count(a) AS cnt
+        MATCH (a:Artist) WITH count(a) AS cnt RETURN 'artists' AS label, cnt
         UNION ALL
-        MATCH (l:Label) RETURN 'labels' AS label, count(l) AS cnt
+        MATCH (l:Label) WITH count(l) AS cnt RETURN 'labels' AS label, cnt
         UNION ALL
-        MATCH (r:Release) RETURN 'releases' AS label, count(r) AS cnt
+        MATCH (r:Release) WITH count(r) AS cnt RETURN 'releases' AS label, cnt
         UNION ALL
-        MATCH (m:Master) RETURN 'masters' AS label, count(m) AS cnt
+        MATCH (m:Master) WITH count(m) AS cnt RETURN 'masters' AS label, cnt
         UNION ALL
-        MATCH (g:Genre) RETURN 'genres' AS label, count(g) AS cnt
+        MATCH (g:Genre) WITH count(g) AS cnt RETURN 'genres' AS label, cnt
         UNION ALL
-        MATCH (s:Style) RETURN 'styles' AS label, count(s) AS cnt
+        MATCH (s:Style) WITH count(s) AS cnt RETURN 'styles' AS label, cnt
     }
     RETURN label, cnt
     """

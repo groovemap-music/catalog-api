@@ -1327,6 +1327,25 @@ class TestGraphStatsQuery:
         result = await get_graph_stats(driver)
         assert result == {}
 
+    @pytest.mark.asyncio
+    async def test_graph_stats_query_uses_count_store_shape(self) -> None:
+        """Each branch must count a bare label scan so the planner can use the count store.
+
+        A literal in the aggregation's RETURN (``RETURN 'artists' AS label, count(a)``) forces a full
+        scan of every labelled node (audit H10, gm-catalog-api-88cu).
+        """
+        from api.queries.neo4j_queries import get_graph_stats
+
+        driver = _make_driver(records=[])
+        await get_graph_stats(driver)
+
+        mock_session = driver.session.return_value
+        cypher = cypher_text(mock_session.run.call_args[0][0])
+        for label, var in [("Artist", "a"), ("Label", "l"), ("Release", "r"), ("Master", "m"), ("Genre", "g"), ("Style", "s")]:
+            assert f"MATCH ({var}:{label}) WITH count({var}) AS cnt RETURN" in cypher
+        assert "RETURN 'artists' AS label, count(a)" not in cypher
+        assert cypher.count("UNION ALL") == 5
+
 
 # ---------------------------------------------------------------------------
 # Unknown-year (null) releases must sort last, not first,
