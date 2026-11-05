@@ -9,6 +9,7 @@ full cache and no cache, and that a full budget is reported as its own state, no
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import functools
 import os
 from collections.abc import AsyncIterator, Iterator
@@ -113,6 +114,7 @@ async def test_the_routes_stay_bounded_and_answer_the_same(valkey: Any, route: s
             patch.object(explore_router, "_neo4j_driver", object()),
             patch.object(explore_router, "_valkey", client),
             patch.dict(getattr(explore_router, dispatch), {entity_type: fake_query}),
+            patch.object(explore_router, "_MIN_CACHE_COMPUTE_SECONDS", 0.0),  # the fake queries are instant; cost has its own test
             patch.object(explore_router, "store_within_budget", functools.partial(cache_budget.store_within_budget, max_keys=BUDGET)),
             patch.object(cache_budget, "record_cache_budget_full") as budget_full,
             patch("api.telemetry.record_cache_write_failure") as write_failure,
@@ -138,3 +140,59 @@ async def test_a_noeviction_valkey_never_sees_more_than_the_budget(valkey: Any) 
         for i in range(2000):
             await cache_budget.store_within_budget(valkey, cache="t", key=f"t:{i}", value="x" * 200, ttl=300, max_keys=BUDGET)
     assert await valkey.dbsize() == BUDGET + 1  # the budgeted keys and their index
+
+
+HEAVY = 5.0  # seconds a heavy root takes to compute
+CHEAP = 0.01
+
+
+async def test_a_walk_of_cheap_roots_leaves_the_slots_to_heavy_ones(valkey: Any) -> None:
+    """A client walking distinct cheap names (60/min, so ~100 in two minutes) must not fill strata's budget."""
+    admit = functools.partial(cache_budget.store_within_budget, valkey, cache="strata", ttl=300, max_keys=BUDGET, min_compute_seconds=0.2)
+
+    cheap = [await admit(key=f"strata:cheap{i}", value="c", compute_seconds=CHEAP) for i in range(WALK)]
+    heavy = [await admit(key=f"strata:heavy{i}", value="h", compute_seconds=HEAVY) for i in range(BUDGET)]
+
+    assert not any(cheap)  # a cheap root is recomputed cheaper than a slot is worth
+    assert all(heavy)  # and every heavy root is still cacheable afterwards
+    assert len(await _keys(valkey, "strata:cheap")) == 0
+    assert len(await _keys(valkey, "strata:heavy")) == BUDGET
+    assert await valkey.zcard(cache_budget.index_key("strata")) == BUDGET  # bounds from 57d6 unchanged
+
+
+async def test_cheap_roots_never_register_as_a_spent_budget(valkey: Any) -> None:
+    """A skip for cost is not ``budget_full``, so only real exhaustion of the budget raises the alert."""
+    with patch.object(cache_budget, "record_cache_budget_full") as full:
+        for i in range(WALK):
+            await cache_budget.store_within_budget(
+                valkey, cache="t", key=f"t:{i}", value="v", ttl=300, max_keys=BUDGET, compute_seconds=CHEAP, min_compute_seconds=0.2
+            )
+        full.assert_not_called()
+        for i in range(BUDGET + 3):
+            await cache_budget.store_within_budget(
+                valkey, cache="t", key=f"t:h{i}", value="v", ttl=300, max_keys=BUDGET, compute_seconds=HEAVY, min_compute_seconds=0.2
+            )
+        assert full.call_count == 3  # three heavy writes met a genuinely full budget
+
+
+async def test_the_strata_route_stores_only_a_catalog_that_was_slow_to_build(valkey: Any) -> None:
+    from api.routers.explore import _store_strata_catalog, _strata_cache_key
+    from tests.test_explore_strata import CATALOG  # a small real Catalog
+
+    with patch.object(explore_router, "_valkey", valkey):
+        await _store_strata_catalog(dataclasses.replace(CATALOG, root_id="cheap"), CHEAP)
+        await _store_strata_catalog(dataclasses.replace(CATALOG, root_id="heavy"), HEAVY)
+
+    assert await valkey.exists(_strata_cache_key("cheap")) == 0
+    assert await valkey.exists(_strata_cache_key("heavy")) == 1
+
+
+async def test_without_the_cost_rule_the_same_walk_locks_heavy_roots_out(valkey: Any) -> None:
+    """The failure the rule fixes (the 57d6 behaviour): the same walk, admitting everything."""
+    admit = functools.partial(cache_budget.store_within_budget, valkey, cache="strata", ttl=300, max_keys=BUDGET)
+    with patch.object(cache_budget, "record_cache_budget_full"):
+        for i in range(WALK):
+            await admit(key=f"strata:cheap{i}", value="c")
+        heavy = [await admit(key=f"strata:heavy{i}", value="h") for i in range(BUDGET)]
+
+    assert not any(heavy)  # every heavy root refused, recomputed on each request for the whole TTL

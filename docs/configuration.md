@@ -314,12 +314,17 @@ ever carries an identifier, a cache key, or free text.
 | `db.client.operation.duration` | `db.system.name` (`postgresql`, `neo4j`, or `valkey`), `db.operation.name`, `error.type` on failure |
 | `groovemap.api.sync.duration` | `outcome` (`completed`, `failed`, `cancelled`) |
 | `groovemap.api.cache` | `outcome` (`hit`, `miss`), `cache` (the logical Valkey cache) |
-| `groovemap.api.cache.budget_full` | `cache` (the logical Valkey cache). A write skipped because that cache already holds its key budget (10,000 live keys of at most 10 KB; 100 keys of at most 1 MB for strata). A state of the cache, not a Valkey failure: it is never counted under `write_failures` and never logged |
+| `groovemap.api.cache.budget_full` | `cache` (the logical Valkey cache). A write skipped because that cache already holds its key budget (10,000 live keys of at most 10 KB; 100 keys of at most 1 MB for strata). A state of the cache, not a Valkey failure: it is never counted under `write_failures` and never logged. A result that took under 0.2 s to compute is not stored and never counts here, so a sustained rate means the budget is full of results that were slow to compute: alert when it stays above zero for 15 minutes |
 | `groovemap.api.cache.write_failures` | `cache` (the logical Valkey cache), `error.type` (the exception class) |
 | `groovemap.api.nlq.requests` | `outcome` (`success`, `cached`, `error`, `invalid`, `unavailable`) |
 | `groovemap.api.activity_events` | `event_type` (the version 1 event vocabulary, plus `impression`) |
 | `groovemap.api.activity_failures` | `outcome` (`duplicate`, `invalid`, `not_configured`, `no_native_id`, `no_subject`, `write_failed`) |
 | `groovemap.api.identity_ledger.refreshes` | `trigger` (`reattach`, `backfill`, `poll`), `outcome` (`success`, `failed`) |
+
+Explore, trends and strata store a result only when it took at least 0.2 s to compute, because a full
+budget refuses rather than evicts and a client can pick the keys: without the rule one client walking
+100 cheap artist ids held every strata slot for 24 h and left heavy roots recomputed on every request.
+The response is the same either way; only the cache hit rate differs.
 
 Cache writes are best-effort: a failed write never fails the request. Each one increments
 `groovemap.api.cache.write_failures` and logs a `Cache write failed` warning, at most once a

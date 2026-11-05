@@ -244,6 +244,12 @@ def valkey_store(mock_valkey: AsyncMock) -> dict[str, str]:
 class TestCache:
     """The catalog side is cached like /api/explore; the caller's marks never are."""
 
+    @pytest.fixture(autouse=True)
+    def _store_every_result(self) -> Any:
+        """These tests use instant fake queries; the cost rule has its own tests (``test_cache_budget.py``)."""
+        with patch("api.routers.explore._MIN_CACHE_COMPUTE_SECONDS", 0.0):
+            yield
+
     def test_the_cache_holds_no_copy_id_and_a_signed_in_read_does_not_leak_into_it(
         self,
         test_client: TestClient,
