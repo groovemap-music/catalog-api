@@ -1543,7 +1543,7 @@ header: a missing or wrong header is `401`, and with the variable unset every ro
 | GET    | `/api/internal/insights/label-longevity`   | Secret header | Label longevity data from Neo4j       |
 | GET    | `/api/internal/insights/anniversaries`     | Secret header | Anniversary data from Neo4j           |
 | GET    | `/api/internal/insights/data-completeness` | Secret header | Data completeness from PostgreSQL (cached in Valkey for 6 hours) |
-| GET    | `/api/internal/insights/rarity-scores`     | Secret header | Rarity score data from Neo4j and PostgreSQL |
+| GET    | `/api/internal/insights/rarity-scores`     | Secret header | Rarity score data from Neo4j and PostgreSQL, streamed one page at a time |
 | GET    | `/api/internal/insights/community-enrichment` | Secret header | Fetch Discogs community have/want counts for collected releases (at most 1,500 per call) |
 
 ### Health

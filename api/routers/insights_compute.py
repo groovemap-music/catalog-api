@@ -7,13 +7,14 @@ service can fetch data over HTTP instead of importing query modules directly.
 import asyncio
 import json
 import secrets
+from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
 import httpx
 import structlog
 from common import describe_exception
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from neo4j.exceptions import ClientError, Neo4jError, TransientError
 from psycopg.rows import dict_row
 
@@ -30,7 +31,7 @@ from api.queries.insights_neo4j_queries import (
     query_style_year_counts,
 )
 from api.queries.insights_pg_queries import query_data_completeness
-from api.queries.rarity_queries import fetch_all_rarity_signals
+from api.queries.rarity_queries import iter_rarity_signals
 from api.syncer import DISCOGS_API_BASE, MAX_RATE_LIMIT_RETRIES, SYNC_DELAY_SECONDS, _auth_header
 from api.telemetry import CACHE_INSIGHTS_COMPLETENESS, cache_get, record_cache_write_failure
 from api.valkey_keys import valkey_key
@@ -304,17 +305,56 @@ def _retryable_unavailable(exc: BaseException, computation: str) -> JSONResponse
     )
 
 
-@router.get("/rarity-scores")
+# Rows encoded per chunk written to the client. The body is `{"items":[...]}`, byte for byte what
+# `JSONResponse({"items": rows})` produced, written as the rows are scored.
+_RARITY_CHUNK_ROWS = 500
+
+
+def _encode_rarity_row(row: dict[str, Any]) -> str:
+    """Encode one row exactly as `JSONResponse` encodes it (compact, UTF-8, no NaN)."""
+    return json.dumps(row, ensure_ascii=False, allow_nan=False, indent=None, separators=(",", ":"))
+
+
+async def _rarity_body(first: dict[str, Any], rest: AsyncIterator[dict[str, Any]]) -> AsyncIterator[bytes]:
+    """Stream `{"items":[...]}` one chunk of rows at a time, so no response is ever held whole."""
+    chunk = ['{"items":[', _encode_rarity_row(first)]
+    rows = 1
+    try:
+        async for row in rest:
+            chunk.append("," + _encode_rarity_row(row))
+            rows += 1
+            if rows % _RARITY_CHUNK_ROWS == 0:
+                yield "".join(chunk).encode("utf-8")
+                chunk = []
+        chunk.append("]}")
+        yield "".join(chunk).encode("utf-8")
+    except Exception:
+        # Headers are already sent. Ending the body early gives the client a broken document, which
+        # its JSON parser rejects, rather than a complete-looking one with rows missing.
+        logger.exception("⚠️ Rarity stream failed after it began", rows_sent=rows)
+        raise
+
+
+@router.get("/rarity-scores", response_model=None)
 @limiter.limit("5/minute")
-async def rarity_scores(request: Request) -> JSONResponse:  # noqa: ARG001
-    """Return computed rarity scores for all releases from Neo4j."""
+async def rarity_scores(request: Request) -> JSONResponse | StreamingResponse:  # noqa: ARG001
+    """Return computed rarity scores for all releases from Neo4j.
+
+    The body is `{"items": [...]}` with every release, as before, but it is streamed: the API process
+    holds one page of rows rather than one row per release in the graph (about 1.7 KB each, so about
+    17 GB at 10M releases). The first row is read before the response starts, which covers the first
+    pass over the quality signals and the first page, so a Neo4j error there is still a 503.
+    """
     if not _neo4j:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
+    rows = iter_rarity_signals(_neo4j, _pool)
     try:
-        results = await fetch_all_rarity_signals(_neo4j, _pool)
+        first = await anext(rows)
+    except StopAsyncIteration:
+        return JSONResponse(content={"items": []})
     except (TransientError, ClientError, BaseExceptionGroup) as exc:
         return _retryable_unavailable(exc, "Rarity computation")
-    return JSONResponse(content={"items": results})
+    return StreamingResponse(_rarity_body(first, rows), media_type="application/json")
 
 
 async def _enrich_community_counts(

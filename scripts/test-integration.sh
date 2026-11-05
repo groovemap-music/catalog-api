@@ -99,4 +99,5 @@ NEO4J_PASSWORD="${password}" \
         tests/test_search_total_integration.py \
         tests/test_neo4j_timeout_integration.py \
         tests/test_genre_tree_integration.py \
-        tests/test_network_collaborators_integration.py
+        tests/test_network_collaborators_integration.py \
+        tests/test_rarity_stream_integration.py
