@@ -606,7 +606,9 @@ async def get_rarity_tier_page(
     """The next page of a tier's releases after the cursor ``after`` = (rarity_score, release_id).
 
     Pass ``None`` for the first page. Pages are consistent under score ties: every row is returned
-    exactly once in a full walk.
+    exactly once in a full walk, provided the caller sends the cursor score as text with at least
+    9 significant digits (FLT_DECIMAL_DIG). Fewer digits move the score to a neighbouring REAL, and
+    the walk then repeats a tie group, which on real Postgres ran without ending.
     """
     after_score, after_id = after if after is not None else (None, None)
     async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
