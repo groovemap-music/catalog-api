@@ -736,3 +736,91 @@ class TestEventLoopMonitor:
         monkeypatch.setattr(common_telemetry, "_sdk_provider", None)
 
         assert common_telemetry.start_event_loop_monitor() is None
+
+
+class _FakeNeo4jResult:
+    def __init__(self, records: list[dict[str, Any]]) -> None:
+        self._records = records
+
+    def __aiter__(self) -> Any:
+        return self._iterate()
+
+    async def _iterate(self) -> Any:
+        for record in self._records:
+            yield record
+
+    async def single(self) -> dict[str, Any] | None:
+        return self._records[0] if self._records else None
+
+    async def consume(self) -> None:
+        return None
+
+
+class _FakeNeo4jSession:
+    def __init__(self, records: list[dict[str, Any]], error: BaseException | None) -> None:
+        self._records = records
+        self._error = error
+
+    async def __aenter__(self) -> _FakeNeo4jSession:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> bool:
+        return False
+
+    async def run(self, _query: Any, _params: dict[str, Any]) -> _FakeNeo4jResult:
+        if self._error is not None:
+            raise self._error
+        return _FakeNeo4jResult(self._records)
+
+
+def _fake_neo4j_driver(records: list[dict[str, Any]] | None = None, error: BaseException | None = None) -> MagicMock:
+    driver = MagicMock()
+    driver.session = MagicMock(return_value=_FakeNeo4jSession(records or [], error))
+    return driver
+
+
+async def lookup_artist_for_telemetry(driver: Any) -> list[dict[str, Any]]:
+    from api.queries.helpers import run_query
+
+    return await run_query(driver, "MATCH (n:Artist {id: $id}) RETURN n.id AS id", id="secret-artist-id")
+
+
+async def count_artists_for_telemetry(driver: Any) -> int:
+    from api.queries.helpers import run_count
+
+    return await run_count(driver, "MATCH (n:Artist) RETURN count(n) AS total")
+
+
+class TestNeo4jQueryDuration:
+    """db.client.operation.duration for Cypher, named by the query function that issued it."""
+
+    @pytest.mark.asyncio
+    async def test_statement_is_named_by_its_calling_query_function(self, collector: Collector) -> None:
+        await lookup_artist_for_telemetry(_fake_neo4j_driver(records=[{"id": "1"}]))
+
+        assert collector.attributes(DB_DURATION) == [{"db.system.name": "neo4j", "db.query.summary": "lookup_artist_for_telemetry"}]
+
+    @pytest.mark.asyncio
+    async def test_no_parameter_value_or_cypher_text_reaches_an_attribute(self, collector: Collector) -> None:
+        await lookup_artist_for_telemetry(_fake_neo4j_driver(records=[{"id": "1"}]))
+
+        rendered = repr(collector.attributes(DB_DURATION))
+        assert "secret-artist-id" not in rendered
+        assert "MATCH" not in rendered
+
+    @pytest.mark.asyncio
+    async def test_failed_statement_records_its_error_type(self, collector: Collector) -> None:
+        with pytest.raises(RuntimeError):
+            await lookup_artist_for_telemetry(_fake_neo4j_driver(error=RuntimeError("boom")))
+
+        assert collector.attributes(DB_DURATION) == [
+            {"db.system.name": "neo4j", "db.query.summary": "lookup_artist_for_telemetry", "error.type": "RuntimeError"}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_count_helper_is_timed_under_its_own_name(self, collector: Collector) -> None:
+        driver = _fake_neo4j_driver(records=[{"total": 3}])
+
+        assert await count_artists_for_telemetry(driver) == 3
+
+        assert collector.attributes(DB_DURATION) == [{"db.system.name": "neo4j", "db.query.summary": "count_artists_for_telemetry"}]

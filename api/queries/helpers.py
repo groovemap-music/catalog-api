@@ -11,6 +11,10 @@ multiple query modules with a single set of helpers that add:
 from __future__ import annotations
 
 import logging
+import sys
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 from common.query_debug import (
@@ -20,6 +24,8 @@ from common.query_debug import (
     log_profile_result,
 )
 from neo4j import Query
+
+from api.telemetry import record_neo4j_query
 
 
 if TYPE_CHECKING:
@@ -50,6 +56,22 @@ def resolve_timeout(timeout: Timeout) -> float | None:
     if isinstance(timeout, _DefaultTimeout):
         return DEFAULT_READ_TIMEOUT_SECONDS
     return timeout
+
+
+@contextmanager
+def _timed_statement(name: str) -> Iterator[None]:
+    """Record one statement's duration under its caller's name, with its error type if it fails.
+
+    The name is the calling query function's code name, a fixed string, so no parameter value
+    reaches a metric attribute.
+    """
+    start = time.perf_counter()
+    try:
+        yield
+    except BaseException as exc:
+        record_neo4j_query(name, time.perf_counter() - start, type(exc).__name__)
+        raise
+    record_neo4j_query(name, time.perf_counter() - start)
 
 
 def _build_query(cypher: str, timeout: Timeout) -> Query | str:
@@ -122,18 +144,20 @@ async def run_query(
     if database:
         session_kwargs["database"] = database
 
-    try:
-        async with driver.session(**session_kwargs) as session:
-            result = await session.run(query, params)
-            records = [dict(record) async for record in result]
-            summary = await result.consume()
+    name = sys._getframe(1).f_code.co_qualname
+    with _timed_statement(name):
+        try:
+            async with driver.session(**session_kwargs) as session:
+                result = await session.run(query, params)
+                records = [dict(record) async for record in result]
+                summary = await result.consume()
+                if profiling:
+                    log_profile_result(cypher, params, summary)
+                return records
+        except Exception as exc:
             if profiling:
-                log_profile_result(cypher, params, summary)
-            return records
-    except Exception as exc:
-        if profiling:
-            await _try_explain_on_error(driver, cypher, params, exc, database)
-        raise
+                await _try_explain_on_error(driver, cypher, params, exc, database)
+            raise
 
 
 async def run_single(
@@ -167,18 +191,20 @@ async def run_single(
     if database:
         session_kwargs["database"] = database
 
-    try:
-        async with driver.session(**session_kwargs) as session:
-            result = await session.run(query, params)
-            record = await result.single()
-            summary = await result.consume()
+    name = sys._getframe(1).f_code.co_qualname
+    with _timed_statement(name):
+        try:
+            async with driver.session(**session_kwargs) as session:
+                result = await session.run(query, params)
+                record = await result.single()
+                summary = await result.consume()
+                if profiling:
+                    log_profile_result(cypher, params, summary)
+                return dict(record) if record else None
+        except Exception as exc:
             if profiling:
-                log_profile_result(cypher, params, summary)
-            return dict(record) if record else None
-    except Exception as exc:
-        if profiling:
-            await _try_explain_on_error(driver, cypher, params, exc, database)
-        raise
+                await _try_explain_on_error(driver, cypher, params, exc, database)
+            raise
 
 
 async def run_count(
@@ -214,15 +240,17 @@ async def run_count(
     if database:
         session_kwargs["database"] = database
 
-    try:
-        async with driver.session(**session_kwargs) as session:
-            result = await session.run(query, params)
-            record = await result.single()
-            summary = await result.consume()
+    name = sys._getframe(1).f_code.co_qualname
+    with _timed_statement(name):
+        try:
+            async with driver.session(**session_kwargs) as session:
+                result = await session.run(query, params)
+                record = await result.single()
+                summary = await result.consume()
+                if profiling:
+                    log_profile_result(cypher, params, summary)
+                return int(record["total"]) if record else 0
+        except Exception as exc:
             if profiling:
-                log_profile_result(cypher, params, summary)
-            return int(record["total"]) if record else 0
-    except Exception as exc:
-        if profiling:
-            await _try_explain_on_error(driver, cypher, params, exc, database)
-        raise
+                await _try_explain_on_error(driver, cypher, params, exc, database)
+            raise
