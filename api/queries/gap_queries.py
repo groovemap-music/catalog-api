@@ -13,6 +13,7 @@ Graph model used:
   media_families (list of canonical family ids), sha256
 """
 
+import asyncio
 from typing import Any
 
 from common import AsyncResilientNeo4jDriver
@@ -76,6 +77,9 @@ async def get_label_gaps(
     MATCH (l:Label {{id: $label_id}})<-[:ON]-(r:Release)
     WHERE NOT (u)-[:COLLECTED]->(r)
     {extra}
+    WITH DISTINCT u, r
+    ORDER BY r.year DESC, r.title
+    SKIP $offset LIMIT $limit
     OPTIONAL MATCH (r)-[:BY]->(a:Artist)
     OPTIONAL MATCH (r)-[:IS]->(g:Genre)
     OPTIONAL MATCH (u)-[w:WANTS]->(r)
@@ -86,7 +90,6 @@ async def get_label_gaps(
     RETURN r.id AS id, r.title AS title, r.year AS year,
            r.formats AS formats, artist_name AS artist, genres, on_wantlist
     ORDER BY r.year DESC, r.title
-    SKIP $offset LIMIT $limit
     """
     count_cypher = f"""
     MATCH (u:User {{id: $user_id}})
@@ -100,8 +103,7 @@ async def get_label_gaps(
         params["families"] = families
     if mediums:
         params["mediums"] = mediums
-    results = await run_query(driver, cypher, **params)
-    total = await run_count(driver, count_cypher, **params)
+    results, total = await asyncio.gather(run_query(driver, cypher, **params), run_count(driver, count_cypher, **params))
     return await attach_gap_identity(results), total
 
 
@@ -150,6 +152,9 @@ async def get_artist_gaps(
     MATCH (a:Artist {{id: $artist_id}})<-[:BY]-(r:Release)
     WHERE NOT (u)-[:COLLECTED]->(r)
     {extra}
+    WITH DISTINCT u, r
+    ORDER BY r.year DESC, r.title
+    SKIP $offset LIMIT $limit
     OPTIONAL MATCH (r)-[:ON]->(l:Label)
     OPTIONAL MATCH (r)-[:IS]->(g:Genre)
     OPTIONAL MATCH (u)-[w:WANTS]->(r)
@@ -160,7 +165,6 @@ async def get_artist_gaps(
     RETURN r.id AS id, r.title AS title, r.year AS year,
            r.formats AS formats, label_name AS label, genres, on_wantlist
     ORDER BY r.year DESC, r.title
-    SKIP $offset LIMIT $limit
     """
     count_cypher = f"""
     MATCH (u:User {{id: $user_id}})
@@ -174,8 +178,7 @@ async def get_artist_gaps(
         params["families"] = families
     if mediums:
         params["mediums"] = mediums
-    results = await run_query(driver, cypher, **params)
-    total = await run_count(driver, count_cypher, **params)
+    results, total = await asyncio.gather(run_query(driver, cypher, **params), run_count(driver, count_cypher, **params))
     return await attach_gap_identity(results), total
 
 
@@ -224,6 +227,9 @@ async def get_master_gaps(
     MATCH (m:Master {{id: $master_id}})<-[:DERIVED_FROM]-(r:Release)
     WHERE NOT (u)-[:COLLECTED]->(r)
     {extra}
+    WITH DISTINCT u, r
+    ORDER BY r.year DESC, r.title
+    SKIP $offset LIMIT $limit
     OPTIONAL MATCH (r)-[:BY]->(a:Artist)
     OPTIONAL MATCH (r)-[:ON]->(l:Label)
     OPTIONAL MATCH (r)-[:IS]->(g:Genre)
@@ -237,7 +243,6 @@ async def get_master_gaps(
            r.formats AS formats, artist_name AS artist, label_name AS label,
            genres, on_wantlist
     ORDER BY r.year DESC, r.title
-    SKIP $offset LIMIT $limit
     """
     count_cypher = f"""
     MATCH (u:User {{id: $user_id}})
@@ -251,8 +256,7 @@ async def get_master_gaps(
         params["families"] = families
     if mediums:
         params["mediums"] = mediums
-    results = await run_query(driver, cypher, **params)
-    total = await run_count(driver, count_cypher, **params)
+    results, total = await asyncio.gather(run_query(driver, cypher, **params), run_count(driver, count_cypher, **params))
     return await attach_gap_identity(results), total
 
 
