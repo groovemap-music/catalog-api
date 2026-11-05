@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -279,7 +280,7 @@ async def _hub_result(entity_type: str, entity_id: str) -> HubResult | None:
 # 0.4 s), plus the 15 genres and 740 styles. It runs once per loop, not per hub.
 _HUBS_Q = """
 MATCH (n) WHERE (n:Genre OR n:Style OR n:Label) AND coalesce(n.release_count, 0) >= $min
-RETURN toLower(labels(n)[0]) AS type, CASE WHEN n:Label THEN n.id ELSE n.name END AS id, n.release_count AS releases
+RETURN toLower(labels(n)[0]) AS type, CASE WHEN n:Label THEN n.id ELSE n.name END AS id, n.name AS name, n.release_count AS releases
 ORDER BY releases, id
 """
 
@@ -338,21 +339,35 @@ def _lock_key(entity_type: str, entity_id: str) -> str:
     return valkey_key(f"explore-hub:v1:lock:{entity_type}:{entity_id}")
 
 
+_lock_tokens: dict[tuple[str, str], str] = {}
+_RELEASE_IF_OWNER = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end return 0"
+
+
 async def _take_lock(entity_type: str, entity_id: str) -> bool:
-    """One replica builds a given hub at a time (Valkey SET NX); without Valkey, build locally."""
+    """One replica builds a given hub at a time (Valkey SET NX); without Valkey, build locally.
+
+    The value is a token private to this builder, so releasing never deletes a lock that expired and was taken by
+    another replica while this builder overran.
+    """
     if _valkey is None:
         return True
+    token = uuid.uuid4().hex
     try:
-        return bool(await _valkey.set(_lock_key(entity_type, entity_id), "1", nx=True, ex=HUB_LOCK_SECONDS))
+        taken = bool(await _valkey.set(_lock_key(entity_type, entity_id), token, nx=True, ex=HUB_LOCK_SECONDS))
     except Exception:
         return True
+    if taken:
+        _lock_tokens[(entity_type, entity_id)] = token
+    return taken
 
 
 async def _release_lock(entity_type: str, entity_id: str) -> None:
-    if _valkey is None:
+    """Delete the lock only if it still holds this builder's token (atomic compare-and-delete)."""
+    token = _lock_tokens.pop((entity_type, entity_id), None)
+    if _valkey is None or token is None:
         return
     try:
-        await _valkey.delete(_lock_key(entity_type, entity_id))
+        await _valkey.eval(_RELEASE_IF_OWNER, 1, _lock_key(entity_type, entity_id), token)
     except Exception as exc:
         logger.debug("explore hub lock release failed", error_type=type(exc).__name__)
 
@@ -438,7 +453,8 @@ async def refresh_hubs(driver: Any, *, max_age: float = 7 * 86400, pause: float 
             fresh = await _hub_result(*key)
             if fresh is not None and fresh.release_count == hub["releases"] and time.time() - fresh.built_at < max_age:
                 continue
-            result = await _build_hub(driver, key[0], key[1], key[1], int(hub["releases"]))
+            # A path starts at the hub's name; a nameless label (1818) falls back to its id.
+            result = await _build_hub(driver, key[0], key[1], str(hub.get("name") or key[1]), int(hub["releases"]))
         except Exception as exc:
             failures += 1
             delay = min(_RETRY_BASE_SECONDS * 2 ** (failures - 1), _RETRY_CAP_SECONDS)

@@ -139,7 +139,7 @@ async def test_hub_results_computed_in_the_background_equal_the_live_walk(
         assert _keys(stored) == _keys(live), (entity_type, entity_id)
         assert stored == await ed.get_explore_traversal(neo4j_driver, entity_type, entity_id, 2)
         for row in stored:
-            assert row["path_names"][0] == entity_id and row["path_names"][-1] == row["name"] and row["dist"] == 2
+            assert row["path_names"][0] == {"Rock": "Rock", "L1": "One"}[entity_id] and row["path_names"][-1] == row["name"] and row["dist"] == 2
         assert await ed.get_explore_traversal(neo4j_driver, entity_type, entity_id, 1) == []
         assert (await ed.refresh_hubs(neo4j_driver))[0] == 0  # unchanged hubs are not rebuilt
         monkeypatch.setattr(ed, "HUB_MIN_RELEASES", 50_000)
@@ -165,5 +165,16 @@ async def test_hubs_reach_artists_and_genres_through_masters_and_demote_placehol
     live_rock = await ed.get_explore_traversal(neo4j_driver, "label", "L1", 2)
     assert any(r["id"] == "194" for r in live_rock if r["type"] == "artist")
     assert [r["id"] for r in live_rock if r["type"] == "artist"][-1] == "194"
+    ed.configure(None)
+    monkeypatch.setattr(ed, "HUB_MIN_RELEASES", 50_000)
+
+
+async def test_a_label_hub_path_starts_at_the_label_name(neo4j_driver: AsyncResilientNeo4jDriver, monkeypatch: pytest.MonkeyPatch) -> None:
+    await _seed(neo4j_driver)
+    monkeypatch.setattr(ed, "HUB_MIN_RELEASES", 1)
+    ed.configure(None)
+    await ed.refresh_hubs(neo4j_driver)
+    rows = await ed.get_explore_traversal(neo4j_driver, "label", "L1", 2)
+    assert rows and {r["path_names"][0] for r in rows} == {"One"}  # the name, not the id 'L1'
     ed.configure(None)
     monkeypatch.setattr(ed, "HUB_MIN_RELEASES", 50_000)

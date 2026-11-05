@@ -148,10 +148,23 @@ class FakeValkey:
             raise ConnectionError("down")
         return self.data.get(key)
 
-    async def set(self, key: str, value: str) -> None:
+    async def set(self, key: str, value: str, nx: bool = False, ex: int | None = None) -> bool | None:  # noqa: ARG002
         if self.fail:
             raise ConnectionError("down")
+        if nx and key in self.data:
+            return None
         self.data[key] = value
+        return True
+
+    async def eval(self, _script: str, _numkeys: int, key: str, token: str) -> int:
+        """The compare-and-delete the lock release runs."""
+        if self.data.get(key) == token:
+            del self.data[key]
+            return 1
+        return 0
+
+    async def delete(self, key: str) -> None:
+        self.data.pop(key, None)
 
 
 def _reset() -> None:
@@ -163,7 +176,7 @@ def _reset() -> None:
 def _hub_queries(release_count: int = 60_000) -> Any:
     async def run(_driver: Any, cypher: str, **params: Any) -> list[dict[str, Any]]:
         if "n.release_count) >= $min" in cypher.replace(" ", "").replace("coalesce(", "").replace("\n", "") or "AS releases" in cypher:
-            return [{"type": "genre", "id": "Rock", "releases": release_count}]
+            return [{"type": "genre", "id": "Rock", "name": "Rock", "releases": release_count}]
         if "o:Genre OR o:Style" in cypher:
             return [{"label": "Style", "id": "Punk", "name": "Punk", "witness": "First"}]
         if "AS pop" in cypher and "Artist" in cypher:
@@ -321,17 +334,7 @@ async def test_a_hub_another_replica_is_building_is_skipped_and_one_stored_meanw
     ed._failures.clear()
     ed._stages.clear()
 
-    class LockingValkey(FakeValkey):
-        async def set(self, key: str, value: str, nx: bool = False, ex: int | None = None) -> bool | None:  # noqa: ARG002
-            if nx:
-                if key in self.data:
-                    return None
-                self.data[key] = value
-                return True
-            return await super().set(key, value)
-
-        async def delete(self, key: str) -> None:
-            self.data.pop(key, None)
+    LockingValkey = FakeValkey
 
     locking = LockingValkey()
     ed.configure(locking)
@@ -399,3 +402,52 @@ async def test_placeholder_artists_go_last_not_out() -> None:
     assert picked[-1] != "194" or len(picked) == 3
     assert picked.index("b") < picked.index("a")  # established first among real names
     assert "194" not in picked  # cut by the limit only after every real name is in, never ahead of one
+
+
+def _label_hub_queries(name: str | None, label_id: str = "1866") -> Any:
+    healthy = _hub_queries()
+
+    async def run(driver: Any, cypher: str, **params: Any) -> list[dict[str, Any]]:
+        if "AS releases" in cypher:
+            return [{"type": "label", "id": label_id, "name": name, "releases": 60_000}]
+        return await healthy(driver, cypher, **params)
+
+    return run
+
+
+@pytest.mark.asyncio
+async def test_a_label_hub_path_starts_at_the_label_name_not_its_id() -> None:
+    _reset()
+    with patch.object(ed, "run_query", _label_hub_queries("Columbia")):
+        assert (await ed.refresh_hubs(object()))[0] == 1
+    rows = ed._hubs[("label", "1866")].rows
+    assert rows and all(r["path_names"][0] == "Columbia" for r in rows)
+    _reset()
+
+
+@pytest.mark.asyncio
+async def test_a_nameless_label_hub_still_builds_and_starts_at_its_id() -> None:
+    _reset()
+    with patch.object(ed, "run_query", _label_hub_queries(None, "1818")):
+        assert (await ed.refresh_hubs(object()))[0] == 1
+    assert all(r["path_names"][0] == "1818" for r in ed._hubs[("label", "1818")].rows)
+    _reset()
+
+
+@pytest.mark.asyncio
+async def test_an_overrunning_builder_cannot_delete_another_replicas_lock() -> None:
+    valkey = FakeValkey()
+    ed.configure(valkey)
+    ed._lock_tokens.clear()
+    assert await ed._take_lock("genre", "Rock")
+    mine = valkey.data[ed._lock_key("genre", "Rock")]
+    # This builder overran: its lock expired and replica B took the lock with its own token.
+    valkey.data[ed._lock_key("genre", "Rock")] = "replica-b-token"
+    await ed._release_lock("genre", "Rock")
+    assert valkey.data[ed._lock_key("genre", "Rock")] == "replica-b-token" != mine
+    # An owner releases its own lock.
+    del valkey.data[ed._lock_key("genre", "Rock")]
+    assert await ed._take_lock("genre", "Rock")
+    await ed._release_lock("genre", "Rock")
+    assert ed._lock_key("genre", "Rock") not in valkey.data
+    ed.configure(None)
