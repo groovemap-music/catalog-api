@@ -1,6 +1,7 @@
 """Explore endpoints — migrated from explore service."""
 
 import asyncio
+import hashlib
 import json
 import time
 from collections import OrderedDict
@@ -53,7 +54,7 @@ from api.strata import (
     encode_catalog,
     label_targets,
 )
-from api.telemetry import CACHE_EXPLORE, CACHE_STRATA, CACHE_TRENDS, cache_get, record_cache_write_failure
+from api.telemetry import CACHE_EXPAND, CACHE_EXPLORE, CACHE_STRATA, CACHE_TRENDS, cache_get, record_cache_write_failure
 from api.valkey_keys import valkey_key
 
 
@@ -193,6 +194,12 @@ async def explore(
     return JSONResponse(content=response)
 
 
+def _expand_cache_key(entity_type: str, node_id: str, category: str, limit: int, offset: int, before_year: int | None) -> str:
+    """One page and its total, keyed on everything that changes either. Hashed so a name cannot collide on ``:``."""
+    digest = hashlib.sha256(json.dumps([entity_type, node_id, category, limit, offset, before_year]).encode()).hexdigest()
+    return valkey_key(f"expand:{digest}")
+
+
 @router.get("/api/expand")
 async def expand(
     node_id: str = Query(...),
@@ -212,13 +219,29 @@ async def expand(
     if category_lower not in type_categories:
         valid = ", ".join(type_categories.keys())
         return JSONResponse(content={"error": f"Invalid category '{category}' for type '{type}'. Valid: {valid}"}, status_code=400)
+    cache_key = _expand_cache_key(entity_type, node_id, category_lower, limit, offset, before_year)
+    if _valkey:
+        try:
+            cached = await cache_get(_valkey, cache_key, cache=CACHE_EXPAND)
+            if cached:
+                return JSONResponse(content=json.loads(cached))
+        except Exception:
+            logger.debug("⚠️ Expand cache get failed", key=cache_key)
+
     query_func = type_categories[category_lower]
     count_func = COUNT_DISPATCH[entity_type][category_lower]
     results, total = await asyncio.gather(
         query_func(_neo4j_driver, node_id, limit, offset, before_year=before_year),
         count_func(_neo4j_driver, node_id, before_year=before_year),
     )
-    return JSONResponse(content={"children": results, "total": total, "offset": offset, "limit": limit, "has_more": offset + len(results) < total})
+    body = {"children": results, "total": total, "offset": offset, "limit": limit, "has_more": offset + len(results) < total}
+    # An empty page is not cached: it may be a node that does not exist yet, and costs nothing to recompute.
+    if _valkey and (results or total):
+        try:
+            await _valkey.setex(cache_key, _EXPLORE_CACHE_TTL, json.dumps(body))
+        except Exception as exc:
+            record_cache_write_failure(CACHE_EXPAND, exc)
+    return JSONResponse(content=body)
 
 
 @router.get("/api/explore/year-range")
