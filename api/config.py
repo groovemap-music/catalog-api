@@ -93,6 +93,7 @@ class ApiConfig:
     identity_ledger_refresh_interval: int = 300
     identity_ledger_refresh_quiet: int = 600
     identity_ledger_max_staleness: int = 21600
+    import_cache_watch_interval: int = 300
     explore_hubs_refresh_enabled: bool = True
     explore_hubs_refresh_interval: int = 3600
     explore_hubs_max_age: int = 604800
@@ -189,6 +190,7 @@ class ApiConfig:
             identity_ledger_refresh_interval=max(1, _env_int("IDENTITY_LEDGER_REFRESH_INTERVAL", 300)),
             identity_ledger_refresh_quiet=max(0, _env_int("IDENTITY_LEDGER_REFRESH_QUIET", 600)),
             identity_ledger_max_staleness=max(0, _env_int("IDENTITY_LEDGER_MAX_STALENESS", 21600)),
+            import_cache_watch_interval=max(1, _env_int("IMPORT_CACHE_WATCH_INTERVAL", 300)),
             similar_artists_precomputed_enabled=_env_bool("SIMILAR_ARTISTS_PRECOMPUTED_ENABLED"),
             similar_artists_fusion_alpha=_env_unit_float("SIMILAR_ARTISTS_FUSION_ALPHA", DEFAULT_FUSION_ALPHA),
         )
