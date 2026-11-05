@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import time
 from collections import OrderedDict
 from collections.abc import Coroutine
 from typing import Annotated, Any
@@ -55,7 +56,7 @@ from api.strata import (
     encode_catalog,
     label_targets,
 )
-from api.telemetry import CACHE_EXPLORE, CACHE_STRATA, CACHE_TRENDS, cache_get, record_cache_write_failure
+from api.telemetry import CACHE_EXPAND, CACHE_EXPLORE, CACHE_STRATA, CACHE_TRENDS, cache_get, record_cache_write_failure
 from api.valkey_keys import valkey_key
 
 
@@ -189,6 +190,46 @@ async def explore(
     return JSONResponse(content=response)
 
 
+# The Valkey instance is noeviction and shared with auth state, and every part of an expand key is chosen
+# by an unauthenticated caller, so the cache writes only pages that are expensive to recompute and
+# bounded in number: hub-sized parents (total >= this), the default page size, and the first
+# _EXPAND_CACHE_MAX_PAGES pages; a before_year page only at offset 0 (131 years x 20 pages would not be bounded
+# enough). Every other request is answered exactly the same, just uncached.
+_EXPAND_CACHE_MIN_TOTAL = 1000
+_EXPAND_CACHE_PAGE_SIZE = 50
+_EXPAND_CACHE_MAX_PAGES = 20
+
+
+# A global budget on top of the per-page rules: an index of live expand keys (a sorted set scored by expiry)
+# caps how many exist at once. At about 10 KB a page this is on the order of 100 MB, whatever callers send.
+_EXPAND_CACHE_MAX_KEYS = 10_000
+_EXPAND_INDEX_KEY = valkey_key("expand:index")
+
+
+async def _store_expand_page(cache_key: str, body: dict[str, Any]) -> None:
+    """Write one page unless the live-key budget is spent. Expired index entries are dropped first."""
+    now = time.time()
+    await _valkey.zremrangebyscore(_EXPAND_INDEX_KEY, "-inf", now)
+    if await _valkey.zcard(_EXPAND_INDEX_KEY) >= _EXPAND_CACHE_MAX_KEYS:
+        record_cache_write_failure(CACHE_EXPAND, RuntimeError("expand cache budget spent"))
+        return
+    await _valkey.zadd(_EXPAND_INDEX_KEY, {cache_key: now + _EXPLORE_CACHE_TTL})
+    await _valkey.expire(_EXPAND_INDEX_KEY, _EXPLORE_CACHE_TTL)
+    await _valkey.setex(cache_key, _EXPLORE_CACHE_TTL, json.dumps(body))
+
+
+def _expand_page_is_cacheable(limit: int, offset: int, before_year: int | None) -> bool:
+    if limit != _EXPAND_CACHE_PAGE_SIZE or offset % _EXPAND_CACHE_PAGE_SIZE or offset >= _EXPAND_CACHE_PAGE_SIZE * _EXPAND_CACHE_MAX_PAGES:
+        return False
+    return before_year is None or offset == 0
+
+
+def _expand_cache_key(entity_type: str, node_id: str, category: str, limit: int, offset: int, before_year: int | None) -> str:
+    """One page and its total, keyed on everything that changes either. Hashed so a name cannot collide on ``:``."""
+    digest = hashlib.sha256(json.dumps([entity_type, node_id, category, limit, offset, before_year]).encode()).hexdigest()
+    return valkey_key(f"expand:{digest}")
+
+
 @router.get("/api/expand")
 async def expand(
     node_id: str = Query(...),
@@ -208,13 +249,30 @@ async def expand(
     if category_lower not in type_categories:
         valid = ", ".join(type_categories.keys())
         return JSONResponse(content={"error": f"Invalid category '{category}' for type '{type}'. Valid: {valid}"}, status_code=400)
+    cache_key = _expand_cache_key(entity_type, node_id, category_lower, limit, offset, before_year)
+    cacheable = _expand_page_is_cacheable(limit, offset, before_year)
+    if _valkey and cacheable:
+        try:
+            cached = await cache_get(_valkey, cache_key, cache=CACHE_EXPAND)
+            if cached:
+                return JSONResponse(content=json.loads(cached))
+        except Exception:
+            logger.debug("⚠️ Expand cache get failed", key=cache_key)
+
     query_func = type_categories[category_lower]
     count_func = COUNT_DISPATCH[entity_type][category_lower]
     results, total = await asyncio.gather(
         query_func(_neo4j_driver, node_id, limit, offset, before_year=before_year),
         count_func(_neo4j_driver, node_id, before_year=before_year),
     )
-    return JSONResponse(content={"children": results, "total": total, "offset": offset, "limit": limit, "has_more": offset + len(results) < total})
+    body = {"children": results, "total": total, "offset": offset, "limit": limit, "has_more": offset + len(results) < total}
+    # Only pages worth caching are written (see _expand_page_is_cacheable); an empty page never is.
+    if _valkey and cacheable and results and total >= _EXPAND_CACHE_MIN_TOTAL:
+        try:
+            await _store_expand_page(cache_key, body)
+        except Exception as exc:
+            record_cache_write_failure(CACHE_EXPAND, exc)
+    return JSONResponse(content=body)
 
 
 @router.get("/api/explore/year-range")
