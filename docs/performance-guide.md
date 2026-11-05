@@ -123,7 +123,8 @@ fulltext procedure, so only the best `limit` names are scored and returned (`the
 
 The typed text is cut into tokens the way the index analyzer cuts names (letters and digits; an apostrophe or dot
 inside a word stays in it), so `jay-z` is `jay` and `z`, `ac/dc` is `ac` and `dc`, and `d'angelo` is one token.
-Every token is required and the last is a prefix (`jay AND z*`): only names holding all of them match. The old query
+Every token is required and each is a prefix (`jay* AND z*`): only names holding all of them match, and plain input
+matches exactly what it did before (`dav bo` still finds `David Bowie`). The old query
 sent `jay-z` to Lucene as one escaped prefix, which matched nothing, so punctuated names could not be found at all.
 On lux: `jay-z` 79 matches (Jay-Z first), `ac/dc` 10 (AC/DC first), `d'angelo` 412 (D'Angelo first).
 
@@ -133,8 +134,7 @@ Prefix terms are constant-score in Lucene, so the query adds boosts that decide 
   merely start with it (`David Bowie` before `David Bowie Tribute`);
 * one token: a name containing that whole word is boosted over one that only starts with it.
 
-Every word but the last must now be a whole word; the old query also accepted a prefix there (`david bowie` matched
-`Davidson Bowie`). Known limits: Lucene cannot see how well known a name is, so among names with the same score the order
+Known limits: Lucene cannot see how well known a name is, so among names with the same score the order
 is shorter name, then id (accepted by the operator); names that differ only by punctuation score the same (`David Bowie` and
 `David Bowie,`; a name equal to the typed text wins the tie); and a name that repeats the typed word (`The The The`) can
 outscore the single word (`The`).

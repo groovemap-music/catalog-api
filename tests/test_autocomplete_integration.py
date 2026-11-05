@@ -108,19 +108,13 @@ async def _old_matches(driver: AsyncResilientNeo4jDriver, typed: str) -> set[str
     return {r["name"] for r in await run_query(driver, _OLD, database="neo4j", query=old_query)}
 
 
-@pytest.mark.parametrize("typed", ["David Bowie", "the", "joh", "The Beatles", "indecent n", "bowie", "david bo"])
-async def test_the_new_query_matches_a_subset_of_the_old_one_dropping_only_prefix_only_earlier_words(
-    neo4j_driver: AsyncResilientNeo4jDriver, typed: str
-) -> None:
-    """Every word but the last must now be a whole word; the old query accepted a prefix there ('Davidson Bowie')."""
+@pytest.mark.parametrize("typed", ["David Bowie", "the", "joh", "The Beatles", "indecent n", "bowie", "david bo", "dav bo", "ind no"])
+async def test_plain_input_matches_exactly_the_names_the_old_query_did(neo4j_driver: AsyncResilientNeo4jDriver, typed: str) -> None:
+    """Every token is a prefix, so 'dav bo' still finds 'David Bowie' and 'Davidson Bowie' as before."""
     await _seed(neo4j_driver)
     got = {r["name"] for r in await q.autocomplete_artist(neo4j_driver, typed, limit=1000)}
-    old = await _old_matches(neo4j_driver, typed)
+    assert got == await _old_matches(neo4j_driver, typed)
     assert got
-    assert got <= old
-    first = typed.split()[0].lower()
-    for dropped in old - got:
-        assert first not in dropped.lower().replace("&", " ").split(), dropped
 
 
 @pytest.mark.parametrize(
@@ -179,7 +173,7 @@ async def test_hyphenated_input_requires_both_tokens(neo4j_driver: AsyncResilien
     await _seed(neo4j_driver)
     names = await _names(neo4j_driver, "jay-z")
     assert names[0] == "Jay-Z"
-    assert set(names) == {"Jay-Z", "Jay-Z (2)", "Jay Zimmerman"}  # both tokens, the last as a prefix: not Zebra, Z, Big Jay, Wiz Z
+    assert set(names) == {"Jay-Z", "Jay-Z (2)", "Jay Zimmerman"}  # both tokens, each a prefix: not Zebra, Z, Big Jay, Wiz Z
 
 
 async def test_slashed_input_requires_both_tokens(neo4j_driver: AsyncResilientNeo4jDriver) -> None:

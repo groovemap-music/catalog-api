@@ -57,12 +57,13 @@ def _analyzer_tokens(query: str) -> list[str]:
 
 
 def _build_autocomplete_query(query: str) -> str:
-    """Build a Lucene fulltext query: names holding every typed token, the last as a prefix, best matches boosted.
+    """Build a Lucene fulltext query: names holding every typed token as a prefix, best matches boosted.
 
     Input is cut into tokens the way the index analyzer cuts names (``jay-z`` is ``jay`` and ``z``, ``ac/dc`` is
-    ``ac`` and ``dc``) and every token is required: ``jay AND z*``. Splitting is what makes punctuated names
-    findable at all (the old query matched none) and ANDing is what keeps names containing only one of the tokens
-    out. On top of that:
+    ``ac`` and ``dc``) and every token is required, each as a prefix: ``jay* AND z*``. Splitting is what makes
+    punctuated names findable at all (the old query matched none) and ANDing is what keeps names containing only one
+    of the tokens out. Plain input matches exactly what ``t1* AND t2*`` matched before (``dav bo`` still finds
+    ``David Bowie``). On top of that:
 
     * with two or more tokens, the whole phrase is boosted, so a name that is those words and nothing else
       outranks a longer name that merely starts with them (Lucene's length normalisation then puts the
@@ -74,10 +75,10 @@ def _build_autocomplete_query(query: str) -> str:
     tokens = _analyzer_tokens(query)
     if not tokens:
         return " AND ".join(_escape_lucene_query(term) + "*" for term in query.split())
-    *head, last = (_escape_lucene_query(token) for token in tokens)
-    if not head:
-        return f"({last}^{_EXACT_BOOST} OR {last}*)"
-    required = " AND ".join([*head, f"{last}*"])
+    escaped = [_escape_lucene_query(token) for token in tokens]
+    if len(escaped) == 1:
+        return f"({escaped[0]}^{_EXACT_BOOST} OR {escaped[0]}*)"
+    required = " AND ".join(f"{token}*" for token in escaped)
     phrase = _escape_lucene_phrase(" ".join(tokens))
     return f'"{phrase}"^{_EXACT_BOOST} OR ({required})'
 
