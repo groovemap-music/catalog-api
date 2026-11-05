@@ -194,6 +194,22 @@ async def explore(
     return JSONResponse(content=response)
 
 
+# The Valkey instance is noeviction and shared with auth state, and every part of an expand key is chosen
+# by an unauthenticated caller, so the cache writes only pages that are expensive to recompute and
+# bounded in number: hub-sized parents (total >= this), the default page size, and the first
+# _EXPAND_CACHE_MAX_PAGES pages; a before_year page only at offset 0 (131 years x 20 pages would not be bounded
+# enough). Every other request is answered exactly the same, just uncached.
+_EXPAND_CACHE_MIN_TOTAL = 1000
+_EXPAND_CACHE_PAGE_SIZE = 50
+_EXPAND_CACHE_MAX_PAGES = 20
+
+
+def _expand_page_is_cacheable(limit: int, offset: int, before_year: int | None) -> bool:
+    if limit != _EXPAND_CACHE_PAGE_SIZE or offset % _EXPAND_CACHE_PAGE_SIZE or offset >= _EXPAND_CACHE_PAGE_SIZE * _EXPAND_CACHE_MAX_PAGES:
+        return False
+    return before_year is None or offset == 0
+
+
 def _expand_cache_key(entity_type: str, node_id: str, category: str, limit: int, offset: int, before_year: int | None) -> str:
     """One page and its total, keyed on everything that changes either. Hashed so a name cannot collide on ``:``."""
     digest = hashlib.sha256(json.dumps([entity_type, node_id, category, limit, offset, before_year]).encode()).hexdigest()
@@ -220,7 +236,8 @@ async def expand(
         valid = ", ".join(type_categories.keys())
         return JSONResponse(content={"error": f"Invalid category '{category}' for type '{type}'. Valid: {valid}"}, status_code=400)
     cache_key = _expand_cache_key(entity_type, node_id, category_lower, limit, offset, before_year)
-    if _valkey:
+    cacheable = _expand_page_is_cacheable(limit, offset, before_year)
+    if _valkey and cacheable:
         try:
             cached = await cache_get(_valkey, cache_key, cache=CACHE_EXPAND)
             if cached:
@@ -235,8 +252,8 @@ async def expand(
         count_func(_neo4j_driver, node_id, before_year=before_year),
     )
     body = {"children": results, "total": total, "offset": offset, "limit": limit, "has_more": offset + len(results) < total}
-    # An empty page is not cached: it may be a node that does not exist yet, and costs nothing to recompute.
-    if _valkey and (results or total):
+    # Only pages worth caching are written (see _expand_page_is_cacheable); an empty page never is.
+    if _valkey and cacheable and results and total >= _EXPAND_CACHE_MIN_TOTAL:
         try:
             await _valkey.setex(cache_key, _EXPLORE_CACHE_TTL, json.dumps(body))
         except Exception as exc:
