@@ -1129,6 +1129,21 @@ Rarity analysis for releases based on market scarcity, media, and collector dema
 | GET    | `/api/rarity/label/{label_id}`   | No            | 30/min     | Rarity scores for a label's releases   |
 | GET    | `/api/rarity/{release_id}`       | No            | 30/min     | Rarity score for a specific release    |
 
+`/api/rarity/leaderboard` pages by `page` and `page_size` (1-100). A request with `tier` also returns `next_cursor` (`null` on the
+last page); send it back as `cursor` (with the same `tier`) to page the tier by keyset. A cursor page costs the same on every page
+instead of growing with the offset, and a full walk returns every row exactly once even where scores tie. The cursor is made by the
+server: treat it as opaque. A cursor response carries `items`, `page_size` and `next_cursor`, without `total` or `page`; a cursor
+without `tier`, or one the server did not make, is a 400. The order is score descending, then release id ascending, which is the
+order of `idx_release_rarity_tier_score` (`tier, rarity_score DESC, release_id`) in database-schema. A cursor is bound to the tier it
+was made for and is refused (400) on another.
+
+That index is on database-schema `main` and is not in a tagged release yet (v0.6.3 and earlier lack it, and so does lux). The
+one-index-range-scan, no-sort plan needs the next schema release; without the index the same statement returns the same rows in
+the same order through a sort, only slower. The integration tests never create the index themselves: the walk tests pass on any
+schema, and `test_the_keyset_page_is_one_index_range_scan_with_no_sort` skips, with that reason, until catalog-api's dev pin
+moves to a schema release that has the index. (Run against database-schema `main` it passes: one `idx_release_rarity_tier_score`
+range scan, no Sort.)
+
 Releases whose master id is the Discogs zero-master sentinel (`'0'` or `0`) are masterless.
 The pressing and temporal queries exclude that sentinel before expanding siblings, so
 unrelated masterless releases are never counted as each other's siblings.

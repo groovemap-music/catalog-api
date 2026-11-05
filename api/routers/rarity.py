@@ -7,16 +7,19 @@ Artist and label endpoints also query Neo4j for release ID lookups.
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from api.limiter import limiter
 from api.queries.rarity_queries import (
+    decode_tier_cursor,
+    encode_tier_cursor,
     get_rarity_by_artist,
     get_rarity_by_label,
     get_rarity_for_release,
     get_rarity_hidden_gems,
     get_rarity_leaderboard,
+    get_rarity_tier_page,
 )
 from api.rarity import CORE_SIGNAL_WEIGHTS, effective_weights, module_weights
 
@@ -120,6 +123,10 @@ def _format_list_item(row: dict[str, Any]) -> dict[str, Any]:
 # ── Static path endpoints FIRST (before /{release_id}) ─────────────
 
 
+def _tier_cursor_of(tier: str, row: dict[str, Any]) -> str:
+    return encode_tier_cursor(tier, float(row["rarity_score"]), int(row["release_id"]))
+
+
 @router.get("/leaderboard")
 @limiter.limit("30/minute")
 async def rarity_leaderboard(
@@ -127,20 +134,46 @@ async def rarity_leaderboard(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     tier: str | None = Query(None),
+    cursor: str | None = Query(None, max_length=256, description="Opaque cursor from a previous response's next_cursor; needs tier"),
 ) -> JSONResponse:
-    """Get global rarity leaderboard, paginated."""
+    """Get global rarity leaderboard, paginated.
+
+    ``page`` pages by offset and works for every request. A request with ``tier`` also returns ``next_cursor``; sending it back
+    as ``cursor`` pages the tier by keyset, which stays the same cost on every page instead of growing with the offset, and
+    returns every row exactly once even where scores tie. A cursor response carries no ``total`` or ``page``.
+    """
     if not _pg_pool:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
+    if cursor is not None:
+        if not tier:
+            raise HTTPException(status_code=400, detail="cursor needs tier")
+        try:
+            after = decode_tier_cursor(cursor, tier)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid cursor") from None
+        rows = await get_rarity_tier_page(_pg_pool, tier, after, page_size + 1)
+        has_more = len(rows) > page_size
+        rows = rows[:page_size]
+        return JSONResponse(
+            content={
+                "items": [_format_list_item(r) for r in rows],
+                "page_size": page_size,
+                "next_cursor": _tier_cursor_of(tier, rows[-1]) if has_more else None,
+            }
+        )
+
     items, total = await get_rarity_leaderboard(_pg_pool, page, page_size, tier)
-    return JSONResponse(
-        content={
-            "items": [_format_list_item(r) for r in items],
-            "total": total,
-            "page": page,
-            "page_size": page_size,
-        }
-    )
+    content: dict[str, Any] = {
+        "items": [_format_list_item(r) for r in items],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+    if tier:
+        # Another page follows exactly when this offset page ends before the tier's last row.
+        content["next_cursor"] = _tier_cursor_of(tier, items[-1]) if items and page * page_size < total else None
+    return JSONResponse(content=content)
 
 
 @router.get("/hidden-gems")
