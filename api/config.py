@@ -93,6 +93,9 @@ class ApiConfig:
     identity_ledger_refresh_interval: int = 300
     identity_ledger_refresh_quiet: int = 600
     identity_ledger_max_staleness: int = 21600
+    genre_tree_refresh_enabled: bool = True
+    genre_tree_refresh_interval: int = 3600
+    genre_tree_max_age: int = 86400
     similar_artists_precomputed_enabled: bool = False
     similar_artists_fusion_alpha: float = DEFAULT_FUSION_ALPHA
 
@@ -173,6 +176,9 @@ class ApiConfig:
             rabbitmq_password=get_secret("RABBITMQ_PASSWORD", "groovemap"),
             identity_auto_reattach_enabled=_env_bool("IDENTITY_AUTO_REATTACH_ENABLED"),
             identity_auto_reattach_interval=max(1, _env_int("IDENTITY_AUTO_REATTACH_INTERVAL", 300)),
+            genre_tree_refresh_enabled=_env_bool("GENRE_TREE_REFRESH_ENABLED", True),
+            genre_tree_refresh_interval=max(1, _env_int("GENRE_TREE_REFRESH_INTERVAL", 3600)),
+            genre_tree_max_age=max(1, _env_int("GENRE_TREE_MAX_AGE", 86400)),
             identity_ledger_refresh_enabled=_env_bool("IDENTITY_LEDGER_REFRESH_ENABLED"),
             identity_ledger_refresh_interval=max(1, _env_int("IDENTITY_LEDGER_REFRESH_INTERVAL", 300)),
             identity_ledger_refresh_quiet=max(0, _env_int("IDENTITY_LEDGER_REFRESH_QUIET", 600)),
