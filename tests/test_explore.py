@@ -275,6 +275,12 @@ class TestTrendsEndpoint:
 class TestTrendsCaching:
     """Tests for Valkey caching on genre/style trends."""
 
+    @pytest.fixture(autouse=True)
+    def _store_every_result(self) -> Any:
+        """These tests use instant fake queries; the cost rule has its own tests (``test_cache_budget.py``)."""
+        with patch("api.routers.explore._MIN_CACHE_RELEASES", 0):
+            yield
+
     def test_trends_genre_cache_hit(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
         """Cached genre trends should be returned without calling the query function."""
 
@@ -355,6 +361,12 @@ class TestTrendsCaching:
 
 class TestExploreCaching:
     """Tests for Valkey caching on artist/label explore endpoints."""
+
+    @pytest.fixture(autouse=True)
+    def _store_every_result(self) -> Any:
+        """These tests use instant fake queries; the cost rule has its own tests (``test_cache_budget.py``)."""
+        with patch("api.routers.explore._MIN_CACHE_RELEASES", 0):
+            yield
 
     def test_explore_artist_cache_hit(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
         """Cached artist explore should be returned without Neo4j query."""

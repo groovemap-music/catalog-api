@@ -52,6 +52,8 @@ async def store_within_budget(
     ttl: int,
     max_keys: int = DEFAULT_MAX_KEYS,
     max_value_bytes: int = DEFAULT_MAX_VALUE_BYTES,
+    cost: int | None = None,
+    min_cost: int = 0,
 ) -> bool:
     """Write ``value`` under ``key`` for ``ttl`` seconds unless ``cache`` already holds ``max_keys`` live keys.
 
@@ -60,12 +62,21 @@ async def store_within_budget(
     counted again. Returns ``False`` when the budget is spent and nothing was written. A Valkey error
     propagates, for the caller's existing best-effort handler to count as a write failure.
 
+    A key is chosen by the caller, so a budget with no admission rule is spent by whoever walks the most
+    names, however cheap each is to recompute (gm-catalog-api-dcwo). A caller passes ``cost``, a
+    deterministic size of the work behind the value (the release count of the entity it describes), never a
+    measured latency, which a client could inflate with load; below ``min_cost`` the write is skipped and the
+    budget is left alone, because recomputing it costs less than the slot is worth. The slots then go to
+    results that are expensive to recompute, which is what a cache is for.
+
     The check and the write are separate commands, so concurrent writers can overshoot the budget by about
     their own number, which the budget tolerates; an index entry whose ``setex`` then fails expires with
     its TTL. A Lua script would close that gap but cannot run on the fake Valkey the unit tests use.
     """
     size = len(value.encode("utf-8")) if isinstance(value, str) else len(value)
     if len(key) > MAX_KEY_LENGTH or size > max_value_bytes:
+        return False
+    if cost is not None and cost < min_cost:
         return False
     index = index_key(cache)
     now = time.time()
