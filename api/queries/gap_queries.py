@@ -78,7 +78,7 @@ async def get_label_gaps(
     WHERE NOT (u)-[:COLLECTED]->(r)
     {extra}
     WITH DISTINCT u, r
-    ORDER BY r.year DESC, r.title
+    ORDER BY r.year DESC, r.title, r.id
     SKIP $offset LIMIT $limit
     OPTIONAL MATCH (r)-[:BY]->(a:Artist)
     OPTIONAL MATCH (r)-[:IS]->(g:Genre)
@@ -89,7 +89,7 @@ async def get_label_gaps(
          w IS NOT NULL AS on_wantlist
     RETURN r.id AS id, r.title AS title, r.year AS year,
            r.formats AS formats, artist_name AS artist, genres, on_wantlist
-    ORDER BY r.year DESC, r.title
+    ORDER BY r.year DESC, r.title, r.id
     """
     count_cypher = f"""
     MATCH (u:User {{id: $user_id}})
@@ -153,7 +153,7 @@ async def get_artist_gaps(
     WHERE NOT (u)-[:COLLECTED]->(r)
     {extra}
     WITH DISTINCT u, r
-    ORDER BY r.year DESC, r.title
+    ORDER BY r.year DESC, r.title, r.id
     SKIP $offset LIMIT $limit
     OPTIONAL MATCH (r)-[:ON]->(l:Label)
     OPTIONAL MATCH (r)-[:IS]->(g:Genre)
@@ -164,7 +164,7 @@ async def get_artist_gaps(
          w IS NOT NULL AS on_wantlist
     RETURN r.id AS id, r.title AS title, r.year AS year,
            r.formats AS formats, label_name AS label, genres, on_wantlist
-    ORDER BY r.year DESC, r.title
+    ORDER BY r.year DESC, r.title, r.id
     """
     count_cypher = f"""
     MATCH (u:User {{id: $user_id}})
@@ -228,7 +228,7 @@ async def get_master_gaps(
     WHERE NOT (u)-[:COLLECTED]->(r)
     {extra}
     WITH DISTINCT u, r
-    ORDER BY r.year DESC, r.title
+    ORDER BY r.year DESC, r.title, r.id
     SKIP $offset LIMIT $limit
     OPTIONAL MATCH (r)-[:BY]->(a:Artist)
     OPTIONAL MATCH (r)-[:ON]->(l:Label)
@@ -242,7 +242,7 @@ async def get_master_gaps(
     RETURN r.id AS id, r.title AS title, r.year AS year,
            r.formats AS formats, artist_name AS artist, label_name AS label,
            genres, on_wantlist
-    ORDER BY r.year DESC, r.title
+    ORDER BY r.year DESC, r.title, r.id
     """
     count_cypher = f"""
     MATCH (u:User {{id: $user_id}})

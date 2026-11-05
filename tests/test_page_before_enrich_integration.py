@@ -205,3 +205,31 @@ async def test_gap_pages_are_unchanged(
             assert total >= len(page)
             if offset == 0 and not (exclude_wantlist or families or mediums):
                 assert page, function.__name__  # a filter can legitimately empty a page; the unfiltered one cannot
+
+
+async def test_walking_gap_pages_across_ties_returns_every_release_exactly_once(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    """Reissues with the same year and title tie on the old sort key; the id breaks the tie, so no page repeats or drops one."""
+    await run_query(neo4j_driver, "MATCH (n) DETACH DELETE n", database="neo4j", timeout=None)
+    await run_query(
+        neo4j_driver,
+        """CREATE (u:User {id: 'u1'}), (l:Label {id: 'L1'}), (a:Artist {id: 'A1', name: 'A'}), (m:Master {id: 'M1'})
+           WITH u, l, a, m UNWIND range(1, 40) AS i
+           CREATE (r:Release {id: 'r' + right('000' + toString(i), 3), title: 'Same Title', year: 1970 + i % 2})
+           CREATE (r)-[:ON]->(l), (r)-[:BY]->(a), (r)-[:DERIVED_FROM]->(m)""",
+        database="neo4j",
+        timeout=None,
+    )
+    expected = sorted(f"r{i:03d}" for i in range(1, 41))
+    with patch.object(gap_queries, "attach_gap_identity", _passthrough):
+        for function, value in [
+            (gap_queries.get_label_gaps, "L1"),
+            (gap_queries.get_artist_gaps, "A1"),
+            (gap_queries.get_master_gaps, "M1"),
+        ]:
+            seen: list[str] = []
+            for offset in range(0, 45, 7):
+                page, total = await function(neo4j_driver, "u1", value, 7, offset)
+                assert total == 40
+                seen.extend(row["id"] for row in page)
+            assert sorted(seen) == expected, function.__name__
+            assert len(seen) == len(set(seen)) == 40, function.__name__
