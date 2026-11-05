@@ -9,6 +9,23 @@ from psycopg.rows import dict_row
 from api.queries.helpers import run_query, run_single
 
 
+# The relationship types musicbrainz-graph-enricher writes between two artists (its
+# MB_RELATIONSHIP_MAP values). Cypher cannot take a type as a parameter, so the list is a code
+# constant. tests/test_musicbrainz_relationship_types.py pins it to a snapshot of the enricher map
+# and fails when the enricher adds a type this list omits.
+MB_ARTIST_RELATIONSHIP_TYPES: tuple[str, ...] = (
+    "MEMBER_OF",
+    "COLLABORATED_WITH",
+    "TAUGHT",
+    "TRIBUTE_TO",
+    "FOUNDED",
+    "SUPPORTED",
+    "SUBGROUP_OF",
+    "RENAMED_TO",
+)
+_MB_TYPES = "|".join(MB_ARTIST_RELATIONSHIP_TYPES)
+
+
 async def get_artist_musicbrainz(neo4j_driver: Any, discogs_id: int | str) -> dict[str, Any] | None:
     """Fetch MusicBrainz metadata for a Discogs artist from Neo4j."""
     row = await run_single(
@@ -36,23 +53,25 @@ async def get_artist_musicbrainz(neo4j_driver: Any, discogs_id: int | str) -> di
     }
 
 
+# Typed on the enricher's relationship types so the planner reads only those edges, not every BY
+# edge into the artist (audit H14). Output is the same rows as the untyped pattern for every type
+# the enricher writes, which MB_ARTIST_RELATIONSHIP_TYPES lists.
+_MB_RELATIONSHIPS_CYPHER = """MATCH (a:Artist {id: $discogs_id})-[r:__MB_TYPES__]->(target:Artist)
+   WHERE r.source = 'musicbrainz'
+   RETURN type(r) AS type, target.id AS target_id, target.name AS target_name,
+          'outgoing' AS direction, r.begin_date AS begin_date,
+          r.end_date AS end_date, r.attributes AS attributes
+   UNION ALL
+   MATCH (source:Artist)-[r:__MB_TYPES__]->(a:Artist {id: $discogs_id})
+   WHERE r.source = 'musicbrainz'
+   RETURN type(r) AS type, source.id AS target_id, source.name AS target_name,
+          'incoming' AS direction, r.begin_date AS begin_date,
+          r.end_date AS end_date, r.attributes AS attributes""".replace("__MB_TYPES__", _MB_TYPES)
+
+
 async def get_artist_mb_relationships(neo4j_driver: Any, discogs_id: int | str) -> list[dict[str, Any]]:
     """Fetch MusicBrainz-sourced relationships for a Discogs artist from Neo4j."""
-    return await run_query(
-        neo4j_driver,
-        """MATCH (a:Artist {id: $discogs_id})-[r]->(target:Artist)
-           WHERE r.source = 'musicbrainz'
-           RETURN type(r) AS type, target.id AS target_id, target.name AS target_name,
-                  'outgoing' AS direction, r.begin_date AS begin_date,
-                  r.end_date AS end_date, r.attributes AS attributes
-           UNION ALL
-           MATCH (source:Artist)-[r]->(a:Artist {id: $discogs_id})
-           WHERE r.source = 'musicbrainz'
-           RETURN type(r) AS type, source.id AS target_id, source.name AS target_name,
-                  'incoming' AS direction, r.begin_date AS begin_date,
-                  r.end_date AS end_date, r.attributes AS attributes""",
-        discogs_id=discogs_id,
-    )
+    return await run_query(neo4j_driver, _MB_RELATIONSHIPS_CYPHER, discogs_id=discogs_id)
 
 
 async def get_artist_external_links(pool: Any, discogs_id: int) -> list[dict[str, Any]]:
