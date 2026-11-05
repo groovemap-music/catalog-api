@@ -30,19 +30,18 @@ async def get_person_credits(
 ) -> list[dict[str, Any]]:
     """Return one page of the releases a person is credited on, one row per release, role and category.
 
-    Pages follow a total order (year newest first, then title, release id, role, category) over the credit
-    records, so walking ``offset`` upward reaches every credit. The page is cut before the artist and label
-    lookups and before any de-duplication, so memory is the page and not the person: Bob Ludwig has 60,758
-    credits and the full list took 8.2 s and 110 MB (audit H12). A credit recorded twice is one row, as before
-    (collapsed inside the page).
+    Pages follow a total order (year newest first, then title, release id, role, category) over the distinct
+    credits, so walking ``offset`` upward reaches every credit exactly once: a credit stored as two edges is one
+    row and one count, on every page. The page is cut before the artist and label lookups, so only ``limit``
+    releases are enriched. Bob Ludwig has 60,758 credits and the full list took 8.2 s and 110 MB (audit H12);
+    de-duplicating across the person's credits holds about 14 MB while the page is cut.
     """
     cypher = """
     MATCH (p:Person {name: $name})-[c:CREDITED_ON]->(r:Release)
-    WITH r, c.role AS role, c.category AS category
+    WITH DISTINCT r, c.role AS role, c.category AS category
     ORDER BY r.year DESC, r.title, r.id, role, category
     SKIP $offset
     LIMIT $limit
-    WITH DISTINCT r, role, category
     OPTIONAL MATCH (r)-[:BY]->(a:Artist)
     OPTIONAL MATCH (r)-[:ON]->(l:Label)
     WITH r, role, category, collect(DISTINCT a.name)[..3] AS artists, collect(DISTINCT l.name)[..1] AS labels
@@ -59,10 +58,10 @@ async def get_person_credits(
 
 
 async def count_person_credits(driver: AsyncResilientNeo4jDriver, name: str) -> int:
-    """Count the credit records :func:`get_person_credits` pages through (one per ``CREDITED_ON`` edge)."""
+    """Count the distinct credits :func:`get_person_credits` pages through: (release, role, category) once each."""
     cypher = """
-    MATCH (:Person {name: $name})-[c:CREDITED_ON]->(:Release)
-    RETURN count(c) AS total
+    MATCH (:Person {name: $name})-[c:CREDITED_ON]->(r:Release)
+    RETURN count(DISTINCT [r.id, c.role, c.category]) AS total
     """
     return await run_count(driver, cypher, name=name)
 

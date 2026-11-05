@@ -1323,7 +1323,7 @@ The response is identical either way.
 - `limit` — Credits per page (1–500, default: 100)
 - `offset` — Credits to skip (default: 0)
 
-The response carries `total_credits` (every credit record the person has), `limit`, `offset` and `has_more`. Credits come
+The response carries `total_credits` (every distinct credit the person has: a release, role and category once, even if stored twice), `limit`, `offset` and `has_more`. Credits come
 newest year first, then title, release id, role and category, so raising `offset` by `limit` until `has_more` is `false`
 reaches every credit. Before pagination the whole list came back at once (60,758 rows for the busiest mastering engineer).
 A page near the start is cheap; a page deep into a very long list costs more because the rows before it are ordered first.

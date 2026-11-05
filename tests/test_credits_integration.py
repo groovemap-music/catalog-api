@@ -68,7 +68,7 @@ async def test_pages_are_exactly_the_old_rows_and_walk_to_the_end(neo4j_driver: 
     old = await run_query(neo4j_driver, _OLD_CREDITS, database="neo4j", name="Ana")
     total = await cq.count_person_credits(neo4j_driver, "Ana")
     assert len(old) == 37 + 9  # 37 mastering rows and 9 producer rows (i % 4 == 0); the repeated edge collapses
-    assert total == len(old) + 1  # the total counts credit records: the one credit stored twice counts twice
+    assert total == len(old)  # the credit stored twice is one credit, in the total and in the pages
 
     for limit in (1, 7, 10, 100):
         walked: list[dict[str, Any]] = []
@@ -80,20 +80,19 @@ async def test_pages_are_exactly_the_old_rows_and_walk_to_the_end(neo4j_driver: 
             if offset + limit >= total:
                 break
             offset += limit
-        assert len(walked) <= total
-        # Every credit is reached, and each row is the old row. A credit stored twice may show twice when its two
-        # records straddle a page boundary; inside a page it collapses to one row, as the old grouping made it.
-        as_text = lambda rows: {str(sorted(r.items())) for r in rows}  # noqa: E731
+        # Every credit exactly once, and each row is the old row, however small the page: the doubled edge never repeats.
+        assert len(walked) == total, limit
+        assert len({_key(r) for r in walked}) == total, limit
+        as_text = lambda rows: sorted(str(sorted(r.items())) for r in rows)  # noqa: E731
         assert as_text(walked) == as_text(old), limit
 
 
 async def test_pages_follow_one_total_order(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
-    await _seed_credits(neo4j_driver, duplicate=False)
+    await _seed_credits(neo4j_driver)
     everything = await cq.get_person_credits(neo4j_driver, "Ana", 500, 0)
     assert await cq.get_person_credits(neo4j_driver, "Ana", 500, 0) == everything  # deterministic
-    for offset in (5, 20, 40):
-        page = await cq.get_person_credits(neo4j_driver, "Ana", 5, offset)
-        assert [_key(r) for r in page] == [_key(r) for r in everything[offset : offset + 5]]
+    for offset in (0, 5, 20, 40):
+        assert await cq.get_person_credits(neo4j_driver, "Ana", 5, offset) == everything[offset : offset + 5]
     assert await cq.get_person_credits(neo4j_driver, "Ana", 10, 1000) == []
     assert await cq.count_person_credits(neo4j_driver, "Nobody") == 0
 
