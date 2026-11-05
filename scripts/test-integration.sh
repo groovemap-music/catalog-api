@@ -104,4 +104,5 @@ NEO4J_PASSWORD="${password}" \
         tests/test_genre_tree_integration.py \
         tests/test_network_collaborators_integration.py \
         tests/test_rarity_stream_integration.py \
-        tests/test_data_completeness_integration.py
+        tests/test_data_completeness_integration.py \
+        tests/test_rarity_empty_integration.py
