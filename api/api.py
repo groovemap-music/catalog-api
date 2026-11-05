@@ -43,6 +43,7 @@ from slowapi.errors import RateLimitExceeded
 import api.activity as _activity
 import api.app_tokens as _app_tokens
 import api.dependencies as _dependencies
+import api.explore_discovery as _explore_discovery
 import api.genre_tree_store as _genre_tree_store
 import api.identity as _identity
 import api.routers.activity as _activity_router
@@ -377,6 +378,7 @@ async def _start_service(_app: FastAPI) -> _LifecycleResources:
     _app.state.prewarm_task = asyncio.create_task(_prewarm_search_cache())
     _start_identity_maintenance(_app, config, pool, _neo4j)
     _start_ledger_refresh(_app, config, pool)
+    _start_explore_hubs(_app, config, valkey, _neo4j)
     _start_genre_tree_refresh(_app, config, valkey, _neo4j)
     return _LifecycleResources(health_server=health_server, anthropic_client=anthropic_client)
 
@@ -391,6 +393,18 @@ def _start_identity_maintenance(_app: FastAPI, config: ApiConfig, pool: Any, neo
         return
     _app.state.identity_maintenance_task = asyncio.create_task(run_trigger_loop(pool, neo4j, config.identity_auto_reattach_interval))
     logger.info("🔗 Automatic identity maintenance watcher started", interval=config.identity_auto_reattach_interval)
+
+
+def _start_explore_hubs(_app: FastAPI, config: ApiConfig, valkey: Any, neo4j: Any) -> None:
+    """Start the background computation of /api/recommend/explore discoveries for hub entities."""
+    _explore_discovery.configure(valkey)
+    _app.state.explore_hubs_task = None
+    if not config.explore_hubs_refresh_enabled or neo4j is None:
+        return
+    _app.state.explore_hubs_task = asyncio.create_task(
+        _explore_discovery.run_refresh_loop(neo4j, interval=config.explore_hubs_refresh_interval, max_age=config.explore_hubs_max_age)
+    )
+    logger.info("🌳 Explore hub refresh started", interval=config.explore_hubs_refresh_interval)
 
 
 def _start_genre_tree_refresh(_app: FastAPI, config: ApiConfig, valkey: Any, neo4j: Any) -> None:
@@ -445,6 +459,9 @@ async def _stop_service(_app: FastAPI, resources: _LifecycleResources) -> None:
     ledger_refresh_task = getattr(_app.state, "ledger_refresh_task", None)
     if isinstance(ledger_refresh_task, asyncio.Task):
         await _cancel_tasks([ledger_refresh_task])
+    explore_hubs_task = getattr(_app.state, "explore_hubs_task", None)
+    if isinstance(explore_hubs_task, asyncio.Task):
+        await _cancel_tasks([explore_hubs_task])
     genre_tree_task = getattr(_app.state, "genre_tree_task", None)
     if isinstance(genre_tree_task, asyncio.Task):
         await _cancel_tasks([genre_tree_task])
