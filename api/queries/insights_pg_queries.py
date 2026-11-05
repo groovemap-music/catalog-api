@@ -39,6 +39,9 @@ _COMPLETENESS_FIELDS: dict[str, list[tuple[str, str]]] = {
     ],
 }
 
+# Counted and returned, but left out of `completeness_pct` because it can never be non-zero today.
+_UNSCORED_FIELD = "with_image"
+
 # Pre-built combined queries per entity type — single table scan each.
 #
 # `jsonb_to_record` reads each row's `data` once and hands back every key as text, where
@@ -87,7 +90,12 @@ async def _query_single_entity(pool: Any, entity_type: str, fields: list[tuple[s
         for i, (field_name, _) in enumerate(fields):
             item[field_name] = row[i + 1]
 
-        field_pcts = [item[field_name] / total_count * 100 for field_name, _ in fields]
+        # `with_image` is reported but not scored: no source carries images (see _COMPLETENESS_FIELDS), so
+        # averaging it would cap every entity type at a fraction of what its real fields show. An entity
+        # type with no other field (artists, labels) has nothing to average and reports 0.0, not 100: the
+        # honest value there is "not measurable", which the insights.data_completeness column
+        # (NUMERIC NOT NULL) cannot hold until that schema and analytics-engine accept null.
+        field_pcts = [item[field_name] / total_count * 100 for field_name, _ in fields if field_name != _UNSCORED_FIELD]
         item["completeness_pct"] = round(sum(field_pcts) / len(field_pcts), 2) if field_pcts else 0.0
     else:
         item["completeness_pct"] = 0.0

@@ -92,8 +92,24 @@ class TestQueryDataCompleteness:
         pool = _make_pool_with_fetchone_sequence(sequence)
         results = await query_data_completeness(pool)
 
-        for result in results:
-            assert result["completeness_pct"] == 80.0
+        by_type = {r["entity_type"]: r for r in results}
+        assert by_type["masters"]["completeness_pct"] == 80.0
+        assert by_type["releases"]["completeness_pct"] == 80.0
+        # artists and labels have only the unscored image field: nothing to average, so 0.0, not 80 or 100
+        assert by_type["artists"]["completeness_pct"] == 0.0
+        assert by_type["labels"]["completeness_pct"] == 0.0
+        assert by_type["artists"]["with_image"] == 80  # still reported
+
+    @pytest.mark.asyncio
+    async def test_images_that_are_always_zero_do_not_drag_the_score_down(self) -> None:
+        sequence: list[tuple[int, ...] | None] = [(100, 0), (100, 0), (100, 100, 100, 0), (100, 100, 100, 100, 0)]
+        results = await query_data_completeness(_make_pool_with_fetchone_sequence(sequence))
+
+        by_type = {r["entity_type"]: r for r in results}
+        assert by_type["releases"]["completeness_pct"] == 100.0
+        assert by_type["masters"]["completeness_pct"] == 100.0
+        assert by_type["releases"]["with_image"] == 0
+        assert by_type["artists"]["completeness_pct"] == 0.0
 
     @pytest.mark.asyncio
     async def test_zero_total_count_returns_zero_completeness(self) -> None:
