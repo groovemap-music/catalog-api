@@ -7,6 +7,7 @@ import os
 from collections.abc import AsyncIterator
 from datetime import datetime
 from time import perf_counter
+from typing import Any
 from uuid import UUID
 
 import httpx
@@ -718,6 +719,24 @@ async def test_strata_read_bounds_surface_as_the_errors_the_route_maps_to_504(
         assert await (await conn.execute("SHOW statement_timeout")).fetchone() == default
 
 
+class _RolledBack(Exception):
+    """Raised to roll back the rows a plan check loads."""
+
+
+async def _strata_sibling_plan_on_a_selective_table(cursor: Any) -> str:
+    await cursor.execute("TRUNCATE musicbrainz.releases")
+    await cursor.execute(
+        "INSERT INTO musicbrainz.releases (mbid, name, release_group_mbid, discogs_release_id, data) "
+        "SELECT md5('r' || n)::uuid, 'r' || n, md5('g' || n)::uuid, n, '{}'::jsonb FROM generate_series(1, 5000) AS n"
+    )
+    await cursor.execute("ANALYZE musicbrainz.releases")
+    await cursor.execute("SET LOCAL enable_seqscan = off")
+    await cursor.execute("SELECT md5('g1')::uuid::text")
+    group = (await cursor.fetchone())[0]
+    await cursor.execute(f"EXPLAIN {strata_queries._MB_SIBLINGS}", {"group_mbids": [group]})
+    return "\n".join(row[0] for row in await cursor.fetchall())
+
+
 async def test_the_pinned_schema_indexes_the_strata_release_group_join(postgres_pool: AsyncPostgreSQLPool) -> None:
     """database-schema f21b3e1 indexes musicbrainz.releases (release_group_mbid), and the sibling read uses it."""
     async with postgres_pool.connection() as conn, conn.cursor() as cursor:
@@ -725,12 +744,15 @@ async def test_the_pinned_schema_indexes_the_strata_release_group_join(postgres_
         assert await cursor.fetchone() == (
             "CREATE INDEX idx_mb_releases_release_group_mbid ON musicbrainz.releases USING btree (release_group_mbid)",
         )
-        async with conn.transaction():
-            # The fixture's tables are nearly empty, so a sequential scan would win on cost;
-            # disabling it shows the index is one the sibling read can use at all.
-            await cursor.execute("SET LOCAL enable_seqscan = off")
-            await cursor.execute(f"EXPLAIN {strata_queries._MB_SIBLINGS}", {"group_mbids": ["00000000-0000-0000-0000-00000000b501"]})
-            plan = "\n".join(row[0] for row in await cursor.fetchall())
+        # The plan must not depend on whatever statistics the table holds (empty after ANALYZE, a few
+        # fixture rows, or a reused database), so a rolled-back transaction loads a table where one
+        # group is selective: 5,000 linked releases over 5,000 groups, analyzed. The partial
+        # idx_mb_releases_discogs_id then has to read every row, and only the release-group index
+        # reaches the group's row directly. Without that index the plan falls back to the partial one.
+        with pytest.raises(_RolledBack):
+            async with conn.transaction():
+                plan = await _strata_sibling_plan_on_a_selective_table(cursor)
+                raise _RolledBack
     assert "idx_mb_releases_release_group_mbid" in plan
 
 
