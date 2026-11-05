@@ -26,7 +26,6 @@ from api.queries.label_dna_queries import (
     MIN_RELEASES,
     compute_similar_labels,
     get_candidate_labels_genre_vectors,
-    get_label_active_years,
     get_label_format_profile,
     get_label_full_profile,
     get_label_genre_profile,
@@ -122,8 +121,8 @@ async def _build_dna(label_id: str) -> tuple[LabelDNA | None, str]:
     styles = profile["styles"]
     decades = profile["decades"]
 
-    active_years, formats, media = await asyncio.gather(
-        get_label_active_years(_neo4j_driver, label_id),
+    active_years = profile["years"]  # the same read as the decades: one pass over the label's years
+    formats, media = await asyncio.gather(
         get_label_format_profile(_neo4j_driver, label_id),
         get_label_media_profile(_neo4j_driver, label_id),
     )
