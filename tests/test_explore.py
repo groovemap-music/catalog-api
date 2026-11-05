@@ -343,6 +343,15 @@ class TestTrendsCaching:
         mock_valkey.setex.assert_called_once()
         assert mock_valkey.setex.call_args[0][0] == "trends:label:Reprise Records"
 
+    def test_trends_empty_result_is_answered_but_not_cached(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        """A name with no trends spends no cache budget, and the response is the same."""
+        mock_valkey.get = AsyncMock(return_value=None)
+        with patch.dict("api.routers.explore.TRENDS_DISPATCH", {"label": AsyncMock(return_value=[])}):
+            response = test_client.get("/api/trends?name=No Such Label&type=label")
+        assert response.status_code == 200
+        assert response.json() == {"name": "No Such Label", "type": "label", "data": []}
+        mock_valkey.setex.assert_not_called()
+
 
 class TestExploreCaching:
     """Tests for Valkey caching on artist/label explore endpoints."""

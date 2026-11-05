@@ -51,6 +51,7 @@ CACHE_MISS = "miss"
 # Logical Valkey caches. The value names the cache, never the key inside it.
 CACHE_CREDITS_LEADERBOARD = "credits_leaderboard"
 CACHE_CREDITS_PERSON = "credits_person"
+CACHE_EXPAND = "expand"
 CACHE_EXPLORE = "explore"
 CACHE_INSIGHTS_COMPLETENESS = "insights_completeness"
 CACHE_LABEL_DNA = "label_dna"
@@ -123,6 +124,7 @@ class _Instruments:
     activity_events: Any
     activity_failures: Any
     cache: Any
+    cache_budget_full: Any
     cache_write_failures: Any
     db_operation_duration: Any
     identity_ledger_refreshes: Any
@@ -158,6 +160,11 @@ def _build_instruments() -> _Instruments:
             "groovemap.api.cache",
             unit="{event}",
             description="Valkey cache-aside lookups by logical cache and outcome",
+        ),
+        cache_budget_full=meter.create_counter(
+            "groovemap.api.cache.budget_full",
+            unit="{event}",
+            description="Cache writes skipped because the logical cache already holds its key budget",
         ),
         cache_write_failures=meter.create_counter(
             "groovemap.api.cache.write_failures",
@@ -296,6 +303,15 @@ def record_cache_write_failure(cache: str, exc: BaseException) -> None:
         return
     _write_failure_log[cache] = (now, 0)
     logger.warning("⚠️ Cache write failed", cache=cache, error_type=error_type, suppressed=suppressed)
+
+
+def record_cache_budget_full(cache: str) -> None:
+    """Count one write skipped because ``cache`` holds its whole key budget.
+
+    This is a state of the cache, not a failure of Valkey, so it is only counted: no warning, and
+    never under ``cache.write_failures``.
+    """
+    instruments().cache_budget_full.add(1, {"cache": cache})
 
 
 def record_identity_ledger_refresh(trigger: str, outcome: str) -> None:
