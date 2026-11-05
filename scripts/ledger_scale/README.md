@@ -14,7 +14,7 @@ This is the stand-in until one does.
 ## Run it
 
 The disk needed grows linearly: about 0.95 GB at `scale=0.05`, 4.7 GB at 0.25, and 9.3 GB at
-0.5. Full scale needs about 18.5 GB, plus temporary sort space while the largest indexes build.
+0.5. Full scale needs about 27 GB, plus temporary sort space while the largest indexes build. The identifier aliases added the difference: the 0.01 seed measured 273 MB with them, against about 185 MB for the same scale before (the 18.5 GB full-scale figure divided by 100).
 Check `df -h /` first. Under Colima the volume lives in the VM's sparse disk image, which does
 not shrink on its own when the volume is removed (see teardown below).
 
@@ -76,7 +76,9 @@ apart, in kind order: artist, label, master, then release. Every count below is 
 
 | Figure (scale 1) | Count | Source |
 | --- | ---: | --- |
-| `provider_aliases` | 48,588,202 | Section 3: 48,416,897 in month 1 and 171,305 in month 2 |
+| `provider_aliases` (provider identifiers only) | 48,588,202 | Section 3: 48,416,897 in month 1 and 171,305 in month 2 |
+| Identifier aliases (`barcode`, `catalog_number`, `matrix`) | 2.1 per release: about 41.2M at scale 1 | Not in loj9. Added to the seed at the lux ratio (8.45M over about 4M releases); `sql-performance-audit-2026-11-04` |
+| `provider_aliases` total | about 89.5M at scale 1 (895,299 at scale 0.01) | The harness `--counts` line `provider_aliases` is this total; `identifier_aliases` is the identifier part (409,418 at 0.01) |
 | Editions (release items, less superseded) | 23,480,146 | Section 3, the release ledger |
 | Works (master items, less superseded) | 6,842,218 | Section 3 gives 6,839,569. This count is every Discogs master and own release group, less the 337 re-attached |
 | Releases linked at ingest | 1,881,444 + 1,315 | Section 2 |
@@ -111,7 +113,7 @@ statement can read, which would only cost disk: `provider_aliases_pkey`, `public
 document indexes, and `musicbrainz.releases`' `gm_item_id` and `media` indexes.
 `ledger_scale.deferred` lists every one with `rebuilt`.
 
-**What is not modelled.** Identifier aliases (loj9 did not replay them), `catalog_item_moves`
+**What is not modelled.** Shared barcodes (each identifier alias is unique to its release), `catalog_item_moves`
 (0 by construction), `admin_audit_log` rows (a `decision_ref` is not a foreign key, and the
 ledger never joins it), and the provider tables for artists, labels, and release groups (no
 ledger statement reads them).

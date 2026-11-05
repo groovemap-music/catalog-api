@@ -50,6 +50,22 @@ async def test_a_new_import_drops_every_explore_and_trends_key_and_keeps_the_res
 
 
 @pytest.mark.asyncio
+async def test_expand_pages_and_their_budget_index_are_dropped_with_the_explore_caches() -> None:
+    """Pre-import expand totals are the same stale counts as the Bowie page; the budget index counts those pages."""
+    valkey = _store()
+    await valkey.set(valkey_key("expand:3f2a9c"), "{}")
+    await valkey.zadd(valkey_key("expand:index"), {valkey_key("expand:3f2a9c"): 9_999_999_999})
+    await valkey.set(valkey_key("expand:unrelated-but-same-family"), "{}")
+    await valkey.set(valkey_key("explore:artist:David Bowie"), "{}")
+    await valkey.set(import_cache._MARKER_KEY, "1")
+
+    with patch.object(import_cache, "latest_discogs_version", AsyncMock(return_value="2")):
+        assert await import_cache.check_import_cache(AsyncMock(), valkey, None) is True
+
+    assert await _keys(valkey) == sorted([import_cache._MARKER_KEY])
+
+
+@pytest.mark.asyncio
 async def test_auth_keys_survive_an_import_invalidation() -> None:
     """Revocations, password-reset tokens and password-change markers are security state, not cache."""
     valkey = _store()

@@ -1,6 +1,7 @@
 """Explore endpoints — migrated from explore service."""
 
 import asyncio
+import hashlib
 import json
 import time
 from collections import OrderedDict
@@ -14,10 +15,12 @@ from fastapi.responses import JSONResponse
 from neo4j.exceptions import ClientError as Neo4jClientError
 from psycopg.errors import QueryCanceled
 
+from api import genre_tree_store
+from api.cache_budget import store_within_budget
 from api.dependencies import get_optional_user
 from api.limiter import limiter
 from api.models import PathNode, PathResponse
-from api.queries import collaborator_queries, genre_tree_queries
+from api.queries import collaborator_queries
 from api.queries.neo4j_queries import (
     AUTOCOMPLETE_DISPATCH,
     COUNT_DISPATCH,
@@ -53,7 +56,7 @@ from api.strata import (
     encode_catalog,
     label_targets,
 )
-from api.telemetry import CACHE_EXPLORE, CACHE_STRATA, CACHE_TRENDS, cache_get, record_cache_write_failure
+from api.telemetry import CACHE_EXPAND, CACHE_EXPLORE, CACHE_STRATA, CACHE_TRENDS, cache_get, record_cache_write_failure
 from api.valkey_keys import valkey_key
 
 
@@ -81,12 +84,6 @@ def configure(neo4j: Any, jwt_secret: str | None, valkey: Any = None, pg_pool: A
 _autocomplete_cache: OrderedDict[tuple[str, str, int], list[dict[str, Any]]] = OrderedDict()
 _AUTOCOMPLETE_CACHE_MAX = 512
 _autocomplete_lock: asyncio.Lock | None = None  # lazy init to avoid binding to wrong event loop
-
-# Genre tree cache — refreshed every 5 minutes since the tree changes rarely
-_genre_tree_cache: dict | None = None
-_genre_tree_cache_time: float = 0
-_GENRE_TREE_TTL = 300  # 5 minutes
-_genre_tree_lock: asyncio.Lock | None = None  # lazy init to avoid binding to wrong event loop
 
 
 def _get_cache_key(query: str, entity_type: str, limit: int) -> tuple[str, str, int]:
@@ -186,11 +183,51 @@ async def explore(
     if _valkey and entity_type in ("artist", "label"):
         cache_key = valkey_key(f"explore:{entity_type}:{name}")
         try:
-            await _valkey.setex(cache_key, _EXPLORE_CACHE_TTL, json.dumps(response))
+            await store_within_budget(_valkey, cache=CACHE_EXPLORE, key=cache_key, value=json.dumps(response), ttl=_EXPLORE_CACHE_TTL)
         except Exception as exc:
             record_cache_write_failure(CACHE_EXPLORE, exc)
 
     return JSONResponse(content=response)
+
+
+# The Valkey instance is noeviction and shared with auth state, and every part of an expand key is chosen
+# by an unauthenticated caller, so the cache writes only pages that are expensive to recompute and
+# bounded in number: hub-sized parents (total >= this), the default page size, and the first
+# _EXPAND_CACHE_MAX_PAGES pages; a before_year page only at offset 0 (131 years x 20 pages would not be bounded
+# enough). Every other request is answered exactly the same, just uncached.
+_EXPAND_CACHE_MIN_TOTAL = 1000
+_EXPAND_CACHE_PAGE_SIZE = 50
+_EXPAND_CACHE_MAX_PAGES = 20
+
+
+# A global budget on top of the per-page rules: an index of live expand keys (a sorted set scored by expiry)
+# caps how many exist at once. At about 10 KB a page this is on the order of 100 MB, whatever callers send.
+_EXPAND_CACHE_MAX_KEYS = 10_000
+_EXPAND_INDEX_KEY = valkey_key("expand:index")
+
+
+async def _store_expand_page(cache_key: str, body: dict[str, Any]) -> None:
+    """Write one page unless the live-key budget is spent. Expired index entries are dropped first."""
+    now = time.time()
+    await _valkey.zremrangebyscore(_EXPAND_INDEX_KEY, "-inf", now)
+    if await _valkey.zcard(_EXPAND_INDEX_KEY) >= _EXPAND_CACHE_MAX_KEYS:
+        record_cache_write_failure(CACHE_EXPAND, RuntimeError("expand cache budget spent"))
+        return
+    await _valkey.zadd(_EXPAND_INDEX_KEY, {cache_key: now + _EXPLORE_CACHE_TTL})
+    await _valkey.expire(_EXPAND_INDEX_KEY, _EXPLORE_CACHE_TTL)
+    await _valkey.setex(cache_key, _EXPLORE_CACHE_TTL, json.dumps(body))
+
+
+def _expand_page_is_cacheable(limit: int, offset: int, before_year: int | None) -> bool:
+    if limit != _EXPAND_CACHE_PAGE_SIZE or offset % _EXPAND_CACHE_PAGE_SIZE or offset >= _EXPAND_CACHE_PAGE_SIZE * _EXPAND_CACHE_MAX_PAGES:
+        return False
+    return before_year is None or offset == 0
+
+
+def _expand_cache_key(entity_type: str, node_id: str, category: str, limit: int, offset: int, before_year: int | None) -> str:
+    """One page and its total, keyed on everything that changes either. Hashed so a name cannot collide on ``:``."""
+    digest = hashlib.sha256(json.dumps([entity_type, node_id, category, limit, offset, before_year]).encode()).hexdigest()
+    return valkey_key(f"expand:{digest}")
 
 
 @router.get("/api/expand")
@@ -212,13 +249,30 @@ async def expand(
     if category_lower not in type_categories:
         valid = ", ".join(type_categories.keys())
         return JSONResponse(content={"error": f"Invalid category '{category}' for type '{type}'. Valid: {valid}"}, status_code=400)
+    cache_key = _expand_cache_key(entity_type, node_id, category_lower, limit, offset, before_year)
+    cacheable = _expand_page_is_cacheable(limit, offset, before_year)
+    if _valkey and cacheable:
+        try:
+            cached = await cache_get(_valkey, cache_key, cache=CACHE_EXPAND)
+            if cached:
+                return JSONResponse(content=json.loads(cached))
+        except Exception:
+            logger.debug("⚠️ Expand cache get failed", key=cache_key)
+
     query_func = type_categories[category_lower]
     count_func = COUNT_DISPATCH[entity_type][category_lower]
     results, total = await asyncio.gather(
         query_func(_neo4j_driver, node_id, limit, offset, before_year=before_year),
         count_func(_neo4j_driver, node_id, before_year=before_year),
     )
-    return JSONResponse(content={"children": results, "total": total, "offset": offset, "limit": limit, "has_more": offset + len(results) < total})
+    body = {"children": results, "total": total, "offset": offset, "limit": limit, "has_more": offset + len(results) < total}
+    # Only pages worth caching are written (see _expand_page_is_cacheable); an empty page never is.
+    if _valkey and cacheable and results and total >= _EXPAND_CACHE_MIN_TOTAL:
+        try:
+            await _store_expand_page(cache_key, body)
+        except Exception as exc:
+            record_cache_write_failure(CACHE_EXPAND, exc)
+    return JSONResponse(content=body)
 
 
 @router.get("/api/explore/year-range")
@@ -254,6 +308,12 @@ async def _anonymous_marks() -> dict[str, Mark] | None:
 _STRATA_EDGES_PER_MASTER = 4
 
 
+# A strata catalog is the whole ladder of a root of up to MAX_ROOT_RELEASES (134,051) releases, megabytes
+# rather than the ~10 KB of the other caches, so it gets 100 keys of at most 1 MB (100 MB), and a larger catalog is answered uncached.
+_STRATA_CACHE_MAX_KEYS = 100
+_STRATA_CACHE_MAX_VALUE_BYTES = 1_048_576
+
+
 def _strata_cache_key(artist_id: str) -> str:
     return valkey_key(f"explore:strata:{artist_id}")
 
@@ -277,9 +337,49 @@ async def _store_strata_catalog(catalog: Catalog) -> None:
     if not _valkey:
         return
     try:
-        await _valkey.setex(_strata_cache_key(catalog.root_id), _EXPLORE_CACHE_TTL, encode_catalog(catalog))
+        await store_within_budget(
+            _valkey,
+            cache=CACHE_STRATA,
+            key=_strata_cache_key(catalog.root_id),
+            value=encode_catalog(catalog),
+            ttl=_EXPLORE_CACHE_TTL,
+            max_keys=_STRATA_CACHE_MAX_KEYS,
+            max_value_bytes=_STRATA_CACHE_MAX_VALUE_BYTES,
+        )
     except Exception as exc:
         record_cache_write_failure(CACHE_STRATA, exc)
+
+
+def _shared_personnel_cache_key(master_ids: list[str], limit: int) -> str:
+    # The edges depend on the drawn masters, in order, and the limit, and on nothing about the
+    # caller, so the key is a digest of exactly those two values.
+    digest = hashlib.sha256(json.dumps({"masters": master_ids, "limit": limit}, separators=(",", ":")).encode()).hexdigest()
+    return valkey_key(f"explore:strata:personnel:{digest}")
+
+
+async def _shared_personnel(master_ids: list[str], limit: int) -> list[dict[str, Any]]:
+    """Shared-personnel edges for the drawn masters, from Valkey when this exact draw was read before.
+
+    The graph read is the same statement whatever the caller, so its result is cached under the
+    explore key family and TTL. A missing, unreadable or corrupt entry falls through to the graph.
+    """
+    if len(master_ids) < 2:
+        return []
+    cache_key = _shared_personnel_cache_key(master_ids, limit)
+    if _valkey:
+        try:
+            cached = await cache_get(_valkey, cache_key, cache=CACHE_STRATA)
+            if cached:
+                return json.loads(cached)  # type: ignore[no-any-return]
+        except Exception:
+            logger.debug("⚠️ Strata personnel cache read failed", key=cache_key)
+    edges = await get_shared_personnel(_neo4j_driver, master_ids, limit=limit)
+    if _valkey:
+        try:
+            await _valkey.setex(cache_key, _EXPLORE_CACHE_TTL, json.dumps(edges, separators=(",", ":")))
+        except Exception as exc:
+            record_cache_write_failure(CACHE_STRATA, exc)
+    return edges
 
 
 @router.get("/api/explore/strata")
@@ -350,7 +450,7 @@ async def strata(
         release_ids, master_ids, artist_ids = label_targets(payload)
         (release_titles, master_titles, artist_names), edges = await asyncio.gather(
             get_strata_labels(_neo4j_driver, release_ids, master_ids, artist_ids),
-            get_shared_personnel(_neo4j_driver, master_ids, limit=_STRATA_EDGES_PER_MASTER * len(master_ids)),
+            _shared_personnel(master_ids, limit=_STRATA_EDGES_PER_MASTER * len(master_ids)),
         )
     except (Neo4jClientError, QueryCanceled) as exc:
         if isinstance(exc, QueryCanceled) or "TransactionTimedOut" in str(exc):
@@ -405,39 +505,20 @@ async def get_collaborators(
 async def genre_tree(
     request: Request,  # noqa: ARG001
 ) -> JSONResponse:
-    """Return the full genre/style hierarchy derived from release co-occurrence."""
-    global _genre_tree_cache, _genre_tree_cache_time, _genre_tree_lock
+    """Return the full genre/style hierarchy derived from release co-occurrence.
 
-    if not _neo4j_driver:
-        return JSONResponse(content={"error": "Service not ready"}, status_code=503)
-
-    now = time.monotonic()
-    if _genre_tree_cache is not None and (now - _genre_tree_cache_time) < _GENRE_TREE_TTL:
-        return JSONResponse(content=_genre_tree_cache)
-
-    # Serialize cache refresh to prevent thundering herd on expiry
-    if _genre_tree_lock is None:
-        _genre_tree_lock = asyncio.Lock()
-    async with _genre_tree_lock:
-        # Re-check after acquiring lock — another coroutine may have refreshed
-        now = time.monotonic()
-        if _genre_tree_cache is not None and (now - _genre_tree_cache_time) < _GENRE_TREE_TTL:
-            return JSONResponse(content=_genre_tree_cache)
-
-        try:
-            genres = await genre_tree_queries.get_genre_tree(_neo4j_driver)
-        except Neo4jClientError as exc:
-            if "TransactionTimedOut" in str(exc):
-                logger.warning("⏱️ Genre tree query timed out")
-                return JSONResponse(
-                    content={"error": "Genre tree query timed out — try again later"},
-                    status_code=504,
-                )
-            raise
-
-        _genre_tree_cache = {"genres": genres}
-        _genre_tree_cache_time = time.monotonic()
-        return JSONResponse(content=_genre_tree_cache)
+    Served from the tree the background refresh stores (``api/genre_tree_store.py``); no request runs a
+    scan. A cold start with nothing stored yet answers 503 with ``Retry-After``.
+    """
+    try:
+        genres = await genre_tree_store.get_genre_tree()
+    except genre_tree_store.GenreTreeNotReadyError:
+        return JSONResponse(
+            content={"error": "The genre tree is being built — try again shortly"},
+            status_code=503,
+            headers={"Retry-After": "30"},
+        )
+    return JSONResponse(content={"genres": genres})
 
 
 async def _resolve_release_media(release_id: str, formats: list[Any] | None) -> dict[str, Any]:
@@ -523,10 +604,11 @@ async def get_trends(
     results = await query_func(_neo4j_driver, name)
     response = {"name": name, "type": entity_type, "data": results}
 
-    if _valkey and entity_type in ("genre", "style", "label"):
+    # An empty result is not stored: a name that does not exist would otherwise spend budget.
+    if _valkey and entity_type in ("genre", "style", "label") and results:
         cache_key = valkey_key(f"trends:{entity_type}:{name}")
         try:
-            await _valkey.setex(cache_key, _TRENDS_CACHE_TTL, json.dumps(response))
+            await store_within_budget(_valkey, cache=CACHE_TRENDS, key=cache_key, value=json.dumps(response), ttl=_TRENDS_CACHE_TTL)
         except Exception as exc:
             record_cache_write_failure(CACHE_TRENDS, exc)
 

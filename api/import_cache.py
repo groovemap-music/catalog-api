@@ -10,7 +10,7 @@ The completion signal is the newest complete Discogs extraction in
 (`api/reattach_trigger.py`). The loader writes it for every writer that counts, so no loader
 change is needed. The watcher keeps the version it last acted on in Valkey. When the newest
 complete version differs, it deletes every ``explore:*`` and ``trends:*`` key, which includes
-the strata catalog and personnel entries. On the first run, with no marker, it records the
+the strata catalog and personnel entries, and the expand pages with their budget index. On the first run, with no marker, it records the
 version and deletes nothing, since an empty cache has nothing stale in it.
 
 It is always on and cheap: one indexed lookup per poll, and a SCAN only when a new import lands.
@@ -31,7 +31,9 @@ from api.valkey_keys import valkey_key, valkey_pattern, with_legacy_patterns
 logger = structlog.get_logger(__name__)
 
 _MARKER_KEY: Final = valkey_key("import_cache:discogs_version")
-_INVALIDATED_FAMILIES: Final = ("explore:*", "trends:*")
+# expand:* holds the paged /api/explore expansions and their budget index (expand:index, a sorted set),
+# which the same pattern covers, so the index is reset with the pages it counts.
+_INVALIDATED_FAMILIES: Final = ("explore:*", "trends:*", "expand:*")
 
 
 async def latest_discogs_version(pool: Any) -> str | None:

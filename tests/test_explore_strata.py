@@ -259,12 +259,27 @@ class TestCache:
         assert "copy-secret" in signed_in.text
         assert "copy-secret" not in anonymous.text
         assert "owned_copy" not in anonymous.text
-        assert list(valkey_store) == ["explore:strata:1"]
-        assert "copy-secret" not in valkey_store["explore:strata:1"]
-        assert "owned_copy" not in valkey_store["explore:strata:1"]
+        assert "explore:strata:1" in valkey_store
+        assert all("copy-secret" not in value and "owned_copy" not in value for value in valkey_store.values())
         # The second read was served from the cache and still asked for the caller's own marks.
         reads["get_strata_catalog"].assert_awaited_once()
         reads["get_strata_marks"].assert_awaited_once()
+
+    def test_a_repeated_draw_reads_shared_personnel_once_and_returns_the_same_body(
+        self, test_client: TestClient, reads: dict[str, AsyncMock], valkey_store: dict[str, str]
+    ) -> None:
+        first = test_client.get("/api/explore/strata?artist_id=1")
+        second = test_client.get("/api/explore/strata?artist_id=1")
+
+        assert first.status_code == second.status_code == 200
+        assert first.json() == second.json()
+        assert first.json()["planes"][1]["edges"] == [
+            {"source": "m:500", "target": "m:501", "kind": "shared_personnel", "categories": ["Production"], "people": 3}
+        ]
+        reads["get_shared_personnel"].assert_awaited_once()
+        personnel_keys = [key for key in valkey_store if key.startswith("explore:strata:personnel:")]
+        assert len(personnel_keys) == 1
+        assert all("owned_copy" not in value for value in valkey_store.values())
 
     def test_a_pressing_focus_is_folded_from_the_one_cached_catalog(
         self, test_client: TestClient, reads: dict[str, AsyncMock], valkey_store: dict[str, str]
@@ -274,7 +289,7 @@ class TestCache:
 
         assert focused.status_code == 200
         assert focused.json()["focus"]["id"] == "ra:m:500"
-        assert list(valkey_store) == ["explore:strata:1"]
+        assert [key for key in valkey_store if not key.startswith("explore:strata:personnel:")] == ["explore:strata:1"]
         reads["get_strata_catalog"].assert_awaited_once()
 
     def test_a_second_read_is_served_from_the_cache(
@@ -288,10 +303,11 @@ class TestCache:
         # Neither the root nor the ladder is read again.
         reads["get_strata_root"].assert_awaited_once()
         reads["get_strata_catalog"].assert_awaited_once()
-        assert list(valkey_store) == ["explore:strata:1"]
-        key, ttl, _value = mock_valkey.setex.await_args.args
-        assert (key, ttl) == ("explore:strata:1", 86400)
-        assert mock_valkey.setex.await_count == 1
+        assert [key for key in valkey_store if not key.startswith("explore:strata:personnel:")] == ["explore:strata:1"]
+        catalog_writes = [call.args[:2] for call in mock_valkey.setex.await_args_list if call.args[0] == "explore:strata:1"]
+        assert catalog_writes == [("explore:strata:1", 86400)]
+        # The personnel edges are cached too, so the repeat read writes that key once and never again.
+        assert mock_valkey.setex.await_count == 2
 
     def test_a_cached_catalog_is_folded_for_every_page_and_budget(
         self,
@@ -318,7 +334,7 @@ class TestCache:
         urls = ["/api/explore/strata?artist_id=1"] + [f"/api/explore/strata?artist_id=1&focus=ra:m:600&page={page}" for page in range(4)]
 
         cached = [test_client.get(url).json() for url in urls]
-        assert list(valkey_store) == ["explore:strata:1"]
+        assert [key for key in valkey_store if not key.startswith("explore:strata:personnel:")] == ["explore:strata:1"]
         reads["get_strata_catalog"].assert_awaited_once()
         original = explore_module._valkey
         explore_module._valkey = None
@@ -355,11 +371,11 @@ class TestCache:
         assert (states[1]["r:10"], states[1]["r:11"]) == ("none", "wanted")
         assert set(states[2].values()) == {None}
         assert anonymous.json()["signed_in"] is False
-        # The one cached entry is the catalog alone: no caller id, state, or recorded time.
-        (cached,) = valkey_store.values()
-        assert cached == encode_catalog(CATALOG)
-        for marker in (TEST_USER_ID, other_user, "owned", "wanted", "2020-01-01"):
-            assert marker not in cached
+        # The catalog entry holds no caller id, state, or recorded time, and neither do the personnel edges.
+        assert valkey_store["explore:strata:1"] == encode_catalog(CATALOG)
+        for cached in valkey_store.values():
+            for marker in (TEST_USER_ID, other_user, "owned", "wanted", "2020-01-01"):
+                assert marker not in cached
 
     def test_without_valkey_every_read_goes_to_the_graph(self, test_client: TestClient, reads: dict[str, AsyncMock]) -> None:
         import api.routers.explore as explore_module
@@ -436,3 +452,17 @@ class TestLargeRoots:
 
         assert test_client.get("/api/explore/strata?artist_id=1").status_code == 200
         reads["get_strata_catalog"].assert_awaited_once()
+
+
+class TestSharedPersonnelKey:
+    """The personnel cache key is a digest of the ordered drawn masters and the limit, and nothing else."""
+
+    def test_the_key_depends_on_the_ordered_masters_and_the_limit_only(self) -> None:
+        from api.routers.explore import _shared_personnel_cache_key
+
+        base = _shared_personnel_cache_key(["500", "501"], 8)
+        assert base == _shared_personnel_cache_key(["500", "501"], 8)
+        assert base != _shared_personnel_cache_key(["501", "500"], 8)
+        assert base != _shared_personnel_cache_key(["500", "501"], 4)
+        assert base.startswith("explore:strata:personnel:")
+        assert "user" not in base.lower()
