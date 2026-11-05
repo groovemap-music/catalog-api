@@ -51,7 +51,9 @@ _ANALYZER_TOKEN_RE = re.compile(r"\w+(?:['\u2019.]\w+)*")
 
 
 def _analyzer_tokens(query: str) -> list[str]:
-    return _ANALYZER_TOKEN_RE.findall(query)
+    # Lower-cased, as the analyzer lower-cases names: Lucene operators are upper-case words, so a typed AND, OR or NOT
+    # must reach the parser as an ordinary word.
+    return [token.lower() for token in _ANALYZER_TOKEN_RE.findall(query)]
 
 
 def _build_autocomplete_query(query: str) -> str:

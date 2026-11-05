@@ -65,6 +65,11 @@ _NAMES = [
     "Guns N' Roses",
     "Guns Of Navarone",
     "Roses",
+    "Rock And Roll",
+    "Rock Roll",
+    "Not Fade Away",
+    "Fade",
+    "A Or B",
 ]
 _INDEXES = [
     ("artist_name_fulltext", "Artist"),
@@ -204,3 +209,14 @@ async def test_multiword_input_with_punctuation(neo4j_driver: AsyncResilientNeo4
 async def test_input_without_word_characters_is_an_empty_result_not_an_error(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
     await _seed(neo4j_driver)
     assert await _names(neo4j_driver, "!!") == []
+
+
+async def test_operator_words_are_ordinary_words(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    """A typed AND, OR or NOT must not reach the Lucene parser as an operator (a 500, or a different query)."""
+    await _seed(neo4j_driver)
+    assert (await _names(neo4j_driver, "ROCK AND ROLL"))[0] == "Rock And Roll"
+    assert "Rock Roll" not in await _names(neo4j_driver, "rock and roll")  # 'and' is a required word, not an operator
+    assert (await _names(neo4j_driver, "NOT Fade"))[0] == "Not Fade Away"
+    assert "Fade" not in await _names(neo4j_driver, "NOT Fade")
+    assert isinstance(await _names(neo4j_driver, "NOT"), list)
+    assert (await _names(neo4j_driver, "a OR b"))[0] == "A Or B"

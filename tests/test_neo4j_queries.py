@@ -114,17 +114,24 @@ class TestBuildAutocompleteQuery:
     def test_single_word(self) -> None:
         from api.queries.neo4j_queries import _build_autocomplete_query
 
-        assert _build_autocomplete_query("Indecent") == "(Indecent^100 OR Indecent*)"
+        assert _build_autocomplete_query("Indecent") == "(indecent^100 OR indecent*)"
 
     def test_multi_word(self) -> None:
         from api.queries.neo4j_queries import _build_autocomplete_query
 
-        assert _build_autocomplete_query("Indecent N") == '"Indecent N"^100 OR (Indecent AND N*)'
+        assert _build_autocomplete_query("Indecent N") == '"indecent n"^100 OR (indecent AND n*)'
 
     def test_special_chars_escaped(self) -> None:
         from api.queries.neo4j_queries import _build_autocomplete_query
 
         assert _build_autocomplete_query("key:val test") == '"key val test"^100 OR (key AND val AND test*)'
+
+    def test_operator_words_become_plain_lowercase_words(self) -> None:
+        from api.queries.neo4j_queries import _build_autocomplete_query
+
+        assert _build_autocomplete_query("ROCK AND ROLL") == '"rock and roll"^100 OR (rock AND and AND roll*)'
+        assert _build_autocomplete_query("NOT") == "(not^100 OR not*)"
+        assert _build_autocomplete_query("a OR b") == '"a or b"^100 OR (a AND or AND b*)'
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +241,7 @@ class TestAutocompleteQueries:
         driver = _make_driver(records=[])
         assert await autocomplete_artist(driver, "AC+DC", limit=5) == []
         params = driver.session().__aenter__.return_value.run.await_args.args[1]
-        assert params["query"] == '"AC DC"^100 OR (AC AND DC*)'
+        assert params["query"] == '"ac dc"^100 OR (ac AND dc*)'
         assert params["limit"] == 5
 
 

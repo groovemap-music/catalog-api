@@ -260,7 +260,7 @@ class TestAutocompletePerson:
         assert await autocomplete_person(driver, "Bob*") == []
         params = driver.session().__aenter__.return_value.run.await_args.args[1]
         # '*' is not a word character: the query is cut into word tokens, so no input wildcard reaches Lucene.
-        assert params["query"] == "(Bob^100 OR Bob*)"
+        assert params["query"] == "(bob^100 OR bob*)"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
