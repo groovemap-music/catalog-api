@@ -376,7 +376,7 @@ async def _start_service(_app: FastAPI) -> _LifecycleResources:
     _app.state.prewarm_task = asyncio.create_task(_prewarm_search_cache())
     _start_identity_maintenance(_app, config, pool, _neo4j)
     _start_ledger_refresh(_app, config, pool)
-    _start_import_cache_watch(_app, config, pool, valkey)
+    _start_import_cache_watch(_app, config, pool, valkey, neo4j)
     return _LifecycleResources(health_server=health_server, anthropic_client=anthropic_client)
 
 
@@ -392,12 +392,15 @@ def _start_identity_maintenance(_app: FastAPI, config: ApiConfig, pool: Any, neo
     logger.info("🔗 Automatic identity maintenance watcher started", interval=config.identity_auto_reattach_interval)
 
 
-def _start_import_cache_watch(_app: FastAPI, config: ApiConfig, pool: Any, valkey: Any) -> None:
+def _start_import_cache_watch(_app: FastAPI, config: ApiConfig, pool: Any, valkey: Any, neo4j: Any) -> None:
     """Start the watcher that drops the Explore and trends caches when an import completes (api/import_cache.py)."""
     _app.state.import_cache_task = None
     if valkey is None:
         return
-    _app.state.import_cache_task = asyncio.create_task(run_import_cache_watch(pool, valkey, config.import_cache_watch_interval))
+    if neo4j is None:
+        logger.warning("⚠️ Import cache watch needs Neo4j to see the graph finish; it is not started")
+        return
+    _app.state.import_cache_task = asyncio.create_task(run_import_cache_watch(pool, valkey, neo4j, config.import_cache_watch_interval))
     logger.info("🧹 Import cache watch started", interval=config.import_cache_watch_interval)
 
 

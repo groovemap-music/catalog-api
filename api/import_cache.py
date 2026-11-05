@@ -23,6 +23,7 @@ from typing import Any, Final
 
 import structlog
 
+from api.queries.helpers import run_single
 from api.reattach_trigger import _LATCH_PRESENT, _LATEST_COMPLETE, DISCOGS_DATA_TYPES, _scalar
 from api.valkey_keys import valkey_key, valkey_pattern, with_legacy_patterns
 
@@ -42,6 +43,27 @@ async def latest_discogs_version(pool: Any) -> str | None:
     return None if version is None else str(version)
 
 
+_GRAPH_LATCH: Final = """
+MATCH (m:ExtractionCompletion {version: $version})
+RETURN coalesce(m.signals, []) AS signals
+"""
+
+
+async def graph_extraction_complete(driver: Any, version: str) -> bool:
+    """Whether the graph has every data type's extraction_complete for this version.
+
+    The SQL latch and the Neo4j counts are written by different services. graphinator records
+    each data type's signal in Neo4j after that type's queue has reached the signal, so all four
+    means the graph's writes for this extraction have landed. Until then the counts can still
+    move, so the watcher waits.
+    """
+    if driver is None:
+        return False
+    record = await run_single(driver, _GRAPH_LATCH, version=version)
+    signals = set(record["signals"]) if record else set()
+    return set(DISCOGS_DATA_TYPES) <= signals
+
+
 async def invalidate_explore_and_trends(valkey: Any) -> int:
     """Delete every Explore and trends key by SCAN, and return how many were deleted."""
     deleted = 0
@@ -57,10 +79,18 @@ async def invalidate_explore_and_trends(valkey: Any) -> int:
     return deleted
 
 
-async def check_import_cache(pool: Any, valkey: Any) -> bool:
-    """One poll: invalidate when a new complete import has landed. Returns whether it invalidated."""
+async def check_import_cache(pool: Any, valkey: Any, driver: Any) -> bool:
+    """One poll: invalidate once a new import is complete in both stores. Returns whether it invalidated.
+
+    Both gates must pass for the same version: the SQL latch (the loader is done) and the graph's
+    own latch (the Neo4j counts are done). A poll that finds the SQL side done but the graph still
+    loading does nothing and leaves the marker alone, so the next poll after the graph finishes
+    invalidates. That re-invalidation is what keeps caches from refilling from a half-loaded graph.
+    """
     version = await latest_discogs_version(pool)
     if version is None:
+        return False
+    if not await graph_extraction_complete(driver, version):
         return False
     stored = await valkey.get(_MARKER_KEY)
     stored_text = stored.decode() if isinstance(stored, bytes) else stored
@@ -73,11 +103,11 @@ async def check_import_cache(pool: Any, valkey: Any) -> bool:
     return stored_text is not None
 
 
-async def run_import_cache_watch(pool: Any, valkey: Any, interval: int) -> None:
+async def run_import_cache_watch(pool: Any, valkey: Any, driver: Any, interval: int) -> None:
     """Poll every *interval* seconds; a failure is logged and retried next poll. Re-raises ``CancelledError``."""
     while True:
         try:
-            await check_import_cache(pool, valkey)
+            await check_import_cache(pool, valkey, driver)
         except asyncio.CancelledError:
             raise
         except Exception:
