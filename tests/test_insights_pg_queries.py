@@ -22,7 +22,8 @@ class TestConstants:
         for table, fields in _COMPLETENESS_FIELDS.items():
             for field_name, jsonb_key in fields:
                 assert f"AS {field_name}" in _COMBINED_QUERIES[table]
-                assert f"data->>'{jsonb_key}'" in _COMBINED_QUERIES[table]
+                assert f"x.{jsonb_key} NOT IN" in _COMBINED_QUERIES[table]
+                assert f"{jsonb_key} text" in _COMBINED_QUERIES[table]
 
     def test_completeness_fields_cover_all_entity_types(self) -> None:
         assert set(_COMPLETENESS_FIELDS.keys()) == {"artists", "labels", "masters", "releases"}
@@ -135,3 +136,10 @@ class TestQueryDataCompleteness:
             assert "total_count" in result
             assert "completeness_pct" in result
             assert "with_image" in result
+
+
+def test_each_document_is_read_once_per_row() -> None:
+    """One ``jsonb_to_record`` per table scan; a ``->>`` per field would detoast the document again each time."""
+    for query in _COMBINED_QUERIES.values():
+        assert query.count("jsonb_to_record(") == 1
+        assert "->>" not in query

@@ -17,6 +17,16 @@ from common.query_debug import execute_sql
 logger = structlog.get_logger(__name__)
 
 # Fields to check for completeness, per entity type.
+#
+# `with_image` always counts zero, and that is the true value, not a query fault. The `images` key
+# is read from `data`, and `data` is the Discogs data-dump document: the dumps carry no image
+# element at all (cover art is reachable only through the Discogs API). Checked 2026-11-05 on lux:
+# no key named `images` in 700 sampled rows across artists, labels, masters and releases, no
+# image-like property on the Neo4j Release, Artist, Label or Master nodes, and the 2% release
+# sample of docs/sql-performance-audit-2026-11-04.md (78,212 rows) found none either. The field
+# stays so the response shape is unchanged, and so a future image source that writes `images`
+# into `data` is counted without a code change. Until then it holds `completeness_pct` of artists
+# and labels at 0.0 and takes a third to a fifth off the others.
 _COMPLETENESS_FIELDS: dict[str, list[tuple[str, str]]] = {
     "artists": [("with_image", "images")],
     "labels": [("with_image", "images")],
@@ -30,20 +40,30 @@ _COMPLETENESS_FIELDS: dict[str, list[tuple[str, str]]] = {
 }
 
 # Pre-built combined queries per entity type — single table scan each.
-# Uses count(*) FILTER to compute all field counts in one pass.
+#
+# `jsonb_to_record` reads each row's `data` once and hands back every key as text, where
+# `data->>'key'` detoasts and decompresses the whole document again for every mention. The old
+# filter mentioned each key three times, about 12 detoasts per release row. On 60,000 TOASTed
+# release rows (local PostgreSQL 18, serial scan, rows shaped like lux's) that was 5.8 s and
+# 2.83M buffers against 0.93 s and 0.31M for this form, with identical counts.
+#
+# A field counts when its text is present and is neither '' nor '[]'. `x.key NOT IN ('', '[]')` is
+# NULL, so not counted, when the key is absent or JSON null, which is what the old
+# `IS NOT NULL AND != '' AND != '[]'` chain meant. The text is the same one `->>` returns (an
+# array or object comes back as its JSON text), so no row changes sides.
 _COMBINED_QUERIES: dict[str, str] = {}
 for _table, _fields in _COMPLETENESS_FIELDS.items():
     _filter_parts = []
-    _aliases = []
+    _columns = []
     for _field_name, _jsonb_key in _fields:
-        _filter_parts.append(
-            f"count(*) FILTER (WHERE data->>'{_jsonb_key}' IS NOT NULL"
-            f" AND data->>'{_jsonb_key}' != ''"
-            f" AND data->>'{_jsonb_key}' != '[]') AS {_field_name}"
-        )
-        _aliases.append(_field_name)
+        _filter_parts.append(f"count(*) FILTER (WHERE x.{_jsonb_key} NOT IN ('', '[]')) AS {_field_name}")
+        _columns.append(f"{_jsonb_key} text")
     _filters_sql = ", ".join(_filter_parts)
-    _COMBINED_QUERIES[_table] = f"SELECT count(*) AS total_count, {_filters_sql} FROM {_table}"  # noqa: S608
+    _record_sql = ", ".join(_columns)
+    _COMBINED_QUERIES[_table] = (
+        f"SELECT count(*) AS total_count, {_filters_sql} "  # noqa: S608
+        f"FROM {_table} t CROSS JOIN LATERAL jsonb_to_record(t.data) AS x({_record_sql})"
+    )
 
 
 async def _query_single_entity(pool: Any, entity_type: str, fields: list[tuple[str, str]]) -> dict[str, Any]:
