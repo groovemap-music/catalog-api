@@ -105,3 +105,19 @@ async def test_the_limit_cuts_neighbours_by_shared_releases_before_any_genre_is_
     top = _by_artist(await nq.get_artist_cluster(neo4j_driver, "R", limit=3))
     assert set(top) == {"n6", "n5", "n4"}  # the most shared releases: 6, 5, 4
     assert top == {"n6": "Blues", "n5": "Rock", "n4": "Pop"}
+
+
+async def test_a_swept_genre_less_artist_is_unknown_and_never_scanned(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    """release_count present and primary_genre absent is 'computed, no genre': even with genre edges present, no live read."""
+    await _seed(neo4j_driver)
+    # n3 has no genre in the graph. Give n3 a genre edge AFTER marking it swept: a live read would find it, the marker must not.
+    await run_query(neo4j_driver, "MATCH (n:Artist {id: 'n3'}) SET n.release_count = 3", database="neo4j", timeout=None)
+    await run_query(
+        neo4j_driver,
+        "MATCH (n:Artist {id: 'n3'}) MERGE (g:Genre {name: 'Folk'}) CREATE (r:Release {id: 'late'}), (r)-[:BY]->(n), (r)-[:IS]->(g)",
+        database="neo4j",
+        timeout=None,
+    )
+    assert _by_artist(await nq.get_artist_cluster(neo4j_driver, "R", limit=50))["n3"] == "Unknown"
+    await run_query(neo4j_driver, "MATCH (n:Artist {id: 'n3'}) REMOVE n.release_count", database="neo4j", timeout=None)  # not swept: live
+    assert _by_artist(await nq.get_artist_cluster(neo4j_driver, "R", limit=50))["n3"] == "Folk"

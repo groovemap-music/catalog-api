@@ -636,7 +636,7 @@ class TestClusterReadsPrimaryGenreAfterTheCut:
     async def test_the_stored_property_is_used_and_nothing_is_scanned(self) -> None:
         from api.queries.network_queries import get_artist_cluster
 
-        ranked = [{"artist_id": "1", "artist_name": "A", "shared_releases": 5, "primary_genre": "Jazz"}]
+        ranked = [{"artist_id": "1", "artist_name": "A", "shared_releases": 5, "primary_genre": "Jazz", "genre_computed": True}]
         with patch("api.queries.network_queries.run_query", new_callable=AsyncMock, return_value=ranked) as run:
             clusters = await get_artist_cluster(AsyncMock(), "123", limit=10)
         assert run.await_count == 1  # no genre histogram when every ranked neighbour has the property
@@ -656,3 +656,18 @@ class TestClusterReadsPrimaryGenreAfterTheCut:
             clusters = await get_artist_cluster(AsyncMock(), "123")
         assert run.await_args_list[1].kwargs["ids"] == ["2"]  # the neighbour cut by LIMIT is never looked up
         assert {c["cluster_label"] for c in clusters} == {"Jazz", "Blues"}
+
+    @pytest.mark.asyncio
+    async def test_a_swept_artist_with_no_genre_is_unknown_without_a_live_read(self) -> None:
+        from api.queries.network_queries import get_artist_cluster
+
+        ranked = [
+            {"artist_id": "1", "artist_name": "A", "shared_releases": 5, "primary_genre": None, "genre_computed": True},  # swept: no genre
+            {"artist_id": "2", "artist_name": "B", "shared_releases": 4, "primary_genre": None, "genre_computed": False},  # not reached yet
+        ]
+        with patch(
+            "api.queries.network_queries.run_query", new_callable=AsyncMock, side_effect=[ranked, [{"artist_id": "2", "primary_genre": "Blues"}]]
+        ) as run:
+            clusters = await get_artist_cluster(AsyncMock(), "123")
+        assert run.await_args_list[1].kwargs["ids"] == ["2"]  # the swept artist is never looked up
+        assert {c["cluster_label"] for c in clusters} == {"Unknown", "Blues"}

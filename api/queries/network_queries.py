@@ -167,7 +167,8 @@ LIMIT $limit
 RETURN neighbor.id AS artist_id,
        neighbor.name AS artist_name,
        shared_releases,
-       neighbor.primary_genre AS primary_genre
+       neighbor.primary_genre AS primary_genre,
+       neighbor.release_count IS NOT NULL AS genre_computed
 """
 
 # The live equivalent of the enricher's Artist.primary_genre: the genre on most of an artist's releases, a tie going to the
@@ -196,12 +197,16 @@ async def get_artist_cluster(
     releases, and Bowie took 29.6 s and 37.5M hits (audit H6). The neighbours are the same; ties in shared releases
     are now broken by artist id.
 
-    The primary genre is read from ``Artist.primary_genre`` when the enricher has written it, and computed live for a
-    ranked neighbour where it is absent, so the answer is identical before and after the first maintenance pass.
+    The primary genre is read from ``Artist.primary_genre`` when the enricher has written it. An artist the sweep
+    has finished (``release_count`` present) with no ``primary_genre`` has no genre. Only an artist the sweep has
+    not reached is computed live, so the answer is identical before, during and after the first maintenance pass.
     """
     results = await run_query(driver, _CLUSTER_NEIGHBOURS, artist_id=artist_id, limit=limit)
 
-    missing = [row["artist_id"] for row in results if row["primary_genre"] is None]
+    # The enricher's sweep writes release_count on every artist (0 for none) in the same transaction as primary_genre, so
+    # release_count present means primary_genre is final and absent means the artist has no genre: no live read for it.
+    # Only an artist the sweep has not reached yet is computed live.
+    missing = [row["artist_id"] for row in results if row["primary_genre"] is None and not row.get("genre_computed")]
     if missing:
         live = {r["artist_id"]: r["primary_genre"] for r in await run_query(driver, _PRIMARY_GENRE_LIVE, ids=missing)}
         for row in results:
