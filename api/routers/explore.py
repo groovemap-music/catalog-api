@@ -1,6 +1,7 @@
 """Explore endpoints — migrated from explore service."""
 
 import asyncio
+import hashlib
 import json
 import time
 from collections import OrderedDict
@@ -282,6 +283,38 @@ async def _store_strata_catalog(catalog: Catalog) -> None:
         record_cache_write_failure(CACHE_STRATA, exc)
 
 
+def _shared_personnel_cache_key(master_ids: list[str], limit: int) -> str:
+    # The edges depend on the drawn masters, in order, and the limit, and on nothing about the
+    # caller, so the key is a digest of exactly those two values.
+    digest = hashlib.sha256(json.dumps({"masters": master_ids, "limit": limit}, separators=(",", ":")).encode()).hexdigest()
+    return valkey_key(f"explore:strata:personnel:{digest}")
+
+
+async def _shared_personnel(master_ids: list[str], limit: int) -> list[dict[str, Any]]:
+    """Shared-personnel edges for the drawn masters, from Valkey when this exact draw was read before.
+
+    The graph read is the same statement whatever the caller, so its result is cached under the
+    explore key family and TTL. A missing, unreadable or corrupt entry falls through to the graph.
+    """
+    if len(master_ids) < 2:
+        return []
+    cache_key = _shared_personnel_cache_key(master_ids, limit)
+    if _valkey:
+        try:
+            cached = await cache_get(_valkey, cache_key, cache=CACHE_STRATA)
+            if cached:
+                return json.loads(cached)  # type: ignore[no-any-return]
+        except Exception:
+            logger.debug("⚠️ Strata personnel cache read failed", key=cache_key)
+    edges = await get_shared_personnel(_neo4j_driver, master_ids, limit=limit)
+    if _valkey:
+        try:
+            await _valkey.setex(cache_key, _EXPLORE_CACHE_TTL, json.dumps(edges, separators=(",", ":")))
+        except Exception as exc:
+            record_cache_write_failure(CACHE_STRATA, exc)
+    return edges
+
+
 @router.get("/api/explore/strata")
 @limiter.limit("60/minute")
 async def strata(
@@ -350,7 +383,7 @@ async def strata(
         release_ids, master_ids, artist_ids = label_targets(payload)
         (release_titles, master_titles, artist_names), edges = await asyncio.gather(
             get_strata_labels(_neo4j_driver, release_ids, master_ids, artist_ids),
-            get_shared_personnel(_neo4j_driver, master_ids, limit=_STRATA_EDGES_PER_MASTER * len(master_ids)),
+            _shared_personnel(master_ids, limit=_STRATA_EDGES_PER_MASTER * len(master_ids)),
         )
     except (Neo4jClientError, QueryCanceled) as exc:
         if isinstance(exc, QueryCanceled) or "TransactionTimedOut" in str(exc):
