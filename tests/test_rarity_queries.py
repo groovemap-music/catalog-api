@@ -407,6 +407,14 @@ class TestGetRarityHiddenGems:
         assert total == 50
 
 
+@pytest.fixture
+def _rarity_populated():
+    """These tests exercise the id-list path, which only runs when the rarity table has rows."""
+    with patch("api.queries.rarity_queries._release_rarity_has_rows", new=AsyncMock(return_value=True)):
+        yield
+
+
+@pytest.mark.usefixtures("_rarity_populated")
 class TestGetRarityByArtist:
     @pytest.mark.asyncio
     async def test_artist_not_found(self) -> None:
@@ -540,6 +548,7 @@ class TestGetRarityByArtist:
         assert len(items) == 1
 
 
+@pytest.mark.usefixtures("_rarity_populated")
 class TestGetRarityByLabel:
     @pytest.mark.asyncio
     async def test_label_not_found(self) -> None:
@@ -1019,6 +1028,7 @@ class TestFetchAllRaritySignals:
         assert results[0]["pressing_scarcity"] == 100.0
 
 
+@pytest.mark.usefixtures("_rarity_populated")
 class TestRarityPaginationTiebreaker:
     """The rarity_score / hidden_gem_score values are heavily
     quantized (round(..., 1)), so OFFSET pagination without a unique tiebreaker
@@ -1269,3 +1279,39 @@ def test_masterless_hub_is_filtered_before_sibling_expansion(query_name: str) ->
     assert (
         "OPTIONAL MATCH (r)-[:DERIVED_FROM]->(m:Master)\nWHERE NOT m.id IN ['0', 0]\nOPTIONAL MATCH (m)<-[:DERIVED_FROM]-(sibling:Release)" in query
     )
+
+
+class TestEmptyRarityTable:
+    """With no stored rarity rows the by-label and by-artist reads answer without reading ids out of Neo4j."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("function", "expected_label"),
+        [(get_rarity_by_label, "Label"), (get_rarity_by_artist, "Artist")],
+    )
+    async def test_returns_empty_without_reading_the_release_ids(self, function, expected_label) -> None:
+        queries: list[str] = []
+
+        async def fake_run_query(_driver, cypher, **_kwargs):
+            queries.append(cypher)
+            return [{"id": "1", "name": "N"}]  # the node exists
+
+        with (
+            patch("api.queries.rarity_queries.run_query", new=fake_run_query),
+            patch("api.queries.rarity_queries._release_rarity_has_rows", new=AsyncMock(return_value=False)),
+        ):
+            result = await function(MagicMock(), MagicMock(), "1")
+
+        assert result == ([], 0)
+        assert len(queries) == 1  # the existence lookup only
+        assert f":{expected_label} {{id:" in queries[0]
+        assert "RETURN r.id AS release_id" not in queries[0]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("function", [get_rarity_by_label, get_rarity_by_artist])
+    async def test_a_missing_node_is_still_not_found(self, function) -> None:
+        with (
+            patch("api.queries.rarity_queries.run_query", new=AsyncMock(return_value=[])),
+            patch("api.queries.rarity_queries._release_rarity_has_rows", new=AsyncMock(return_value=False)),
+        ):
+            assert await function(MagicMock(), MagicMock(), "nope") is None

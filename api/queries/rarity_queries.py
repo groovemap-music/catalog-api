@@ -601,6 +601,20 @@ async def get_rarity_hidden_gems(
     return items, total
 
 
+async def _release_rarity_has_rows(pool: Any) -> bool:
+    """Whether ``insights.release_rarity`` holds any row at all (a primary-key probe, not a count).
+
+    The by-label and by-artist reads filter this table by a list of release ids, so on an empty table
+    they can only return nothing; this lets them say so without first reading that list out of Neo4j,
+    which for a large label is hundreds of thousands of ids. The table is empty until the first
+    rarity computation has stored its rows.
+    """
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT EXISTS (SELECT 1 FROM insights.release_rarity) AS present")
+        row = await cur.fetchone()
+    return bool(row and row["present"])
+
+
 async def get_rarity_by_artist(
     driver: Any,
     pool: Any,
@@ -621,6 +635,9 @@ async def get_rarity_by_artist(
     )
     if not artist_rows:
         return None
+
+    if not await _release_rarity_has_rows(pool):
+        return [], 0
 
     release_rows = await run_query(
         driver,
@@ -679,6 +696,9 @@ async def get_rarity_by_label(
     )
     if not label_rows:
         return None
+
+    if not await _release_rarity_has_rows(pool):
+        return [], 0
 
     release_rows = await run_query(
         driver,
