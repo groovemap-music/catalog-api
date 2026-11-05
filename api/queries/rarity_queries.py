@@ -77,6 +77,7 @@ __all__ = [
     "get_rarity_for_release",
     "get_rarity_hidden_gems",
     "get_rarity_leaderboard",
+    "get_rarity_tier_page",
     "iter_rarity_signals",
     "medium_rarity_score",
 ]
@@ -576,6 +577,45 @@ async def get_rarity_for_release(pool: Any, release_id: int) -> dict[str, Any] |
         )
         row: dict[str, Any] | None = await cur.fetchone()
         return row
+
+
+# One page of a tier's releases in leaderboard order, by keyset. The order is score descending
+# then release id ascending, the same order get_rarity_leaderboard pages with OFFSET, and it
+# matches the (tier, rarity_score DESC, release_id) index. The cursor is the last row's score and
+# id. rarity_score is REAL, so the score is bound ::real: a float8 cursor compares against a value
+# that a text round trip has rounded, and admits none of a tie group whose score it rounded. That
+# drops rows, which is worse than a repeat.
+_TIER_KEYSET_PAGE = """
+SELECT release_id, title, artist_name, year, rarity_score, tier, hidden_gem_score
+FROM insights.release_rarity
+WHERE tier = %(tier)s
+  AND (%(after_score)s::real IS NULL
+       OR (rarity_score <= %(after_score)s::real
+           AND (rarity_score < %(after_score)s::real OR release_id > %(after_id)s::bigint)))
+ORDER BY rarity_score DESC, release_id
+LIMIT %(limit)s
+"""
+
+
+async def get_rarity_tier_page(
+    pool: Any,
+    tier: str,
+    after: tuple[float, int] | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """The next page of a tier's releases after the cursor ``after`` = (rarity_score, release_id).
+
+    Pass ``None`` for the first page. Pages are consistent under score ties: every row is returned
+    exactly once in a full walk.
+    """
+    after_score, after_id = after if after is not None else (None, None)
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            _TIER_KEYSET_PAGE,
+            {"tier": tier, "after_score": after_score, "after_id": after_id, "limit": limit},
+        )
+        rows: list[dict[str, Any]] = await cur.fetchall()
+    return rows
 
 
 async def get_rarity_leaderboard(
