@@ -104,7 +104,7 @@ async def test_the_routes_stay_bounded_and_answer_the_same(valkey: Any, route: s
     async def fake_query(_driver: Any, name: str) -> Any:
         if route == "explore":
             return {"id": name, "name": name, "release_count": 5, "label_count": 2, "alias_count": 1}
-        return [{"year": 2000, "count": len(name)}]
+        return [{"year": 2000, "count": 5}]  # one cost for every name, so none is heavy enough to displace another
 
     handler = getattr(explore_router, route)
     names = [f"Name {i}" for i in range(WALK)]
@@ -139,7 +139,7 @@ async def test_a_noeviction_valkey_never_sees_more_than_the_budget(valkey: Any) 
     with patch.object(cache_budget, "record_cache_budget_full"):
         for i in range(2000):
             await cache_budget.store_within_budget(valkey, cache="t", key=f"t:{i}", value="x" * 200, ttl=300, max_keys=BUDGET)
-    assert await valkey.dbsize() == BUDGET + 1  # the budgeted keys and their index
+    assert await valkey.dbsize() == BUDGET + 2  # the budgeted keys, their index and their cost set
 
 
 HEAVY = 100_000  # releases behind a heavy root
@@ -237,3 +237,67 @@ async def test_the_routes_walk_of_cheap_names_leaves_heavy_names_cacheable(
 
     assert heavy == again  # served from the cache, byte for byte
     assert len(cheap) == WALK
+
+
+STRATA_SLOTS = 100  # the strata budget (api/routers/explore.py: _STRATA_CACHE_MAX_KEYS)
+
+
+async def test_a_heavy_root_is_cached_after_100_lighter_500_plus_roots_fill_the_budget(valkey: Any) -> None:
+    """gm-catalog-api-yac9, on a real Valkey: the 57d6 design refused Bowie for the whole TTL here."""
+    admit = functools.partial(cache_budget.store_within_budget, valkey, cache="strata", ttl=300, max_keys=STRATA_SLOTS, min_cost=500)
+    lighter = [await admit(key=f"strata:root{i}", value="r", cost=500 + i) for i in range(STRATA_SLOTS)]
+    assert all(lighter)  # 100 real roots of 500+ releases fill every slot
+    assert await admit(key="strata:extra-light", value="x", cost=500) is False  # a root no heavier than the lightest still waits
+
+    bowie = await admit(key="strata:bowie", value="b", cost=39_000)
+
+    assert bowie is True
+    assert await valkey.get("strata:bowie") == "b"
+    assert await valkey.exists("strata:root0") == 0  # cost 500 was the lightest, and is the one removed
+    assert len(await _keys(valkey, "strata:root")) == STRATA_SLOTS - 1
+    assert await valkey.zcard(cache_budget.index_key("strata")) == STRATA_SLOTS  # the 57d6 key bound holds
+    assert await valkey.zcard(cache_budget.cost_key("strata")) == STRATA_SLOTS
+
+
+async def test_a_cheaper_root_cannot_displace_a_heavier_one_on_real_valkey(valkey: Any) -> None:
+    admit = functools.partial(cache_budget.store_within_budget, valkey, cache="strata", ttl=300, max_keys=BUDGET, min_cost=500)
+    for i in range(BUDGET):
+        assert await admit(key=f"strata:heavy{i}", value="h", cost=10_000 + i)
+
+    with patch.object(cache_budget, "record_cache_budget_evicted") as evicted:
+        refused = [await admit(key=f"strata:light{i}", value="l", cost=cost) for i, cost in enumerate([500, 9_999, 10_000])]
+
+    assert refused == [False, False, False]  # cheaper, and equal to the lightest: neither displaces anything
+    evicted.assert_not_called()
+    assert len(await _keys(valkey, "strata:heavy")) == BUDGET
+
+
+async def test_a_walk_of_ever_heavier_roots_keeps_the_heaviest_within_the_bounds(valkey: Any) -> None:
+    admit = functools.partial(cache_budget.store_within_budget, valkey, cache="strata", ttl=300, max_keys=BUDGET, min_cost=500)
+    for i in range(WALK):
+        await admit(key=f"strata:r{i}", value="x" * 200, cost=1_000 + i)
+
+    kept = sorted(int(key.removeprefix("strata:r")) for key in await _keys(valkey, "strata:r"))
+    assert kept == list(range(WALK - BUDGET, WALK))  # the BUDGET heaviest of the walk
+    assert await valkey.dbsize() == BUDGET + 2  # keys, index, cost set: never more
+
+
+async def test_concurrent_writers_keep_the_key_and_byte_bounds(valkey: Any) -> None:
+    """Many heavier writers at once: eviction is claimed with ZREM, so a slot is freed once, not once per writer."""
+    admit = functools.partial(cache_budget.store_within_budget, valkey, cache="strata", ttl=300, max_keys=BUDGET, min_cost=500)
+    for i in range(BUDGET):
+        await admit(key=f"strata:base{i}", value="b" * 100, cost=1_000 + i)
+
+    writers = 40
+    results = await asyncio.gather(*[admit(key=f"strata:w{i}", value="w" * 100, cost=5_000 + i) for i in range(writers)])
+
+    live = len(await _keys(valkey, "strata:"))
+    assert any(results)
+    assert live <= BUDGET + writers  # the 57d6 tolerance: about the writer count over, never unbounded
+    assert await valkey.zcard(cache_budget.index_key("strata")) >= BUDGET
+    # ... and the next uncontended write settles back to the budget instead of drifting higher
+    for i in range(3):
+        await admit(key=f"strata:settle{i}", value="s" * 100, cost=50_000 + i)
+    assert len(await _keys(valkey, "strata:")) <= live + 3
+    for key in await _keys(valkey, "strata:"):
+        assert len(await valkey.get(key)) <= 100  # no value above the byte bound

@@ -314,6 +314,7 @@ ever carries an identifier, a cache key, or free text.
 | `db.client.operation.duration` | `db.system.name` (`postgresql`, `neo4j`, or `valkey`), `db.operation.name`, `error.type` on failure |
 | `groovemap.api.sync.duration` | `outcome` (`completed`, `failed`, `cancelled`) |
 | `groovemap.api.cache` | `outcome` (`hit`, `miss`), `cache` (the logical Valkey cache) |
+| `groovemap.api.cache.budget_evictions` | `cache`. An entry removed so a costlier result could take its slot in a full budget. A state of the cache, not a failure: a steady rate means the cache is churning toward heavier entries, and a rate that stays high means callers keep arriving with results heavier than what is stored |
 | `groovemap.api.cache.budget_full` | `cache` (the logical Valkey cache). A write skipped because that cache already holds its key budget (10,000 live keys of at most 10 KB; 100 keys of at most 1 MB for strata). A state of the cache, not a Valkey failure: it is never counted under `write_failures` and never logged. An entity with fewer than 500 releases is not stored and never counts here, so a sustained rate means the budget is full of entities that are expensive to recompute: alert when it stays above zero for 15 minutes |
 | `groovemap.api.cache.write_failures` | `cache` (the logical Valkey cache), `error.type` (the exception class) |
 | `groovemap.api.nlq.requests` | `outcome` (`success`, `cached`, `error`, `invalid`, `unavailable`) |
@@ -321,10 +322,10 @@ ever carries an identifier, a cache key, or free text.
 | `groovemap.api.activity_failures` | `outcome` (`duplicate`, `invalid`, `not_configured`, `no_native_id`, `no_subject`, `write_failed`) |
 | `groovemap.api.identity_ledger.refreshes` | `trigger` (`reattach`, `backfill`, `poll`), `outcome` (`success`, `failed`) |
 
-Explore, trends and strata store a result only for an entity with at least 500 releases (its release count, or for trends the releases its yearly counts add up to; never a measured latency, which a client could raise with load), because a full
-budget refuses rather than evicts and a client can pick the keys: without the rule one client walking
+Explore, trends and strata store a result only for an entity with at least 500 releases (its release count, or for trends the releases its yearly counts add up to; never a measured latency, which a client could raise with load), so a client walking cheap names cannot spend the slots: without the rule one client walking
 100 cheap artist ids held every strata slot for 24 h and left heavy roots recomputed on every request.
-The response is the same either way; only the cache hit rate differs.
+
+Each cache keeps its live keys scored by expiry and, in a second sorted set (`<prefix>budget:<cache>:cost`), by that same cost. When the key budget is full, a write whose cost is strictly greater than the lightest live entry's removes that entry and takes its slot (`groovemap.api.cache.budget_evictions`); a write of equal or lower cost is skipped as before (`budget_full`). So a client that fills the 100 strata slots with real roots of 500+ releases cannot keep a heavy root such as Bowie out for the rest of the 24 h TTL, and a cheaper root can never push out a heavier one. The key budget, the value size cap and the worst-case bytes are unchanged; concurrent writers can overshoot by about their own number, as before, because the claim on the lightest entry is a single `ZREM` and only one writer wins it. An import's invalidation drops the cost set with the index. The response is the same either way; only the cache hit rate differs.
 
 Cache writes are best-effort: a failed write never fails the request. Each one increments
 `groovemap.api.cache.write_failures` and logs a `Cache write failed` warning, at most once a

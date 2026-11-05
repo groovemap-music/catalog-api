@@ -3,11 +3,16 @@
 The Valkey instance is ``noeviction`` and shared with auth state, and the key of every Explore, trends
 and strata entry is chosen by the caller, so the caches grow with whatever distinct names are walked
 (gm-catalog-api-57d6; ``/api/expand`` got the same budget in gm-catalog-api-9d8z). Each cache keeps an
-index of its live keys, a sorted set scored by expiry, and a write is skipped once that index is full.
+index of its live keys, a sorted set scored by expiry, and a second sorted set scored by each key's cost
+(the deterministic size of the work behind the value). Once the index is full a write is skipped, unless
+its cost is strictly greater than the lightest live entry's: then that lightest entry is removed and the
+heavier one takes its slot (gm-catalog-api-yac9), so a caller who filled the budget with the cheapest
+results that clear the admission rule cannot keep a heavy entry out for the rest of the TTL.
 
 A skipped write changes nothing a caller can see: the response is the one it would have got, just not
-stored. A spent budget is reported as its own state, ``groovemap.api.cache.budget_full``, and never
-as a Valkey failure, so it does not page anyone or fill the log.
+stored. A spent budget is reported as its own state, ``groovemap.api.cache.budget_full``, and an eviction
+as ``groovemap.api.cache.budget_evictions``; neither is a Valkey failure, so neither pages anyone or fills
+the log.
 """
 
 from __future__ import annotations
@@ -17,7 +22,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from api.telemetry import record_cache_budget_full
+from api.telemetry import record_cache_budget_evicted, record_cache_budget_full
 from api.valkey_keys import valkey_key
 
 
@@ -41,6 +46,38 @@ DEFAULT_MAX_VALUE_BYTES = 10_240
 def index_key(cache: str) -> str:
     """The sorted-set key that indexes ``cache``'s live keys."""
     return valkey_key(f"budget:{cache}:index")
+
+
+def cost_key(cache: str) -> str:
+    """The sorted-set key that scores ``cache``'s live keys by cost; it lives and dies with :func:`index_key`'s."""
+    return valkey_key(f"budget:{cache}:cost")
+
+
+# A candidate that turns out to be gone already (another writer took it, or its entry had expired) is skipped; this many are
+# tried before the write is refused as if the budget were full.
+_EVICTION_ATTEMPTS = 5
+
+
+async def _evict_lightest_below(valkey: Any, index: str, costs: str, cost: int) -> bool:
+    """Remove the lightest live entry if it is strictly cheaper than ``cost``; whether a slot was freed.
+
+    ``ZREM`` on the cost set is the claim: of several writers that picked the same entry, one gets ``1`` and goes on to
+    remove it, so a slot is freed once, not once per writer. An entry that was in the cost set but no longer in the index
+    freed no slot and is dropped before the next candidate is tried.
+    """
+    for _ in range(_EVICTION_ATTEMPTS):
+        lightest = await valkey.zrange(costs, 0, 0, withscores=True)
+        if not lightest:
+            return False
+        victim, victim_cost = lightest[0]
+        if cost <= victim_cost:
+            return False
+        if await valkey.zrem(costs, victim) != 1:
+            continue
+        if await valkey.zrem(index, victim) == 1:
+            await valkey.delete(victim)
+            return True
+    return False
 
 
 async def store_within_budget(
@@ -72,6 +109,11 @@ async def store_within_budget(
     The check and the write are separate commands, so concurrent writers can overshoot the budget by about
     their own number, which the budget tolerates; an index entry whose ``setex`` then fails expires with
     its TTL. A Lua script would close that gap but cannot run on the fake Valkey the unit tests use.
+
+    When the budget is full and ``cost`` is strictly greater than the lightest live entry's, that entry is
+    evicted and this write takes its slot (gm-catalog-api-yac9). A cost equal to or below the lightest never
+    displaces anything, so a cheaper result cannot push out a heavier one and equal results do not churn. A write
+    without a ``cost`` counts as cost ``0``: it never evicts, and it is the first to go.
     """
     size = len(value.encode("utf-8")) if isinstance(value, str) else len(value)
     if len(key) > MAX_KEY_LENGTH or size > max_value_bytes:
@@ -79,12 +121,21 @@ async def store_within_budget(
     if cost is not None and cost < min_cost:
         return False
     index = index_key(cache)
+    costs = cost_key(cache)
     now = time.time()
-    await valkey.zremrangebyscore(index, "-inf", now)
+    expired = await valkey.zrangebyscore(index, "-inf", now)
+    if expired:
+        await valkey.zrem(costs, *expired)
+        await valkey.zremrangebyscore(index, "-inf", now)
+    weight = 0 if cost is None else cost
     if await valkey.zscore(index, key) is None and await valkey.zcard(index) >= max_keys:
-        record_cache_budget_full(cache)
-        return False
+        if not await _evict_lightest_below(valkey, index, costs, weight):
+            record_cache_budget_full(cache)
+            return False
+        record_cache_budget_evicted(cache)
     await valkey.zadd(index, {key: now + ttl})
+    await valkey.zadd(costs, {key: weight})
     await valkey.expire(index, ttl)
+    await valkey.expire(costs, ttl)
     await valkey.setex(key, ttl, value)
     return True

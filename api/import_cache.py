@@ -29,7 +29,7 @@ from typing import Any, Final
 
 import structlog
 
-from api.cache_budget import index_key
+from api.cache_budget import cost_key, index_key
 from api.queries.helpers import run_single
 from api.reattach_trigger import _LATCH_PRESENT, _LATEST_COMPLETE, DISCOGS_DATA_TYPES, _scalar
 from api.telemetry import CACHE_EXPAND, CACHE_EXPLORE, CACHE_STRATA, CACHE_TRENDS
@@ -111,7 +111,7 @@ async def invalidate_explore_and_trends(valkey: Any) -> int:
     """Delete every Explore and trends key by SCAN, and return how many were deleted."""
     deleted = 0
     # Built per call: the key prefix is configuration, not a constant of the module.
-    for index in with_legacy_keys([index_key(cache) for cache in _BUDGETED_CACHES]):
+    for index in with_legacy_keys([key for cache in _BUDGETED_CACHES for key in (index_key(cache), cost_key(cache))]):
         deleted += int(await valkey.delete(index))
     patterns = with_legacy_patterns([valkey_pattern(family) for family in _INVALIDATED_FAMILIES])
     for pattern in patterns:
