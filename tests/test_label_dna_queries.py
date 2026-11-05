@@ -1,5 +1,6 @@
 """Unit tests for Label DNA query functions."""
 
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -140,10 +141,18 @@ class TestComputeSimilarLabels:
 class TestGetCandidateLabelsGenreVectors:
     """Tests for the two-phase get_candidate_labels_genre_vectors query.
 
+    The target has no HAS_STYLE edges here, so the live candidate form runs; the stored form is proven equal to it on a
+    real Neo4j (test_label_dna_integration.py).
+
     Phase 1: style-based candidate discovery (1 run_query call)
     Phase 2: split into 25-label batches, each with 2 concurrent queries
              (count + genre), so 2 run_query calls per batch.
     """
+
+    @pytest.fixture(autouse=True)
+    def _no_style_edges(self) -> Any:
+        with patch("api.queries.label_dna_queries.run_single", new_callable=AsyncMock, return_value={"has_edges": False}):
+            yield
 
     @pytest.mark.asyncio
     @patch("api.queries.label_dna_queries.run_query", new_callable=AsyncMock)
@@ -256,11 +265,11 @@ class TestLabelDecadeProfile:
     @pytest.mark.asyncio
     @patch("api.queries.label_dna_queries.run_query", new_callable=AsyncMock)
     async def test_returns_decades(self, mock_run_query: AsyncMock) -> None:
-        mock_run_query.return_value = [{"decade": 1990, "count": 30}, {"decade": 2000, "count": 50}]
+        # Per-year counts in, decades out: 1991 + 1995 are the 1990s, 2003 the 2000s.
+        mock_run_query.return_value = [{"year": 1991, "count": 10}, {"year": 1995, "count": 20}, {"year": 2003, "count": 50}]
         driver = AsyncMock()
         result = await get_label_decade_profile(driver, "L1")
-        assert len(result) == 2
-        assert result[0]["decade"] == 1990
+        assert result == [{"decade": 1990, "count": 30}, {"decade": 2000, "count": 50}]
 
 
 class TestLabelActiveYears:
@@ -418,22 +427,19 @@ class TestLabelFullProfile:
         assert result["decades"] == []
 
     @pytest.mark.asyncio
-    @patch("api.queries.label_dna_queries.get_label_decade_profile", new_callable=AsyncMock)
-    @patch("api.queries.label_dna_queries.get_label_style_profile", new_callable=AsyncMock)
-    @patch("api.queries.label_dna_queries.get_label_genre_profile", new_callable=AsyncMock)
+    @patch("api.queries.label_dna_queries.get_label_year_counts", new_callable=AsyncMock)
+    @patch("api.queries.label_dna_queries.get_label_genre_style_profile", new_callable=AsyncMock)
     @patch("api.queries.label_dna_queries.get_label_identity", new_callable=AsyncMock)
     async def test_normal_path(
         self,
         mock_identity: AsyncMock,
-        mock_genres: AsyncMock,
-        mock_styles: AsyncMock,
+        mock_genre_styles: AsyncMock,
         mock_decades: AsyncMock,
     ) -> None:
         """Normal path with enough releases fetches genres, styles, decades in parallel."""
         mock_identity.return_value = {"label_id": "L1", "label_name": "Warp", "release_count": 100, "artist_count": 40}
-        mock_genres.return_value = [{"name": "Electronic", "count": 80}]
-        mock_styles.return_value = [{"name": "Techno", "count": 50}]
-        mock_decades.return_value = [{"decade": 1990, "count": 60}]
+        mock_genre_styles.return_value = ([{"name": "Electronic", "count": 80}], [{"name": "Techno", "count": 50}])
+        mock_decades.return_value = [{"year": 1991, "count": 20}, {"year": 1995, "count": 40}]
 
         driver = AsyncMock()
         result = await get_label_full_profile(driver, "L1")
@@ -443,3 +449,4 @@ class TestLabelFullProfile:
         assert result["genres"] == [{"name": "Electronic", "count": 80}]
         assert result["styles"] == [{"name": "Techno", "count": 50}]
         assert result["decades"] == [{"decade": 1990, "count": 60}]
+        assert result["years"] == [1991, 1995]

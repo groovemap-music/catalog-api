@@ -312,12 +312,10 @@ class TestBuildDnaInternal:
 
     @patch("api.routers.label_dna.get_label_media_profile")
     @patch("api.routers.label_dna.get_label_format_profile")
-    @patch("api.routers.label_dna.get_label_active_years")
     @patch("api.routers.label_dna.get_label_full_profile")
     def test_build_dna_success(
         self,
         mock_full_profile: AsyncMock,
-        mock_active_years: AsyncMock,
         mock_formats: AsyncMock,
         mock_media: AsyncMock,
         test_client: TestClient,
@@ -332,7 +330,7 @@ class TestBuildDnaInternal:
             "styles": [{"name": "Avant-garde", "count": 100}],
             "decades": [{"decade": 1970, "count": 80}, {"decade": 1980, "count": 120}],
         }
-        mock_active_years.return_value = [1970, 1975, 1980, 1985, 1990]
+        mock_full_profile.return_value["years"] = [1970, 1975, 1980, 1985, 1990]
         mock_formats.return_value = [{"name": "Vinyl", "count": 100}, {"name": "CD", "count": 100}]
         mock_media.return_value = [
             {
@@ -364,12 +362,10 @@ class TestBuildDnaInternal:
 
     @patch("api.routers.label_dna.get_label_media_profile")
     @patch("api.routers.label_dna.get_label_format_profile")
-    @patch("api.routers.label_dna.get_label_active_years")
     @patch("api.routers.label_dna.get_label_full_profile")
     def test_build_dna_no_decades_peak_none(
         self,
         mock_full_profile: AsyncMock,
-        mock_active_years: AsyncMock,
         mock_formats: AsyncMock,
         mock_media: AsyncMock,
         test_client: TestClient,
@@ -384,7 +380,7 @@ class TestBuildDnaInternal:
             "styles": [],
             "decades": [],
         }
-        mock_active_years.return_value = []
+        mock_full_profile.return_value["years"] = []
         mock_formats.return_value = []
         mock_media.return_value = []
 
@@ -401,15 +397,13 @@ class TestGetLabelFullProfile:
     """Tests for get_label_full_profile query function."""
 
     @pytest.mark.asyncio
-    @patch("api.queries.label_dna_queries.get_label_decade_profile")
-    @patch("api.queries.label_dna_queries.get_label_style_profile")
-    @patch("api.queries.label_dna_queries.get_label_genre_profile")
+    @patch("api.queries.label_dna_queries.get_label_year_counts")
+    @patch("api.queries.label_dna_queries.get_label_genre_style_profile")
     @patch("api.queries.label_dna_queries.get_label_identity")
     async def test_full_profile_with_sufficient_releases(
         self,
         mock_identity: AsyncMock,
-        mock_genres: AsyncMock,
-        mock_styles: AsyncMock,
+        mock_genre_styles: AsyncMock,
         mock_decades: AsyncMock,
     ) -> None:
         """Labels with >= MIN_RELEASES run parallel genre/style/decade queries."""
@@ -421,9 +415,8 @@ class TestGetLabelFullProfile:
             "release_count": 200,
             "artist_count": 80,
         }
-        mock_genres.return_value = [{"name": "Jazz", "count": 150}]
-        mock_styles.return_value = [{"name": "Avant-garde", "count": 100}]
-        mock_decades.return_value = [{"decade": 1970, "count": 80}]
+        mock_genre_styles.return_value = ([{"name": "Jazz", "count": 150}], [{"name": "Avant-garde", "count": 100}])
+        mock_decades.return_value = [{"year": 1970, "count": 30}, {"year": 1975, "count": 50}]
 
         result = await get_label_full_profile(AsyncMock(), "42")
         assert result is not None
@@ -431,8 +424,8 @@ class TestGetLabelFullProfile:
         assert result["genres"] == [{"name": "Jazz", "count": 150}]
         assert result["styles"] == [{"name": "Avant-garde", "count": 100}]
         assert result["decades"] == [{"decade": 1970, "count": 80}]
-        mock_genres.assert_called_once()
-        mock_styles.assert_called_once()
+        assert result["years"] == [1970, 1975]
+        mock_genre_styles.assert_called_once()
         mock_decades.assert_called_once()
 
     @pytest.mark.asyncio
@@ -762,12 +755,10 @@ class TestBuildDnaCaching:
 
     @patch("api.routers.label_dna.get_label_media_profile")
     @patch("api.routers.label_dna.get_label_format_profile")
-    @patch("api.routers.label_dna.get_label_active_years")
     @patch("api.routers.label_dna.get_label_full_profile")
     def test_build_dna_cache_miss_stores(
         self,
         mock_full_profile: AsyncMock,
-        mock_active_years: AsyncMock,
         mock_formats: AsyncMock,
         mock_media: AsyncMock,
         test_client: TestClient,
@@ -784,7 +775,7 @@ class TestBuildDnaCaching:
             "styles": [],
             "decades": [{"decade": 1970, "count": 200}],
         }
-        mock_active_years.return_value = [1970]
+        mock_full_profile.return_value["years"] = [1970]
         mock_formats.return_value = []
         mock_media.return_value = []
 
@@ -796,12 +787,10 @@ class TestBuildDnaCaching:
 
     @patch("api.routers.label_dna.get_label_media_profile")
     @patch("api.routers.label_dna.get_label_format_profile")
-    @patch("api.routers.label_dna.get_label_active_years")
     @patch("api.routers.label_dna.get_label_full_profile")
     def test_build_dna_cache_set_failure(
         self,
         mock_full_profile: AsyncMock,
-        mock_active_years: AsyncMock,
         mock_formats: AsyncMock,
         mock_media: AsyncMock,
         test_client: TestClient,
@@ -819,7 +808,7 @@ class TestBuildDnaCaching:
             "styles": [],
             "decades": [],
         }
-        mock_active_years.return_value = []
+        mock_full_profile.return_value["years"] = []
         mock_formats.return_value = []
         mock_media.return_value = []
 
