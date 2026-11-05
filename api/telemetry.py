@@ -107,6 +107,9 @@ LEDGER_REFRESH_SUCCESS = "success"
 # `db.system.name` for the Valkey client, which is not one of the shared resilient wrappers
 # and therefore reports `db.client.operation.duration` itself.
 VALKEY_SYSTEM = "valkey"
+NEO4J_SYSTEM = "neo4j"
+# The wrapper samples in the same histogram use "session"; a statement is an "execute".
+NEO4J_OPERATION = "execute"
 
 # Valkey client methods that manage the connection rather than issue a command. Timing them
 # would put lifecycle latency into the database-operation histogram.
@@ -120,6 +123,7 @@ class _Instruments:
     activity_events: Any
     activity_failures: Any
     cache: Any
+    cache_budget_full: Any
     cache_write_failures: Any
     db_operation_duration: Any
     identity_ledger_refreshes: Any
@@ -155,6 +159,11 @@ def _build_instruments() -> _Instruments:
             "groovemap.api.cache",
             unit="{event}",
             description="Valkey cache-aside lookups by logical cache and outcome",
+        ),
+        cache_budget_full=meter.create_counter(
+            "groovemap.api.cache.budget_full",
+            unit="{event}",
+            description="Cache writes skipped because the logical cache already holds its key budget",
         ),
         cache_write_failures=meter.create_counter(
             "groovemap.api.cache.write_failures",
@@ -295,6 +304,15 @@ def record_cache_write_failure(cache: str, exc: BaseException) -> None:
     logger.warning("⚠️ Cache write failed", cache=cache, error_type=error_type, suppressed=suppressed)
 
 
+def record_cache_budget_full(cache: str) -> None:
+    """Count one write skipped because ``cache`` holds its whole key budget.
+
+    This is a state of the cache, not a failure of Valkey, so it is only counted: no warning, and
+    never under ``cache.write_failures``.
+    """
+    instruments().cache_budget_full.add(1, {"cache": cache})
+
+
 def record_identity_ledger_refresh(trigger: str, outcome: str) -> None:
     """Count one refresh of the precomputed identity ledger, by what started it and how it ended."""
     instruments().identity_ledger_refreshes.add(1, {"trigger": trigger, OUTCOME_ATTRIBUTE: outcome})
@@ -315,6 +333,22 @@ def record_sync_duration(seconds: float, outcome: str) -> None:
 def record_valkey_operation(operation: str, seconds: float, error_type: str | None = None) -> None:
     """Record one Valkey command as `db.client.operation.duration`."""
     attributes: dict[str, str] = {"db.system.name": VALKEY_SYSTEM, "db.operation.name": operation}
+    if error_type is not None:
+        attributes["error.type"] = error_type
+    instruments().db_operation_duration.record(seconds, attributes)
+
+
+def record_neo4j_query(query: str, seconds: float, error_type: str | None = None) -> None:
+    """Record one named Cypher statement as `db.client.operation.duration`.
+
+    ``query`` is the code name of the query function that issued the statement, so the
+    attribute set is fixed by the code and never carries a parameter value or the Cypher text.
+    """
+    attributes: dict[str, str] = {
+        "db.system.name": NEO4J_SYSTEM,
+        "db.operation.name": NEO4J_OPERATION,
+        "db.query.summary": query,
+    }
     if error_type is not None:
         attributes["error.type"] = error_type
     instruments().db_operation_duration.record(seconds, attributes)

@@ -289,7 +289,26 @@ UNION ALL
 SELECT ledger_scale.id(ledger_scale.t6_at(p, r), p.kcode * 16 + 5, r), 'musicbrainz', p.kind,
        ledger_scale.mbid(p, p.l1 + 1 + r)::text, ledger_scale.dg_item(p, ledger_scale.mb_link(p, p.l1 + 1 + r)),
        ledger_scale.t6_at(p, r), NULL, 1.0, 'catalog', ledger_scale.t6_at(p, r)
-FROM ledger_scale.plan AS p CROSS JOIN LATERAL generate_series(0, p.a + p.k + p.c - 1) AS r;
+FROM ledger_scale.plan AS p CROSS JOIN LATERAL generate_series(0, p.a + p.k + p.c - 1) AS r
+UNION ALL
+-- Identifier aliases (ADR 0011) on every release: a barcode and a catalog number, and a matrix on
+-- every tenth. That is 2.1 per release, the lux ratio (8.45M over about 4M releases, audit
+-- sql-performance-audit-2026-11-04). Each is keyed by the release's own Discogs id, so the
+-- (provider, entity_kind, external_id) key is unique. Shared barcodes on lux are not modelled.
+SELECT ledger_scale.id(ledger_scale.dg_at(p, n), p.kcode * 16 + 7, n), 'barcode', p.kind, n::text,
+       ledger_scale.dg_item(p, n), ledger_scale.dg_at(p, n), NULL, 1.0, 'catalog', ledger_scale.dg_at(p, n)
+FROM ledger_scale.plan AS p CROSS JOIN LATERAL generate_series(1, p.d1 + p.d2) AS n
+WHERE p.kind = 'release'
+UNION ALL
+SELECT ledger_scale.id(ledger_scale.dg_at(p, n), p.kcode * 16 + 8, n), 'catalog_number', p.kind, n::text,
+       ledger_scale.dg_item(p, n), ledger_scale.dg_at(p, n), NULL, 1.0, 'catalog', ledger_scale.dg_at(p, n)
+FROM ledger_scale.plan AS p CROSS JOIN LATERAL generate_series(1, p.d1 + p.d2) AS n
+WHERE p.kind = 'release'
+UNION ALL
+SELECT ledger_scale.id(ledger_scale.dg_at(p, n), p.kcode * 16 + 9, n), 'matrix', p.kind, n::text,
+       ledger_scale.dg_item(p, n), ledger_scale.dg_at(p, n), NULL, 1.0, 'catalog', ledger_scale.dg_at(p, n)
+FROM ledger_scale.plan AS p CROSS JOIN LATERAL generate_series(1, p.d1 + p.d2) AS n
+WHERE p.kind = 'release' AND n % 10 = 0;
 
 -- Columns: id, superseded_id, survivor_id, cause, decision_ref, valid_from, valid_to, via_id.
 CREATE VIEW ledger_scale.gen_catalog_item_supersessions AS

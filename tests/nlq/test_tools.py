@@ -430,7 +430,7 @@ async def test_execute_get_trends_unknown_type(runner: NLQToolRunner) -> None:
 async def test_execute_get_genre_tree(runner: NLQToolRunner) -> None:
     """Get genre tree tool should return the genre hierarchy."""
     fake_tree = [{"name": "Electronic", "children": ["Techno", "House"]}]
-    with patch("api.queries.genre_tree_queries.get_genre_tree", new_callable=AsyncMock, return_value=fake_tree):
+    with patch("api.genre_tree_store.get_genre_tree", new_callable=AsyncMock, return_value=fake_tree):
         result = await runner.execute("get_genre_tree", {})
     assert result["genres"] == fake_tree
 
