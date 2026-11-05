@@ -73,6 +73,12 @@ _pg_pool: Any = None
 _TRENDS_CACHE_TTL = 86400
 _EXPLORE_CACHE_TTL = 86400
 
+# An entity with fewer releases than this is not stored. The key of every entry is chosen by the caller
+# and a full budget refuses rather than evicts, so cheap names (a stub artist, a typo) would otherwise
+# hold the slots that the heavy roots need (gm-catalog-api-dcwo). The cost is the entity's release
+# count, which the data fixes: unlike a measured latency, a client cannot raise it with load.
+_MIN_CACHE_RELEASES = 500
+
 
 def configure(neo4j: Any, jwt_secret: str | None, valkey: Any = None, pg_pool: Any = None) -> None:  # noqa: ARG001
     global _neo4j_driver, _valkey, _pg_pool
@@ -183,7 +189,15 @@ async def explore(
     if _valkey and entity_type in ("artist", "label"):
         cache_key = valkey_key(f"explore:{entity_type}:{name}")
         try:
-            await store_within_budget(_valkey, cache=CACHE_EXPLORE, key=cache_key, value=json.dumps(response), ttl=_EXPLORE_CACHE_TTL)
+            await store_within_budget(
+                _valkey,
+                cache=CACHE_EXPLORE,
+                key=cache_key,
+                value=json.dumps(response),
+                ttl=_EXPLORE_CACHE_TTL,
+                cost=result.get("release_count"),
+                min_cost=_MIN_CACHE_RELEASES,
+            )
         except Exception as exc:
             record_cache_write_failure(CACHE_EXPLORE, exc)
 
@@ -333,7 +347,7 @@ async def _cached_strata_catalog(artist_id: str) -> Catalog | None:
     return await asyncio.to_thread(decode_catalog, cached)
 
 
-async def _store_strata_catalog(catalog: Catalog) -> None:
+async def _store_strata_catalog(catalog: Catalog, releases: int) -> None:
     if not _valkey:
         return
     try:
@@ -345,6 +359,8 @@ async def _store_strata_catalog(catalog: Catalog) -> None:
             ttl=_EXPLORE_CACHE_TTL,
             max_keys=_STRATA_CACHE_MAX_KEYS,
             max_value_bytes=_STRATA_CACHE_MAX_VALUE_BYTES,
+            cost=releases,
+            min_cost=_MIN_CACHE_RELEASES,
         )
     except Exception as exc:
         record_cache_write_failure(CACHE_STRATA, exc)
@@ -437,10 +453,11 @@ async def strata(
                     },
                     status_code=422,
                 )
+
             # The catalog side depends on the root alone; the caller's marks start from their
             # own edges. Neither waits on the other.
             catalog, marks = await asyncio.gather(get_strata_catalog(_neo4j_driver, _pg_pool, artist_id, root["name"]), read_marks())
-            await _store_strata_catalog(catalog)
+            await _store_strata_catalog(catalog, root["releases"])
         try:
             # Folding a root near the ceiling is CPU work measured in hundreds of milliseconds,
             # so it runs off the event loop.
@@ -608,7 +625,15 @@ async def get_trends(
     if _valkey and entity_type in ("genre", "style", "label") and results:
         cache_key = valkey_key(f"trends:{entity_type}:{name}")
         try:
-            await store_within_budget(_valkey, cache=CACHE_TRENDS, key=cache_key, value=json.dumps(response), ttl=_TRENDS_CACHE_TTL)
+            await store_within_budget(
+                _valkey,
+                cache=CACHE_TRENDS,
+                key=cache_key,
+                value=json.dumps(response),
+                ttl=_TRENDS_CACHE_TTL,
+                cost=sum(row.get("count", 0) for row in results),  # the releases the yearly counts add up to
+                min_cost=_MIN_CACHE_RELEASES,
+            )
         except Exception as exc:
             record_cache_write_failure(CACHE_TRENDS, exc)
 

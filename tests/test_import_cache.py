@@ -75,6 +75,20 @@ async def test_expand_pages_and_their_budget_index_are_dropped_with_the_explore_
 
 
 @pytest.mark.asyncio
+async def test_the_cached_enrichment_status_is_dropped_by_an_import_and_other_enrichment_keys_stay() -> None:
+    """/api/enrichment/status caches Postgres and Neo4j counts that an import changes; it must not outlive the import."""
+    valkey = _store()
+    await valkey.set(valkey_key("enrichment:status"), '{"coverage": 1}')
+    await valkey.set(valkey_key("enrichment:other"), "keep")
+    await valkey.set(import_cache._MARKER_KEY, "1")
+
+    with patch.object(import_cache, "latest_discogs_version", AsyncMock(return_value="2")):
+        assert await import_cache.check_import_cache(AsyncMock(), valkey, None) is True
+
+    assert await _keys(valkey) == sorted([import_cache._MARKER_KEY, valkey_key("enrichment:other")])
+
+
+@pytest.mark.asyncio
 async def test_auth_keys_survive_an_import_invalidation() -> None:
     """Revocations, password-reset tokens and password-change markers are security state, not cache."""
     valkey = _store()

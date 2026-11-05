@@ -47,7 +47,9 @@ _WAIT_KEY: Final = valkey_key("import_cache:maintenance_wait_since")
 MAINTENANCE_WAIT_ALERT_SECONDS: Final = 2 * 3600
 # expand:* holds the paged /api/explore expansions and their budget index (expand:index, a sorted set),
 # which the same pattern covers, so the index is reset with the pages it counts.
-_INVALIDATED_FAMILIES: Final = ("explore:*", "trends:*", "expand:*")
+# enrichment:status is the cached /api/enrichment/status coverage (api/routers/musicbrainz.py): its Postgres and Neo4j counts
+# move with an import too, so it is dropped with the rest rather than served stale for its TTL.
+_INVALIDATED_FAMILIES: Final = ("explore:*", "trends:*", "expand:*", "enrichment:status")
 # Each budgeted cache keeps its live-key index at <prefix>budget:<cache>:index (api/cache_budget.py). It lives outside the
 # families above, so it is deleted by name: left behind, a full budget stays full for up to 24 h after the pages it counts
 # are gone, and every new write is refused.

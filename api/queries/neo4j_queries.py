@@ -35,10 +35,52 @@ def _escape_lucene_query(query: str) -> str:
     return _LUCENE_SPECIAL_RE.sub(r"\\\1", query)
 
 
+# Score boost for a whole-name match. Prefix (wildcard) terms are constant-score in Lucene, so without this
+# every match scored 1.0 and ``ORDER BY score LIMIT n`` kept an arbitrary n (audit H15).
+_EXACT_BOOST = 100
+
+
+def _escape_lucene_phrase(text: str) -> str:
+    """Escape what is special inside a quoted Lucene phrase: the quote and the backslash."""
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+# The standard analyzer splits on everything but letters, digits and apostrophes or dots inside a word, so
+# "jay-z" is indexed as jay + z and "ac/dc" as ac + dc. The query is cut the same way.
+_ANALYZER_TOKEN_RE = re.compile(r"\w+(?:['\u2019.]\w+)*")
+
+
+def _analyzer_tokens(query: str) -> list[str]:
+    # Lower-cased, as the analyzer lower-cases names: Lucene operators are upper-case words, so a typed AND, OR or NOT
+    # must reach the parser as an ordinary word.
+    return [token.lower() for token in _ANALYZER_TOKEN_RE.findall(query)]
+
+
 def _build_autocomplete_query(query: str) -> str:
-    """Build a Lucene fulltext query with wildcard on each term for prefix matching."""
-    terms = query.split()
-    return " AND ".join(_escape_lucene_query(term) + "*" for term in terms)
+    """Build a Lucene fulltext query: names holding every typed token as a prefix, best matches boosted.
+
+    Input is cut into tokens the way the index analyzer cuts names (``jay-z`` is ``jay`` and ``z``, ``ac/dc`` is
+    ``ac`` and ``dc``) and every token is required, each as a prefix: ``jay* AND z*``. Splitting is what makes
+    punctuated names findable at all (the old query matched none) and ANDing is what keeps names containing only one
+    of the tokens out. Plain input matches exactly what ``t1* AND t2*`` matched before (``dav bo`` still finds
+    ``David Bowie``). On top of that:
+
+    * with two or more tokens, the whole phrase is boosted, so a name that is those words and nothing else
+      outranks a longer name that merely starts with them (Lucene's length normalisation then puts the
+      shorter name first);
+    * with one token, a name containing that whole word is boosted over one that only starts with it.
+
+    Input with no word characters at all falls back to the escaped terms as prefixes, which match nothing.
+    """
+    tokens = _analyzer_tokens(query)
+    if not tokens:
+        return " AND ".join(_escape_lucene_query(term) + "*" for term in query.split())
+    escaped = [_escape_lucene_query(token) for token in tokens]
+    if len(escaped) == 1:
+        return f"({escaped[0]}^{_EXACT_BOOST} OR {escaped[0]}*)"
+    required = " AND ".join(f"{token}*" for token in escaped)
+    phrase = _escape_lucene_phrase(" ".join(tokens))
+    return f'"{phrase}"^{_EXACT_BOOST} OR ({required})'
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,14 +95,17 @@ async def _autocomplete(
     query: str,
     limit: int,
 ) -> list[dict[str, Any]]:
+    # The limit goes to Lucene, which then keeps the highest-scoring names instead of scoring every match
+    # ('the*' matches tens of thousands; 119 ms warm before, 4 to 7 ms now). The tie-break only orders names
+    # Lucene scored equally: a name equal to what was typed, then the shorter, then the lower id.
     cypher = f"""
-    CALL db.index.fulltext.queryNodes('{spec.index}', $query)
+    CALL db.index.fulltext.queryNodes('{spec.index}', $query, {{limit: $limit}})
     YIELD node, score
     RETURN {spec.id_expression} AS id, node.name AS name, score
-    ORDER BY score DESC
+    ORDER BY score DESC, toLower(node.name) = $typed DESC, size(node.name), id
     LIMIT $limit
     """
-    return await run_query(driver, cypher, query=_build_autocomplete_query(query), limit=limit)
+    return await run_query(driver, cypher, query=_build_autocomplete_query(query), limit=limit, typed=" ".join(query.split()).lower())
 
 
 _ARTIST_AUTOCOMPLETE = _AutocompleteSpec("artist_name_fulltext", "node.id")
@@ -173,9 +218,17 @@ async def autocomplete_style(driver: AsyncResilientNeo4jDriver, query: str, limi
 async def explore_artist(driver: AsyncResilientNeo4jDriver, name: str) -> dict[str, Any] | None:
     """Get artist center node with category counts.
 
-    alias_count dedups across ALIAS_OF/MEMBER_OF categories the same way
+    ``release_count`` and ``label_count`` are read from the Artist node's stored ``release_count``
+    and ``label_count`` properties (written by discogs-graph-enricher's post-import stats, like
+    Genre, Label and Style) when both are present: a property read instead of a traversal of every
+    release the artist is credited on and every label of those releases (339,676 db hits for Bowie).
+    An artist without them falls back to the live traversal, which defines what the stored values
+    must equal: distinct releases by the artist, and distinct labels of those releases.
+
+    alias_count is always live. It dedups across ALIAS_OF/MEMBER_OF categories the same way
     count_artist_aliases and expand_artist_aliases do, so an artist reachable
-    through more than one category still contributes exactly one.
+    through more than one category still contributes exactly one, and it moves with those edges
+    rather than with a maintenance run.
     """
     cypher = """
     MATCH (a:Artist {name: $name})
@@ -192,11 +245,24 @@ async def explore_artist(driver: AsyncResilientNeo4jDriver, name: str) -> dict[s
         RETURN count(related_id) AS alias_count
     }
     RETURN a.id AS id, a.name AS name,
-           COUNT { MATCH (r:Release)-[:BY]->(a) RETURN DISTINCT r } AS release_count,
-           COUNT { MATCH (r:Release)-[:BY]->(a), (r)-[:ON]->(l:Label) RETURN DISTINCT l } AS label_count,
+           a.release_count AS release_count,
+           a.label_count AS label_count,
            alias_count
     """
-    return await run_single(driver, cypher, name=name)
+    result = await run_single(driver, cypher, name=name)
+    if not result:
+        return None
+    if result.get("release_count") is not None and result.get("label_count") is not None:
+        return result
+
+    # Fallback: live traversal, for artists the post-import stats have not reached.
+    fallback_cypher = """
+    MATCH (a:Artist {id: $id})
+    RETURN COUNT { MATCH (r:Release)-[:BY]->(a) RETURN DISTINCT r } AS release_count,
+           COUNT { MATCH (r:Release)-[:BY]->(a), (r)-[:ON]->(l:Label) RETURN DISTINCT l } AS label_count
+    """
+    counts = await run_single(driver, fallback_cypher, id=result["id"])
+    return {**result, "release_count": counts["release_count"], "label_count": counts["label_count"]} if counts else result
 
 
 async def explore_genre(driver: AsyncResilientNeo4jDriver, name: str) -> dict[str, Any] | None:

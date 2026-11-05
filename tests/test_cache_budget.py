@@ -70,3 +70,30 @@ async def test_an_oversized_value_or_key_is_not_stored_and_costs_no_budget() -> 
 
     valkey.setex.assert_awaited_once()
     full.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_cheap_result_is_not_stored_and_leaves_the_budget_alone() -> None:
+    valkey = _valkey(live=5)
+    with patch.object(cache_budget, "record_cache_budget_full") as full:
+        stored = await cache_budget.store_within_budget(valkey, cache="c", key="k", value="v", ttl=60, max_keys=5, cost=3, min_cost=500)
+
+    assert stored is False
+    valkey.zadd.assert_not_called()
+    valkey.setex.assert_not_called()
+    full.assert_not_called()  # a cost skip is not a spent budget
+
+
+@pytest.mark.asyncio
+async def test_an_expensive_result_is_stored() -> None:
+    valkey = _valkey(live=0)
+    stored = await cache_budget.store_within_budget(valkey, cache="c", key="k", value="v", ttl=60, cost=100_000, min_cost=500)
+
+    assert stored is True
+    valkey.setex.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_no_measured_cost_keeps_the_old_behaviour() -> None:
+    valkey = _valkey(live=0)
+    assert await cache_budget.store_within_budget(valkey, cache="c", key="k", value="v", ttl=60, min_cost=500) is True
