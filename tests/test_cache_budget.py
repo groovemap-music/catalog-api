@@ -57,4 +57,16 @@ async def test_a_valkey_error_propagates_for_the_callers_failure_handler() -> No
 
 def test_the_budgets() -> None:
     assert cache_budget.DEFAULT_MAX_KEYS == 10_000
-    assert explore._STRATA_CACHE_MAX_KEYS == 1_000
+    assert explore._STRATA_CACHE_MAX_KEYS == 100
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_value_or_key_is_not_stored_and_costs_no_budget() -> None:
+    valkey = _valkey(live=0)
+    with patch.object(cache_budget, "record_cache_budget_full") as full:
+        assert await cache_budget.store_within_budget(valkey, cache="c", key="k", value="x" * 11_000, ttl=60) is False
+        assert await cache_budget.store_within_budget(valkey, cache="c", key="k" * 300, value="v", ttl=60) is False
+        assert await cache_budget.store_within_budget(valkey, cache="c", key="k", value="x" * 11_000, ttl=60, max_value_bytes=20_000) is True
+
+    valkey.setex.assert_awaited_once()
+    full.assert_not_called()

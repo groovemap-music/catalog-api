@@ -27,8 +27,15 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+# A key longer than this is never stored: every part of it is chosen by the caller.
+MAX_KEY_LENGTH = 256
+
 # Live keys one cache may hold. At about 10 KB an entry this is on the order of 100 MB.
 DEFAULT_MAX_KEYS = 10_000
+
+# The largest value one entry may hold. Together with the key budget this bounds a cache in bytes, not
+# only in keys: 10,000 entries of at most 10 KB is 100 MB.
+DEFAULT_MAX_VALUE_BYTES = 10_240
 
 
 def index_key(cache: str) -> str:
@@ -44,13 +51,22 @@ async def store_within_budget(
     value: str | bytes,
     ttl: int,
     max_keys: int = DEFAULT_MAX_KEYS,
+    max_value_bytes: int = DEFAULT_MAX_VALUE_BYTES,
 ) -> bool:
     """Write ``value`` under ``key`` for ``ttl`` seconds unless ``cache`` already holds ``max_keys`` live keys.
 
-    Expired index entries are dropped first, and a key already in the index is refreshed rather than
+    An oversized value, or a key longer than ``MAX_KEY_LENGTH``, is not stored either: it returns ``False``
+    without touching the budget. Expired index entries are dropped first, and a key already in the index is refreshed rather than
     counted again. Returns ``False`` when the budget is spent and nothing was written. A Valkey error
     propagates, for the caller's existing best-effort handler to count as a write failure.
+
+    The check and the write are separate commands, so concurrent writers can overshoot the budget by about
+    their own number, which the budget tolerates; an index entry whose ``setex`` then fails expires with
+    its TTL. A Lua script would close that gap but cannot run on the fake Valkey the unit tests use.
     """
+    size = len(value.encode("utf-8")) if isinstance(value, str) else len(value)
+    if len(key) > MAX_KEY_LENGTH or size > max_value_bytes:
+        return False
     index = index_key(cache)
     now = time.time()
     await valkey.zremrangebyscore(index, "-inf", now)

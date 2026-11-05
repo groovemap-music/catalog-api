@@ -250,8 +250,9 @@ _STRATA_EDGES_PER_MASTER = 4
 
 
 # A strata catalog is the whole ladder of a root of up to MAX_ROOT_RELEASES (134,051) releases, megabytes
-# rather than the ~10 KB of the other caches, so its key budget is a tenth of theirs.
-_STRATA_CACHE_MAX_KEYS = 1_000
+# rather than the ~10 KB of the other caches, so it gets 100 keys of at most 1 MB (100 MB), and a larger catalog is answered uncached.
+_STRATA_CACHE_MAX_KEYS = 100
+_STRATA_CACHE_MAX_VALUE_BYTES = 1_048_576
 
 
 def _strata_cache_key(artist_id: str) -> str:
@@ -284,6 +285,7 @@ async def _store_strata_catalog(catalog: Catalog) -> None:
             value=encode_catalog(catalog),
             ttl=_EXPLORE_CACHE_TTL,
             max_keys=_STRATA_CACHE_MAX_KEYS,
+            max_value_bytes=_STRATA_CACHE_MAX_VALUE_BYTES,
         )
     except Exception as exc:
         record_cache_write_failure(CACHE_STRATA, exc)
@@ -511,7 +513,8 @@ async def get_trends(
     results = await query_func(_neo4j_driver, name)
     response = {"name": name, "type": entity_type, "data": results}
 
-    if _valkey and entity_type in ("genre", "style", "label"):
+    # An empty result is not stored: a name that does not exist would otherwise spend budget.
+    if _valkey and entity_type in ("genre", "style", "label") and results:
         cache_key = valkey_key(f"trends:{entity_type}:{name}")
         try:
             await store_within_budget(_valkey, cache=CACHE_TRENDS, key=cache_key, value=json.dumps(response), ttl=_TRENDS_CACHE_TTL)
