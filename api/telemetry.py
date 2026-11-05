@@ -51,6 +51,7 @@ CACHE_MISS = "miss"
 # Logical Valkey caches. The value names the cache, never the key inside it.
 CACHE_CREDITS_LEADERBOARD = "credits_leaderboard"
 CACHE_CREDITS_PERSON = "credits_person"
+CACHE_EXPAND = "expand"
 CACHE_EXPLORE = "explore"
 CACHE_INSIGHTS_COMPLETENESS = "insights_completeness"
 CACHE_LABEL_DNA = "label_dna"
