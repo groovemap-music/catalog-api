@@ -83,25 +83,4 @@ POSTGRES_PASSWORD="${password}" \
 NEO4J_HOST="bolt://127.0.0.1:${neo4j_port}" \
 NEO4J_USERNAME=neo4j \
 NEO4J_PASSWORD="${password}" \
-    uv run pytest -m integration \
-        tests/test_real_databases.py \
-        tests/test_reattach_integration.py \
-        tests/test_reattach_trigger_integration.py \
-        tests/test_ledger_backfill_integration.py \
-        tests/test_identity_ledger_integration.py \
-        tests/test_lookup_integration.py \
-        tests/test_activity_dedup_integration.py \
-        tests/test_activity_request_keys_integration.py \
-        tests/test_similar_precomputed_integration.py \
-        tests/test_role_leaderboard_integration.py \
-        tests/test_search_integration.py \
-        tests/test_search_pool_integration.py \
-        tests/test_search_total_integration.py \
-        tests/test_neo4j_timeout_integration.py \
-        tests/test_credits_integration.py \
-        tests/test_expand_order_integration.py \
-        tests/test_precomputed_counts_integration.py \
-        tests/test_genre_tree_integration.py \
-        tests/test_network_collaborators_integration.py \
-        tests/test_rarity_stream_integration.py \
-        tests/test_data_completeness_integration.py
+    uv run pytest -m integration $(bash scripts/integration-files.sh)
