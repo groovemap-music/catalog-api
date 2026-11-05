@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
 import api.activity as activity
+from api import explore_discovery
 from api.cache import RecommendCache
 from api.config import DEFAULT_FUSION_ALPHA
 from api.dependencies import get_optional_user, require_user
@@ -257,11 +258,18 @@ async def explore_from_here(
             return JSONResponse(content=cached)
 
     # Run traversal and user taste queries in parallel
-    traversal_results, heatmap_result, blind_spots_raw = await asyncio.gather(
-        get_explore_traversal(_neo4j_driver, entity_type, entity_id, hops=hops),
-        get_taste_heatmap(_neo4j_driver, user_id),
-        get_blind_spots(_neo4j_driver, user_id),
-    )
+    try:
+        traversal_results, heatmap_result, blind_spots_raw = await asyncio.gather(
+            get_explore_traversal(_neo4j_driver, entity_type, entity_id, hops=hops),
+            get_taste_heatmap(_neo4j_driver, user_id),
+            get_blind_spots(_neo4j_driver, user_id),
+        )
+    except explore_discovery.HubNotReadyError:
+        return JSONResponse(
+            content={"error": "Discoveries for this widely used entity are being computed — try again shortly"},
+            status_code=503,
+            headers={"Retry-After": "30"},
+        )
 
     # Build flat genre vector from heatmap (aggregate across decades)
     cells, _total = heatmap_result

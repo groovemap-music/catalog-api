@@ -360,3 +360,19 @@ class TestRecommenderModels:
         assert resp.total == 1
         assert resp.strategy == "multi"
         assert resp.recommendations[0].score == 0.87
+
+
+class TestExploreHubNotReady:
+    def test_a_hub_being_computed_is_503_with_retry_after(self, test_client: TestClient, auth_headers: dict[str, str]) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        from api.explore_discovery import HubNotReadyError
+
+        with (
+            patch("api.routers.recommend.get_explore_traversal", AsyncMock(side_effect=HubNotReadyError("rock"))),
+            patch("api.routers.recommend.get_taste_heatmap", AsyncMock(return_value=([], 0))),
+            patch("api.routers.recommend.get_blind_spots", AsyncMock(return_value=[])),
+        ):
+            response = test_client.get("/api/recommend/explore/genre/Rock", headers=auth_headers)
+        assert response.status_code == 503
+        assert "retry-after" in response.headers
