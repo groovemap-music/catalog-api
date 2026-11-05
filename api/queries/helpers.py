@@ -58,6 +58,28 @@ def resolve_timeout(timeout: Timeout) -> float | None:
     return timeout
 
 
+_NAME_SEARCH_DEPTH = 4
+
+
+def _statement_name(caller: Any) -> str:
+    """Name a statement after the first public function that issued it, within a few frames.
+
+    Query code often reaches Cypher through private helpers (``_count``, ``_fetch_batch``), so
+    the direct caller would blend several public queries under one private name. Walk up at
+    most ``_NAME_SEARCH_DEPTH`` frames to the first public function; if there is none, use the
+    direct caller. The name is a code name, so no parameter value reaches a metric attribute.
+    """
+    frame = caller
+    for _ in range(_NAME_SEARCH_DEPTH):
+        if frame is None:
+            break
+        code_name = frame.f_code.co_name
+        if not code_name.startswith(("_", "<")):
+            return str(code_name)
+        frame = frame.f_back
+    return str(caller.f_code.co_name)
+
+
 @contextmanager
 def _timed_statement(name: str) -> Iterator[None]:
     """Record one statement's duration under its caller's name, with its error type if it fails.
@@ -144,8 +166,7 @@ async def run_query(
     if database:
         session_kwargs["database"] = database
 
-    name = sys._getframe(1).f_code.co_qualname
-    with _timed_statement(name):
+    with _timed_statement(_statement_name(sys._getframe(1))):
         try:
             async with driver.session(**session_kwargs) as session:
                 result = await session.run(query, params)
@@ -191,8 +212,7 @@ async def run_single(
     if database:
         session_kwargs["database"] = database
 
-    name = sys._getframe(1).f_code.co_qualname
-    with _timed_statement(name):
+    with _timed_statement(_statement_name(sys._getframe(1))):
         try:
             async with driver.session(**session_kwargs) as session:
                 result = await session.run(query, params)
@@ -240,8 +260,7 @@ async def run_count(
     if database:
         session_kwargs["database"] = database
 
-    name = sys._getframe(1).f_code.co_qualname
-    with _timed_statement(name):
+    with _timed_statement(_statement_name(sys._getframe(1))):
         try:
             async with driver.session(**session_kwargs) as session:
                 result = await session.run(query, params)

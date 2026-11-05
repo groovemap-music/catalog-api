@@ -791,6 +791,16 @@ async def count_artists_for_telemetry(driver: Any) -> int:
     return await run_count(driver, "MATCH (n:Artist) RETURN count(n) AS total")
 
 
+async def _private_count_for_telemetry(driver: Any) -> int:
+    from api.queries.helpers import run_count
+
+    return await run_count(driver, "MATCH (n:Artist) RETURN count(n) AS total")
+
+
+async def public_calls_private_calls_run_count(driver: Any) -> int:
+    return await _private_count_for_telemetry(driver)
+
+
 class TestNeo4jQueryDuration:
     """db.client.operation.duration for Cypher, named by the query function that issued it."""
 
@@ -798,7 +808,9 @@ class TestNeo4jQueryDuration:
     async def test_statement_is_named_by_its_calling_query_function(self, collector: Collector) -> None:
         await lookup_artist_for_telemetry(_fake_neo4j_driver(records=[{"id": "1"}]))
 
-        assert collector.attributes(DB_DURATION) == [{"db.system.name": "neo4j", "db.query.summary": "lookup_artist_for_telemetry"}]
+        assert collector.attributes(DB_DURATION) == [
+            {"db.system.name": "neo4j", "db.operation.name": "execute", "db.query.summary": "lookup_artist_for_telemetry"}
+        ]
 
     @pytest.mark.asyncio
     async def test_no_parameter_value_or_cypher_text_reaches_an_attribute(self, collector: Collector) -> None:
@@ -814,7 +826,12 @@ class TestNeo4jQueryDuration:
             await lookup_artist_for_telemetry(_fake_neo4j_driver(error=RuntimeError("boom")))
 
         assert collector.attributes(DB_DURATION) == [
-            {"db.system.name": "neo4j", "db.query.summary": "lookup_artist_for_telemetry", "error.type": "RuntimeError"}
+            {
+                "db.system.name": "neo4j",
+                "db.operation.name": "execute",
+                "db.query.summary": "lookup_artist_for_telemetry",
+                "error.type": "RuntimeError",
+            }
         ]
 
     @pytest.mark.asyncio
@@ -823,4 +840,15 @@ class TestNeo4jQueryDuration:
 
         assert await count_artists_for_telemetry(driver) == 3
 
-        assert collector.attributes(DB_DURATION) == [{"db.system.name": "neo4j", "db.query.summary": "count_artists_for_telemetry"}]
+        assert collector.attributes(DB_DURATION) == [
+            {"db.system.name": "neo4j", "db.operation.name": "execute", "db.query.summary": "count_artists_for_telemetry"}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_statement_under_private_helpers_is_named_by_the_first_public_caller(self, collector: Collector) -> None:
+        # public -> private -> run_count: the samples carry the public name, not the private helper's.
+        assert await public_calls_private_calls_run_count(_fake_neo4j_driver(records=[{"total": 2}])) == 2
+
+        assert collector.attributes(DB_DURATION) == [
+            {"db.system.name": "neo4j", "db.operation.name": "execute", "db.query.summary": "public_calls_private_calls_run_count"}
+        ]
