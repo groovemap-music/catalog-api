@@ -158,6 +158,31 @@ async def get_artist_centrality(
     return await run_single(driver, gds_cypher, artist_id=artist_id)
 
 
+_CLUSTER_NEIGHBOURS = """
+MATCH (a:Artist {id: $artist_id})<-[:BY]-(r:Release)-[:BY]->(neighbor:Artist)
+WHERE neighbor <> a
+WITH neighbor, count(DISTINCT r) AS shared_releases
+ORDER BY shared_releases DESC, neighbor.id
+LIMIT $limit
+RETURN neighbor.id AS artist_id,
+       neighbor.name AS artist_name,
+       shared_releases,
+       neighbor.primary_genre AS primary_genre
+"""
+
+# The live equivalent of the enricher's Artist.primary_genre: the genre on most of an artist's releases, a tie going to the
+# alphabetically first genre. Run only for the neighbours that were already ranked and cut, and only where the stored
+# property is absent (not computed yet, or the artist has no genre).
+_PRIMARY_GENRE_LIVE = """
+UNWIND $ids AS nid
+MATCH (n:Artist {id: nid})<-[:BY]-(r:Release)-[:IS]->(g:Genre)
+WITH n, g.name AS genre, count(r) AS genre_count
+ORDER BY n.id, genre_count DESC, genre
+WITH n, collect(genre)[0] AS primary_genre
+RETURN n.id AS artist_id, primary_genre
+"""
+
+
 async def get_artist_cluster(
     driver: AsyncResilientNeo4jDriver,
     artist_id: str,
@@ -165,29 +190,23 @@ async def get_artist_cluster(
 ) -> list[dict[str, Any]]:
     """Detect the community/cluster around an artist.
 
-    Uses label propagation via shared-release co-occurrence:
-    finds all artists connected through shared releases (up to 2 hops),
-    then groups them by their most common genre to approximate communities.
+    Finds the artists who share the most releases with the artist, cuts to ``limit``, and only then reads each one's
+    primary genre (the genre on most of their releases, a tie to the alphabetically first). The old statement built
+    the genre histogram of every neighbour's whole discography before the cut: one Various co-credit cost 1.53M
+    releases, and Bowie took 29.6 s and 37.5M hits (audit H6). The neighbours are the same; ties in shared releases
+    are now broken by artist id.
+
+    The primary genre is read from ``Artist.primary_genre`` when the enricher has written it, and computed live for a
+    ranked neighbour where it is absent, so the answer is identical before and after the first maintenance pass.
     """
-    cypher = """
-    MATCH (a:Artist {id: $artist_id})
-    MATCH (a)<-[:BY]-(r:Release)-[:BY]->(neighbor:Artist)
-    WHERE neighbor <> a
-    WITH a, neighbor, count(DISTINCT r) AS shared_releases
-    OPTIONAL MATCH (neighbor)<-[:BY]-(r2:Release)-[:IS]->(g:Genre)
-    WITH neighbor, shared_releases,
-         g.name AS genre, count(r2) AS genre_count
-    ORDER BY genre_count DESC
-    WITH neighbor, shared_releases,
-         collect(genre)[0] AS primary_genre
-    ORDER BY shared_releases DESC
-    LIMIT $limit
-    RETURN neighbor.id AS artist_id,
-           neighbor.name AS artist_name,
-           shared_releases,
-           primary_genre
-    """
-    results = await run_query(driver, cypher, artist_id=artist_id, limit=limit)
+    results = await run_query(driver, _CLUSTER_NEIGHBOURS, artist_id=artist_id, limit=limit)
+
+    missing = [row["artist_id"] for row in results if row["primary_genre"] is None]
+    if missing:
+        live = {r["artist_id"]: r["primary_genre"] for r in await run_query(driver, _PRIMARY_GENRE_LIVE, ids=missing)}
+        for row in results:
+            if row["primary_genre"] is None:
+                row["primary_genre"] = live.get(row["artist_id"])
 
     # Group results by primary_genre to form clusters
     clusters: dict[str, list[dict[str, Any]]] = {}
