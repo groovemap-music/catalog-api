@@ -148,3 +148,65 @@ async def test_corrupt_valkey_value_is_ignored(valkey: FakeValkey) -> None:
     valkey.data[store.SNAPSHOT_KEY] = "{not json"
     with pytest.raises(store.GenreTreeNotReadyError):
         await store.get_genre_tree()
+
+
+@pytest.mark.asyncio
+async def test_loop_retries_on_a_short_backoff_until_a_tree_exists_then_uses_the_interval(valkey: FakeValkey) -> None:  # noqa: ARG001
+    import asyncio
+
+    delays: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        delays.append(seconds)
+        if len(delays) == 5:
+            raise asyncio.CancelledError
+
+    outcomes = [RuntimeError("neo4j restarting"), RuntimeError("neo4j restarting"), TREE]
+    sig = patch("api.queries.genre_tree_queries.get_genre_signature", AsyncMock(return_value="1:9:1"))
+    build = patch("api.queries.genre_tree_queries.build_genre_tree", AsyncMock(side_effect=outcomes))
+    with sig, build, patch("api.genre_tree_store.asyncio.sleep", fake_sleep), pytest.raises(asyncio.CancelledError):
+        await store.run_refresh_loop(object(), interval=3600, retry_initial=30, retry_max=300)
+
+    # Two failures back off 30 s then 60 s; the third attempt stores a tree; then the hourly interval.
+    assert delays[:2] == [30, 60]
+    assert delays[2:] == [3600, 3600, 3600]
+    assert await store.get_genre_tree() == TREE
+
+
+@pytest.mark.asyncio
+async def test_loop_backoff_is_capped_and_never_exceeds_the_interval(valkey: FakeValkey) -> None:  # noqa: ARG001
+    import asyncio
+
+    delays: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        delays.append(seconds)
+        if len(delays) == 7:
+            raise asyncio.CancelledError
+
+    sig = patch("api.queries.genre_tree_queries.get_genre_signature", AsyncMock(return_value="1:9:1"))
+    build = patch("api.queries.genre_tree_queries.build_genre_tree", AsyncMock(side_effect=RuntimeError("down")))
+    with sig, build, patch("api.genre_tree_store.asyncio.sleep", fake_sleep), pytest.raises(asyncio.CancelledError):
+        await store.run_refresh_loop(object(), interval=3600, retry_initial=30, retry_max=300)
+    assert delays == [30, 60, 120, 240, 300, 300, 300]
+
+
+@pytest.mark.asyncio
+async def test_loop_retries_when_another_replica_holds_the_lock_and_nothing_is_stored(valkey: FakeValkey) -> None:
+    import asyncio
+
+    valkey.data[store.LOCK_KEY] = "1"
+    delays: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        delays.append(seconds)
+        valkey.data.pop(store.LOCK_KEY, None)  # the other replica gave up without storing
+        if len(delays) == 2:
+            raise asyncio.CancelledError
+
+    sig, build = _queries()
+    with sig, build as built, patch("api.genre_tree_store.asyncio.sleep", fake_sleep), pytest.raises(asyncio.CancelledError):
+        await store.run_refresh_loop(object(), interval=3600, retry_initial=30, retry_max=300)
+    assert delays[0] == 30
+    assert built.await_count == 1
+    assert await store.get_genre_tree() == TREE

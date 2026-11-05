@@ -158,8 +158,32 @@ async def refresh_once(driver: Any, *, max_age: float = DEFAULT_MAX_AGE_SECONDS,
         return False
 
 
-async def run_refresh_loop(driver: Any, *, interval: float, max_age: float = DEFAULT_MAX_AGE_SECONDS) -> None:
-    """Check at once, then every ``interval`` seconds, until cancelled."""
+RETRY_INITIAL_SECONDS: Final = 30.0
+RETRY_MAX_SECONDS: Final = 300.0
+
+
+async def run_refresh_loop(
+    driver: Any,
+    *,
+    interval: float,
+    max_age: float = DEFAULT_MAX_AGE_SECONDS,
+    retry_initial: float = RETRY_INITIAL_SECONDS,
+    retry_max: float = RETRY_MAX_SECONDS,
+) -> None:
+    """Check at once, then every ``interval`` seconds, until cancelled.
+
+    While no tree exists anywhere (the first build failed, or another replica holds the lock and has
+    stored nothing yet) the route answers 503, so it retries on a short backoff, doubling from
+    ``retry_initial`` to ``retry_max``, instead of waiting a full ``interval``. Once a tree is stored it
+    returns to ``interval``.
+    """
+    backoff = retry_initial
     while True:
         await refresh_once(driver, max_age=max_age)
-        await asyncio.sleep(interval)
+        if _snapshot is None:
+            delay = min(backoff, interval)
+            backoff = min(backoff * 2, retry_max)
+        else:
+            delay = interval
+            backoff = retry_initial
+        await asyncio.sleep(delay)

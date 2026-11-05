@@ -10,11 +10,13 @@ Nothing here touches a shared database: ``just test-integration`` starts throwaw
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from common import AsyncResilientNeo4jDriver
+from neo4j.exceptions import ServiceUnavailable
 
 from api import genre_tree_store as store
 from api.queries import genre_tree_queries
@@ -124,3 +126,37 @@ async def test_store_serves_the_built_tree_with_no_neo4j_read_and_rebuilds_after
     jazz = next(g for g in await store.get_genre_tree() if g["name"] == "Jazz")
     assert jazz["release_count"] == 3
     assert {"name": "Cool", "release_count": 2} in jazz["styles"]
+
+
+class _FlakyDriver:
+    """The real driver, except the first ``failures`` sessions fail the way a restarting Neo4j does."""
+
+    def __init__(self, real: AsyncResilientNeo4jDriver, failures: int) -> None:
+        self._real = real
+        self.failures = failures
+        self.attempts = 0
+
+    def session(self, **kwargs: Any) -> Any:
+        self.attempts += 1
+        if self.failures > 0:
+            self.failures -= 1
+            raise ServiceUnavailable("neo4j restarting")
+        return self._real.session(**kwargs)
+
+
+async def test_loop_recovers_after_a_real_failure_without_waiting_the_interval(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    await _seed(neo4j_driver)
+    store.configure(None)
+    flaky = _FlakyDriver(neo4j_driver, failures=1)
+    task = asyncio.create_task(store.run_refresh_loop(flaky, interval=3600, retry_initial=0.05, retry_max=0.2))
+    try:
+        for _ in range(100):
+            if store.current() is not None:
+                break
+            await asyncio.sleep(0.05)
+        assert store.current() is not None, "the tree was not stored after the failure"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert flaky.attempts > 1  # failed once, retried in well under the one-hour interval
+    assert [g["name"] for g in await store.get_genre_tree()] == ["Rock", "Jazz", "Folk"]
