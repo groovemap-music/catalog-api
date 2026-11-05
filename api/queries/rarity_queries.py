@@ -17,7 +17,11 @@ Graph model:
   (Release)-[:ISSUED_ON {qty, source}]->(Medium {id, family})
 """
 
+import base64
+import binascii
 import bisect
+import json
+import math
 from collections import Counter
 from collections.abc import AsyncIterator, Iterable
 from datetime import UTC, datetime
@@ -64,6 +68,7 @@ __all__ = [
     "RARITY_PAGE_SIZE",
     "RARITY_QUERY_TIMEOUT_SECONDS",
     "RARITY_TIERS",
+    "TIER_PAGE_MAX_LIMIT",
     "compute_collection_prevalence_score",
     "compute_format_rarity_score",
     "compute_graph_isolation_score",
@@ -72,6 +77,8 @@ __all__ = [
     "compute_pressing_scarcity_score",
     "compute_rarity_tier",
     "compute_temporal_scarcity_score",
+    "decode_tier_cursor",
+    "encode_tier_cursor",
     "fetch_all_rarity_signals",
     "fetch_rarity_page",
     "fetch_rarity_quality_counts",
@@ -80,6 +87,7 @@ __all__ = [
     "get_rarity_for_release",
     "get_rarity_hidden_gems",
     "get_rarity_leaderboard",
+    "get_rarity_tier_page",
     "iter_rarity_signals",
     "medium_rarity_score",
 ]
@@ -685,6 +693,88 @@ async def get_rarity_for_release(pool: Any, release_id: int) -> dict[str, Any] |
         )
         row: dict[str, Any] | None = await cur.fetchone()
         return row
+
+
+# One page of a tier's releases in leaderboard order, by keyset. The order is score descending
+# then release id ascending, the same order get_rarity_leaderboard pages with OFFSET, and it
+# matches the (tier, rarity_score DESC, release_id) index. The cursor is the last row's score and
+# id. rarity_score is REAL, so the score is bound ::real: a float8 cursor compares against a value
+# that a text round trip has rounded, and admits none of a tie group whose score it rounded. That
+# drops rows, which is worse than a repeat.
+_TIER_KEYSET_PAGE = """
+SELECT release_id, title, artist_name, year, rarity_score, tier, hidden_gem_score
+FROM insights.release_rarity
+WHERE tier = %(tier)s
+  AND (%(after_score)s::real IS NULL
+       OR (rarity_score <= %(after_score)s::real
+           AND (rarity_score < %(after_score)s::real OR release_id > %(after_id)s::bigint)))
+ORDER BY rarity_score DESC, release_id
+LIMIT %(limit)s
+"""
+
+
+# The page size the leaderboard route already allows (Query le=100); the query clamps to it too, so a caller that skips the
+# route cannot ask Postgres for an unbounded page.
+TIER_PAGE_MAX_LIMIT = 100
+
+
+_BIGINT_MAX = 2**63 - 1
+_REAL_MAX = 3.4028234663852886e38
+_REAL_MIN_NORMAL = 1.1754943508222875e-38
+
+
+def encode_tier_cursor(tier: str, score: float, release_id: int) -> str:
+    """The opaque cursor for the page after the row (``score``, ``release_id``) of ``tier``.
+
+    The server makes it and the client only hands it back, so the score keeps every digit of the REAL it was read as
+    (``repr`` of the float is exact) and a client cannot round it to a neighbouring REAL. The tier is in the token so a cursor
+    from one tier is refused on another.
+    """
+    raw = json.dumps([tier, repr(float(score)), int(release_id)]).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def decode_tier_cursor(token: str, tier: str) -> tuple[float, int]:
+    """Read a cursor made by :func:`encode_tier_cursor` for ``tier``; ``ValueError`` for anything else.
+
+    A token that decodes cleanly can still carry values Postgres refuses (a release id past BIGINT, a score outside REAL's range
+    or one that underflows it), which would surface as a 500 from the query, so those are rejected here.
+    """
+    try:
+        cursor_tier, score_text, release_id = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
+        if not (isinstance(cursor_tier, str) and isinstance(score_text, str)) or isinstance(release_id, bool) or not isinstance(release_id, int):
+            raise ValueError
+        score = float(score_text)
+    except (ValueError, TypeError, binascii.Error, UnicodeDecodeError) as exc:
+        raise ValueError("invalid cursor") from exc
+    in_real_range = math.isfinite(score) and abs(score) <= _REAL_MAX and (score == 0 or abs(score) >= _REAL_MIN_NORMAL)
+    if cursor_tier != tier or not in_real_range or not 0 <= release_id <= _BIGINT_MAX:
+        raise ValueError("invalid cursor")
+    return score, release_id
+
+
+async def get_rarity_tier_page(
+    pool: Any,
+    tier: str,
+    after: tuple[float, int] | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """The next page of a tier's releases after the cursor ``after`` = (rarity_score, release_id).
+
+    Pass ``None`` for the first page. Pages are consistent under score ties: every row is returned
+    exactly once in a full walk, provided the caller sends the cursor score as text with at least
+    9 significant digits (FLT_DECIMAL_DIG). Fewer digits move the score to a neighbouring REAL, and
+    the walk then repeats a tie group, which on real Postgres ran without ending.
+    """
+    after_score, after_id = after if after is not None else (None, None)
+    limit = max(1, min(limit, TIER_PAGE_MAX_LIMIT + 1))  # one more than a page lets the route see whether another follows
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            _TIER_KEYSET_PAGE,
+            {"tier": tier, "after_score": after_score, "after_id": after_id, "limit": limit},
+        )
+        rows: list[dict[str, Any]] = await cur.fetchall()
+    return rows
 
 
 async def get_rarity_leaderboard(
