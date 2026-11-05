@@ -17,6 +17,7 @@ from api.telemetry import CACHE_EXPLORE, CACHE_STRATA, CACHE_TRENDS
 
 
 _REAL_GRAPH_MAINTENANCE = import_cache.graph_maintenance
+_REAL_GRAPH_COMPLETE = import_cache.graph_extraction_complete
 
 
 @pytest.fixture(autouse=True)
@@ -290,3 +291,76 @@ async def test_the_wait_clock_is_cleared_once_the_version_is_maintained_and_rest
         await import_cache.check_import_cache(AsyncMock(), valkey, None)
     assert not [entry for entry in logs if entry.get("alert")]  # version 3 starts its own clock
     assert (await _get(valkey, import_cache._WAIT_KEY) or "").startswith("3|")
+
+
+class _Cursor:
+    async def __aenter__(self) -> _Cursor:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+
+class _Pool:
+    def connection(self) -> _Pool:
+        return self
+
+    async def __aenter__(self) -> _Pool:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+    def cursor(self) -> _Cursor:
+        return _Cursor()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("latch", "latest", "expected"),
+    [(False, None, None), (True, None, None), (True, 20260101, "20260101")],
+)
+async def test_latest_discogs_version_reads_the_sql_latch(latch: bool, latest: object, expected: str | None) -> None:
+    scalars = AsyncMock(side_effect=[latch, latest])
+    with patch.object(import_cache, "_scalar", scalars):
+        assert await import_cache.latest_discogs_version(_Pool()) == expected
+
+
+@pytest.mark.asyncio
+async def test_graph_extraction_complete_needs_every_data_type_signal() -> None:
+    every = {"signals": list(import_cache.DISCOGS_DATA_TYPES), "maintained": False, "stats_version": None}
+    partial = {"signals": list(import_cache.DISCOGS_DATA_TYPES)[:1], "maintained": False, "stats_version": None}
+    real = _REAL_GRAPH_COMPLETE
+    with patch.object(import_cache, "run_single", AsyncMock(return_value=every)):
+        assert await real(object(), "2") is True
+    with patch.object(import_cache, "run_single", AsyncMock(return_value=partial)):
+        assert await real(object(), "2") is False
+    with patch.object(import_cache, "run_single", AsyncMock(return_value=None)):
+        assert await real(object(), "2") is False
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_wait_clock_restarts_instead_of_failing() -> None:
+    valkey = _store()
+    await valkey.set(import_cache._WAIT_KEY, "2|not-a-number")
+    await import_cache._note_maintenance_wait(valkey, "2")
+    assert (await _get(valkey, import_cache._WAIT_KEY) or "").startswith("2|")
+    await valkey.set(import_cache._WAIT_KEY, "2")  # no clock at all
+    await import_cache._note_maintenance_wait(valkey, "2")
+    assert (await _get(valkey, import_cache._WAIT_KEY) or "").startswith("2|")
+
+
+@pytest.mark.asyncio
+async def test_the_watch_loop_survives_a_failed_poll_and_stops_on_cancellation() -> None:
+    import asyncio
+
+    polls = AsyncMock(side_effect=[RuntimeError("valkey down"), asyncio.CancelledError()])
+    with (
+        patch.object(import_cache, "check_import_cache", polls),
+        patch.object(import_cache.asyncio, "sleep", AsyncMock()),
+        structlog.testing.capture_logs() as logs,
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await import_cache.run_import_cache_watch(object(), object(), object(), 1)
+    assert polls.await_count == 2
+    assert [entry["log_level"] for entry in logs] == ["error"]
