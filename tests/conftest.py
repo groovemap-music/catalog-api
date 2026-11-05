@@ -106,6 +106,12 @@ def mock_valkey() -> AsyncMock:
     valkey = AsyncMock()
     valkey.get = AsyncMock(return_value=None)
     valkey.setex = AsyncMock()
+    # The cache key budget (api/cache_budget.py): an empty index, so every write is within budget.
+    valkey.zremrangebyscore = AsyncMock(return_value=0)
+    valkey.zscore = AsyncMock(return_value=None)
+    valkey.zcard = AsyncMock(return_value=0)
+    valkey.zadd = AsyncMock(return_value=1)
+    valkey.expire = AsyncMock(return_value=True)
     valkey.delete = AsyncMock()
     valkey.aclose = AsyncMock()
     return valkey
