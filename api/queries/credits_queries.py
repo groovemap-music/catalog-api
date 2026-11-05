@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from common.credit_roles import ALL_CATEGORIES
 
-from api.queries.helpers import run_query, run_single
+from api.queries.helpers import run_count, run_query, run_single
 from api.queries.neo4j_queries import _build_autocomplete_query
 
 
@@ -25,22 +25,45 @@ logger = structlog.get_logger(__name__)
 async def get_person_credits(
     driver: AsyncResilientNeo4jDriver,
     name: str,
+    limit: int = 100,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
-    """Return all releases a person is credited on, grouped by role."""
+    """Return one page of the releases a person is credited on, one row per release, role and category.
+
+    Pages follow a total order (year newest first, then title, release id, role, category) over the distinct
+    credits, so walking ``offset`` upward reaches every credit exactly once: a credit stored as two edges is one
+    row and one count, on every page. The page is cut before the artist and label lookups, so only ``limit``
+    releases are enriched. Bob Ludwig has 60,758 credits and the full list took 8.2 s and 110 MB (audit H12);
+    de-duplicating across the person's credits holds about 14 MB while the page is cut.
+    """
     cypher = """
     MATCH (p:Person {name: $name})-[c:CREDITED_ON]->(r:Release)
+    WITH DISTINCT r, c.role AS role, c.category AS category
+    ORDER BY r.year DESC, r.title, r.id, role, category
+    SKIP $offset
+    LIMIT $limit
     OPTIONAL MATCH (r)-[:BY]->(a:Artist)
     OPTIONAL MATCH (r)-[:ON]->(l:Label)
+    WITH r, role, category, collect(DISTINCT a.name)[..3] AS artists, collect(DISTINCT l.name)[..1] AS labels
     RETURN r.id AS release_id,
            r.title AS title,
            r.year AS year,
-           c.role AS role,
-           c.category AS category,
-           collect(DISTINCT a.name)[..3] AS artists,
-           collect(DISTINCT l.name)[..1] AS labels
-    ORDER BY r.year DESC, r.title
+           role,
+           category,
+           artists,
+           labels
+    ORDER BY r.year DESC, r.title, r.id, role, category
     """
-    return await run_query(driver, cypher, name=name)
+    return await run_query(driver, cypher, name=name, limit=limit, offset=offset)
+
+
+async def count_person_credits(driver: AsyncResilientNeo4jDriver, name: str) -> int:
+    """Count the distinct credits :func:`get_person_credits` pages through: (release, role, category) once each."""
+    cypher = """
+    MATCH (:Person {name: $name})-[c:CREDITED_ON]->(r:Release)
+    RETURN count(DISTINCT [r.id, c.role, c.category]) AS total
+    """
+    return await run_count(driver, cypher, name=name)
 
 
 async def get_person_timeline(
@@ -160,6 +183,10 @@ async def get_shared_credits(
     return await run_query(driver, cypher, person1=person1, person2=person2)
 
 
+MAX_CONNECTION_DEPTH = 2
+SECOND_HOPS_PER_CONNECTION = 10
+
+
 async def get_person_connections(
     driver: AsyncResilientNeo4jDriver,
     name: str,
@@ -168,41 +195,43 @@ async def get_person_connections(
 ) -> list[dict[str, Any]]:
     """Find people connected through shared releases (collaboration graph).
 
-    Returns edges: each row is a pair of connected people with the count
-    of shared releases between them.
+    Returns one row per connected person with the count of shared releases. At ``depth=2`` each row also
+    carries ``second_hops``: the people that connection shares releases with, ranked by shared releases
+    (then name) *before* the top :data:`SECOND_HOPS_PER_CONNECTION` are kept. The old statement kept an
+    arbitrary ten (audit H12). Only one or two hops exist: ``depth=3`` is rejected by the route.
     """
-    if depth < 1:
-        depth = 1
-    if depth > 3:
-        depth = 3
+    if not 1 <= depth <= MAX_CONNECTION_DEPTH:
+        msg = f"depth must be between 1 and {MAX_CONNECTION_DEPTH}"
+        raise ValueError(msg)
 
     cypher = """
-    MATCH (start:Person {name: $name})-[:CREDITED_ON]->(r:Release)<-[:CREDITED_ON]-(connected:Person)
-    WHERE connected.name <> $name
+    MATCH (p:Person {name: $name})-[:CREDITED_ON]->(r:Release)<-[:CREDITED_ON]-(connected:Person)
+    WHERE connected <> p
     WITH connected, count(DISTINCT r) AS shared_count
-    ORDER BY shared_count DESC
+    ORDER BY shared_count DESC, connected.name
     LIMIT $limit
     RETURN connected.name AS name, shared_count
     """
     if depth >= 2:
         cypher = """
-        MATCH path = (start:Person {name: $name})-[:CREDITED_ON]->(:Release)<-[:CREDITED_ON]-(hop1:Person)
-        WHERE hop1.name <> $name
-        WITH DISTINCT hop1, count(DISTINCT nodes(path)[1]) AS direct_shared
-        ORDER BY direct_shared DESC
+        MATCH (p:Person {name: $name})-[:CREDITED_ON]->(r:Release)<-[:CREDITED_ON]-(hop1:Person)
+        WHERE hop1 <> p
+        WITH p, hop1, count(DISTINCT r) AS direct_shared
+        ORDER BY direct_shared DESC, hop1.name
         LIMIT $limit
-        OPTIONAL MATCH (hop1)-[:CREDITED_ON]->(r2:Release)<-[:CREDITED_ON]-(hop2:Person)
-        WHERE hop2.name <> $name AND hop2.name <> hop1.name
-        WITH hop1, direct_shared, hop2, count(DISTINCT r2) AS hop2_shared
-        WITH hop1, direct_shared,
-             [x IN collect(DISTINCT
-                 CASE WHEN hop2 IS NOT NULL
-                      THEN {name: hop2.name, via: hop1.name, shared: hop2_shared}
-                 END
-             ) WHERE x IS NOT NULL][..10] AS second_hops
+        CALL {
+            WITH p, hop1
+            MATCH (hop1)-[:CREDITED_ON]->(r2:Release)<-[:CREDITED_ON]-(hop2:Person)
+            WHERE hop2 <> hop1 AND hop2 <> p
+            WITH hop1, hop2, count(DISTINCT r2) AS shared
+            ORDER BY shared DESC, hop2.name
+            LIMIT $second_hops
+            RETURN collect({name: hop2.name, via: hop1.name, shared: shared}) AS second_hops
+        }
         RETURN hop1.name AS name, direct_shared AS shared_count, second_hops
+        ORDER BY shared_count DESC, name
         """
-    return await run_query(driver, cypher, name=name, limit=limit)
+    return await run_query(driver, cypher, name=name, limit=limit, second_hops=SECOND_HOPS_PER_CONNECTION)
 
 
 async def autocomplete_person(

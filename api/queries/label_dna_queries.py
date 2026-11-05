@@ -21,8 +21,20 @@ MIN_RELEASES = 5
 async def get_label_identity(driver: AsyncResilientNeo4jDriver, label_id: str) -> dict[str, Any] | None:
     """Get basic label info and release/artist counts.
 
-    Single traversal from label to releases, with OPTIONAL MATCH for artists.
+    Reads ``Label.release_count`` and ``Label.artist_count`` (written by the enricher; equal to the live counts for
+    Columbia: 351,183 and 37,985). Counts them live, as before, only when the label lacks them. The live count of
+    label 1818 took 9.4M hits and 5.4 s (audit H9).
     """
+    stored = await run_single(
+        driver,
+        """
+        MATCH (l:Label {id: $label_id})
+        RETURN l.id AS label_id, l.name AS label_name, l.release_count AS release_count, l.artist_count AS artist_count
+        """,
+        label_id=label_id,
+    )
+    if stored is None or (stored["release_count"] is not None and stored["artist_count"] is not None):
+        return stored
     cypher = """
     MATCH (l:Label {id: $label_id})
     OPTIONAL MATCH (l)<-[:ON]-(r:Release)
@@ -56,28 +68,54 @@ async def get_label_style_profile(driver: AsyncResilientNeo4jDriver, label_id: s
     return await run_query(driver, cypher, label_id=label_id)
 
 
-async def get_label_decade_profile(driver: AsyncResilientNeo4jDriver, label_id: str) -> list[dict[str, Any]]:
-    """Get release count by decade for a label."""
+async def get_label_genre_style_profile(driver: AsyncResilientNeo4jDriver, label_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Get a label's genre and style distributions from one pass over its releases.
+
+    The two separate reads each walked every release and its ``IS`` edges (Columbia: 7.05M and 7.02M db hits). One pass
+    groups by kind and name, 8.5M hits and 39 MB, with the same counts and the same order.
+    """
+    cypher = """
+    MATCH (r:Release)-[:ON]->(l:Label {id: $label_id}), (r)-[:IS]->(x)
+    WHERE x:Genre OR x:Style
+    WITH labels(x)[0] AS kind, x.name AS name, count(DISTINCT r) AS count
+    RETURN kind, name, count
+    ORDER BY count DESC
+    """
+    rows = await run_query(driver, cypher, label_id=label_id)
+    genres = [{"name": r["name"], "count": r["count"]} for r in rows if r["kind"] == "Genre"]
+    styles = [{"name": r["name"], "count": r["count"]} for r in rows if r["kind"] == "Style"]
+    return genres, styles
+
+
+async def get_label_year_counts(driver: AsyncResilientNeo4jDriver, label_id: str) -> list[dict[str, Any]]:
+    """Get the number of releases per year for a label: the one read behind the decade profile and the active years."""
     cypher = """
     MATCH (r:Release)-[:ON]->(l:Label {id: $label_id})
     WHERE r.year > 0
-    WITH (r.year / 10) * 10 AS decade, count(DISTINCT r) AS count
-    RETURN decade, count
-    ORDER BY decade
+    WITH r.year AS year, count(DISTINCT r) AS count
+    RETURN year, count
+    ORDER BY year
     """
     return await run_query(driver, cypher, label_id=label_id)
 
 
+def decades_from_years(year_counts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Release count by decade, from per-year counts (a release has one year, so the counts add)."""
+    by_decade: dict[int, int] = {}
+    for row in year_counts:
+        decade = (row["year"] // 10) * 10
+        by_decade[decade] = by_decade.get(decade, 0) + row["count"]
+    return [{"decade": decade, "count": by_decade[decade]} for decade in sorted(by_decade)]
+
+
+async def get_label_decade_profile(driver: AsyncResilientNeo4jDriver, label_id: str) -> list[dict[str, Any]]:
+    """Get release count by decade for a label."""
+    return decades_from_years(await get_label_year_counts(driver, label_id))
+
+
 async def get_label_active_years(driver: AsyncResilientNeo4jDriver, label_id: str) -> list[int]:
     """Get sorted list of years in which a label had releases."""
-    cypher = """
-    MATCH (r:Release)-[:ON]->(l:Label {id: $label_id})
-    WHERE r.year > 0
-    RETURN DISTINCT r.year AS year
-    ORDER BY year
-    """
-    rows = await run_query(driver, cypher, label_id=label_id)
-    return [row["year"] for row in rows]
+    return [row["year"] for row in await get_label_year_counts(driver, label_id)]
 
 
 async def get_label_format_profile(driver: AsyncResilientNeo4jDriver, label_id: str) -> list[dict[str, Any]]:
@@ -194,13 +232,14 @@ async def get_label_full_profile(
             "genres": [],
             "styles": [],
             "decades": [],
+            "years": [],
         }
 
-    genres, styles, decades = await asyncio.gather(
-        get_label_genre_profile(driver, label_id),
-        get_label_style_profile(driver, label_id),
-        get_label_decade_profile(driver, label_id),
+    (genres, styles), year_counts = await asyncio.gather(
+        get_label_genre_style_profile(driver, label_id),
+        get_label_year_counts(driver, label_id),
     )
+    decades = decades_from_years(year_counts)
 
     return {
         "label_id": identity["label_id"],
@@ -210,7 +249,67 @@ async def get_label_full_profile(
         "genres": genres,
         "styles": styles,
         "decades": decades,
+        "years": [row["year"] for row in year_counts],
     }
+
+
+# The enricher's completeness marker (agreed with discogs-graph-enricher): read the NEWEST dump node and nothing else. A new
+# dump's node is the newest and has no stats_version until both sweeps finish, which is exactly what sends a reader live while
+# the HAS_STYLE set may be partial. Trust the edges only when the newest node is maintained and stats_version >= 1; no row,
+# a null stats_version or maintained false all mean "compute live". HAS_STYLE existing for one label proves nothing about the others.
+MIN_STATS_VERSION = 1
+_SWEEP_MARKER = """
+MATCH (m:ExtractionCompletion)
+RETURN m.stats_version AS stats_version, m.maintained_at IS NOT NULL AS maintained
+ORDER BY coalesce(m.created_at, datetime({epochMillis: 0})) DESC
+LIMIT 1
+"""
+
+
+async def _has_style_sweep_complete(driver: AsyncResilientNeo4jDriver) -> bool:
+    row = await run_single(driver, _SWEEP_MARKER)
+    if row is None or not row["maintained"] or row["stats_version"] is None:
+        return False
+    return bool(row["stats_version"] >= MIN_STATS_VERSION)
+
+
+# Top five styles of the target by release count, ties by name; for each, every other label's release count in that style,
+# summed over the five. ``total_shared`` is the same number the live form computes.
+_CANDIDATES_STORED = """
+MATCH (l:Label {id: $label_id})-[h:HAS_STYLE]->(s:Style)
+WITH l, s, h.release_count AS style_count
+ORDER BY style_count DESC, s.name
+LIMIT 5
+WITH l, collect(s) AS top_styles
+UNWIND top_styles AS s2
+MATCH (s2)<-[h2:HAS_STYLE]-(l2:Label)
+WHERE l2 <> l
+WITH l2, sum(h2.release_count) AS total_shared
+WHERE total_shared >= $min_releases
+RETURN l2.id AS label_id, l2.name AS label_name, total_shared
+ORDER BY total_shared DESC, l2.id
+LIMIT 100
+"""
+
+_CANDIDATES_LIVE = """
+MATCH (l:Label {id: $label_id})<-[:ON]-(r:Release)-[:IS]->(s:Style)
+WITH l, s, count(DISTINCT r) AS style_count
+ORDER BY style_count DESC, s.name
+LIMIT 5
+WITH l, collect(s) AS top_styles
+UNWIND top_styles AS s2
+CALL {
+    WITH s2, l
+    MATCH (s2)<-[:IS]-(r2:Release)-[:ON]->(l2:Label)
+    WHERE l2 <> l
+    RETURN l2, count(DISTINCT r2) AS shared_in_style
+}
+WITH l2, sum(shared_in_style) AS total_shared
+WHERE total_shared >= $min_releases
+RETURN l2.id AS label_id, l2.name AS label_name, total_shared
+ORDER BY total_shared DESC, l2.id
+LIMIT 100
+"""
 
 
 async def get_candidate_labels_genre_vectors(driver: AsyncResilientNeo4jDriver, label_id: str) -> list[dict[str, Any]]:
@@ -231,36 +330,14 @@ async def get_candidate_labels_genre_vectors(driver: AsyncResilientNeo4jDriver, 
     - Timeout protection on each phase.
     """
     # Phase 1: Find candidate label IDs via style overlap (top 5 styles).
-    # Styles are more specific than genres (757 styles vs 16 genres), so each
-    # style traversal processes 5-10x fewer releases.  e.g. Trance (~671K
-    # releases) vs Electronic (~4.9M releases).
-    # Uses CALL {} per-style to prevent cross-style row explosion.
-    candidates_cypher = """
-    MATCH (l:Label {id: $label_id})<-[:ON]-(r:Release)-[:IS]->(s:Style)
-    WITH l, s, count(DISTINCT r) AS style_count
-    ORDER BY style_count DESC
-    LIMIT 5
-    WITH l, collect(s) AS top_styles
-    UNWIND top_styles AS s2
-    CALL {
-        With s2, l
-        MATCH (s2)<-[:IS]-(r2:Release)-[:ON]->(l2:Label)
-        WHERE l2 <> l
-        RETURN l2, count(DISTINCT r2) AS shared_in_style
-    }
-    WITH l2, sum(shared_in_style) AS total_shared
-    WHERE total_shared >= $min_releases
-    RETURN l2.id AS label_id, l2.name AS label_name, total_shared
-    ORDER BY total_shared DESC
-    LIMIT 100
-    """
-    candidates = await run_query(
-        driver,
-        candidates_cypher,
-        timeout=60,
-        label_id=label_id,
-        min_releases=MIN_RELEASES,
-    )
+    # With the enricher's (:Label)-[:HAS_STYLE {release_count}]->(:Style) edges, a label's styles and, for every other label
+    # in a style, how many of its releases are in it are single edge reads: no release is scanned and nothing is capped
+    # per style (the live form took 54.7M hits and 28.3 s, driven by the size of the styles). The edges are trusted only
+    # when the enricher's completeness marker says the sweep finished; otherwise the live form gives the same candidates.
+    if await _has_style_sweep_complete(driver):
+        candidates = await run_query(driver, _CANDIDATES_STORED, timeout=60, label_id=label_id, min_releases=MIN_RELEASES)
+    else:
+        candidates = await run_query(driver, _CANDIDATES_LIVE, timeout=60, label_id=label_id, min_releases=MIN_RELEASES)
 
     if not candidates:
         return []
@@ -277,6 +354,11 @@ async def get_candidate_labels_genre_vectors(driver: AsyncResilientNeo4jDriver, 
     async def _fetch_batch(batch_ids: list[str]) -> list[dict[str, Any]]:
         count_cypher = """
         UNWIND $label_ids AS lid
+        MATCH (l:Label {id: lid})
+        RETURN l.id AS label_id, l.name AS label_name, l.release_count AS release_count
+        """
+        live_count_cypher = """
+        UNWIND $label_ids AS lid
         MATCH (l:Label {id: lid})<-[:ON]-(r:Release)
         RETURN l.id AS label_id, l.name AS label_name, count(DISTINCT r) AS release_count
         """
@@ -291,6 +373,11 @@ async def get_candidate_labels_genre_vectors(driver: AsyncResilientNeo4jDriver, 
             run_query(driver, count_cypher, timeout=60, label_ids=batch_ids),
             run_query(driver, genre_cypher, timeout=60, label_ids=batch_ids),
         )
+        # The stored count; counted live only for a label that lacks it, as before.
+        unstored = [row["label_id"] for row in counts if row["release_count"] is None]
+        if unstored:
+            live = {r["label_id"]: r for r in await run_query(driver, live_count_cypher, timeout=60, label_ids=unstored)}
+            counts = [row if row["release_count"] is not None else live.get(row["label_id"], {**row, "release_count": 0}) for row in counts]
 
         genre_map: dict[str, list[dict[str, Any]]] = {row["label_id"]: row["genres"] for row in genres}
         results: list[dict[str, Any]] = []

@@ -38,6 +38,9 @@ flowchart LR
   result keys, and interrupted streams cancel their engine work.
 - Keep release rarity and community enrichment as internal authenticated API operations. The
   analytics scheduler calls the contract; it does not import catalog implementation modules.
+- Serve the rarity walk as stateless keyset pages, one request per page, with the catalog-wide
+  quality counts summed by the client and sent back on each scoring request. No single response
+  has to last the walk, a failed request repeats one page, and an API restart loses nothing.
 - Keep password reset and optional TOTP inside the catalog identity boundary. Transactional mail
   uses the notification-channel interface and sends through Resend over HTTP without a vendor SDK.
 - Build the performance runner as the repository-named `catalog-api-performance` image. Runtime
