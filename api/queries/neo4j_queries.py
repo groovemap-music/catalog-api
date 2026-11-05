@@ -173,9 +173,17 @@ async def autocomplete_style(driver: AsyncResilientNeo4jDriver, query: str, limi
 async def explore_artist(driver: AsyncResilientNeo4jDriver, name: str) -> dict[str, Any] | None:
     """Get artist center node with category counts.
 
-    alias_count dedups across ALIAS_OF/MEMBER_OF categories the same way
+    ``release_count`` and ``label_count`` are read from the Artist node's stored ``release_count``
+    and ``label_count`` properties (written by discogs-graph-enricher's post-import stats, like
+    Genre, Label and Style) when both are present: a property read instead of a traversal of every
+    release the artist is credited on and every label of those releases (339,676 db hits for Bowie).
+    An artist without them falls back to the live traversal, which defines what the stored values
+    must equal: distinct releases by the artist, and distinct labels of those releases.
+
+    alias_count is always live. It dedups across ALIAS_OF/MEMBER_OF categories the same way
     count_artist_aliases and expand_artist_aliases do, so an artist reachable
-    through more than one category still contributes exactly one.
+    through more than one category still contributes exactly one, and it moves with those edges
+    rather than with a maintenance run.
     """
     cypher = """
     MATCH (a:Artist {name: $name})
@@ -192,11 +200,24 @@ async def explore_artist(driver: AsyncResilientNeo4jDriver, name: str) -> dict[s
         RETURN count(related_id) AS alias_count
     }
     RETURN a.id AS id, a.name AS name,
-           COUNT { MATCH (r:Release)-[:BY]->(a) RETURN DISTINCT r } AS release_count,
-           COUNT { MATCH (r:Release)-[:BY]->(a), (r)-[:ON]->(l:Label) RETURN DISTINCT l } AS label_count,
+           a.release_count AS release_count,
+           a.label_count AS label_count,
            alias_count
     """
-    return await run_single(driver, cypher, name=name)
+    result = await run_single(driver, cypher, name=name)
+    if not result:
+        return None
+    if result.get("release_count") is not None and result.get("label_count") is not None:
+        return result
+
+    # Fallback: live traversal, for artists the post-import stats have not reached.
+    fallback_cypher = """
+    MATCH (a:Artist {id: $id})
+    RETURN COUNT { MATCH (r:Release)-[:BY]->(a) RETURN DISTINCT r } AS release_count,
+           COUNT { MATCH (r:Release)-[:BY]->(a), (r)-[:ON]->(l:Label) RETURN DISTINCT l } AS label_count
+    """
+    counts = await run_single(driver, fallback_cypher, id=result["id"])
+    return {**result, "release_count": counts["release_count"], "label_count": counts["label_count"]} if counts else result
 
 
 async def explore_genre(driver: AsyncResilientNeo4jDriver, name: str) -> dict[str, Any] | None:
