@@ -775,6 +775,16 @@ class RarityListResponse(BaseModel):
     page_size: int
 
 
+class RarityDistributions(BaseModel):
+    """Catalog-wide quality-signal counts, as `(value, count)` pairs, for one scoring page."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    artist: list[tuple[float, int]]
+    label: list[tuple[float, int]]
+    genre: list[tuple[float, int]]
+
+
 # --- Media mapping coverage models (ADR 0007) ---
 
 
