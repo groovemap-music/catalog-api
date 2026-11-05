@@ -311,6 +311,7 @@ ever carries an identifier, a cache key, or free text.
 | `db.client.operation.duration` | `db.system.name` (`postgresql`, `neo4j`, or `valkey`), `db.operation.name`, `error.type` on failure |
 | `groovemap.api.sync.duration` | `outcome` (`completed`, `failed`, `cancelled`) |
 | `groovemap.api.cache` | `outcome` (`hit`, `miss`), `cache` (the logical Valkey cache) |
+| `groovemap.api.cache.budget_full` | `cache` (the logical Valkey cache). A write skipped because that cache already holds its key budget (10,000 live keys; 1,000 for strata). A state of the cache, not a Valkey failure: it is never counted under `write_failures` and never logged |
 | `groovemap.api.cache.write_failures` | `cache` (the logical Valkey cache), `error.type` (the exception class) |
 | `groovemap.api.nlq.requests` | `outcome` (`success`, `cached`, `error`, `invalid`, `unavailable`) |
 | `groovemap.api.activity_events` | `event_type` (the version 1 event vocabulary, plus `impression`) |

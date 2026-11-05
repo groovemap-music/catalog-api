@@ -14,6 +14,7 @@ from neo4j.exceptions import ClientError as Neo4jClientError
 from psycopg.errors import QueryCanceled
 
 from api import genre_tree_store
+from api.cache_budget import store_within_budget
 from api.dependencies import get_optional_user
 from api.limiter import limiter
 from api.models import PathNode, PathResponse
@@ -180,7 +181,7 @@ async def explore(
     if _valkey and entity_type in ("artist", "label"):
         cache_key = valkey_key(f"explore:{entity_type}:{name}")
         try:
-            await _valkey.setex(cache_key, _EXPLORE_CACHE_TTL, json.dumps(response))
+            await store_within_budget(_valkey, cache=CACHE_EXPLORE, key=cache_key, value=json.dumps(response), ttl=_EXPLORE_CACHE_TTL)
         except Exception as exc:
             record_cache_write_failure(CACHE_EXPLORE, exc)
 
@@ -248,6 +249,11 @@ async def _anonymous_marks() -> dict[str, Mark] | None:
 _STRATA_EDGES_PER_MASTER = 4
 
 
+# A strata catalog is the whole ladder of a root of up to MAX_ROOT_RELEASES (134,051) releases, megabytes
+# rather than the ~10 KB of the other caches, so its key budget is a tenth of theirs.
+_STRATA_CACHE_MAX_KEYS = 1_000
+
+
 def _strata_cache_key(artist_id: str) -> str:
     return valkey_key(f"explore:strata:{artist_id}")
 
@@ -271,7 +277,14 @@ async def _store_strata_catalog(catalog: Catalog) -> None:
     if not _valkey:
         return
     try:
-        await _valkey.setex(_strata_cache_key(catalog.root_id), _EXPLORE_CACHE_TTL, encode_catalog(catalog))
+        await store_within_budget(
+            _valkey,
+            cache=CACHE_STRATA,
+            key=_strata_cache_key(catalog.root_id),
+            value=encode_catalog(catalog),
+            ttl=_EXPLORE_CACHE_TTL,
+            max_keys=_STRATA_CACHE_MAX_KEYS,
+        )
     except Exception as exc:
         record_cache_write_failure(CACHE_STRATA, exc)
 
@@ -501,7 +514,7 @@ async def get_trends(
     if _valkey and entity_type in ("genre", "style", "label"):
         cache_key = valkey_key(f"trends:{entity_type}:{name}")
         try:
-            await _valkey.setex(cache_key, _TRENDS_CACHE_TTL, json.dumps(response))
+            await store_within_budget(_valkey, cache=CACHE_TRENDS, key=cache_key, value=json.dumps(response), ttl=_TRENDS_CACHE_TTL)
         except Exception as exc:
             record_cache_write_failure(CACHE_TRENDS, exc)
 
