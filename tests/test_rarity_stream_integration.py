@@ -77,6 +77,9 @@ async def _seed(driver: AsyncResilientNeo4jDriver) -> None:
         CREATE (r)-[:BY]->(a)
         WITH r, i
         CALL (r, i) { MATCH (l:Label {id: toString(1 + i % 5)}) WHERE i % 7 <> 0 CREATE (r)-[:ON]->(l) }
+        CALL (r, i) { MATCH (l:Label {id: toString(1 + (i + 2) % 5)}) WHERE i % 6 = 0 CREATE (r)-[:ON]->(l) }
+        CALL (r, i) { MATCH (l:Label {id: toString(1 + i % 5)}) WHERE i % 10 = 0 AND i % 7 <> 0 CREATE (r)-[:ON]->(l) }
+        CALL (r, i) { MATCH (a:Artist {id: toString(1 + (i + 3) % 9)}) WHERE i % 4 = 0 CREATE (r)-[:BY]->(a) }
         CALL (r, i) { MATCH (g:Genre {id: toString(1 + i % 4)}) WHERE i % 11 <> 0 CREATE (r)-[:IS]->(g) }
         """,
         database="neo4j",
@@ -153,3 +156,32 @@ async def test_page_size_does_not_change_any_row(neo4j_driver: AsyncResilientNeo
     by_page_size = [await rarity_queries.fetch_all_rarity_signals(neo4j_driver, None, page_size=size) for size in (5, 53, 1000)]
 
     assert by_page_size[0] == by_page_size[1] == by_page_size[2]
+
+
+async def test_page_rows_carry_every_label_and_artist_read_from_the_other_end(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    """Walk the pages, then read each edge from the label and artist side, as the by-label and by-artist routes do.
+
+    The seed gives some releases two labels or two artists, some a parallel edge to one label, and some no
+    label at all. A multiplied, truncated or missing list fails here.
+    """
+    await _seed(neo4j_driver)
+    distributions: dict[str, list[tuple[float, int]]] = {"artist": [], "label": [], "genre": []}
+    rows, after = [], ""
+    while after is not None:
+        page = await rarity_queries.fetch_rarity_page(neo4j_driver, _NoCommunityCounts(), after=after, limit=20, distributions=distributions)
+        rows += page["items"]
+        after = page["next_after"]
+
+    labels: dict[str, set[int]] = {str(row["release_id"]): set() for row in rows}
+    artists: dict[str, set[int]] = {str(row["release_id"]): set() for row in rows}
+    for edge in await run_query(neo4j_driver, "MATCH (l:Label)<-[:ON]-(r:Release) RETURN l.id AS id, r.id AS rid", database="neo4j", timeout=None):
+        labels[edge["rid"]].add(int(edge["id"]))
+    for edge in await run_query(neo4j_driver, "MATCH (a:Artist)<-[:BY]-(r:Release) RETURN a.id AS id, r.id AS rid", database="neo4j", timeout=None):
+        artists[edge["rid"]].add(int(edge["id"]))
+
+    assert len(rows) == _RELEASES
+    assert {str(row["release_id"]): row["label_ids"] for row in rows} == {rid: sorted(ids) for rid, ids in labels.items()}
+    assert {str(row["release_id"]): row["artist_ids"] for row in rows} == {rid: sorted(ids) for rid, ids in artists.items()}
+    assert any(len(row["label_ids"]) > 1 for row in rows)
+    assert any(len(row["artist_ids"]) > 1 for row in rows)
+    assert any(row["label_ids"] == [] for row in rows)

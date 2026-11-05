@@ -70,6 +70,7 @@ CAPTURED_RARITY_ROWS = {
     "artist_degree": {"release_id": "1", "artist_max_degree": 500},
     "label_size": {"release_id": "1", "label_max_catalog": 2000},
     "genre_count": {"release_id": "1", "genre_max_release_count": 50000},
+    "release_ids": {"release_id": "1", "label_ids": ["10"], "artist_ids": ["20", "21"]},
 }
 CAPTURED_PRESSING_ROW = {"release_id": "1", "pressing_count": 1}
 

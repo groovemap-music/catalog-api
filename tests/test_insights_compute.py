@@ -117,7 +117,7 @@ def test_style_year_counts_contract_publishes_the_producer_read_budget() -> None
     contract = yaml.safe_load(_CONTRACT.read_text(encoding="utf-8"))
     operation = contract["paths"]["/api/internal/insights/style-year-counts"]["get"]
     assert operation["x-groovemap-max-processing-seconds"] == STYLE_YEAR_QUERY_TIMEOUT_SECONDS
-    assert contract["info"]["version"] == "1.6.0"
+    assert contract["info"]["version"] == "1.7.0"
 
 
 _STYLE_YEAR_RESULT = {
