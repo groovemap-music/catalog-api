@@ -1292,13 +1292,13 @@ designers) behind releases. The graph data is produced by
 
 | Method | Path                                  | Auth Required | Rate Limit | Description                                           |
 | ------ | ------------------------------------- | ------------- | ---------- | ----------------------------------------------------- |
-| GET    | `/api/credits/person/{name}`          | No            | 60/min     | All releases a person is credited on, grouped by role |
+| GET    | `/api/credits/person/{name}`          | No            | 60/min     | One page of the releases a person is credited on      |
 | GET    | `/api/credits/person/{name}/timeline` | No            | 60/min     | Year-by-year credit activity for a person             |
 | GET    | `/api/credits/person/{name}/profile`  | No            | 60/min     | Summary profile with role breakdown                   |
 | GET    | `/api/credits/release/{release_id}`   | No            | 60/min     | Full credits breakdown for a release                  |
 | GET    | `/api/credits/role/{role}/top`        | No            | 30/min     | Most prolific people in a given role category         |
 | GET    | `/api/credits/shared`                 | No            | 30/min     | Releases where two people are both credited           |
-| GET    | `/api/credits/connections/{name}`     | No            | 30/min     | People connected through shared releases              |
+| GET    | `/api/credits/connections/{name}`     | No            | 30/min     | People connected through shared releases, with best second hops |
 | GET    | `/api/credits/autocomplete`           | No            | 120/min    | Search credits by person name (fulltext, min 2 chars) |
 
 `/api/credits/role/{role}/top` is served from the indexed `Person.credit_count_<category>`
@@ -1318,9 +1318,20 @@ The response is identical either way.
 - `person1` (required) — First person name
 - `person2` (required) — Second person name
 
+**Query parameters for `/api/credits/person/{name}`:**
+
+- `limit` — Credits per page (1–500, default: 100)
+- `offset` — Credits to skip (default: 0)
+
+The response carries `total_credits` (every distinct credit the person has: a release, role and category once, even if stored twice), `limit`, `offset` and `has_more`. Credits come
+newest year first, then title, release id, role and category, so raising `offset` by `limit` until `has_more` is `false`
+reaches every credit. Before pagination the whole list came back at once (60,758 rows for the busiest mastering engineer).
+A page near the start is cheap; a page deep into a very long list costs more because the rows before it are ordered first.
+
 **Query parameters for `/api/credits/connections/{name}`:**
 
-- `depth` — Connection depth (1–3, default: 2; only two hops are traversed, so 3 is answered as 2)
+- `depth` — `1` returns connections; `2` (default) also returns each connection's ten best second hops, ranked by shared
+  releases (`second_hops: [{name, via, shared}]`). There are no third hops: `depth=3` is rejected with `422`.
 - `limit` — Maximum connections (1–200, default: 50)
 
 **Query parameters for `/api/credits/autocomplete`:**
