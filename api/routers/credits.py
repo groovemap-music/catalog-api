@@ -1,5 +1,6 @@
 """Credits & Provenance endpoints — the people behind the music."""
 
+import asyncio
 import json
 from typing import Any
 
@@ -21,12 +22,15 @@ from api.models import (
     ReleaseCreditEntry,
     ReleaseCreditsResponse,
     RoleLeaderboardResponse,
+    SecondHopEntry,
     SharedCreditEntry,
     SharedCreditsResponse,
     TimelineEntry,
 )
 from api.queries.credits_queries import (
+    MAX_CONNECTION_DEPTH,
     autocomplete_person,
+    count_person_credits,
     get_person_connections,
     get_person_credits,
     get_person_profile,
@@ -108,18 +112,38 @@ async def person_profile(
     return JSONResponse(content=response.model_dump())
 
 
+# A person's credit pages are cached only when they are worth it and their number is bounded: persons with at
+# least this many credits, the default page size, and the first pages. Every other request is answered the same,
+# just uncached (the Valkey instance is shared with auth state and is noeviction).
+_CREDITS_PAGE_DEFAULT = 100
+_CREDITS_CACHE_MIN_TOTAL = 2000
+_CREDITS_CACHE_MAX_PAGES = 20
+
+
+def _credits_page_cacheable(limit: int, offset: int) -> bool:
+    return limit == _CREDITS_PAGE_DEFAULT and offset % limit == 0 and offset < limit * _CREDITS_CACHE_MAX_PAGES
+
+
 @router.get("/api/credits/person/{name}")
 @limiter.limit("60/minute")
 async def person_credits(
     request: Request,  # noqa: ARG001 -- required by slowapi
     name: str,
+    limit: int = Query(_CREDITS_PAGE_DEFAULT, ge=1, le=500),
+    offset: int = Query(0, ge=0),
 ) -> JSONResponse:
-    """All releases a person is credited on, grouped by role."""
+    """One page of the releases a person is credited on, newest first.
+
+    ``total_credits`` is the number of credits in all, so a client reaches every credit by raising ``offset``
+    by ``limit`` until ``has_more`` is false. Before this was paginated the whole list came back at once
+    (60,758 rows for the busiest mastering engineer).
+    """
     if not _neo4j_driver:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
-    cache_key = valkey_key(f"credits:person:{name}")
-    if _valkey:
+    cacheable = _credits_page_cacheable(limit, offset)
+    cache_key = valkey_key(f"credits:person:{name}:{limit}:{offset}")
+    if _valkey and cacheable:
         try:
             cached = await cache_get(_valkey, cache_key, cache=CACHE_CREDITS_PERSON)
             if cached:
@@ -127,8 +151,11 @@ async def person_credits(
         except Exception:
             logger.debug("⚠️ Credits person cache get failed", key=cache_key)
 
-    records = await get_person_credits(_neo4j_driver, name)
-    if not records:
+    records, total = await asyncio.gather(
+        get_person_credits(_neo4j_driver, name, limit, offset),
+        count_person_credits(_neo4j_driver, name),
+    )
+    if not total:
         return JSONResponse(content={"error": f"No credits found for '{name}'"}, status_code=404)
 
     credits = [
@@ -143,10 +170,12 @@ async def person_credits(
         )
         for r in records
     ]
-    response = PersonCreditsResponse(name=name, total_credits=len(credits), credits=credits)
+    response = PersonCreditsResponse(
+        name=name, total_credits=total, credits=credits, limit=limit, offset=offset, has_more=offset + len(credits) < total
+    )
     response_data = response.model_dump()
 
-    if _valkey:
+    if _valkey and cacheable and total >= _CREDITS_CACHE_MIN_TOTAL:
         try:
             await _valkey.setex(cache_key, _CREDITS_CACHE_TTL, json.dumps(response_data, default=str))
         except Exception as exc:
@@ -255,15 +284,27 @@ async def shared_credits(
 async def person_connections(
     request: Request,  # noqa: ARG001 -- required by slowapi
     name: str,
-    depth: int = Query(2, ge=1, le=3),
+    depth: int = Query(2, ge=1, le=MAX_CONNECTION_DEPTH),
     limit: int = Query(50, ge=1, le=200),
 ) -> JSONResponse:
-    """People connected through shared releases (collaboration graph)."""
+    """People connected through shared releases (collaboration graph).
+
+    ``depth=1`` returns the connections. ``depth=2`` (the default) also returns each connection's ten best second
+    hops, ranked by shared releases. There are no third hops, so ``depth=3`` is rejected with 422 rather than
+    answered as 2.
+    """
     if not _neo4j_driver:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
 
     records = await get_person_connections(_neo4j_driver, name, depth, limit)
-    connections = [ConnectionEntry(name=r["name"], shared_count=r["shared_count"]) for r in records]
+    connections = [
+        ConnectionEntry(
+            name=r["name"],
+            shared_count=r["shared_count"],
+            second_hops=[SecondHopEntry(**hop) for hop in r.get("second_hops") or []],
+        )
+        for r in records
+    ]
     response = PersonConnectionsResponse(name=name, connections=connections)
     return JSONResponse(content=response.model_dump())
 

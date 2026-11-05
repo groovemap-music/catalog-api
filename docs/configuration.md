@@ -232,6 +232,9 @@ origin in production so password-reset links do not point at localhost.
 | `IDENTITY_LEDGER_REFRESH_INTERVAL` | `300` | How often that poll runs, in seconds |
 | `IDENTITY_LEDGER_REFRESH_QUIET` | `600` | Seconds the sources must stop changing before the poll refreshes |
 | `IDENTITY_LEDGER_MAX_STALENESS` | `21600` | Seconds after the last refresh at which the poll refreshes changed sources even while writes continue |
+| `EXPLORE_HUBS_REFRESH_ENABLED` | `true` | Compute `/api/recommend/explore` discoveries for hub genres, styles and labels in the background (see `docs/explore-discoveries.md`) |
+| `EXPLORE_HUBS_REFRESH_INTERVAL` | `3600` | Seconds between checks for missing or changed hubs |
+| `EXPLORE_HUBS_MAX_AGE` | `604800` | Seconds after which a hub is recomputed even if its release count did not change |
 | `GENRE_TREE_REFRESH_ENABLED` | `true` | Rebuild the stored `/api/genre-tree` in the background; off means the route answers 503 until a tree is stored by another replica |
 | `GENRE_TREE_REFRESH_INTERVAL` | `3600` | How often the refresh checks the genre counts (one 46-hit statement), in seconds |
 | `GENRE_TREE_MAX_AGE` | `86400` | Seconds after which the tree is rebuilt even when the counts did not change |

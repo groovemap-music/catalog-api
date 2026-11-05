@@ -1,7 +1,7 @@
 """Unit tests for recommend query scoring logic."""
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -711,115 +711,77 @@ class TestGetBlindspotCandidates:
 
 
 class TestGetExploreTraversal:
-    """Tests for get_explore_traversal."""
+    """The traversal's semantics are proven on a real Neo4j (tests/test_explore_discovery_integration.py)."""
 
     @pytest.mark.asyncio
-    async def test_traversal_returns_results(self) -> None:
+    async def test_delegates_to_the_discovery_module(self) -> None:
         from api.queries.recommend_queries import get_explore_traversal
 
-        records = [
-            {"id": "a2", "name": "Related Artist", "type": "artist", "path_names": ["Start", "Related Artist"], "rel_types": ["BY"], "dist": 1},
-        ]
-        driver = _make_driver(records=records)
-        result = await get_explore_traversal(driver, "artist", "a1", hops=2)
-        assert len(result) == 1
-        assert result[0]["name"] == "Related Artist"
+        rows = [{"id": "g", "name": "Rock", "type": "genre", "path_names": ["a", "r", "Rock"], "rel_types": ["BY", "IS"], "dist": 2}]
+        with patch("api.explore_discovery.get_explore_traversal", AsyncMock(return_value=rows)) as inner:
+            assert await get_explore_traversal(object(), "artist", "a1", hops=3) == rows
+        inner.assert_awaited_once()
+        assert inner.await_args.args[1:] == ("artist", "a1", 3)
 
     @pytest.mark.asyncio
-    async def test_genre_entity_type(self) -> None:
-        from api.queries.recommend_queries import get_explore_traversal
+    async def test_invalid_entity_type_is_empty_without_a_query(self) -> None:
+        from api import explore_discovery
 
-        driver = _make_driver(records=[])
-        await get_explore_traversal(driver, "genre", "Rock")
-        call_args = driver.session.return_value.__aenter__.return_value.run.call_args
-        cypher = cypher_text(call_args[0][0])
-        assert "Genre" in cypher
-        assert "name:" in cypher
+        with patch("api.explore_discovery.run_single", AsyncMock(side_effect=AssertionError("queried"))):
+            assert await explore_discovery.get_explore_traversal(object(), "bogus", "x") == []
 
     @pytest.mark.asyncio
-    async def test_hops_clamped_low(self) -> None:
-        from api.queries.recommend_queries import get_explore_traversal
+    @pytest.mark.parametrize("hops", [0, 4, -1])
+    async def test_out_of_range_hops_become_two(self, hops: int) -> None:
+        from api import explore_discovery
 
-        driver = _make_driver(records=[])
-        await get_explore_traversal(driver, "artist", "a1", hops=0)
-        call_args = driver.session.return_value.__aenter__.return_value.run.call_args
-        cypher = cypher_text(call_args[0][0])
-        assert "*1..2" in cypher
-
-    @pytest.mark.asyncio
-    async def test_hops_clamped_high(self) -> None:
-        from api.queries.recommend_queries import get_explore_traversal
-
-        driver = _make_driver(records=[])
-        await get_explore_traversal(driver, "artist", "a1", hops=10)
-        call_args = driver.session.return_value.__aenter__.return_value.run.call_args
-        cypher = cypher_text(call_args[0][0])
-        assert "*1..2" in cypher
+        start = (explore_discovery._Node("e1", "Artist", "A", "a1"), 0)
+        with (
+            patch("api.explore_discovery._find_start", AsyncMock(return_value=start)),
+            patch("api.explore_discovery._bfs", AsyncMock(return_value=[])) as bfs,
+        ):
+            await explore_discovery.get_explore_traversal(object(), "artist", "a1", hops=hops)
+        assert bfs.await_args.args[2] == 2
 
     @pytest.mark.asyncio
-    async def test_id_coalesces_to_name_for_genre_style_nodes(self) -> None:
-        """Genre/Style nodes have no id property; Cypher must coalesce to name
-        so name-keyed discoveries never come back with id=None.
-        """
-        from api.queries.recommend_queries import get_explore_traversal
+    async def test_unknown_start_is_empty(self) -> None:
+        from api import explore_discovery
 
-        driver = _make_driver(records=[])
-        await get_explore_traversal(driver, "artist", "a1", hops=2)
-        call_args = driver.session.return_value.__aenter__.return_value.run.call_args
-        cypher = cypher_text(call_args[0][0])
-        assert "coalesce(discovered.id, discovered.name) AS id" in cypher
+        with patch("api.explore_discovery._find_start", AsyncMock(return_value=None)):
+            assert await explore_discovery.get_explore_traversal(object(), "artist", "nope") == []
 
     @pytest.mark.asyncio
-    async def test_get_explore_traversal_rejects_invalid_entity_type(self) -> None:
-        """Invalid entity_type returns [] without making any Neo4j call."""
-        from api.queries.recommend_queries import get_explore_traversal
+    async def test_a_hub_that_is_not_computed_yet_raises_instead_of_walking_it(self) -> None:
+        from api import explore_discovery
 
-        driver = _make_driver(records=[])
-        result = await get_explore_traversal(driver, "invalid", "some_id")
-        assert result == []
-        # Should NOT have called Neo4j at all
-        driver.session.return_value.__aenter__.return_value.run.assert_not_called()
+        explore_discovery.configure(None)
+        start = (explore_discovery._Node("e1", "Genre", "Rock", "Rock"), 6_000_000)
+        with (
+            patch("api.explore_discovery._find_start", AsyncMock(return_value=start)),
+            patch("api.explore_discovery._bfs", AsyncMock(side_effect=AssertionError("walked a hub"))),
+            pytest.raises(explore_discovery.HubNotReadyError),
+        ):
+            await explore_discovery.get_explore_traversal(object(), "genre", "Rock", hops=2)
 
     @pytest.mark.asyncio
-    async def test_cypher_dedupes_per_discovered_node_not_per_path(self) -> None:
-        """Explore traversal must dedupe per discovered node, not per path.
+    async def test_a_stored_hub_is_served_with_no_graph_read(self) -> None:
+        import time
 
-        `WITH DISTINCT discovered, path_names, rel_types, dist` dedupes the
-        whole PATH tuple, not the discovered node — an artist with N releases
-        on one label produced N duplicate rows for that label (one per
-        distinct path), crowding real discoveries out of the LIMIT 100 cut.
-        Verified directly against a live Neo4j 5 instance (docker): the
-        pre-fix query returned 5 duplicate rows for a single label reached via
-        5 releases, the fixed query returns exactly 1 (shortest path kept).
+        from api import explore_discovery
 
-        Pin the structural fix: dedup must aggregate per `discovered` (via
-        `collect(...)[0]` after an `ORDER BY dist`, which keeps the shortest
-        path), not just `DISTINCT` the raw per-path tuple.
-        """
-        from api.queries.recommend_queries import get_explore_traversal
-
-        driver = _make_driver(records=[])
-        await get_explore_traversal(driver, "artist", "a1", hops=2)
-        call_args = driver.session.return_value.__aenter__.return_value.run.call_args
-        cypher = cypher_text(call_args[0][0])
-
-        assert "WITH DISTINCT discovered," not in cypher
-
-        # Discovered nodes must be collapsed via an aggregation keyed on
-        # `discovered` alone, ordered by distance so collect(...)[0] is the
-        # shortest path.
-        assert "ORDER BY dist" in cypher
-        assert "WITH discovered, collect(" in cypher
-        assert ")[0] AS best" in cypher
-        # And the final RETURN/ORDER BY/LIMIT must operate on the collapsed
-        # per-node aggregate, not the raw per-path rows.
-        assert "best.dist" in cypher
-        assert "LIMIT 100" in cypher
-
-
-# ---------------------------------------------------------------------------
-# score_discoveries
-# ---------------------------------------------------------------------------
+        explore_discovery.configure(None)
+        row = {"id": "x", "name": "X", "type": "artist", "path_names": ["Rock", "r", "X"], "rel_types": ["IS", "BY"], "dist": 2}
+        explore_discovery._hubs[("genre", "Rock")] = explore_discovery.HubResult(rows=[row], release_count=6_000_000, built_at=time.time())
+        start = (explore_discovery._Node("e1", "Genre", "Rock", "Rock"), 6_000_000)
+        try:
+            with (
+                patch("api.explore_discovery._find_start", AsyncMock(return_value=start)),
+                patch("api.explore_discovery._bfs", AsyncMock(side_effect=AssertionError("walked a hub"))),
+            ):
+                assert await explore_discovery.get_explore_traversal(object(), "genre", "Rock", hops=3) == [row]
+                assert await explore_discovery.get_explore_traversal(object(), "genre", "Rock", hops=1) == []
+        finally:
+            explore_discovery.configure(None)
 
 
 class TestScoreDiscoveries:
