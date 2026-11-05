@@ -3,7 +3,6 @@
 import asyncio
 import hashlib
 import json
-import time
 from collections import OrderedDict
 from collections.abc import Coroutine
 from typing import Annotated, Any
@@ -15,10 +14,11 @@ from fastapi.responses import JSONResponse
 from neo4j.exceptions import ClientError as Neo4jClientError
 from psycopg.errors import QueryCanceled
 
+from api import genre_tree_store
 from api.dependencies import get_optional_user
 from api.limiter import limiter
 from api.models import PathNode, PathResponse
-from api.queries import collaborator_queries, genre_tree_queries
+from api.queries import collaborator_queries
 from api.queries.neo4j_queries import (
     AUTOCOMPLETE_DISPATCH,
     COUNT_DISPATCH,
@@ -82,12 +82,6 @@ def configure(neo4j: Any, jwt_secret: str | None, valkey: Any = None, pg_pool: A
 _autocomplete_cache: OrderedDict[tuple[str, str, int], list[dict[str, Any]]] = OrderedDict()
 _AUTOCOMPLETE_CACHE_MAX = 512
 _autocomplete_lock: asyncio.Lock | None = None  # lazy init to avoid binding to wrong event loop
-
-# Genre tree cache — refreshed every 5 minutes since the tree changes rarely
-_genre_tree_cache: dict | None = None
-_genre_tree_cache_time: float = 0
-_GENRE_TREE_TTL = 300  # 5 minutes
-_genre_tree_lock: asyncio.Lock | None = None  # lazy init to avoid binding to wrong event loop
 
 
 def _get_cache_key(query: str, entity_type: str, limit: int) -> tuple[str, str, int]:
@@ -340,6 +334,38 @@ async def _store_strata_catalog(catalog: Catalog) -> None:
         record_cache_write_failure(CACHE_STRATA, exc)
 
 
+def _shared_personnel_cache_key(master_ids: list[str], limit: int) -> str:
+    # The edges depend on the drawn masters, in order, and the limit, and on nothing about the
+    # caller, so the key is a digest of exactly those two values.
+    digest = hashlib.sha256(json.dumps({"masters": master_ids, "limit": limit}, separators=(",", ":")).encode()).hexdigest()
+    return valkey_key(f"explore:strata:personnel:{digest}")
+
+
+async def _shared_personnel(master_ids: list[str], limit: int) -> list[dict[str, Any]]:
+    """Shared-personnel edges for the drawn masters, from Valkey when this exact draw was read before.
+
+    The graph read is the same statement whatever the caller, so its result is cached under the
+    explore key family and TTL. A missing, unreadable or corrupt entry falls through to the graph.
+    """
+    if len(master_ids) < 2:
+        return []
+    cache_key = _shared_personnel_cache_key(master_ids, limit)
+    if _valkey:
+        try:
+            cached = await cache_get(_valkey, cache_key, cache=CACHE_STRATA)
+            if cached:
+                return json.loads(cached)  # type: ignore[no-any-return]
+        except Exception:
+            logger.debug("⚠️ Strata personnel cache read failed", key=cache_key)
+    edges = await get_shared_personnel(_neo4j_driver, master_ids, limit=limit)
+    if _valkey:
+        try:
+            await _valkey.setex(cache_key, _EXPLORE_CACHE_TTL, json.dumps(edges, separators=(",", ":")))
+        except Exception as exc:
+            record_cache_write_failure(CACHE_STRATA, exc)
+    return edges
+
+
 @router.get("/api/explore/strata")
 @limiter.limit("60/minute")
 async def strata(
@@ -408,7 +434,7 @@ async def strata(
         release_ids, master_ids, artist_ids = label_targets(payload)
         (release_titles, master_titles, artist_names), edges = await asyncio.gather(
             get_strata_labels(_neo4j_driver, release_ids, master_ids, artist_ids),
-            get_shared_personnel(_neo4j_driver, master_ids, limit=_STRATA_EDGES_PER_MASTER * len(master_ids)),
+            _shared_personnel(master_ids, limit=_STRATA_EDGES_PER_MASTER * len(master_ids)),
         )
     except (Neo4jClientError, QueryCanceled) as exc:
         if isinstance(exc, QueryCanceled) or "TransactionTimedOut" in str(exc):
@@ -463,39 +489,20 @@ async def get_collaborators(
 async def genre_tree(
     request: Request,  # noqa: ARG001
 ) -> JSONResponse:
-    """Return the full genre/style hierarchy derived from release co-occurrence."""
-    global _genre_tree_cache, _genre_tree_cache_time, _genre_tree_lock
+    """Return the full genre/style hierarchy derived from release co-occurrence.
 
-    if not _neo4j_driver:
-        return JSONResponse(content={"error": "Service not ready"}, status_code=503)
-
-    now = time.monotonic()
-    if _genre_tree_cache is not None and (now - _genre_tree_cache_time) < _GENRE_TREE_TTL:
-        return JSONResponse(content=_genre_tree_cache)
-
-    # Serialize cache refresh to prevent thundering herd on expiry
-    if _genre_tree_lock is None:
-        _genre_tree_lock = asyncio.Lock()
-    async with _genre_tree_lock:
-        # Re-check after acquiring lock — another coroutine may have refreshed
-        now = time.monotonic()
-        if _genre_tree_cache is not None and (now - _genre_tree_cache_time) < _GENRE_TREE_TTL:
-            return JSONResponse(content=_genre_tree_cache)
-
-        try:
-            genres = await genre_tree_queries.get_genre_tree(_neo4j_driver)
-        except Neo4jClientError as exc:
-            if "TransactionTimedOut" in str(exc):
-                logger.warning("⏱️ Genre tree query timed out")
-                return JSONResponse(
-                    content={"error": "Genre tree query timed out — try again later"},
-                    status_code=504,
-                )
-            raise
-
-        _genre_tree_cache = {"genres": genres}
-        _genre_tree_cache_time = time.monotonic()
-        return JSONResponse(content=_genre_tree_cache)
+    Served from the tree the background refresh stores (``api/genre_tree_store.py``); no request runs a
+    scan. A cold start with nothing stored yet answers 503 with ``Retry-After``.
+    """
+    try:
+        genres = await genre_tree_store.get_genre_tree()
+    except genre_tree_store.GenreTreeNotReadyError:
+        return JSONResponse(
+            content={"error": "The genre tree is being built — try again shortly"},
+            status_code=503,
+            headers={"Retry-After": "30"},
+        )
+    return JSONResponse(content={"genres": genres})
 
 
 async def _resolve_release_media(release_id: str, formats: list[Any] | None) -> dict[str, Any]:
