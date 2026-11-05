@@ -253,6 +253,26 @@ async def get_label_full_profile(
     }
 
 
+# The enricher's completeness marker (agreed with discogs-graph-enricher): read the NEWEST dump node and nothing else. A new
+# dump's node is the newest and has no stats_version until both sweeps finish, which is exactly what sends a reader live while
+# the HAS_STYLE set may be partial. Trust the edges only when the newest node is maintained and stats_version >= 1; no row,
+# a null stats_version or maintained false all mean "compute live". HAS_STYLE existing for one label proves nothing about the others.
+MIN_STATS_VERSION = 1
+_SWEEP_MARKER = """
+MATCH (m:ExtractionCompletion)
+RETURN m.stats_version AS stats_version, m.maintained_at IS NOT NULL AS maintained
+ORDER BY coalesce(m.created_at, datetime({epochMillis: 0})) DESC
+LIMIT 1
+"""
+
+
+async def _has_style_sweep_complete(driver: AsyncResilientNeo4jDriver) -> bool:
+    row = await run_single(driver, _SWEEP_MARKER)
+    if row is None or not row["maintained"] or row["stats_version"] is None:
+        return False
+    return bool(row["stats_version"] >= MIN_STATS_VERSION)
+
+
 # Top five styles of the target by release count, ties by name; for each, every other label's release count in that style,
 # summed over the five. ``total_shared`` is the same number the live form computes.
 _CANDIDATES_STORED = """
@@ -312,14 +332,9 @@ async def get_candidate_labels_genre_vectors(driver: AsyncResilientNeo4jDriver, 
     # Phase 1: Find candidate label IDs via style overlap (top 5 styles).
     # With the enricher's (:Label)-[:HAS_STYLE {release_count}]->(:Style) edges, a label's styles and, for every other label
     # in a style, how many of its releases are in it are single edge reads: no release is scanned and nothing is capped
-    # per style (the live form took 54.7M hits and 28.3 s, driven by the size of the styles). Without those edges the
-    # live form below gives the same candidates.
-    has_edges = await run_single(
-        driver,
-        "MATCH (l:Label {id: $label_id}) RETURN EXISTS { (l)-[:HAS_STYLE]->() } AS has_edges",
-        label_id=label_id,
-    )
-    if has_edges and has_edges["has_edges"]:
+    # per style (the live form took 54.7M hits and 28.3 s, driven by the size of the styles). The edges are trusted only
+    # when the enricher's completeness marker says the sweep finished; otherwise the live form gives the same candidates.
+    if await _has_style_sweep_complete(driver):
         candidates = await run_query(driver, _CANDIDATES_STORED, timeout=60, label_id=label_id, min_releases=MIN_RELEASES)
     else:
         candidates = await run_query(driver, _CANDIDATES_LIVE, timeout=60, label_id=label_id, min_releases=MIN_RELEASES)

@@ -88,10 +88,24 @@ async def test_identity_does_not_scan_when_the_counts_are_stored(neo4j_driver: A
     assert (await q.get_label_identity(neo4j_driver, "T"))["release_count"] == 8  # the property, not the edges
 
 
+async def _mark(driver: AsyncResilientNeo4jDriver, *, stats_version: int | None, maintained: bool = True, created: int = 1) -> None:
+    await run_query(
+        driver,
+        "CREATE (m:ExtractionCompletion {created_at: datetime({epochMillis: $created})}) "
+        "SET m.stats_version = $v, m.maintained_at = CASE WHEN $maintained THEN datetime() ELSE null END",
+        database="neo4j",
+        timeout=None,
+        created=created,
+        v=stats_version,
+        maintained=maintained,
+    )
+
+
 async def test_stored_candidates_equal_the_live_candidates_with_no_per_style_cap(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
     await _seed(neo4j_driver)
     live = await q.get_candidate_labels_genre_vectors(neo4j_driver, "T")
     await _store(neo4j_driver)
+    await _mark(neo4j_driver, stats_version=1)
     stored = await q.get_candidate_labels_genre_vectors(neo4j_driver, "T")
     assert live, "the seed must produce candidates"
     key = lambda rows: sorted((r["label_id"], r["release_count"], sorted((g["name"], g["count"]) for g in r["genres"])) for r in rows)  # noqa: E731
@@ -135,3 +149,27 @@ async def test_the_merged_genre_and_style_read_equals_the_two_separate_reads(neo
     assert genres and styles
     profile = await q.get_label_full_profile(neo4j_driver, "T")
     assert profile["genres"] == genres
+
+
+async def test_a_partial_has_style_set_gives_the_live_results_until_the_marker_says_the_sweep_finished(
+    neo4j_driver: AsyncResilientNeo4jDriver,
+) -> None:
+    await _seed(neo4j_driver)
+    live = await q.get_candidate_labels_genre_vectors(neo4j_driver, "T")
+    await _store(neo4j_driver)
+    # A sweep stopped half way: the target's edges and only some other labels' edges exist.
+    await run_query(neo4j_driver, "MATCH (l:Label)-[h:HAS_STYLE]->() WHERE l.id IN ['L2', 'L4'] DELETE h", database="neo4j", timeout=None)
+    key = lambda rows: sorted((r["label_id"], r["release_count"]) for r in rows)  # noqa: E731
+    # No marker, an unfinished dump, a null version and an unmaintained node all mean live: every candidate is found.
+    assert key(await q.get_candidate_labels_genre_vectors(neo4j_driver, "T")) == key(live)
+    await _mark(neo4j_driver, stats_version=None, created=10)
+    assert key(await q.get_candidate_labels_genre_vectors(neo4j_driver, "T")) == key(live)
+    await _mark(neo4j_driver, stats_version=1, maintained=False, created=20)
+    assert key(await q.get_candidate_labels_genre_vectors(neo4j_driver, "T")) == key(live)
+    # The marker is read from the NEWEST node: an older complete node does not outvote a newer unfinished dump.
+    await _mark(neo4j_driver, stats_version=1, created=5)
+    assert key(await q.get_candidate_labels_genre_vectors(neo4j_driver, "T")) == key(live)
+    # Only a newest node that is maintained with stats_version >= 1 trusts the edges (here deliberately partial, so labels drop).
+    await _mark(neo4j_driver, stats_version=2, created=30)
+    trusted = key(await q.get_candidate_labels_genre_vectors(neo4j_driver, "T"))
+    assert trusted != key(live) and {"L2", "L4"}.isdisjoint({label for label, _ in trusted})

@@ -127,9 +127,14 @@ silently rewrite another repository's schema, image, or runtime configuration.
   plus 7.02M separately).
 * **Similar labels** take a label's top five styles from `(:Label)-[h:HAS_STYLE {release_count}]->(:Style)` and, for every other
   label in each style, `h.release_count`: edge reads instead of a scan of every release in the style (54.7M hits and 28.3 s live,
-  driven by the size of the styles). Nothing is capped per style: the live form had no cap either. Ties in the candidate total break
-  by label id. When the target has no `HAS_STYLE` edges (the enricher has not run) the live form runs and returns the same
-  candidates. A real-Neo4j test compares the two. There is no label evaluation set (the evaluation harness is artist-only), so the
+  driven by the size of the styles). Nothing is capped per style: the live form had no cap either. The edges are trusted only
+  when the enricher's completeness marker says its sweep finished: the newest `ExtractionCompletion` node is maintained
+  (`maintained_at` set) and has `stats_version >= 1`. No node, a null `stats_version` or an unmaintained node (a new dump is
+  importing, or a sweep stopped part way) means the live form runs and returns the same candidates; a partly filled or stale edge
+  set would otherwise drop labels and under-count `total_shared`. A real-Neo4j test covers a partial set under each marker state.
+  **Ties are now broken deterministically**: the top five styles tie-break by style name and the top 100 candidates by label id
+  (the old statement left both to the planner), in both forms, so the candidate lists can differ from an old response only where
+  the old order among ties was arbitrary. There is no label evaluation set (the evaluation harness is artist-only), so the
   quality check is that candidates, totals and therefore cosine scores are identical to the live form's.
 * Candidate release counts read `Label.release_count` and count live where it is absent.
 

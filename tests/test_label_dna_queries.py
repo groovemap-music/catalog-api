@@ -151,7 +151,7 @@ class TestGetCandidateLabelsGenreVectors:
 
     @pytest.fixture(autouse=True)
     def _no_style_edges(self) -> Any:
-        with patch("api.queries.label_dna_queries.run_single", new_callable=AsyncMock, return_value={"has_edges": False}):
+        with patch("api.queries.label_dna_queries.run_single", new_callable=AsyncMock, return_value=None):  # no marker: live
             yield
 
     @pytest.mark.asyncio
