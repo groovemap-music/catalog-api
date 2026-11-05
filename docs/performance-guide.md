@@ -154,5 +154,3 @@ alphabetically first genre, absent when the artist has no genre). Where it is ab
 neighbour with the same rule, so the answer is the same before and after the enricher's first pass; only the cost differs. On lux
 (no artist has the property yet): ranking alone is 0.29M hits for Bowie and 0.54M for The Beatles (75 and 101 ms); with the live
 fallback for all 50 neighbours Bowie is 3.6M hits (0.5 s) and The Beatles 31M (3.4 s), against 37.5M for Bowie before.
-
->>>>>>> main
