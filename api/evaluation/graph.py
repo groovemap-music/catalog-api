@@ -579,7 +579,7 @@ class GoldenGraph:
         genre_counts = self._genre_release_counts()
         known = [release_id for release_id in release_ids if release_id in self.golden.releases]
         rows: dict[str, list[dict[str, Any]]] = {
-            fact: [] for fact in ("release", "media", "label", "temporal", "degree", "artist_degree", "label_size", "genre_count")
+            fact: [] for fact in ("release", "media", "label", "temporal", "degree", "artist_degree", "label_size", "genre_count", "release_ids")
         }
         for release_id in known:
             release = self._release(release_id)
@@ -611,6 +611,7 @@ class GoldenGraph:
             rows["genre_count"].append(
                 {"release_id": release_id, "genre_max_release_count": max((genre_counts.get(g, 0) for g in release.genres), default=0)}
             )
+            rows["release_ids"].append({"release_id": release_id, "label_ids": [release.label_id], "artist_ids": list(release.artist_ids)})
         return rows
 
     def grooved_pressing_rows(self, release_ids: Sequence[str]) -> list[dict[str, Any]]:

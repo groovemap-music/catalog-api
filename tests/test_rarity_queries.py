@@ -1,10 +1,12 @@
 """Tests for rarity scoring query functions."""
 
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from api.queries import rarity_queries
 from api.queries.rarity_queries import (
     _CORE_QUERIES,
     CORE_SIGNAL_WEIGHTS,
@@ -16,6 +18,7 @@ from api.queries.rarity_queries import (
     compute_rarity_tier,
     compute_temporal_scarcity_score,
     fetch_all_rarity_signals,
+    fetch_rarity_page,
     get_rarity_by_artist,
     get_rarity_by_label,
     get_rarity_for_release,
@@ -654,6 +657,7 @@ def _fake_run_query(
     artist_degree: list | None = None,
     label_size: list | None = None,
     genre_count: list | None = None,
+    release_ids: list | None = None,
     page_size: int = 20_000,
 ):
     """Build a run_query stub that dispatches on the cypher, not on call order.
@@ -696,6 +700,7 @@ def _fake_run_query(
         "artist_max_degree": artist_degree or [],
         "label_max_catalog": label_size or [],
         "genre_max_release_count": genre_count or [],
+        "AS label_ids": release_ids or [],
     }
     # Every release the pressing query knows about, paged out by the keyset walk.
     all_ids = [row["release_id"] for row in pressing]
@@ -1209,10 +1214,10 @@ class TestRarityChunking:
 
         assert id_batches
         assert all(len(batch) <= 2 for batch in id_batches)
-        # Scoring pass: 3 pages x (8 core signal queries + the 1 the grooved extension declares).
+        # Scoring pass: 3 pages x (9 core signal queries + the 1 the grooved extension declares).
         # Distribution pass: 3 pages x the 3 quality-signal queries and nothing else.
         assert len(id_batches) == 3 * (len(_CORE_QUERIES) + len(family_queries())) + 3 * 3
-        assert len(id_batches) == 36
+        assert len(id_batches) == 39
 
     @pytest.mark.asyncio
     async def test_hidden_gem_percentiles_span_pages(self) -> None:
@@ -1361,3 +1366,47 @@ class TestEmptyRarityTable:
             patch("api.queries.rarity_queries._release_rarity_has_rows", new=AsyncMock(return_value=False)),
         ):
             assert await function(MagicMock(), MagicMock(), "nope") is None
+
+
+_NO_DISTRIBUTIONS: dict[str, list[tuple[float, int]]] = {"artist": [], "label": [], "genre": []}
+
+
+class TestReleaseIds:
+    """The ids the writer stores in the `label_ids` and `artist_ids` columns."""
+
+    @staticmethod
+    async def _rows(release_ids: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        pressing = [{"release_id": r, "title": "T", "artist_name": "A", "year": 1990, "formats": ["LP"]} for r in ("1", "2")]
+        stub = _fake_run_query(pressing=pressing, release_ids=release_ids)
+        with (
+            patch("api.queries.rarity_queries.run_query", side_effect=stub),
+            patch("api.queries.rarity_queries._load_page_community_counts", new=AsyncMock(return_value={})),
+        ):
+            page = await fetch_rarity_page(MagicMock(), MagicMock(), after="", limit=2, distributions=_NO_DISTRIBUTIONS)
+        return {row["release_id"]: row for row in page["items"]}
+
+    @pytest.mark.asyncio
+    async def test_ids_are_integers_in_ascending_numeric_order(self) -> None:
+        rows = await self._rows([{"release_id": "1", "label_ids": ["1818", "9"], "artist_ids": ["100", "20", "3"]}])
+
+        assert rows["1"]["label_ids"] == [9, 1818]
+        assert rows["1"]["artist_ids"] == [3, 20, 100]
+
+    @pytest.mark.asyncio
+    async def test_a_release_with_no_edges_has_empty_lists_not_missing_fields(self) -> None:
+        rows = await self._rows([{"release_id": "1", "label_ids": [], "artist_ids": []}])
+
+        assert (rows["1"]["label_ids"], rows["1"]["artist_ids"]) == ([], [])
+        assert (rows["2"]["label_ids"], rows["2"]["artist_ids"]) == ([], [])
+
+    @pytest.mark.asyncio
+    async def test_a_non_numeric_id_fails_the_page_instead_of_dropping_out(self) -> None:
+        with pytest.raises(ValueError, match="mbid-1"):
+            await self._rows([{"release_id": "1", "label_ids": ["mbid-1"], "artist_ids": []}])
+
+    def test_the_query_walks_out_from_the_release_and_keeps_labels_and_artists_apart(self) -> None:
+        query = rarity_queries._RELEASE_IDS_QUERY
+
+        assert "(r)-[:ON]->(l:Label)" in query
+        assert "(r)-[:BY]->(a:Artist)" in query
+        assert "OPTIONAL MATCH" not in query

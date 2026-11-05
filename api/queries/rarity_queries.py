@@ -242,6 +242,20 @@ WITH r.id AS release_id, max(COALESCE(g.release_count, 0)) AS genre_max_release_
 RETURN release_id, genre_max_release_count
 """
 
+# 9. Label and artist ids per release, for the `label_ids` and `artist_ids` columns.
+#
+# Both subqueries walk out from the release, so a hub label's 762,000 edges are never expanded: the
+# cost is the release's own few edges. COLLECT, not two OPTIONAL MATCHes, because those would
+# multiply labels by artists on every release. Ids with no value can't be looked up by the routes
+# these columns serve, so they are left out rather than failing the page.
+_RELEASE_IDS_QUERY = """
+UNWIND $ids AS rid
+MATCH (r:Release {id: rid})
+RETURN r.id AS release_id,
+       COLLECT { MATCH (r)-[:ON]->(l:Label) WHERE l.id IS NOT NULL RETURN DISTINCT l.id } AS label_ids,
+       COLLECT { MATCH (r)-[:BY]->(a:Artist) WHERE a.id IS NOT NULL RETURN DISTINCT a.id } AS artist_ids
+"""
+
 # The media-neutral queries, keyed by the fact name their rows are indexed under. Family
 # extension modules contribute further queries through the registry; see
 # api/rarity/families/registry.py. Fact names are unique across the core and every module.
@@ -254,6 +268,7 @@ _CORE_QUERIES: dict[str, str] = {
     "artist_degree": _ARTIST_DEGREE_QUERY,
     "label_size": _LABEL_SIZE_QUERY,
     "genre_count": _GENRE_COUNT_QUERY,
+    "release_ids": _RELEASE_IDS_QUERY,
 }
 
 
@@ -458,6 +473,7 @@ def _score_page(
     artist_deg_map = {r["release_id"]: r["artist_max_degree"] for r in signals["artist_degree"]}
     label_size_map = {r["release_id"]: r["label_max_catalog"] for r in signals["label_size"]}
     genre_count_map = {r["release_id"]: r["genre_max_release_count"] for r in signals["genre_count"]}
+    release_ids_map = _index_by_release(signals["release_ids"])
     fact_maps = {fact: _index_by_release(signals.get(fact, [])) for fact in family_facts}
 
     scored_rows: list[dict[str, Any]] = []
@@ -473,6 +489,7 @@ def _score_page(
         )
 
         temporal_info = temporal_map.get(rid, {})
+        ids_row = release_ids_map.get(rid, {})
         have, want = community_map.get(rid, (None, None))
 
         core_signals = {
@@ -525,6 +542,10 @@ def _score_page(
                 "medium_rarity": core_signals["medium_rarity"],
                 "media_families": list(media.families),
                 "family_signals": scored.family_signals,
+                # Graph ids are strings; the columns these fill are BIGINT[]. A non-numeric id fails
+                # the page here rather than dropping out of a list that has to be complete.
+                "label_ids": sorted(int(value) for value in ids_row.get("label_ids", ())),
+                "artist_ids": sorted(int(value) for value in ids_row.get("artist_ids", ())),
             }
         )
     return scored_rows
