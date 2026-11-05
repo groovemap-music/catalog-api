@@ -35,10 +35,52 @@ def _escape_lucene_query(query: str) -> str:
     return _LUCENE_SPECIAL_RE.sub(r"\\\1", query)
 
 
+# Score boost for a whole-name match. Prefix (wildcard) terms are constant-score in Lucene, so without this
+# every match scored 1.0 and ``ORDER BY score LIMIT n`` kept an arbitrary n (audit H15).
+_EXACT_BOOST = 100
+
+
+def _escape_lucene_phrase(text: str) -> str:
+    """Escape what is special inside a quoted Lucene phrase: the quote and the backslash."""
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+# The standard analyzer splits on everything but letters, digits and apostrophes or dots inside a word, so
+# "jay-z" is indexed as jay + z and "ac/dc" as ac + dc. The query is cut the same way.
+_ANALYZER_TOKEN_RE = re.compile(r"\w+(?:['\u2019.]\w+)*")
+
+
+def _analyzer_tokens(query: str) -> list[str]:
+    # Lower-cased, as the analyzer lower-cases names: Lucene operators are upper-case words, so a typed AND, OR or NOT
+    # must reach the parser as an ordinary word.
+    return [token.lower() for token in _ANALYZER_TOKEN_RE.findall(query)]
+
+
 def _build_autocomplete_query(query: str) -> str:
-    """Build a Lucene fulltext query with wildcard on each term for prefix matching."""
-    terms = query.split()
-    return " AND ".join(_escape_lucene_query(term) + "*" for term in terms)
+    """Build a Lucene fulltext query: names holding every typed token as a prefix, best matches boosted.
+
+    Input is cut into tokens the way the index analyzer cuts names (``jay-z`` is ``jay`` and ``z``, ``ac/dc`` is
+    ``ac`` and ``dc``) and every token is required, each as a prefix: ``jay* AND z*``. Splitting is what makes
+    punctuated names findable at all (the old query matched none) and ANDing is what keeps names containing only one
+    of the tokens out. Plain input matches exactly what ``t1* AND t2*`` matched before (``dav bo`` still finds
+    ``David Bowie``). On top of that:
+
+    * with two or more tokens, the whole phrase is boosted, so a name that is those words and nothing else
+      outranks a longer name that merely starts with them (Lucene's length normalisation then puts the
+      shorter name first);
+    * with one token, a name containing that whole word is boosted over one that only starts with it.
+
+    Input with no word characters at all falls back to the escaped terms as prefixes, which match nothing.
+    """
+    tokens = _analyzer_tokens(query)
+    if not tokens:
+        return " AND ".join(_escape_lucene_query(term) + "*" for term in query.split())
+    escaped = [_escape_lucene_query(token) for token in tokens]
+    if len(escaped) == 1:
+        return f"({escaped[0]}^{_EXACT_BOOST} OR {escaped[0]}*)"
+    required = " AND ".join(f"{token}*" for token in escaped)
+    phrase = _escape_lucene_phrase(" ".join(tokens))
+    return f'"{phrase}"^{_EXACT_BOOST} OR ({required})'
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,14 +95,17 @@ async def _autocomplete(
     query: str,
     limit: int,
 ) -> list[dict[str, Any]]:
+    # The limit goes to Lucene, which then keeps the highest-scoring names instead of scoring every match
+    # ('the*' matches tens of thousands; 119 ms warm before, 4 to 7 ms now). The tie-break only orders names
+    # Lucene scored equally: a name equal to what was typed, then the shorter, then the lower id.
     cypher = f"""
-    CALL db.index.fulltext.queryNodes('{spec.index}', $query)
+    CALL db.index.fulltext.queryNodes('{spec.index}', $query, {{limit: $limit}})
     YIELD node, score
     RETURN {spec.id_expression} AS id, node.name AS name, score
-    ORDER BY score DESC
+    ORDER BY score DESC, toLower(node.name) = $typed DESC, size(node.name), id
     LIMIT $limit
     """
-    return await run_query(driver, cypher, query=_build_autocomplete_query(query), limit=limit)
+    return await run_query(driver, cypher, query=_build_autocomplete_query(query), limit=limit, typed=" ".join(query.split()).lower())
 
 
 _ARTIST_AUTOCOMPLETE = _AutocompleteSpec("artist_name_fulltext", "node.id")

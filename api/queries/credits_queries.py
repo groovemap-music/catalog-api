@@ -247,13 +247,13 @@ async def autocomplete_person(
     search_query = _build_autocomplete_query(query)
 
     cypher = """
-    CALL db.index.fulltext.queryNodes('person_name_fulltext', $query)
+    CALL db.index.fulltext.queryNodes('person_name_fulltext', $query, {limit: $limit})
     YIELD node, score
     RETURN node.name AS name, score
-    ORDER BY score DESC
+    ORDER BY score DESC, toLower(node.name) = $typed DESC, size(node.name), name
     LIMIT $limit
     """
-    return await run_query(driver, cypher, query=search_query, limit=limit)
+    return await run_query(driver, cypher, query=search_query, limit=limit, typed=" ".join(query.split()).lower())
 
 
 async def get_person_profile(

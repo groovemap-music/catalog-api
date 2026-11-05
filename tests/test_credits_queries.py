@@ -228,8 +228,8 @@ class TestAutocompletePerson:
         driver = _make_mock_driver(query_returns=[])
         assert await autocomplete_person(driver, "Bob*") == []
         params = driver.session().__aenter__.return_value.run.await_args.args[1]
-        # Input * is literal; exactly one unescaped prefix wildcard is appended.
-        assert params["query"] == r"Bob\**"
+        # '*' is not a word character: the query is cut into word tokens, so no input wildcard reaches Lucene.
+        assert params["query"] == "(bob^100 OR bob*)"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -254,9 +254,14 @@ class TestAutocompletePerson:
         sent = params["query"]
         # Every Lucene special char that appears in the raw input must be
         # backslash-escaped in the query actually sent to Neo4j.
-        for ch in raw:
-            if ch in '+-&|!(){}[]^"~*?:\\/':
-                assert f"\\{ch}" in sent, f"metacharacter {ch!r} was not escaped in {sent!r}"
+        # The query is built from word tokens only, so none of the raw input's metacharacters can reach Lucene
+        # syntax: each is dropped (it splits tokens) or, inside a token, is not special.
+        syntax = '+-&|!(){}[]^"~*?:\\/'
+        raw_meta = {ch for ch in raw if ch in syntax}
+        body = (
+            sent.replace('"', "", 2).replace("^100", "").replace(" OR ", " ").replace(" AND ", " ").replace("(", "").replace(")", "").replace("*", "")
+        )
+        assert not (raw_meta & set(body)), f"metacharacter leaked into {sent!r}"
 
 
 class TestGetPersonProfile:

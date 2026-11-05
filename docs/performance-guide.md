@@ -115,6 +115,31 @@ silently rewrite another repository's schema, image, or runtime configuration.
 - The default test suite remains isolated from live services.
 - Performance results do not contain credentials, tokens, or private URLs.
 
+
+## Autocomplete ranking
+
+Artist, label, genre, style and person autocomplete (`gm-catalog-api-4wgh`, audit H15) send `{limit}` to the Lucene
+fulltext procedure, so only the best `limit` names are scored and returned (`the*`: 163 ms before, 3 to 7 ms warm).
+
+The typed text is cut into tokens the way the index analyzer cuts names (letters and digits; an apostrophe or dot
+inside a word stays in it), so `jay-z` is `jay` and `z`, `ac/dc` is `ac` and `dc`, and `d'angelo` is one token.
+Every token is required and each is a prefix (`jay* AND z*`): only names holding all of them match, and plain input
+matches exactly what it did before (`dav bo` still finds `David Bowie`). The old query
+sent `jay-z` to Lucene as one escaped prefix, which matched nothing, so punctuated names could not be found at all.
+On lux: `jay-z` 79 matches (Jay-Z first), `ac/dc` 10 (AC/DC first), `d'angelo` 412 (D'Angelo first).
+
+Prefix terms are constant-score in Lucene, so the query adds boosts that decide who is "best":
+
+* two or more tokens: the whole phrase is boosted x100, so a name equal to what was typed outranks longer names that
+  merely start with it (`David Bowie` before `David Bowie Tribute`);
+* one token: a name containing that whole word is boosted over one that only starts with it.
+
+Known limits: Lucene cannot see how well known a name is, so among names with the same score the order
+is shorter name, then id (accepted by the operator); names that differ only by punctuation score the same (`David Bowie` and
+`David Bowie,`; a name equal to the typed text wins the tie); and a name that repeats the typed word (`The The The`) can
+outscore the single word (`The`).
+
+
 ## Label DNA and similar labels
 
 `/api/label/{id}/dna` and `/api/label/{id}/similar` (`gm-catalog-api-j4ml`, audit H9; both cache for 24 h, so this is the cold path):
@@ -154,3 +179,4 @@ alphabetically first genre, absent when the artist has no genre). Where it is ab
 neighbour with the same rule, so the answer is the same before and after the enricher's first pass; only the cost differs. On lux
 (no artist has the property yet): ranking alone is 0.29M hits for Bowie and 0.54M for The Beatles (75 and 101 ms); with the live
 fallback for all 50 neighbours Bowie is 3.6M hits (0.5 s) and The Beatles 31M (3.4 s), against 37.5M for Bowie before.
+
