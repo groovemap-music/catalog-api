@@ -73,7 +73,7 @@ The API owns cache keys, TTLs, and invalidation for its responses. Current examp
 
 | Result | Cache behavior |
 | --- | --- |
-| Genre tree | Five-minute in-process cache |
+| Genre tree | Built in the background and stored (memory + Valkey); no scan on the request path |
 | Explore and trends | Valkey cache for stable imported data |
 | Recommendations and label DNA | Valkey cache with bounded TTL |
 | Search | Valkey cache after bounded PostgreSQL queries |

@@ -1168,8 +1168,9 @@ class TestRarityChunking:
         with patch("api.queries.rarity_queries.run_query", side_effect=_recording):
             results = await fetch_all_rarity_signals(mock_driver, None, page_size=page_size)
 
-        # 25 releases at 10/page -> 10, 10, 5
-        assert pages == [10, 10, 5]
+        # 25 releases at 10/page -> 10, 10, 5, walked twice: once to count the quality-signal
+        # distributions, once to score. Neither walk skips or repeats a page.
+        assert pages == [10, 10, 5, 10, 10, 5]
         assert [r["release_id"] for r in results] == ids
 
     @pytest.mark.asyncio
@@ -1208,9 +1209,10 @@ class TestRarityChunking:
 
         assert id_batches
         assert all(len(batch) <= 2 for batch in id_batches)
-        # 3 pages x (8 core signal queries + the 1 the grooved extension declares)
-        assert len(id_batches) == 3 * (len(_CORE_QUERIES) + len(family_queries()))
-        assert len(id_batches) == 27
+        # Scoring pass: 3 pages x (8 core signal queries + the 1 the grooved extension declares).
+        # Distribution pass: 3 pages x the 3 quality-signal queries and nothing else.
+        assert len(id_batches) == 3 * (len(_CORE_QUERIES) + len(family_queries())) + 3 * 3
+        assert len(id_batches) == 36
 
     @pytest.mark.asyncio
     async def test_hidden_gem_percentiles_span_pages(self) -> None:
@@ -1279,6 +1281,50 @@ def test_masterless_hub_is_filtered_before_sibling_expansion(query_name: str) ->
     assert (
         "OPTIONAL MATCH (r)-[:DERIVED_FROM]->(m:Master)\nWHERE NOT m.id IN ['0', 0]\nOPTIONAL MATCH (m)<-[:DERIVED_FROM]-(sibling:Release)" in query
     )
+
+
+class TestQualityDistribution:
+    """``_Distribution`` ranks exactly as the sorted list of every positive value did."""
+
+    @pytest.mark.parametrize(
+        "values",
+        [[], [0, None, 0], [5], [1, 1, 1], [3, 1, 2, 2, 9, 9, 9, 0, None, 4.5], list(range(1, 200)) * 3],
+    )
+    def test_matches_the_sorted_list_rank(self, values: list[float | None]) -> None:
+        from api.queries.rarity_queries import _Distribution, _percentile_rank
+
+        distribution = _Distribution()
+        for value in values:
+            distribution.add(value)
+        distribution.freeze()
+        reference = sorted(v for v in values if v)
+        for probe in [-1, 0, 0.5, 1, 2, 2.5, 3, 4.5, 5, 9, 10, 1000]:
+            assert distribution.percentile_rank(probe) == _percentile_rank(probe, reference)
+
+
+class TestStreamedWalk:
+    @pytest.mark.asyncio
+    async def test_the_first_row_does_not_wait_for_the_last_page(self) -> None:
+        """Rows come out as pages finish: after the first row, later pages have not been scored."""
+        from api.queries.rarity_queries import iter_rarity_signals
+
+        ids = [f"{i:04d}" for i in range(25)]
+        pressing = [{"release_id": rid, "pressing_count": 1, "title": "R", "artist_name": "A", "year": 1970} for rid in ids]
+        run_query = _fake_run_query(pressing=pressing, page_size=10)
+        scored_pages: list[int] = []
+
+        async def _recording(driver, cypher, **kwargs):
+            if "r.title AS title" in cypher:  # the release query runs once per scoring page
+                scored_pages.append(len(kwargs["ids"]))
+            return await run_query(driver, cypher, **kwargs)
+
+        with patch("api.queries.rarity_queries.run_query", side_effect=_recording):
+            rows = iter_rarity_signals(MagicMock(), None, page_size=10)
+            first = await anext(rows)
+            assert first["release_id"] == ids[0]
+            assert scored_pages == [10]  # one page scored, two to go
+            assert len([row async for row in rows]) == 24
+        assert scored_pages == [10, 10, 5]
 
 
 class TestEmptyRarityTable:
