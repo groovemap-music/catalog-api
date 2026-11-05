@@ -141,3 +141,18 @@ silently rewrite another repository's schema, image, or runtime configuration.
 Measured on lux before the enricher has written the new properties: the identity and year reads above. The similar-label figure
 (`< 10M` hits) can only be measured once `HAS_STYLE` exists. The 40% reduction for Columbia's DNA is about 33% from these changes
 (identity 6.65M, genre and style 5.5M, years 1.05M of 39.9M); the format and media reads are unchanged.
+
+
+## Network cluster
+
+`/api/network/cluster/{artist_id}` (`gm-catalog-api-575h`, audit H6) ranks neighbours by shared releases, cuts to `limit`, and only
+then reads each one's primary genre. The old statement built every neighbour's genre histogram first: one Various co-credit cost
+1.53M releases and Bowie took 29.6 s and 37.5M db hits. Ties in shared releases now break by artist id.
+
+The primary genre is `Artist.primary_genre` (written by the enricher: the genre on most of the artist's releases, a tie to the
+alphabetically first genre, absent when the artist has no genre). Where it is absent the genre is computed live for that ranked
+neighbour with the same rule, so the answer is the same before and after the enricher's first pass; only the cost differs. On lux
+(no artist has the property yet): ranking alone is 0.29M hits for Bowie and 0.54M for The Beatles (75 and 101 ms); with the live
+fallback for all 50 neighbours Bowie is 3.6M hits (0.5 s) and The Beatles 31M (3.4 s), against 37.5M for Bowie before.
+
+>>>>>>> main

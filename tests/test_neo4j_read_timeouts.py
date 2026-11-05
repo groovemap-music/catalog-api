@@ -31,6 +31,7 @@ REQUEST_BUDGET_SECONDS = 30.0
 EXCEPTIONS: dict[str, tuple[float | None, str]] = {
     "api/projection.py": (None, "internal gm_id projection write batch, bounded by batch_size, not a request read"),
     "api/queries/insights_neo4j_queries.py": (300.0, "internal Analytics batch reads, documented 30 to 300 s"),
+    "api/explore_discovery.py": (300.0, "background exact scan of one hub genre/style/label for explore discoveries, never a request"),
     "api/queries/genre_tree_queries.py": (
         120.0,
         "background genre/style co-occurrence scan, one genre at a time (Rock 16 s on lux), never a request",

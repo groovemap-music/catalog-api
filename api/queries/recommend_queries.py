@@ -11,7 +11,6 @@ from typing import Any
 from common import AsyncResilientNeo4jDriver
 
 from api.queries.helpers import run_query, run_single
-from api.queries.neo4j_queries import _PATH_REL_TYPES
 from api.queries.similarity import cosine_similarity, to_genre_vector
 
 
@@ -427,45 +426,13 @@ async def get_explore_traversal(
     entity_id: str,
     hops: int = 2,
 ) -> list[dict[str, Any]]:
-    """Perform variable-length traversal from an entity and return discovered nodes with paths."""
-    if not (1 <= hops <= 3):
-        hops = 2
+    """Discoveries from an entity: every genre and style within ``hops``, the nearest 100 artists and labels.
 
-    _ALLOWED_ENTITY_TYPES = {"genre", "style", "artist", "label", "release", "master"}
-    if entity_type not in _ALLOWED_ENTITY_TYPES:
-        return []
-
-    if entity_type in ("genre", "style"):
-        node_label = entity_type.capitalize()
-        match_clause = f"(start:{node_label} {{name: $entity_id}})"
-    else:
-        node_label = entity_type.capitalize()
-        match_clause = f"(start:{node_label} {{id: $entity_id}})"
-
-    cypher = f"""
-    MATCH {match_clause}
-    MATCH path = (start)-[:{_PATH_REL_TYPES}*1..{hops}]-(discovered)
-    WHERE discovered <> start
-      AND (discovered:Artist OR discovered:Label OR discovered:Genre OR discovered:Style)
-    WITH discovered,
-         [n IN nodes(path) | coalesce(n.name, n.title, n.id)] AS path_names,
-         [r IN relationships(path) | type(r)] AS rel_types,
-         length(path) AS dist
-    ORDER BY dist
-    WITH discovered, collect({{path_names: path_names, rel_types: rel_types, dist: dist}})[0] AS best
-    RETURN coalesce(discovered.id, discovered.name) AS id,
-           coalesce(discovered.name, discovered.id) AS name,
-           CASE
-             WHEN discovered:Artist THEN 'artist'
-             WHEN discovered:Label THEN 'label'
-             WHEN discovered:Genre THEN 'genre'
-             WHEN discovered:Style THEN 'style'
-           END AS type,
-           best.path_names AS path_names, best.rel_types AS rel_types, best.dist AS dist
-    ORDER BY best.dist
-    LIMIT 100
+    See :mod:`api.explore_discovery` for the definition and why no path is enumerated.
     """
-    return await run_query(driver, cypher, entity_id=entity_id)
+    from api import explore_discovery  # noqa: PLC0415
+
+    return await explore_discovery.get_explore_traversal(driver, entity_type, entity_id, hops)
 
 
 def score_discoveries(

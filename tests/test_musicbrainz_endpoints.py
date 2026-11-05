@@ -1,6 +1,6 @@
 """Tests for MusicBrainz enrichment API endpoints."""
 
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -314,7 +314,7 @@ class TestGetEnrichmentStatusQuery:
             {"total": 75},  # artists enriched
             {"total": 25},  # labels enriched
             {"total": 140},  # releases enriched
-            {"total": 450},  # relationships created
+            *[{"total": 50}] * 9,  # relationships created, one statement per MusicBrainz-sourced type
         ]
         mock_session = AsyncMock()
         call_idx = {"n": 0}
@@ -357,3 +357,121 @@ class TestConfigure:
         mb_router.configure(mock_pool, mock_driver)
         assert mb_router._pool is mock_pool
         assert mb_router._neo4j_driver is mock_driver
+
+
+class _FakeValkey:
+    """A dict-backed stand-in with the two calls the status cache makes."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, str] = {}
+
+    async def get(self, key: str) -> str | None:
+        return self.store.get(key)
+
+    async def setex(self, key: str, _ttl: int, value: str) -> None:
+        self.store[key] = value
+
+
+_STATS = {"musicbrainz": {"relationships": {"total_in_mb": 5, "created_in_neo4j": 3}}}
+
+
+class TestEnrichmentStatusCache:
+    def test_a_hit_does_not_touch_either_database(self, test_client: TestClient) -> None:
+        fake = _FakeValkey()
+        compute = AsyncMock(return_value=_STATS)
+        with (
+            patch("api.routers.musicbrainz._valkey", fake),
+            patch("api.routers.musicbrainz.get_enrichment_status", compute),
+        ):
+            first = test_client.get("/api/enrichment/status")
+            second = test_client.get("/api/enrichment/status")
+        assert first.json() == second.json() == _STATS
+        assert compute.await_count == 1
+
+    def test_without_valkey_it_still_answers(self, test_client: TestClient) -> None:
+        compute = AsyncMock(return_value=_STATS)
+        with patch("api.routers.musicbrainz._valkey", None), patch("api.routers.musicbrainz.get_enrichment_status", compute):
+            assert test_client.get("/api/enrichment/status").json() == _STATS
+            assert test_client.get("/api/enrichment/status").json() == _STATS
+        assert compute.await_count == 2
+
+    def test_concurrent_misses_run_one_scan(self) -> None:
+        import asyncio
+
+        import api.routers.musicbrainz as router
+
+        fake = _FakeValkey()
+        started = 0
+
+        async def slow(*_args: object) -> dict:
+            nonlocal started
+            started += 1
+            await asyncio.sleep(0.05)
+            return _STATS
+
+        async def run() -> list[int]:
+            from starlette.requests import Request
+
+            with (
+                patch.object(router, "_valkey", fake),
+                patch.object(router, "_pool", object()),
+                patch.object(router, "_neo4j_driver", object()),
+                patch.object(router, "_enrichment_status_lock", None),
+                patch.object(router, "get_enrichment_status", slow),
+            ):
+                request = Request(
+                    {"type": "http", "method": "GET", "path": "/", "headers": [], "client": ("t", 1), "server": ("t", 1), "scheme": "http"}
+                )
+                inner = router.enrichment_status_endpoint.__wrapped__  # the handler under the rate limiter
+                responses = await asyncio.gather(*(inner(request) for _ in range(5)))
+            return [r.status_code for r in responses]
+
+        assert asyncio.run(run()) == [200] * 5
+        assert started == 1
+
+
+class TestMusicbrainzSourcedRelationshipTypes:
+    # A snapshot of musicbrainz-graph-enricher's MB_RELATIONSHIP_MAP values (brainzgraphinator/_projections.py).
+    _ENRICHER_MAP_VALUES: ClassVar[set[str]] = {
+        "MEMBER_OF",
+        "COLLABORATED_WITH",
+        "TAUGHT",
+        "TRIBUTE_TO",
+        "FOUNDED",
+        "SUPPORTED",
+        "SUBGROUP_OF",
+        "RENAMED_TO",
+    }
+
+    def test_the_list_is_the_enrichers_types_plus_issued_on(self) -> None:
+        from api.queries.musicbrainz_queries import MB_SOURCED_RELATIONSHIP_TYPES
+
+        assert set(MB_SOURCED_RELATIONSHIP_TYPES) == self._ENRICHER_MAP_VALUES | {"ISSUED_ON"}
+
+    def test_each_statement_names_exactly_one_type(self) -> None:
+        from api.queries.musicbrainz_queries import MB_SOURCED_RELATIONSHIP_TYPES, mb_sourced_count_cypher
+
+        for rel_type in MB_SOURCED_RELATIONSHIP_TYPES:
+            cypher = mb_sourced_count_cypher(rel_type)
+            assert f"[r:{rel_type}]" in cypher
+            assert "|" not in cypher  # several types in one pattern make the planner scan every node
+
+    def test_an_unlisted_type_is_refused(self) -> None:
+        from api.queries.musicbrainz_queries import mb_sourced_count_cypher
+
+        with pytest.raises(ValueError, match="not a MusicBrainz-sourced"):
+            mb_sourced_count_cypher("BY]->() DETACH DELETE n //")
+
+    @pytest.mark.anyio
+    async def test_status_sums_the_per_type_counts(self) -> None:
+        from api.queries.musicbrainz_queries import MB_SOURCED_RELATIONSHIP_TYPES, count_mb_sourced_relationships
+
+        seen: list[str] = []
+
+        async def fake_single(_driver: object, cypher: str) -> dict[str, int]:
+            seen.append(cypher)
+            return {"total": 2}
+
+        with patch("api.queries.musicbrainz_queries.run_single", fake_single):
+            assert await count_mb_sourced_relationships(object()) == 2 * len(MB_SOURCED_RELATIONSHIP_TYPES)
+        assert len(set(seen)) == len(MB_SOURCED_RELATIONSHIP_TYPES)

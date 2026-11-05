@@ -7,20 +7,22 @@ service can fetch data over HTTP instead of importing query modules directly.
 import asyncio
 import json
 import secrets
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from typing import Annotated, Any
 
 import httpx
 import structlog
 from common import describe_exception
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from neo4j.exceptions import ClientError, Neo4jError, TransientError
+from psycopg import Error as PsycopgError
 from psycopg.rows import dict_row
 
 from api.auth import decrypt_oauth_token, get_oauth_encryption_key
 from api.config import DEFAULT_DISCOGS_USER_AGENT
 from api.limiter import limiter
+from api.models import RarityDistributions
 from api.queries.insights_neo4j_queries import (
     query_artist_centrality,
     query_genre_trends,
@@ -31,7 +33,13 @@ from api.queries.insights_neo4j_queries import (
     query_style_year_counts,
 )
 from api.queries.insights_pg_queries import query_data_completeness
-from api.queries.rarity_queries import iter_rarity_signals
+from api.queries.rarity_queries import (
+    RARITY_PAGE_BUDGET_SECONDS,
+    RARITY_PAGE_SIZE,
+    fetch_rarity_page,
+    fetch_rarity_quality_counts,
+    iter_rarity_signals,
+)
 from api.syncer import DISCOGS_API_BASE, MAX_RATE_LIMIT_RETRIES, SYNC_DELAY_SECONDS, _auth_header
 from api.telemetry import CACHE_INSIGHTS_COMPLETENESS, cache_get, record_cache_write_failure
 from api.valkey_keys import valkey_key
@@ -335,21 +343,122 @@ async def _rarity_body(first: dict[str, Any], rest: AsyncIterator[dict[str, Any]
         raise
 
 
+# How often a long read checks whether its client is still there.
+_DISCONNECT_POLL_SECONDS = 1.0
+
+# A paged walk over the catalog makes two requests per 20,000 releases, as fast as the database
+# answers. The route is behind the internal secret, so this only guards against a runaway client.
+_RARITY_PAGE_RATE_LIMIT = "600/minute"
+
+# What a server that gave up on a request records, so the log tells it from a real response. The client
+# never sees it: it has already gone.
+_CLIENT_CLOSED_REQUEST = 499
+
+
+class _ClientLeft(Exception):
+    """The client closed the connection while its request was being computed."""
+
+
+async def _unless_client_left[T](request: Request, work: Awaitable[T]) -> T:
+    """Await ``work``, cancelling it and raising :class:`_ClientLeft` if the client disconnects.
+
+    FastAPI lets a handler run on after its client has gone. Cancelling here also ends the read in
+    flight, because the Neo4j driver drops the connection of a cancelled query.
+    """
+    task = asyncio.ensure_future(work)
+    try:
+        while True:
+            done, _pending = await asyncio.wait({task}, timeout=_DISCONNECT_POLL_SECONDS)
+            if done:
+                return task.result()
+            if await request.is_disconnected():
+                logger.info("🔌 Rarity client left, stopping its read")
+                raise _ClientLeft
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+async def _rarity_page_response(request: Request, work: Awaitable[dict[str, Any]], computation: str) -> Response:
+    """Answer with one whole page or an error status: a page is never sent in part.
+
+    Every failure a client can retry is a 503, including a page that overran the budget the contract
+    publishes, so the client's read timeout only ever fires on a broken connection.
+    """
+    try:
+        async with asyncio.timeout(RARITY_PAGE_BUDGET_SECONDS):
+            page = await _unless_client_left(request, work)
+    except _ClientLeft:
+        return Response(status_code=_CLIENT_CLOSED_REQUEST)
+    except TimeoutError:
+        logger.warning(f"⚠️ {computation} overran its page budget", budget_seconds=RARITY_PAGE_BUDGET_SECONDS)
+        return JSONResponse(content={"error": "Rarity page overran its budget"}, status_code=503)
+    except (TransientError, ClientError, BaseExceptionGroup) as exc:
+        return _retryable_unavailable(exc, computation)
+    except PsycopgError:
+        logger.warning(f"⚠️ {computation} hit a PostgreSQL error", exc_info=True)
+        return JSONResponse(content={"error": "PostgreSQL temporarily unavailable"}, status_code=503)
+    return JSONResponse(content=page)
+
+
+@router.get("/rarity-scores/quality-counts")
+@limiter.limit(_RARITY_PAGE_RATE_LIMIT)
+async def rarity_quality_counts(
+    request: Request,
+    after: str = Query(""),
+    limit: int = Query(RARITY_PAGE_SIZE, ge=1, le=RARITY_PAGE_SIZE),
+) -> Response:
+    """Return one page of the first pass: how often each quality-signal value occurs.
+
+    The caller follows ``next_after`` to the end and sums the counts, which is what hidden-gem scoring
+    ranks each release against. See :func:`rarity_page`.
+    """
+    if not _neo4j:
+        return JSONResponse(content={"error": "Service not ready"}, status_code=503)
+    return await _rarity_page_response(request, fetch_rarity_quality_counts(_neo4j, after=after, limit=limit), "Rarity quality counts")
+
+
+@router.post("/rarity-scores/page")
+@limiter.limit(_RARITY_PAGE_RATE_LIMIT)
+async def rarity_page(
+    request: Request,
+    distributions: RarityDistributions,
+    after: str = Query(""),
+    limit: int = Query(RARITY_PAGE_SIZE, ge=1, le=RARITY_PAGE_SIZE),
+) -> Response:
+    """Return one page of scored rows, ranked against the summed quality counts in the body.
+
+    The counts travel with each request so the API keeps nothing between pages: any worker can answer
+    any page, a restart loses nothing, and a dropped request retries one page.
+    """
+    if not _neo4j or not _pool:
+        return JSONResponse(content={"error": "Service not ready"}, status_code=503)
+    work = fetch_rarity_page(_neo4j, _pool, after=after, limit=limit, distributions=distributions.model_dump())
+    return await _rarity_page_response(request, work, "Rarity page")
+
+
 @router.get("/rarity-scores", response_model=None)
 @limiter.limit("5/minute")
-async def rarity_scores(request: Request) -> JSONResponse | StreamingResponse:  # noqa: ARG001
+async def rarity_scores(request: Request) -> Response:
     """Return computed rarity scores for all releases from Neo4j.
+
+    Deprecated for :func:`rarity_quality_counts` and :func:`rarity_page`: this is one response for the
+    whole catalog, so it cannot be retried, and a client has to hold all of it.
 
     The body is `{"items": [...]}` with every release, as before, but it is streamed: the API process
     holds one page of rows rather than one row per release in the graph (about 1.7 KB each, so about
     17 GB at 10M releases). The first row is read before the response starts, which covers the first
-    pass over the quality signals and the first page, so a Neo4j error there is still a 503.
+    pass over the quality signals and the first page, so a Neo4j error there is still a 503. Starlette
+    ends the stream when the client leaves; before that first row, :func:`_unless_client_left` does.
     """
     if not _neo4j:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     rows = iter_rarity_signals(_neo4j, _pool)
     try:
-        first = await anext(rows)
+        first = await _unless_client_left(request, anext(rows))
+    except _ClientLeft:
+        return Response(status_code=_CLIENT_CLOSED_REQUEST)
     except StopAsyncIteration:
         return JSONResponse(content={"items": []})
     except (TransientError, ClientError, BaseExceptionGroup) as exc:

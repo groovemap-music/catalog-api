@@ -1,14 +1,17 @@
 """Tests for the insights compute router endpoints."""
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import psycopg
+import pytest
 import yaml
 from fastapi.testclient import TestClient
-from neo4j.exceptions import Neo4jError
+from neo4j.exceptions import Neo4jError, TransientError
 
 
 def _neo4j_error(code: str, message: str = "boom") -> Neo4jError:
@@ -114,7 +117,7 @@ def test_style_year_counts_contract_publishes_the_producer_read_budget() -> None
     contract = yaml.safe_load(_CONTRACT.read_text(encoding="utf-8"))
     operation = contract["paths"]["/api/internal/insights/style-year-counts"]["get"]
     assert operation["x-groovemap-max-processing-seconds"] == STYLE_YEAR_QUERY_TIMEOUT_SECONDS
-    assert contract["info"]["version"] == "1.5.0"
+    assert contract["info"]["version"] == "1.6.0"
 
 
 _STYLE_YEAR_RESULT = {
@@ -575,6 +578,157 @@ class TestRarityScoresEndpoint:
             # unhandled exception surfaces as a 500 rather than propagating.
             response = test_client.get("/api/internal/insights/rarity-scores")
         assert response.status_code == 500
+
+
+_DISTRIBUTIONS = {"artist": [[1, 2], [5, 1]], "label": [], "genre": [[1000, 3]]}
+_QUALITY_PATH = "/api/internal/insights/rarity-scores/quality-counts"
+_PAGE_PATH = "/api/internal/insights/rarity-scores/page"
+
+
+class TestRarityQualityCounts:
+    """Tests for GET /api/internal/insights/rarity-scores/quality-counts."""
+
+    def test_passes_the_cursor_and_returns_the_page(self, test_client: TestClient) -> None:
+        page = {**_DISTRIBUTIONS, "releases": 2, "release_total": 9, "next_after": "b"}
+        with patch("api.routers.insights_compute.fetch_rarity_quality_counts", new=AsyncMock(return_value=page)) as fetch:
+            response = test_client.get(_QUALITY_PATH, params={"after": "a", "limit": 2})
+        assert response.status_code == 200
+        assert response.json() == page
+        assert fetch.await_args.kwargs == {"after": "a", "limit": 2}
+
+    @pytest.mark.parametrize("limit", [0, 20_001])
+    def test_rejects_a_limit_outside_the_contract(self, test_client: TestClient, limit: int) -> None:
+        assert test_client.get(_QUALITY_PATH, params={"limit": limit}).status_code == 422
+
+    def test_503_when_neo4j_is_not_configured(self, test_client: TestClient) -> None:
+        with patch("api.routers.insights_compute._neo4j", None):
+            assert test_client.get(_QUALITY_PATH).status_code == 503
+
+    def test_503_on_a_transient_neo4j_error(self, test_client: TestClient) -> None:
+        with patch("api.routers.insights_compute.fetch_rarity_quality_counts", new=AsyncMock(side_effect=TransientError("oom"))):
+            assert test_client.get(_QUALITY_PATH).status_code == 503
+
+
+class TestRarityPage:
+    """Tests for POST /api/internal/insights/rarity-scores/page."""
+
+    def test_passes_cursor_and_counts_and_returns_the_page(self, test_client: TestClient) -> None:
+        page = {"items": [{"release_id": "1", "rarity_score": 85.0}], "next_after": None}
+        with patch("api.routers.insights_compute.fetch_rarity_page", new=AsyncMock(return_value=page)) as fetch:
+            response = test_client.post(_PAGE_PATH, params={"after": "a", "limit": 2}, json=_DISTRIBUTIONS)
+        assert response.status_code == 200
+        assert response.json() == page
+        kwargs = fetch.await_args.kwargs
+        assert (kwargs["after"], kwargs["limit"]) == ("a", 2)
+        assert kwargs["distributions"] == {"artist": [(1.0, 2), (5.0, 1)], "label": [], "genre": [(1000.0, 3)]}
+
+    @pytest.mark.parametrize("body", [{}, {**_DISTRIBUTIONS, "extra": []}, {**_DISTRIBUTIONS, "artist": [[1]]}])
+    def test_rejects_a_body_that_is_not_the_distributions(self, test_client: TestClient, body: dict[str, Any]) -> None:
+        assert test_client.post(_PAGE_PATH, json=body).status_code == 422
+
+    @pytest.mark.parametrize("missing", ["_neo4j", "_pool"])
+    def test_503_rather_than_scoring_without_a_database(self, test_client: TestClient, missing: str) -> None:
+        """Without the pool every row would silently take the neutral community score."""
+        with patch(f"api.routers.insights_compute.{missing}", None):
+            assert test_client.post(_PAGE_PATH, json=_DISTRIBUTIONS).status_code == 503
+
+    def test_503_when_community_counts_fail(self, test_client: TestClient) -> None:
+        with patch("api.routers.insights_compute.fetch_rarity_page", new=AsyncMock(side_effect=psycopg.OperationalError("gone"))):
+            assert test_client.post(_PAGE_PATH, json=_DISTRIBUTIONS).status_code == 503
+
+    def test_503_on_a_page_that_overruns_its_budget(self, test_client: TestClient) -> None:
+        async def _never(*_args: object, **_kwargs: object) -> dict[str, Any]:
+            await asyncio.sleep(60)
+            return {}
+
+        with (
+            patch("api.routers.insights_compute.fetch_rarity_page", new=_never),
+            patch("api.routers.insights_compute.RARITY_PAGE_BUDGET_SECONDS", 0.01),
+        ):
+            assert test_client.post(_PAGE_PATH, json=_DISTRIBUTIONS).status_code == 503
+
+    def test_a_whole_catalog_walk_is_not_rate_limited(self, test_client: TestClient) -> None:
+        """Five requests a minute, the old route's limit, would stall a walk of 1,958 requests."""
+        page = {"items": [], "next_after": None}
+        with patch("api.routers.insights_compute.fetch_rarity_page", new=AsyncMock(return_value=page)):
+            statuses = {test_client.post(_PAGE_PATH, json=_DISTRIBUTIONS).status_code for _ in range(30)}
+        assert statuses == {200}
+
+    def test_requires_the_internal_secret(self, test_client: TestClient) -> None:  # noqa: ARG002
+        from api.api import app
+
+        assert TestClient(app, raise_server_exceptions=False).post(_PAGE_PATH, json=_DISTRIBUTIONS).status_code == 401
+
+
+def _disconnected_request() -> MagicMock:
+    request = MagicMock()
+    request.is_disconnected = AsyncMock(return_value=True)
+    return request
+
+
+class TestClientDisconnect:
+    """A read whose client has gone stops, rather than finishing for nobody."""
+
+    async def _blocked_read(self, started: asyncio.Event, stopped: asyncio.Event) -> dict[str, Any]:
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            stopped.set()
+            raise
+        return {}
+
+    @pytest.mark.asyncio
+    async def test_cancels_the_read_and_says_so(self) -> None:
+        from api.routers.insights_compute import _ClientLeft, _unless_client_left
+
+        started, stopped = asyncio.Event(), asyncio.Event()
+        with patch("api.routers.insights_compute._DISCONNECT_POLL_SECONDS", 0.01), pytest.raises(_ClientLeft):
+            await _unless_client_left(_disconnected_request(), self._blocked_read(started, stopped))
+        assert stopped.is_set()
+
+    @pytest.mark.asyncio
+    async def test_a_page_read_records_499(self) -> None:
+        from api.routers.insights_compute import _rarity_page_response
+
+        started, stopped = asyncio.Event(), asyncio.Event()
+        with patch("api.routers.insights_compute._DISCONNECT_POLL_SECONDS", 0.01):
+            response = await _rarity_page_response(_disconnected_request(), self._blocked_read(started, stopped), "Rarity page")
+        assert response.status_code == 499
+        assert stopped.is_set()
+
+    @pytest.mark.asyncio
+    async def test_the_old_route_stops_in_its_first_pass(self) -> None:
+        """The old route read for hours before its first byte, with nothing to notice a dropped client."""
+        import api.routers.insights_compute as ic_router
+
+        started, stopped = asyncio.Event(), asyncio.Event()
+        blocked = self._blocked_read
+
+        async def _rows_after_the_first_pass(*_args: object) -> AsyncIterator[dict[str, Any]]:
+            yield await blocked(started, stopped)
+
+        request = _disconnected_request()
+        request.app.state.limiter = ic_router.limiter
+        with (
+            patch("api.routers.insights_compute._neo4j", MagicMock()),
+            patch("api.routers.insights_compute.iter_rarity_signals", new=_rows_after_the_first_pass),
+            patch("api.routers.insights_compute._DISCONNECT_POLL_SECONDS", 0.01),
+        ):
+            response = await ic_router.rarity_scores.__wrapped__(request)
+        assert response.status_code == 499
+        assert stopped.is_set()
+
+
+def test_rarity_page_contract_publishes_what_the_producer_enforces() -> None:
+    from api.queries.rarity_queries import RARITY_PAGE_BUDGET_SECONDS, RARITY_PAGE_SIZE
+
+    contract = yaml.safe_load(_CONTRACT.read_text(encoding="utf-8"))
+    quality = contract["paths"][_QUALITY_PATH]["get"]
+    page = contract["paths"][_PAGE_PATH]["post"]
+    assert quality["x-groovemap-max-processing-seconds"] == page["x-groovemap-max-processing-seconds"] == RARITY_PAGE_BUDGET_SECONDS
+    assert contract["components"]["parameters"]["RarityPageLimit"]["schema"]["maximum"] == RARITY_PAGE_SIZE
+    assert contract["paths"]["/api/internal/insights/rarity-scores"]["get"]["deprecated"] is True
 
 
 class TestAnniversariesValidation:
