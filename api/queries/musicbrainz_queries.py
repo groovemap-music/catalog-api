@@ -25,6 +25,36 @@ MB_ARTIST_RELATIONSHIP_TYPES: tuple[str, ...] = (
 )
 _MB_TYPES = "|".join(MB_ARTIST_RELATIONSHIP_TYPES)
 
+# Every relationship type that carries `source = 'musicbrainz'`: the artist types above, and the
+# ISSUED_ON edge the enricher writes from a release to its Medium (MEDIA_SOURCE in its _projections.py).
+# ISSUED_ON stays counted, as it always was. A type the enricher starts writing with that source and
+# that is missing here would be left out of `created_in_neo4j`, so the list is pinned by a test.
+MB_SOURCED_RELATIONSHIP_TYPES: tuple[str, ...] = (*MB_ARTIST_RELATIONSHIP_TYPES, "ISSUED_ON")
+
+# `MATCH ()-[r]->() WHERE r.source = ...` read the `source` property of every relationship in the graph,
+# 263M of them on lux. A statement per type reads only the edges of that type, through the planner's
+# relationship-type scan: 22M edges here. One statement over all the types is NOT the same: with several
+# types in one pattern the planner starts from every node and expands, which read 804M db hits and took
+# 43 s on lux, worse than the single-type reads it replaces. Same count either way, because nothing
+# else is written with that source.
+_MB_SOURCED_COUNT_TEMPLATE = "MATCH ()-[r:{rel_type}]->() WHERE r.source = 'musicbrainz' RETURN COUNT(r) AS total"
+
+
+def mb_sourced_count_cypher(rel_type: str) -> str:
+    """The count statement for one relationship type, which must be one of ``MB_SOURCED_RELATIONSHIP_TYPES``."""
+    if rel_type not in MB_SOURCED_RELATIONSHIP_TYPES:
+        raise ValueError(f"{rel_type!r} is not a MusicBrainz-sourced relationship type")
+    return _MB_SOURCED_COUNT_TEMPLATE.format(rel_type=rel_type)
+
+
+async def count_mb_sourced_relationships(neo4j_driver: Any) -> int:
+    """Count the MusicBrainz-sourced relationships, one type at a time, each under the default read timeout."""
+    total = 0
+    for rel_type in MB_SOURCED_RELATIONSHIP_TYPES:
+        row = await run_single(neo4j_driver, mb_sourced_count_cypher(rel_type))
+        total += row["total"] if row else 0
+    return total
+
 
 async def get_artist_musicbrainz(neo4j_driver: Any, discogs_id: int | str) -> dict[str, Any] | None:
     """Fetch MusicBrainz metadata for a Discogs artist from Neo4j."""
@@ -134,10 +164,6 @@ async def get_enrichment_status(pool: Any, neo4j_driver: Any) -> dict[str, Any]:
         )
         stats["musicbrainz"][entity]["enriched_in_neo4j"] = row["total"] if row else 0
 
-    row = await run_single(
-        neo4j_driver,
-        "MATCH ()-[r]->() WHERE r.source = 'musicbrainz' RETURN COUNT(r) AS total",
-    )
-    stats["musicbrainz"]["relationships"]["created_in_neo4j"] = row["total"] if row else 0
+    stats["musicbrainz"]["relationships"]["created_in_neo4j"] = await count_mb_sourced_relationships(neo4j_driver)
 
     return stats

@@ -19,7 +19,7 @@ Graph model:
 
 import bisect
 from collections import Counter
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -60,6 +60,7 @@ __all__ = [
     "CORE_SIGNAL_WEIGHTS",
     "FORMAT_RARITY_SCORES",
     "MEDIUM_RARITY_SCORES",
+    "RARITY_PAGE_BUDGET_SECONDS",
     "RARITY_PAGE_SIZE",
     "RARITY_QUERY_TIMEOUT_SECONDS",
     "RARITY_TIERS",
@@ -72,6 +73,8 @@ __all__ = [
     "compute_rarity_tier",
     "compute_temporal_scarcity_score",
     "fetch_all_rarity_signals",
+    "fetch_rarity_page",
+    "fetch_rarity_quality_counts",
     "get_rarity_by_artist",
     "get_rarity_by_label",
     "get_rarity_for_release",
@@ -120,6 +123,11 @@ RARITY_PAGE_SIZE = 20_000
 # db.transaction.timeout (600s in production) so a slow page surfaces as a fast,
 # attributable failure rather than a 600s stall.
 RARITY_QUERY_TIMEOUT_SECONDS = 120.0
+
+# Whole-request budget for one page of the paged rarity routes. The API enforces it, so a client's
+# read timeout above this always means the connection failed, never that a page is merely slow. A
+# real 20,000-release page takes about 4 s of Neo4j time on lux, so this is headroom, not a target.
+RARITY_PAGE_BUDGET_SECONDS = 300
 
 # Keyset pagination over the (uniqueness-constrained, therefore indexed) r.id.
 # Ids are strings, so "" is a valid open-ended start cursor.
@@ -278,6 +286,23 @@ async def _load_community_counts(pool: Any) -> dict[str, tuple[int, int]]:
     return community_map
 
 
+async def _load_page_community_counts(pool: Any, ids: list[str]) -> dict[str, tuple[int, int]]:
+    """Load the have/want counts of one page of releases.
+
+    Unlike :func:`_load_community_counts` this has no neutral fallback: a page scored without its
+    counts would be stored as if they were known, so a failure here fails the page and the client
+    retries it.
+    """
+    release_ids = [int(release_id) for release_id in ids if release_id.isdecimal()]
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT release_id, have_count, want_count FROM insights.community_counts WHERE release_id = ANY(%s)",
+            (release_ids,),
+        )
+        community_rows = await cur.fetchall()
+    return {str(r["release_id"]): (r["have_count"], r["want_count"]) for r in community_rows}
+
+
 async def _fetch_page_signals(driver: Any, ids: list[str]) -> dict[str, list[dict[str, Any]]]:
     """Run the core and family-extension signal queries for one page of release ids.
 
@@ -326,10 +351,23 @@ class _Distribution:
         self._below: list[int] = []
         self._total = 0
 
+    @classmethod
+    def from_counts(cls, counts: Iterable[tuple[float, int]]) -> _Distribution:
+        """Build a frozen distribution from ``(value, count)`` pairs, as :meth:`counts` gives them."""
+        distribution = cls()
+        for value, count in counts:
+            distribution._counts[value] += count
+        distribution.freeze()
+        return distribution
+
     def add(self, value: float | None) -> None:
         """Count ``value`` if it is truthy, as the sorted list always did."""
         if value:
             self._counts[value] += 1
+
+    def counts(self) -> list[tuple[float, int]]:
+        """Return the ``(value, count)`` pairs, smallest value first."""
+        return sorted(self._counts.items())
 
     def freeze(self) -> None:
         """Order the distinct values and precompute how many values lie below each."""
@@ -361,7 +399,25 @@ async def _release_id_pages(driver: Any, page_size: int) -> AsyncIterator[list[s
         yield ids
 
 
-_QUALITY_FACTS = ("artist_degree", "label_size", "genre_count")
+# Quality fact to (distribution name, row column).
+_QUALITY_SIGNALS = {
+    "artist_degree": ("artist", "artist_max_degree"),
+    "label_size": ("label", "label_max_catalog"),
+    "genre_count": ("genre", "genre_max_release_count"),
+}
+
+
+def _empty_distributions() -> dict[str, _Distribution]:
+    """Return one empty distribution per quality signal."""
+    return {name: _Distribution() for name, _column in _QUALITY_SIGNALS.values()}
+
+
+async def _count_quality_signals(driver: Any, ids: list[str], distributions: dict[str, _Distribution]) -> None:
+    """Add one page of releases to the quality-signal distributions."""
+    for fact, (name, column) in _QUALITY_SIGNALS.items():
+        rows = await run_query(driver, _CORE_QUERIES[fact], database="neo4j", timeout=RARITY_QUERY_TIMEOUT_SECONDS, ids=ids)
+        for row in rows:
+            distributions[name].add(row[column])
 
 
 async def _quality_distributions(driver: Any, page_size: int) -> dict[str, _Distribution]:
@@ -372,22 +428,99 @@ async def _quality_distributions(driver: Any, page_size: int) -> dict[str, _Dist
     about 1.7 KB per release. Counting values instead keeps this pass at the size of the number of
     distinct values, and the scoring pass below then finishes one page at a time.
     """
-    distributions = {"artist": _Distribution(), "label": _Distribution(), "genre": _Distribution()}
-    keys = {
-        "artist_degree": ("artist", "artist_max_degree"),
-        "label_size": ("label", "label_max_catalog"),
-        "genre_count": ("genre", "genre_max_release_count"),
-    }
+    distributions = _empty_distributions()
     async for ids in _release_id_pages(driver, page_size):
-        for fact in _QUALITY_FACTS:
-            cypher = _CORE_QUERIES[fact]
-            rows = await run_query(driver, cypher, database="neo4j", timeout=RARITY_QUERY_TIMEOUT_SECONDS, ids=ids)
-            name, column = keys[fact]
-            for row in rows:
-                distributions[name].add(row[column])
+        await _count_quality_signals(driver, ids, distributions)
     for distribution in distributions.values():
         distribution.freeze()
     return distributions
+
+
+def _score_page(
+    signals: dict[str, list[dict[str, Any]]],
+    community_map: dict[str, tuple[int, int]],
+    distributions: dict[str, _Distribution],
+    current_year: int,
+) -> list[dict[str, Any]]:
+    """Score one page of releases from its signal rows, in the order the release query returned them."""
+    family_facts = tuple(family_queries())
+    media_map = _index_by_release(signals["media"])
+    label_map = {r["release_id"]: r["label_catalog_size"] for r in signals["label"]}
+    temporal_map = _index_by_release(signals["temporal"])
+    degree_map = {r["release_id"]: r["degree"] for r in signals["degree"]}
+    artist_deg_map = {r["release_id"]: r["artist_max_degree"] for r in signals["artist_degree"]}
+    label_size_map = {r["release_id"]: r["label_max_catalog"] for r in signals["label_size"]}
+    genre_count_map = {r["release_id"]: r["genre_max_release_count"] for r in signals["genre_count"]}
+    fact_maps = {fact: _index_by_release(signals.get(fact, [])) for fact in family_facts}
+
+    scored_rows: list[dict[str, Any]] = []
+    for row in signals["release"]:
+        rid = row["release_id"]
+
+        media_row = media_map.get(rid, {})
+        formats = media_row.get("formats") or []
+        media = resolve_media(
+            mediums=media_row.get("mediums"),
+            media_families=media_row.get("media_families"),
+            formats=formats,
+        )
+
+        temporal_info = temporal_map.get(rid, {})
+        have, want = community_map.get(rid, (None, None))
+
+        core_signals = {
+            "label_catalog": compute_label_catalog_score(label_map.get(rid, 0)),
+            "medium_rarity": compute_medium_rarity_score(media),
+            "temporal_scarcity": compute_temporal_scarcity_score(
+                temporal_info.get("year"),
+                temporal_info.get("latest_sibling_year"),
+                current_year,
+            ),
+            "graph_isolation": compute_graph_isolation_score(degree_map.get(rid, 0)),
+            # Neutral fallback when the community counts are unavailable.
+            "collection_prevalence": compute_collection_prevalence_score(have, want or 0) if have is not None else 50.0,
+        }
+
+        scored = score_release(
+            ReleaseContext(
+                release_id=rid,
+                media=media,
+                year=row.get("year"),
+                facts={fact: fact_maps[fact].get(rid, {}) for fact in family_facts},
+            ),
+            core_signals,
+        )
+
+        quality_multiplier = (
+            0.4 * distributions["artist"].percentile_rank(artist_deg_map.get(rid, 0) or 0)
+            + 0.3 * distributions["label"].percentile_rank(label_size_map.get(rid, 0) or 0)
+            + 0.3 * distributions["genre"].percentile_rank(genre_count_map.get(rid, 0) or 0)
+        )
+
+        scored_rows.append(
+            {
+                "release_id": rid,
+                "title": row.get("title") or "",
+                "artist_name": row.get("artist_name") or "",
+                "year": row.get("year"),
+                "rarity_score": round(scored.score, 1),
+                "tier": scored.tier,
+                # Derived from the UNROUNDED score, as it always has been.
+                "hidden_gem_score": round(scored.score * quality_multiplier, 1),
+                # None when no family extension claimed this release.
+                "pressing_scarcity": scored.signals.get("pressing_scarcity"),
+                "label_catalog": core_signals["label_catalog"],
+                # Deprecated, unscored, retained for one minor version.
+                "format_rarity": compute_format_rarity_score(formats),
+                "temporal_scarcity": core_signals["temporal_scarcity"],
+                "graph_isolation": core_signals["graph_isolation"],
+                "collection_prevalence": core_signals["collection_prevalence"],
+                "medium_rarity": core_signals["medium_rarity"],
+                "media_families": list(media.families),
+                "family_signals": scored.family_signals,
+            }
+        )
+    return scored_rows
 
 
 async def iter_rarity_signals(
@@ -422,90 +555,16 @@ async def iter_rarity_signals(
     logger.info("🔍 Fetching rarity signals from Neo4j...", page_size=page_size)
 
     community_map = await _load_community_counts(pool)
-    family_facts = tuple(family_queries())
     distributions = await _quality_distributions(driver, page_size)
 
     scored_count = 0
     pages = 0
     async for ids in _release_id_pages(driver, page_size):
         pages += 1
-
         signals = await _fetch_page_signals(driver, ids)
-
-        media_map = _index_by_release(signals["media"])
-        label_map = {r["release_id"]: r["label_catalog_size"] for r in signals["label"]}
-        temporal_map = _index_by_release(signals["temporal"])
-        degree_map = {r["release_id"]: r["degree"] for r in signals["degree"]}
-        artist_deg_map = {r["release_id"]: r["artist_max_degree"] for r in signals["artist_degree"]}
-        label_size_map = {r["release_id"]: r["label_max_catalog"] for r in signals["label_size"]}
-        genre_count_map = {r["release_id"]: r["genre_max_release_count"] for r in signals["genre_count"]}
-        fact_maps = {fact: _index_by_release(signals.get(fact, [])) for fact in family_facts}
-
-        for row in signals["release"]:
-            rid = row["release_id"]
-
-            media_row = media_map.get(rid, {})
-            formats = media_row.get("formats") or []
-            media = resolve_media(
-                mediums=media_row.get("mediums"),
-                media_families=media_row.get("media_families"),
-                formats=formats,
-            )
-
-            temporal_info = temporal_map.get(rid, {})
-            have, want = community_map.get(rid, (None, None))
-
-            core_signals = {
-                "label_catalog": compute_label_catalog_score(label_map.get(rid, 0)),
-                "medium_rarity": compute_medium_rarity_score(media),
-                "temporal_scarcity": compute_temporal_scarcity_score(
-                    temporal_info.get("year"),
-                    temporal_info.get("latest_sibling_year"),
-                    current_year,
-                ),
-                "graph_isolation": compute_graph_isolation_score(degree_map.get(rid, 0)),
-                # Neutral fallback when the community counts are unavailable.
-                "collection_prevalence": compute_collection_prevalence_score(have, want or 0) if have is not None else 50.0,
-            }
-
-            scored = score_release(
-                ReleaseContext(
-                    release_id=rid,
-                    media=media,
-                    year=row.get("year"),
-                    facts={fact: fact_maps[fact].get(rid, {}) for fact in family_facts},
-                ),
-                core_signals,
-            )
-
-            quality_multiplier = (
-                0.4 * distributions["artist"].percentile_rank(artist_deg_map.get(rid, 0) or 0)
-                + 0.3 * distributions["label"].percentile_rank(label_size_map.get(rid, 0) or 0)
-                + 0.3 * distributions["genre"].percentile_rank(genre_count_map.get(rid, 0) or 0)
-            )
-
+        for scored_row in _score_page(signals, community_map, distributions, current_year):
             scored_count += 1
-            yield {
-                "release_id": rid,
-                "title": row.get("title") or "",
-                "artist_name": row.get("artist_name") or "",
-                "year": row.get("year"),
-                "rarity_score": round(scored.score, 1),
-                "tier": scored.tier,
-                # Derived from the UNROUNDED score, as it always has been.
-                "hidden_gem_score": round(scored.score * quality_multiplier, 1),
-                # None when no family extension claimed this release.
-                "pressing_scarcity": scored.signals.get("pressing_scarcity"),
-                "label_catalog": core_signals["label_catalog"],
-                # Deprecated, unscored, retained for one minor version.
-                "format_rarity": compute_format_rarity_score(formats),
-                "temporal_scarcity": core_signals["temporal_scarcity"],
-                "graph_isolation": core_signals["graph_isolation"],
-                "collection_prevalence": core_signals["collection_prevalence"],
-                "medium_rarity": core_signals["medium_rarity"],
-                "media_families": list(media.families),
-                "family_signals": scored.family_signals,
-            }
+            yield scored_row
 
         logger.debug("📄 Rarity page scored", page=pages, ids=len(ids), scored=scored_count)
 
@@ -531,6 +590,56 @@ async def fetch_all_rarity_signals(
     over the real catalog iterates :func:`iter_rarity_signals` instead.
     """
     return [row async for row in iter_rarity_signals(driver, pool, page_size=page_size)]
+
+
+def _next_after(ids: list[str], limit: int) -> str | None:
+    """Return the cursor of the page after ``ids``, or ``None`` if ``ids`` was the last page."""
+    return ids[-1] if len(ids) == limit else None
+
+
+async def fetch_rarity_quality_counts(driver: Any, *, after: str, limit: int) -> dict[str, Any]:
+    """Count the quality signals of the ``limit`` releases after ``after``, the first pass, one page at a time.
+
+    The caller sums these across pages and passes the totals to :func:`fetch_rarity_page`, so the
+    catalog-wide distributions are computed once and a failed request costs one page. ``release_total``
+    is what the label count store holds now, so a caller can tell a complete walk from a truncated one.
+    """
+    ids = await _fetch_release_id_page(driver, after, limit)
+    distributions = _empty_distributions()
+    if ids:
+        await _count_quality_signals(driver, ids, distributions)
+    count_rows = await run_query(driver, _RELEASE_COUNT_QUERY, database="neo4j", timeout=RARITY_QUERY_TIMEOUT_SECONDS)
+    return {
+        **{name: distribution.counts() for name, distribution in distributions.items()},
+        "releases": len(ids),
+        "release_total": count_rows[0]["total"],
+        "next_after": _next_after(ids, limit),
+    }
+
+
+async def fetch_rarity_page(
+    driver: Any,
+    pool: Any,
+    *,
+    after: str,
+    limit: int,
+    distributions: dict[str, list[tuple[float, int]]],
+) -> dict[str, Any]:
+    """Score the ``limit`` releases after ``after`` against catalog-wide quality-signal counts.
+
+    The rows are the ones :func:`iter_rarity_signals` yields for the same releases. Nothing is kept
+    between calls, so any process can serve any page, and a retry repeats one page.
+    """
+    ids = await _fetch_release_id_page(driver, after, limit)
+    if not ids:
+        return {"items": [], "next_after": None}
+    community_map = await _load_page_community_counts(pool, ids)
+    signals = await _fetch_page_signals(driver, ids)
+    frozen = {name: _Distribution.from_counts(counts) for name, counts in distributions.items()}
+    return {
+        "items": _score_page(signals, community_map, frozen, datetime.now(UTC).year),
+        "next_after": _next_after(ids, limit),
+    }
 
 
 async def _warn_on_incomplete_coverage(driver: Any, scored: int) -> None:

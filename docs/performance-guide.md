@@ -115,6 +115,59 @@ silently rewrite another repository's schema, image, or runtime configuration.
 - The default test suite remains isolated from live services.
 - Performance results do not contain credentials, tokens, or private URLs.
 
+
+## Autocomplete ranking
+
+Artist, label, genre, style and person autocomplete (`gm-catalog-api-4wgh`, audit H15) send `{limit}` to the Lucene
+fulltext procedure, so only the best `limit` names are scored and returned (`the*`: 163 ms before, 3 to 7 ms warm).
+
+The typed text is cut into tokens the way the index analyzer cuts names (letters and digits; an apostrophe or dot
+inside a word stays in it), so `jay-z` is `jay` and `z`, `ac/dc` is `ac` and `dc`, and `d'angelo` is one token.
+Every token is required and each is a prefix (`jay* AND z*`): only names holding all of them match, and plain input
+matches exactly what it did before (`dav bo` still finds `David Bowie`). The old query
+sent `jay-z` to Lucene as one escaped prefix, which matched nothing, so punctuated names could not be found at all.
+On lux: `jay-z` 79 matches (Jay-Z first), `ac/dc` 10 (AC/DC first), `d'angelo` 412 (D'Angelo first).
+
+Prefix terms are constant-score in Lucene, so the query adds boosts that decide who is "best":
+
+* two or more tokens: the whole phrase is boosted x100, so a name equal to what was typed outranks longer names that
+  merely start with it (`David Bowie` before `David Bowie Tribute`);
+* one token: a name containing that whole word is boosted over one that only starts with it.
+
+Known limits: Lucene cannot see how well known a name is, so among names with the same score the order
+is shorter name, then id (accepted by the operator); names that differ only by punctuation score the same (`David Bowie` and
+`David Bowie,`; a name equal to the typed text wins the tie); and a name that repeats the typed word (`The The The`) can
+outscore the single word (`The`).
+
+
+## Label DNA and similar labels
+
+`/api/label/{id}/dna` and `/api/label/{id}/similar` (`gm-catalog-api-j4ml`, audit H9; both cache for 24 h, so this is the cold path):
+
+* **Identity** reads `Label.release_count` and `Label.artist_count` (the enricher's; equal to the live counts for Columbia) and counts
+  live only for a label that lacks them. Label 1818: 9.37M db hits and 1.7 s live, 5 hits stored.
+* **Decades and active years** come from one read of the label's per-year release counts (a release has one year, so the counts
+  add). The two reads were the same scan twice (Columbia 1.05M hits each).
+* **Genres and styles** come from one pass over the label's releases, grouped by kind (Columbia: 8.5M hits and 39 MB, against 7.05M
+  plus 7.02M separately).
+* **Similar labels** take a label's top five styles from `(:Label)-[h:HAS_STYLE {release_count}]->(:Style)` and, for every other
+  label in each style, `h.release_count`: edge reads instead of a scan of every release in the style (54.7M hits and 28.3 s live,
+  driven by the size of the styles). Nothing is capped per style: the live form had no cap either. The edges are trusted only
+  when the enricher's completeness marker says its sweep finished: the newest `ExtractionCompletion` node is maintained
+  (`maintained_at` set) and has `stats_version >= 1`. No node, a null `stats_version` or an unmaintained node (a new dump is
+  importing, or a sweep stopped part way) means the live form runs and returns the same candidates; a partly filled or stale edge
+  set would otherwise drop labels and under-count `total_shared`. A real-Neo4j test covers a partial set under each marker state.
+  **Ties are now broken deterministically**: the top five styles tie-break by style name and the top 100 candidates by label id
+  (the old statement left both to the planner), in both forms, so the candidate lists can differ from an old response only where
+  the old order among ties was arbitrary. There is no label evaluation set (the evaluation harness is artist-only), so the
+  quality check is that candidates, totals and therefore cosine scores are identical to the live form's.
+* Candidate release counts read `Label.release_count` and count live where it is absent.
+
+Measured on lux before the enricher has written the new properties: the identity and year reads above. The similar-label figure
+(`< 10M` hits) can only be measured once `HAS_STYLE` exists. The 40% reduction for Columbia's DNA is about 33% from these changes
+(identity 6.65M, genre and style 5.5M, years 1.05M of 39.9M); the format and media reads are unchanged.
+
+
 ## Network cluster
 
 `/api/network/cluster/{artist_id}` (`gm-catalog-api-575h`, audit H6) ranks neighbours by shared releases, cuts to `limit`, and only
@@ -126,3 +179,4 @@ alphabetically first genre, absent when the artist has no genre). Where it is ab
 neighbour with the same rule, so the answer is the same before and after the enricher's first pass; only the cost differs. On lux
 (no artist has the property yet): ranking alone is 0.29M hits for Bowie and 0.54M for The Beatles (75 and 101 ms); with the live
 fallback for all 50 neighbours Bowie is 3.6M hits (0.5 s) and The Beatles 31M (3.4 s), against 37.5M for Bowie before.
+

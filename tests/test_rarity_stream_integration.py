@@ -11,6 +11,10 @@ Nothing here touches a shared database: ``just test-integration`` starts throwaw
 
 from __future__ import annotations
 
+from collections import Counter
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 from common import AsyncResilientNeo4jDriver
 
@@ -24,6 +28,19 @@ __all__ = ["neo4j_driver"]
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 _RELEASES = 53
+
+
+class _NoCommunityCounts:
+    """A pool whose `insights.community_counts` is empty, as it is on lux today."""
+
+    def connection(self) -> Any:
+        cursor = MagicMock(execute=AsyncMock(), fetchall=AsyncMock(return_value=[]))
+        cursor.__aenter__ = AsyncMock(return_value=cursor)
+        cursor.__aexit__ = AsyncMock(return_value=False)
+        connection = MagicMock(cursor=MagicMock(return_value=cursor))
+        connection.__aenter__ = AsyncMock(return_value=connection)
+        connection.__aexit__ = AsyncMock(return_value=False)
+        return connection
 
 
 async def _seed(driver: AsyncResilientNeo4jDriver) -> None:
@@ -102,6 +119,32 @@ async def test_streamed_rows_are_complete_ordered_and_ranked_as_before(neo4j_dri
     # can only reproduce it to the rounding of the stored score: compare with that tolerance.
     expected = await _oracle_hidden_gems(neo4j_driver, streamed)
     assert [row["hidden_gem_score"] for row in streamed] == pytest.approx(expected, abs=0.11)
+
+
+@pytest.mark.parametrize("page_size", [7, 53, 1000])
+async def test_paged_rows_are_the_streamed_rows(neo4j_driver: AsyncResilientNeo4jDriver, page_size: int) -> None:
+    """The route pair walks the same rows as the old stream, with the summed counts sent back per page."""
+    await _seed(neo4j_driver)
+    streamed = [row async for row in rarity_queries.iter_rarity_signals(neo4j_driver, None, page_size=page_size)]
+
+    totals: dict[str, Counter[float]] = {"artist": Counter(), "label": Counter(), "genre": Counter()}
+    after: str | None = ""
+    while after is not None:
+        quality = await rarity_queries.fetch_rarity_quality_counts(neo4j_driver, after=after, limit=page_size)
+        assert quality["release_total"] == _RELEASES
+        for name, counter in totals.items():
+            counter.update(dict(quality[name]))
+        after = quality["next_after"]
+    distributions = {name: sorted(counter.items()) for name, counter in totals.items()}
+
+    paged: list[dict[str, object]] = []
+    after = ""
+    while after is not None:
+        page = await rarity_queries.fetch_rarity_page(neo4j_driver, _NoCommunityCounts(), after=after, limit=page_size, distributions=distributions)
+        paged.extend(page["items"])
+        after = page["next_after"]
+
+    assert paged == streamed
 
 
 async def test_page_size_does_not_change_any_row(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
