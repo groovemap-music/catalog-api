@@ -24,9 +24,10 @@ def render_insights() -> str:
     operations: dict[str, str] = {}
     processing_budgets: dict[str, int | float] = {}
     for path, path_item in document["paths"].items():
-        operation_id = path_item["get"]["operationId"]
+        operation = path_item.get("get") or path_item["post"]
+        operation_id = operation["operationId"]
         operations[operation_id] = path
-        max_processing_seconds = path_item["get"].get("x-groovemap-max-processing-seconds")
+        max_processing_seconds = operation.get("x-groovemap-max-processing-seconds")
         if max_processing_seconds is not None:
             processing_budgets[operation_id] = max_processing_seconds
     constants = "\n".join(f"{name.upper()}_PATH = {json.dumps(path)}" for name, path in sorted(operations.items()))
