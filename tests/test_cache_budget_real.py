@@ -114,7 +114,7 @@ async def test_the_routes_stay_bounded_and_answer_the_same(valkey: Any, route: s
             patch.object(explore_router, "_neo4j_driver", object()),
             patch.object(explore_router, "_valkey", client),
             patch.dict(getattr(explore_router, dispatch), {entity_type: fake_query}),
-            patch.object(explore_router, "_MIN_CACHE_COMPUTE_SECONDS", 0.0),  # the fake queries are instant; cost has its own test
+            patch.object(explore_router, "_MIN_CACHE_RELEASES", 0),  # the fakes have no release counts; the cost rule has its own tests
             patch.object(explore_router, "store_within_budget", functools.partial(cache_budget.store_within_budget, max_keys=BUDGET)),
             patch.object(cache_budget, "record_cache_budget_full") as budget_full,
             patch("api.telemetry.record_cache_write_failure") as write_failure,
@@ -142,16 +142,16 @@ async def test_a_noeviction_valkey_never_sees_more_than_the_budget(valkey: Any) 
     assert await valkey.dbsize() == BUDGET + 1  # the budgeted keys and their index
 
 
-HEAVY = 5.0  # seconds a heavy root takes to compute
-CHEAP = 0.01
+HEAVY = 100_000  # releases behind a heavy root
+CHEAP = 3  # releases behind a stub name
 
 
 async def test_a_walk_of_cheap_roots_leaves_the_slots_to_heavy_ones(valkey: Any) -> None:
     """A client walking distinct cheap names (60/min, so ~100 in two minutes) must not fill strata's budget."""
-    admit = functools.partial(cache_budget.store_within_budget, valkey, cache="strata", ttl=300, max_keys=BUDGET, min_compute_seconds=0.2)
+    admit = functools.partial(cache_budget.store_within_budget, valkey, cache="strata", ttl=300, max_keys=BUDGET, min_cost=500)
 
-    cheap = [await admit(key=f"strata:cheap{i}", value="c", compute_seconds=CHEAP) for i in range(WALK)]
-    heavy = [await admit(key=f"strata:heavy{i}", value="h", compute_seconds=HEAVY) for i in range(BUDGET)]
+    cheap = [await admit(key=f"strata:cheap{i}", value="c", cost=CHEAP) for i in range(WALK)]
+    heavy = [await admit(key=f"strata:heavy{i}", value="h", cost=HEAVY) for i in range(BUDGET)]
 
     assert not any(cheap)  # a cheap root is recomputed cheaper than a slot is worth
     assert all(heavy)  # and every heavy root is still cacheable afterwards
@@ -164,14 +164,10 @@ async def test_cheap_roots_never_register_as_a_spent_budget(valkey: Any) -> None
     """A skip for cost is not ``budget_full``, so only real exhaustion of the budget raises the alert."""
     with patch.object(cache_budget, "record_cache_budget_full") as full:
         for i in range(WALK):
-            await cache_budget.store_within_budget(
-                valkey, cache="t", key=f"t:{i}", value="v", ttl=300, max_keys=BUDGET, compute_seconds=CHEAP, min_compute_seconds=0.2
-            )
+            await cache_budget.store_within_budget(valkey, cache="t", key=f"t:{i}", value="v", ttl=300, max_keys=BUDGET, cost=CHEAP, min_cost=500)
         full.assert_not_called()
         for i in range(BUDGET + 3):
-            await cache_budget.store_within_budget(
-                valkey, cache="t", key=f"t:h{i}", value="v", ttl=300, max_keys=BUDGET, compute_seconds=HEAVY, min_compute_seconds=0.2
-            )
+            await cache_budget.store_within_budget(valkey, cache="t", key=f"t:h{i}", value="v", ttl=300, max_keys=BUDGET, cost=HEAVY, min_cost=500)
         assert full.call_count == 3  # three heavy writes met a genuinely full budget
 
 
@@ -196,3 +192,48 @@ async def test_without_the_cost_rule_the_same_walk_locks_heavy_roots_out(valkey:
         heavy = [await admit(key=f"strata:heavy{i}", value="h") for i in range(BUDGET)]
 
     assert not any(heavy)  # every heavy root refused, recomputed on each request for the whole TTL
+
+
+async def test_latency_plays_no_part_in_admission(valkey: Any) -> None:
+    """A client cannot buy a slot by slowing a cheap name down: the cost is the data's, not the clock's."""
+    import time
+
+    admit = functools.partial(cache_budget.store_within_budget, valkey, cache="strata", ttl=300, max_keys=BUDGET, min_cost=500)
+    started = time.monotonic()
+    await asyncio.sleep(1.5)  # a cheap root made slow by load
+    assert await admit(key="strata:slow-but-cheap", value="c", cost=CHEAP) is False
+    assert time.monotonic() - started >= 1.5
+
+
+@pytest.mark.parametrize(
+    ("route", "prefix", "entity_type", "dispatch"),
+    [("explore", "explore:", "artist", "EXPLORE_DISPATCH"), ("get_trends", "trends:", "genre", "TRENDS_DISPATCH")],
+)
+async def test_the_routes_walk_of_cheap_names_leaves_heavy_names_cacheable(
+    valkey: Any, route: str, prefix: str, entity_type: str, dispatch: str
+) -> None:
+    """The real routes, the real admission rule (500 releases), a real Valkey: no patching of the threshold."""
+
+    async def fake_query(_driver: Any, name: str) -> Any:
+        releases = 50_000 if name.startswith("Heavy") else 3
+        if route == "explore":
+            return {"id": name, "name": name, "release_count": releases, "label_count": 2, "alias_count": 1}
+        return [{"year": 2000, "count": releases}]
+
+    handler = getattr(explore_router, route)
+    with (
+        patch.object(explore_router, "_neo4j_driver", object()),
+        patch.object(explore_router, "_valkey", valkey),
+        patch.dict(getattr(explore_router, dispatch), {entity_type: fake_query}),
+        patch.object(explore_router, "store_within_budget", functools.partial(cache_budget.store_within_budget, max_keys=BUDGET)),
+        patch.object(cache_budget, "record_cache_budget_full") as budget_full,
+    ):
+        cheap = [(await handler(name=f"Cheap {i}", type=entity_type)).body for i in range(WALK)]
+        assert len(await _keys(valkey, prefix)) == 0  # the walk took no slot
+        heavy = [(await handler(name=f"Heavy {i}", type=entity_type)).body for i in range(BUDGET)]
+        assert len(await _keys(valkey, prefix)) == BUDGET  # and every heavy name was cached after it
+        budget_full.assert_not_called()
+        again = [(await handler(name=f"Heavy {i}", type=entity_type)).body for i in range(BUDGET)]
+
+    assert heavy == again  # served from the cache, byte for byte
+    assert len(cheap) == WALK

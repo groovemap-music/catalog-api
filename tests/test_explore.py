@@ -278,7 +278,7 @@ class TestTrendsCaching:
     @pytest.fixture(autouse=True)
     def _store_every_result(self) -> Any:
         """These tests use instant fake queries; the cost rule has its own tests (``test_cache_budget.py``)."""
-        with patch("api.routers.explore._MIN_CACHE_COMPUTE_SECONDS", 0.0):
+        with patch("api.routers.explore._MIN_CACHE_RELEASES", 0):
             yield
 
     def test_trends_genre_cache_hit(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
@@ -365,7 +365,7 @@ class TestExploreCaching:
     @pytest.fixture(autouse=True)
     def _store_every_result(self) -> Any:
         """These tests use instant fake queries; the cost rule has its own tests (``test_cache_budget.py``)."""
-        with patch("api.routers.explore._MIN_CACHE_COMPUTE_SECONDS", 0.0):
+        with patch("api.routers.explore._MIN_CACHE_RELEASES", 0):
             yield
 
     def test_explore_artist_cache_hit(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
