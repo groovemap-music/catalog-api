@@ -290,3 +290,196 @@ class TestConfigurationAndStartup:
         assert from_url.await_count == 2
         assert [call.args[0] for call in from_url.await_args_list] == ["valkey://valkey:6379/0", "valkey://valkey-cache:6379/0"]
         assert created.__class__.__name__ == "RoutedValkey"
+
+
+class TestStrictMode:
+    """A caller that must not mistake an unreachable cache for an empty one gets the error."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure", FAILURES, ids=lambda f: type(f).__name__)
+    async def test_the_strict_view_raises_where_the_default_serves_a_miss(self, failure: Exception) -> None:
+        _auth, cache, routed = _pair()
+        for command in ("get", "delete", "scan", "eval"):
+            setattr(cache, command, AsyncMock(side_effect=failure))
+        name = valkey_key("explore:x")
+        strict = routed.strict()
+
+        assert await routed.get(name) is None
+        assert await routed.delete(name) == 0
+        assert await routed.scan(cursor=0, match=valkey_pattern_explore()) == (0, [])
+        for call in (
+            strict.get(name),
+            strict.delete(name),
+            strict.scan(cursor=0, match=valkey_pattern_explore()),
+            strict.eval("return 1", 1, name),
+        ):
+            with pytest.raises(type(failure)):
+                await call
+
+    @pytest.mark.asyncio
+    async def test_the_strict_view_still_routes_and_reaches_the_same_instances(self) -> None:
+        auth, cache, routed = _pair()
+        strict = routed.strict()
+
+        await strict.setex(valkey_key("explore:a"), 60, "v")
+        await strict.setex(valkey_key("revoked:jti:j"), 60, "1")
+
+        assert await cache.get(valkey_key("explore:a")) == "v"
+        assert await auth.get(valkey_key("revoked:jti:j")) == "1"
+        assert strict.auth is routed.auth
+        assert strict.cache is routed.cache
+
+    def test_with_no_cache_instance_the_client_is_returned_unchanged(self) -> None:
+        from api.valkey_routing import strict_valkey
+
+        plain = object()
+        assert strict_valkey(plain) is plain
+        _auth, _cache, routed = _pair()
+        assert strict_valkey(routed)._strict is True
+
+
+class TestErasureAndInvalidationFailWithTheCacheDown:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure", FAILURES, ids=lambda f: type(f).__name__)
+    async def test_an_erasure_does_not_report_complete_while_user_data_sits_on_the_cache_instance(self, failure: Exception) -> None:
+        from api.routers import activity as activity_router
+
+        _auth, cache, routed = _pair()
+        await cache.set(valkey_key("recommend:enhanced:u1"), "recommendations")
+        for command in ("scan", "delete", "get"):
+            setattr(cache, command, AsyncMock(side_effect=failure))
+        with patch.object(activity_router, "_valkey", routed):
+            result = await activity_router._erase_valkey("u1")
+
+        assert result is not None, "the erasure reported complete without being able to look at the cache instance"
+        assert "Valkey deletion failed" in result
+
+    @pytest.mark.asyncio
+    async def test_the_survivor_count_raises_rather_than_counting_zero(self) -> None:
+        from api.routers import activity as activity_router
+
+        _auth, cache, routed = _pair()
+        cache.scan = AsyncMock(side_effect=ValkeyConnectionError("down"))  # type: ignore[method-assign]
+
+        with pytest.raises(ValkeyConnectionError):
+            await activity_router._surviving_recommendation_keys(routed, "u1")
+
+    @pytest.mark.asyncio
+    async def test_an_erasure_with_the_cache_up_still_completes_and_removes_the_keys(self) -> None:
+        from api.routers import activity as activity_router
+
+        auth, cache, routed = _pair()
+        await cache.set(valkey_key("recommend:enhanced:u1"), "recommendations")
+        await cache.set(valkey_key("recommend:explore:u1:artist:1:2"), "recommendations")
+        await auth.set(valkey_key("sync:lock:u1"), "1")
+        with patch.object(activity_router, "_valkey", routed):
+            result = await activity_router._erase_valkey("u1")
+
+        assert result is None
+        assert await cache.keys("*") == []
+        assert await auth.keys("*") == []
+
+    @pytest.mark.asyncio
+    async def test_the_import_invalidation_raises_so_the_marker_is_not_written(self) -> None:
+        from api import import_cache
+
+        auth, cache, routed = _pair()
+        await cache.set(valkey_key("explore:a"), "stale")
+        await auth.set(import_cache._MARKER_KEY, "1")
+        cache.scan = AsyncMock(side_effect=ValkeyConnectionError("down"))  # type: ignore[method-assign]
+        with (
+            patch.object(import_cache, "latest_discogs_version", AsyncMock(return_value="2")),
+            patch.object(import_cache, "graph_extraction_complete", AsyncMock(return_value=True)),
+            patch.object(import_cache, "graph_maintenance", AsyncMock(return_value=(True, None))),
+            pytest.raises(ValkeyConnectionError),
+        ):
+            await import_cache.check_import_cache(AsyncMock(), routed, None)
+
+        assert await auth.get(import_cache._MARKER_KEY) == "1", "the import was recorded as handled while stale entries remain"
+
+    @pytest.mark.asyncio
+    async def test_the_next_poll_invalidates_once_the_cache_is_back(self) -> None:
+        from api import import_cache
+
+        auth, cache, routed = _pair()
+        await cache.set(valkey_key("explore:a"), "stale")
+        await auth.set(import_cache._MARKER_KEY, "1")
+        patches = (
+            patch.object(import_cache, "latest_discogs_version", AsyncMock(return_value="2")),
+            patch.object(import_cache, "graph_extraction_complete", AsyncMock(return_value=True)),
+            patch.object(import_cache, "graph_maintenance", AsyncMock(return_value=(True, None))),
+        )
+        with patches[0], patches[1], patches[2]:
+            real_scan = cache.scan
+            cache.scan = AsyncMock(side_effect=ValkeyConnectionError("down"))  # type: ignore[method-assign]
+            with pytest.raises(ValkeyConnectionError):
+                await import_cache.check_import_cache(AsyncMock(), routed, None)
+            cache.scan = real_scan  # type: ignore[method-assign]
+            assert await import_cache.check_import_cache(AsyncMock(), routed, None) is True
+
+        assert await cache.keys("*") == []
+        assert await auth.get(import_cache._MARKER_KEY) == "2"
+
+
+def _with_info(client: Any, *, policy: str, keys: int, evicted: int = 0) -> None:
+    """fakeredis has no INFO; answer the three sections the storage query reads."""
+    sections = {
+        "memory": {"used_memory_human": "1M", "used_memory_peak_human": "2M", "maxmemory_policy": policy},
+        "keyspace": {"db0": {"keys": keys}},
+        "stats": {"evicted_keys": evicted},
+    }
+    client.info = AsyncMock(side_effect=lambda section: sections[section])
+
+
+class TestAdminStorageIncludesTheCacheInstance:
+    @pytest.mark.asyncio
+    async def test_the_cache_instance_has_its_own_numbers_beside_the_auth_ones(self) -> None:
+        from api.queries.admin_queries import get_valkey_storage
+
+        auth, cache, routed = _pair()
+        await auth.set(valkey_key("revoked:jti:a"), "1")
+        for number in range(3):
+            await cache.set(valkey_key(f"explore:{number}"), "v")
+        _with_info(auth, policy="noeviction", keys=1)
+        _with_info(cache, policy="allkeys-lru", keys=3, evicted=7)
+
+        storage = await get_valkey_storage(routed)
+
+        assert storage["status"] == "ok"
+        assert storage["total_keys"] == 1
+        assert storage["keys_by_prefix"] == {"revoked:": 1}
+        assert storage["cache_instance"]["status"] == "ok"
+        assert storage["cache_instance"]["total_keys"] == 3
+        assert storage["cache_instance"]["keys_by_prefix"] == {"explore:": 3}
+        assert storage["maxmemory_policy"] == "noeviction"
+        assert storage["cache_instance"]["maxmemory_policy"] == "allkeys-lru"
+        assert storage["cache_instance"]["evicted_keys"] == 7
+        assert storage["evicted_keys"] == 0
+
+    @pytest.mark.asyncio
+    async def test_an_unreachable_cache_instance_is_reported_and_does_not_fail_the_page(self) -> None:
+        from api.queries.admin_queries import get_valkey_storage
+
+        auth, cache, routed = _pair()
+        await auth.set(valkey_key("revoked:jti:a"), "1")
+        _with_info(auth, policy="noeviction", keys=1)
+        cache.info = AsyncMock(side_effect=ValkeyConnectionError("down"))  # type: ignore[method-assign]
+
+        storage = await get_valkey_storage(routed)
+
+        assert storage["status"] == "ok"
+        assert storage["total_keys"] == 1
+        assert storage["cache_instance"] == {"status": "unavailable", "error": "ConnectionError"}
+
+    @pytest.mark.asyncio
+    async def test_with_one_instance_the_response_has_no_cache_section(self) -> None:
+        from api.queries.admin_queries import get_valkey_storage
+
+        auth, _cache, _routed = _pair()
+        await auth.set(valkey_key("revoked:jti:a"), "1")
+        _with_info(auth, policy="noeviction", keys=1)
+
+        storage = await get_valkey_storage(auth)
+
+        assert "cache_instance" not in storage
+        assert storage["total_keys"] == 1

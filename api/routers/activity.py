@@ -33,6 +33,7 @@ from api.dependencies import UnifiedAuth, require_user, require_user_or_app_toke
 from api.models import ActivityOutcomeRequest, ConsentUpdateRequest, ErasureRequest
 from api.snapshot_store import SnapshotStore
 from api.valkey_keys import REVOKED_FALLBACK_TTL_SECONDS, valkey_key, valkey_pattern, with_legacy_keys, with_legacy_patterns
+from api.valkey_routing import strict_valkey
 
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -565,7 +566,11 @@ _RECOMMENDATION_KEY_PATTERNS: tuple[str, ...] = ("recommend:explore:{user_id}:*"
 
 
 async def _surviving_recommendation_keys(valkey: Any, user_id: str) -> int:
-    """Count the per-user recommendation keys still present after the invalidation."""
+    """Count the per-user recommendation keys still present after the invalidation.
+
+    Strict: an unreachable cache instance raises, because "I could not look" is not "nothing survived".
+    """
+    valkey = strict_valkey(valkey)
     surviving = 0
     patterns = with_legacy_patterns([valkey_pattern(pattern.format(user_id=user_id)) for pattern in _RECOMMENDATION_KEY_PATTERNS])
     for pattern in patterns:
@@ -593,6 +598,9 @@ async def _erase_valkey(user_id: str) -> str | None:
     valkey = _valkey if _valkey is not None else activity.valkey_client()
     if valkey is None:
         return "Valkey is not configured; per-user cache keys were not removed"
+    # The recommendation keys may live on a separate cache instance. If it is unreachable the sweep and its
+    # verification must fail the erasure, as an unreachable single Valkey always did, not report it complete.
+    valkey = strict_valkey(valkey)
     try:
         await RecommendCache(valkey=valkey).invalidate_user(user_id)
         await valkey.delete(

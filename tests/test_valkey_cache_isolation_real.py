@@ -158,3 +158,79 @@ async def test_import_invalidation_clears_the_cache_instance(pair: Pair) -> None
     assert deleted >= 4
     assert await _keys(pair.cache) == []
     assert await _keys(pair.auth) == sorted([valkey_key("import_cache:discogs_version"), valkey_key("revoked:jti:keep")])
+
+
+async def test_an_erasure_fails_rather_than_reporting_complete_when_the_cache_instance_is_down(pair: Pair) -> None:
+    from unittest.mock import patch
+
+    from api.routers import activity as activity_router
+
+    await pair.routed.set(valkey_key("recommend:enhanced:u1"), "recommendations")
+    await pair.routed.set(valkey_key("sync:lock:u1"), "1")
+    pair.cache_container.remove()
+
+    with patch.object(activity_router, "_valkey", pair.routed):
+        result = await activity_router._erase_valkey("u1")
+
+    print(f"\nERASURE with the cache instance down: {result!r}")
+    assert result is not None
+    assert "Valkey deletion failed" in result
+
+
+async def test_an_erasure_with_both_instances_up_removes_the_keys_from_both(pair: Pair) -> None:
+    from unittest.mock import patch
+
+    from api.routers import activity as activity_router
+
+    await pair.routed.set(valkey_key("recommend:enhanced:u1"), "recommendations")
+    await pair.routed.set(valkey_key("recommend:explore:u1:artist:1:2"), "recommendations")
+    await pair.routed.set(valkey_key("sync:lock:u1"), "1")
+    await pair.routed.set(valkey_key("recommend:enhanced:u2"), "keep")
+
+    with patch.object(activity_router, "_valkey", pair.routed):
+        assert await activity_router._erase_valkey("u1") is None
+
+    assert await _keys(pair.cache) == [valkey_key("recommend:enhanced:u2")]
+    assert await _keys(pair.auth) == []
+
+
+async def test_the_import_invalidation_raises_with_the_cache_down_and_the_marker_stays(pair: Pair) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    from api import import_cache
+
+    await pair.routed.set(valkey_key("explore:artist:a"), "stale")
+    await pair.routed.set(import_cache._MARKER_KEY, "1")
+    pair.cache_container.remove()
+
+    with (
+        patch.object(import_cache, "latest_discogs_version", AsyncMock(return_value="2")),
+        patch.object(import_cache, "graph_extraction_complete", AsyncMock(return_value=True)),
+        patch.object(import_cache, "graph_maintenance", AsyncMock(return_value=(True, None))),
+        pytest.raises(Exception, match=r"onnect|Connection|refused"),
+    ):
+        await import_cache.check_import_cache(AsyncMock(), pair.routed, None)
+
+    assert await pair.routed.get(import_cache._MARKER_KEY) == "1"
+
+
+async def test_admin_storage_reports_each_instance_with_its_own_policy_and_evictions(pair: Pair) -> None:
+    from api.queries.admin_queries import get_valkey_storage
+
+    await pair.routed.setex(valkey_key("revoked:jti:a"), 3600, "1")
+    for number in range(3000):
+        await pair.routed.setex(valkey_key(f"explore:artist:name-{number}"), 3600, VALUE)
+
+    storage = await get_valkey_storage(pair.routed)
+
+    print(
+        f"\nSTORAGE auth: policy {storage['maxmemory_policy']}, {storage['total_keys']} keys, {storage['evicted_keys']} evicted; "
+        f"cache: policy {storage['cache_instance']['maxmemory_policy']}, {storage['cache_instance']['total_keys']} keys, "
+        f"{storage['cache_instance']['evicted_keys']} evicted"
+    )
+    assert storage["maxmemory_policy"] == "noeviction"
+    assert storage["evicted_keys"] == 0
+    assert storage["total_keys"] == 1
+    assert storage["cache_instance"]["maxmemory_policy"] == "allkeys-lru"
+    assert storage["cache_instance"]["evicted_keys"] > 0
+    assert "explore:" in storage["cache_instance"]["keys_by_prefix"]

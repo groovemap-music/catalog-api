@@ -34,6 +34,7 @@ from api.queries.helpers import run_single
 from api.reattach_trigger import _LATCH_PRESENT, _LATEST_COMPLETE, DISCOGS_DATA_TYPES, _scalar
 from api.telemetry import CACHE_EXPAND, CACHE_EXPLORE, CACHE_STRATA, CACHE_TRENDS
 from api.valkey_keys import valkey_key, valkey_pattern, with_legacy_keys, with_legacy_patterns
+from api.valkey_routing import strict_valkey
 
 
 logger = structlog.get_logger(__name__)
@@ -108,7 +109,12 @@ async def graph_maintenance(driver: Any, version: str) -> tuple[bool, int | None
 
 
 async def invalidate_explore_and_trends(valkey: Any) -> int:
-    """Delete every Explore and trends key by SCAN, and return how many were deleted."""
+    """Delete every Explore and trends key by SCAN, and return how many were deleted.
+
+    Strict: when the cache instance cannot be reached this raises, so the caller does not record the import
+    as handled while stale entries remain; the watcher retries on its next poll.
+    """
+    valkey = strict_valkey(valkey)
     deleted = 0
     # Built per call: the key prefix is configuration, not a constant of the module.
     for index in with_legacy_keys([key for cache in _BUDGETED_CACHES for key in (index_key(cache), cost_key(cache))]):

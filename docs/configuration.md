@@ -424,5 +424,6 @@ With `CATALOG_CACHE_VALKEY_HOST` set, `api/valkey_routing.py` sends each command
 - A cache instance that is down, full, read-only or timing out gives misses: reads return nothing, writes are not stored, scans are empty, and a warning with `alert=valkey_cache_unavailable` is logged at most once a minute. An auth command that fails still raises, and still answers 503 where it does today.
 - A budget index that was evicted counts as empty. If its cost set was evicted while it survived, the index is forgotten so writes are not refused until it expires.
 - Import invalidation clears the cache instance. Cache entries written to `VALKEY_HOST` before the overlay was turned on are not read any more and expire with their TTL.
-- `/api/admin` Valkey storage statistics describe `VALKEY_HOST` only.
+- The account erasure and the import-cache invalidation do not treat an unreachable cache instance as an empty one: they raise, so an erasure reports `Valkey deletion failed` instead of complete (ADR 0010 verifies deletion) and the import is not recorded as handled until the next poll succeeds.
+- `/api/admin` Valkey storage statistics keep the main instance's figures at the top level and add the cache instance under `cache_instance`, with its eviction policy, evicted-key count, memory and key distribution; an unreachable cache shows `{"status": "unavailable"}`.
 - A new key family has to be added to `CACHE_FAMILIES` or `AUTH_FAMILIES`; `tests/test_valkey_routing.py` fails on a family in the source that is in neither.

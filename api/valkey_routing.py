@@ -108,9 +108,36 @@ def _report(command: str, error: Exception) -> None:
 class RoutedValkey:
     """The service's Valkey client, sending each command to the instance its key belongs on."""
 
-    def __init__(self, auth: Any, cache: Any) -> None:
+    def __init__(self, auth: Any, cache: Any, *, strict: bool = False) -> None:
         self._auth = auth
         self._cache = cache
+        self._strict = strict
+
+    def strict(self) -> RoutedValkey:
+        """The same two connections, with a cache failure raised instead of served as a miss.
+
+        For the callers that must not mistake an unreachable cache for an empty one: an erasure that
+        has to verify the per-user keys are gone, and the import invalidation that must not record the
+        import as handled while stale entries remain. Everything else wants the default.
+        """
+        return RoutedValkey(self._auth, self._cache, strict=True)
+
+    @property
+    def auth(self) -> Any:
+        """The noeviction instance's client."""
+        return self._auth
+
+    @property
+    def cache(self) -> Any:
+        """The evicting instance's client."""
+        return self._cache
+
+    def _miss(self, command: str, error: Exception, miss: Any) -> Any:
+        """The answer for a cache command that failed: the error in strict mode, otherwise a miss."""
+        if self._strict:
+            raise error
+        _report(command, error)
+        return miss
 
     async def _one(self, command: str, name: Any, args: tuple[Any, ...], kwargs: dict[str, Any], miss: Any) -> Any:
         if not is_cache_name(name):
@@ -118,8 +145,7 @@ class RoutedValkey:
         try:
             return await getattr(self._cache, command)(name, *args, **kwargs)
         except VALKEY_UNAVAILABLE_ERRORS as error:
-            _report(command, error)
-            return miss
+            return self._miss(command, error, miss)
 
     async def get(self, name: Any, *args: Any, **kwargs: Any) -> Any:
         return await self._one("get", name, args, kwargs, None)
@@ -181,7 +207,7 @@ class RoutedValkey:
             try:
                 deleted += int(await self._cache.delete(*cache_names))
             except VALKEY_UNAVAILABLE_ERRORS as error:
-                _report("delete", error)
+                self._miss("delete", error, 0)
         return deleted
 
     async def scan(self, cursor: Any = 0, match: Any = None, count: Any = None, **kwargs: Any) -> Any:
@@ -191,8 +217,7 @@ class RoutedValkey:
         try:
             return await self._cache.scan(cursor=cursor, match=match, count=count, **kwargs)
         except VALKEY_UNAVAILABLE_ERRORS as error:
-            _report("scan", error)
-            return (0, [])
+            return self._miss("scan", error, (0, []))
 
     async def eval(self, script: str, numkeys: int, *keys_and_args: Any) -> Any:
         """Run a script on the instance its first key belongs on (the auth instance when it names no key)."""
@@ -201,8 +226,7 @@ class RoutedValkey:
         try:
             return await self._cache.eval(script, numkeys, *keys_and_args)
         except VALKEY_UNAVAILABLE_ERRORS as error:
-            _report("eval", error)
-            return 0
+            return self._miss("eval", error, 0)
 
     async def aclose(self) -> None:
         """Close both connections; the cache one never stops the auth one from closing."""
@@ -216,6 +240,14 @@ class RoutedValkey:
     def __getattr__(self, name: str) -> Any:
         """Anything not routed above (ping, info, connection pool) is the auth instance's."""
         return getattr(self._auth, name)
+
+
+def strict_valkey(valkey: Any) -> Any:
+    """``valkey`` with cache failures raised, when it routes to a cache instance; otherwise ``valkey`` itself.
+
+    With no cache instance configured there is one client and it already raises, so nothing changes.
+    """
+    return valkey.strict() if isinstance(valkey, RoutedValkey) else valkey
 
 
 def route_valkey(auth: aiovalkey.Valkey, cache: aiovalkey.Valkey) -> aiovalkey.Valkey:
