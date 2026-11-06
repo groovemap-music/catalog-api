@@ -8,6 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PERSISTENCE_PRODUCER_COMMIT = "7937373f328e21efd745fe51357600d564a2ae75"
+MUSICBRAINZ_PROJECTIONS_PRODUCER_COMMIT = "27937811f8fe8cf8aca72064557957e69f9e5dae"
 
 
 def digest(path: Path) -> str:
@@ -32,6 +33,18 @@ for catalog_producer in ("discogs", "musicbrainz"):
     catalog_source = json.loads((producer_root / "source.json").read_text())
     assert digest(producer_root / "contract.json") == catalog_source["contract_sha256"]
     assert digest(producer_root / "python/catalog_contract.py") == catalog_source["binding_sha256"]
+
+# The MusicBrainz relationship types musicbrainz-graph-enricher projects onto Neo4j, promoted byte-for-byte. The typed
+# queries are checked against it by tests/test_musicbrainz_relationship_types.py on every run.
+projections_root = ROOT / "contracts/musicbrainz-projections/v1"
+projections_source = json.loads((projections_root / "source.json").read_text())
+relationship_types = json.loads((projections_root / "relationship-types.json").read_text())
+assert digest(projections_root / "relationship-types.json") == projections_source["contract_sha256"]
+assert projections_source["producer_commit"] == MUSICBRAINZ_PROJECTIONS_PRODUCER_COMMIT
+assert projections_source["producer_repository"] == "https://github.com/groovemap-music/musicbrainz-graph-enricher"
+assert relationship_types["contract"] == "groovemap.musicbrainz-graph-enricher.relationship-types"
+assert relationship_types["version"] == 1
+assert relationship_types["edge_types"] == sorted(set(relationship_types["relationship_types"].values()))
 
 assert digest(ROOT / "contracts/persistence/v1/compatibility.json") == persistence_source["contract_sha256"]
 assert persistence_source["producer_commit"] == PERSISTENCE_PRODUCER_COMMIT

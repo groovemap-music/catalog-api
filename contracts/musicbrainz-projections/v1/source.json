@@ -1,0 +1,6 @@
+{
+  "contract_sha256": "ce7cf064d7a5ed00f2ec0854a68ea1c2c811a255adeb204c26ff840e32925be6",
+  "producer_commit": "27937811f8fe8cf8aca72064557957e69f9e5dae",
+  "producer_path": "contracts/projections/v1/relationship-types.json",
+  "producer_repository": "https://github.com/groovemap-music/musicbrainz-graph-enricher"
+}
