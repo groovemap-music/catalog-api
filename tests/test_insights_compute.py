@@ -110,6 +110,35 @@ class TestGenreTrendsEndpoint:
 _CONTRACT = Path(__file__).parents[1] / "api/contracts/internal-insights/v1/openapi.yaml"
 
 
+class TestGenreTrendsTimeout:
+    """A real timeout on the genre-trends read is a retryable failure, never empty data."""
+
+    def test_503_on_transaction_timeout(self, test_client: TestClient) -> None:
+        err = _neo4j_error("Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration", "transaction timed out")
+        with patch("api.routers.insights_compute.query_genre_trends", new=AsyncMock(side_effect=err)):
+            response = test_client.get("/api/internal/insights/genre-trends")
+        assert response.status_code == 503
+        assert response.json()["code"] == "Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration"
+        assert "items" not in response.json()
+
+    def test_non_retryable_error_is_not_masked_as_503(self, test_client: TestClient) -> None:
+        err = _neo4j_error("Neo.ClientError.Statement.SyntaxError", "invalid syntax")
+        with patch("api.routers.insights_compute.query_genre_trends", new=AsyncMock(side_effect=err)):
+            response = test_client.get("/api/internal/insights/genre-trends")
+        assert response.status_code == 500
+
+
+def test_genre_trends_contract_publishes_the_producer_read_budget() -> None:
+    """The budget consumers pin is the server-side timeout the producer enforces, above the 30 s default."""
+    from api.queries.helpers import DEFAULT_READ_TIMEOUT_SECONDS
+    from api.queries.insights_neo4j_queries import GENRE_TRENDS_QUERY_TIMEOUT_SECONDS
+
+    contract = yaml.safe_load(_CONTRACT.read_text(encoding="utf-8"))
+    operation = contract["paths"]["/api/internal/insights/genre-trends"]["get"]
+    assert operation["x-groovemap-max-processing-seconds"] == GENRE_TRENDS_QUERY_TIMEOUT_SECONDS
+    assert GENRE_TRENDS_QUERY_TIMEOUT_SECONDS > DEFAULT_READ_TIMEOUT_SECONDS
+
+
 def test_style_year_counts_contract_publishes_the_producer_read_budget() -> None:
     """The processing budget consumers pin is the server-side timeout the producer enforces."""
     from api.queries.insights_neo4j_queries import STYLE_YEAR_QUERY_TIMEOUT_SECONDS
@@ -117,7 +146,7 @@ def test_style_year_counts_contract_publishes_the_producer_read_budget() -> None
     contract = yaml.safe_load(_CONTRACT.read_text(encoding="utf-8"))
     operation = contract["paths"]["/api/internal/insights/style-year-counts"]["get"]
     assert operation["x-groovemap-max-processing-seconds"] == STYLE_YEAR_QUERY_TIMEOUT_SECONDS
-    assert contract["info"]["version"] == "1.7.0"
+    assert contract["info"]["version"] == "1.8.0"
 
 
 _STYLE_YEAR_RESULT = {
