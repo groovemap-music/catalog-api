@@ -185,6 +185,19 @@ async def admin_logout(
 # ---------------------------------------------------------------------------
 
 
+def _reported_status(row: dict[str, Any]) -> str:
+    """The status an extraction row is shown with.
+
+    The extractor goes straight from Completed to Waiting, so rows written before a finished run
+    was stored as ``completed`` hold ``waiting`` with ``completed_at`` set. A ``waiting`` row that
+    never finished (no ``completed_at``) is a parked or never-started run and stays ``waiting``.
+    """
+    status_value: str = row["status"]
+    if status_value == "waiting" and row.get("completed_at"):
+        return "completed"
+    return status_value
+
+
 @router.get("/api/admin/extractions", response_model=ExtractionListResponse)
 async def list_extractions(
     current_admin: Annotated[dict[str, Any], Depends(require_admin)],  # noqa: ARG001
@@ -218,7 +231,7 @@ async def list_extractions(
             ExtractionHistoryResponse(
                 id=row["id"],
                 triggered_by=row["triggered_by"],
-                status=row["status"],
+                status=_reported_status(row),
                 started_at=row.get("started_at"),
                 completed_at=row.get("completed_at"),
                 duration_seconds=duration_seconds,
@@ -264,7 +277,7 @@ async def get_extraction(
         content=ExtractionHistoryResponse(
             id=row["id"],
             triggered_by=row["triggered_by"],
-            status=row["status"],
+            status=_reported_status(row),
             started_at=row.get("started_at"),
             completed_at=row.get("completed_at"),
             duration_seconds=duration_seconds,
@@ -485,18 +498,20 @@ async def _track_extraction(extraction_id: str, source: ExtractionSource) -> Non
                         # the end of a successful run. The surrounding run_*_loop immediately
                         # transitions Completed → Waiting before sleeping until the next
                         # periodic check, so "waiting" is the dominant terminal-success value
-                        # the tracker observes. Both are recorded verbatim so operators can
-                        # tell a freshly-finished run from one already back on the schedule.
+                        # the tracker observes. Either way the run finished, so it is stored
+                        # as completed: "waiting" is also the parked state, and storing it
+                        # made every successful run read as unfinished.
                         if extraction_status in ("completed", "waiting"):
                             async with _pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                                 await cur.execute(
-                                    "UPDATE extraction_history SET status = %s, completed_at = NOW(), record_counts = %s WHERE id = %s",
-                                    (extraction_status, json.dumps(record_counts), extraction_id),
+                                    "UPDATE extraction_history SET status = 'completed', completed_at = NOW(), record_counts = %s WHERE id = %s",
+                                    (json.dumps(record_counts), extraction_id),
                                 )
                             logger.info(
                                 "✅ Extraction finished",
                                 extraction_id=extraction_id,
-                                status=extraction_status,
+                                status="completed",
+                                observed_status=extraction_status,
                                 record_counts=record_counts,
                             )
                             return

@@ -821,6 +821,59 @@ class TestExtractionListWithData:
         assert data["extractions"][0]["duration_seconds"] == 300.0
 
 
+def _extraction_row(status: str, completed_at: datetime | None) -> dict[str, Any]:
+    return {
+        "id": str(uuid4()),
+        "triggered_by": TEST_ADMIN_ID,
+        "status": status,
+        "started_at": datetime(2026, 11, 6, 19, 0, tzinfo=UTC),
+        "completed_at": completed_at,
+        "record_counts": {"artists": 50},
+        "error_message": None,
+        "extractor_version": "1.0.0",
+        "created_at": datetime(2026, 11, 6, 19, 0, tzinfo=UTC),
+    }
+
+
+class TestFinishedRunsReadAsCompleted:
+    """Rows stored as waiting with completed_at set are finished runs; parked ones are not."""
+
+    FINISHED = datetime(2026, 11, 6, 20, 20, 24, tzinfo=UTC)
+
+    def test_list_shows_stored_waiting_with_completed_at_as_completed(self, test_client: TestClient, mock_cur: AsyncMock) -> None:
+        mock_cur.fetchone = AsyncMock(return_value={"total": 4})
+        mock_cur.fetchall = AsyncMock(
+            return_value=[
+                _extraction_row("waiting", self.FINISHED),
+                _extraction_row("waiting", None),
+                _extraction_row("pending", None),
+                _extraction_row("running", None),
+            ]
+        )
+        resp = test_client.get("/api/admin/extractions", headers=_admin_auth_headers())
+        assert resp.status_code == 200
+        assert [e["status"] for e in resp.json()["extractions"]] == ["completed", "waiting", "pending", "running"]
+
+    def test_get_shows_stored_waiting_with_completed_at_as_completed(self, test_client: TestClient, mock_cur: AsyncMock) -> None:
+        row = _extraction_row("waiting", self.FINISHED)
+        mock_cur.fetchone = AsyncMock(return_value=row)
+        resp = test_client.get(f"/api/admin/extractions/{row['id']}", headers=_admin_auth_headers())
+        assert resp.json()["status"] == "completed"
+        assert resp.json()["duration_seconds"] == 4824.0
+
+    def test_get_keeps_a_parked_run_waiting(self, test_client: TestClient, mock_cur: AsyncMock) -> None:
+        row = _extraction_row("waiting", None)
+        mock_cur.fetchone = AsyncMock(return_value=row)
+        resp = test_client.get(f"/api/admin/extractions/{row['id']}", headers=_admin_auth_headers())
+        assert resp.json()["status"] == "waiting"
+
+    def test_failed_with_completed_at_stays_failed(self, test_client: TestClient, mock_cur: AsyncMock) -> None:
+        row = _extraction_row("failed", self.FINISHED)
+        mock_cur.fetchone = AsyncMock(return_value=row)
+        resp = test_client.get(f"/api/admin/extractions/{row['id']}", headers=_admin_auth_headers())
+        assert resp.json()["status"] == "failed"
+
+
 class TestExtractionTriggerEdgeCases:
     @patch("api.routers.admin.httpx.AsyncClient")
     def test_unexpected_status(self, mock_client_cls: Any, test_client: TestClient, mock_cur: AsyncMock) -> None:
@@ -1003,8 +1056,8 @@ class TestTrackExtraction:
         terminal_calls = [args for args in executed if "completed_at = NOW()" in args[0]]
         assert terminal_calls, "expected a terminal UPDATE with completed_at"
         terminal_sql, terminal_params = terminal_calls[-1]
-        assert "SET status = %s" in terminal_sql
-        assert terminal_params[0] == "completed"
+        assert "SET status = 'completed'" in terminal_sql
+        assert terminal_params[1] == extraction_id
 
         admin_mod._pool = original_pool
         admin_mod._config = original_config
@@ -1013,7 +1066,7 @@ class TestTrackExtraction:
     async def test_waiting_extraction(self) -> None:
         """Extractor transitions Completed → Waiting before the tracker's 10s poll
         fires, so "waiting" is the common terminal-success value. The tracker must
-        accept it and write "waiting" verbatim to extraction_history.status."""
+        accept it and store the finished run as "completed", not "waiting"."""
         import api.routers.admin as admin_mod
 
         mock_pool = MagicMock()
@@ -1065,13 +1118,14 @@ class TestTrackExtraction:
 
             await admin_mod._track_extraction(extraction_id, "discogs")
 
-        # Assert the terminal UPDATE wrote "waiting" verbatim — not "completed".
+        # The terminal UPDATE stores the finished run as completed, though the extractor said waiting.
         executed = [call.args for call in mock_cur.execute.await_args_list]
         terminal_calls = [args for args in executed if "completed_at = NOW()" in args[0]]
         assert terminal_calls, "expected a terminal UPDATE with completed_at"
         terminal_sql, terminal_params = terminal_calls[-1]
-        assert "SET status = %s" in terminal_sql
-        assert terminal_params[0] == "waiting"
+        assert "SET status = 'completed'" in terminal_sql
+        assert "waiting" not in terminal_sql
+        assert terminal_params[1] == extraction_id
 
         admin_mod._pool = original_pool
         admin_mod._config = original_config
@@ -1192,8 +1246,8 @@ class TestTrackExtraction:
         executed = [call.args for call in mock_cur.execute.await_args_list]
         terminal_calls = [args for args in executed if "completed_at = NOW()" in args[0]]
         terminal_sql, terminal_params = terminal_calls[-1]
-        assert "SET status = %s" in terminal_sql
-        assert terminal_params[0] == "waiting"
+        assert "SET status = 'completed'" in terminal_sql
+        assert terminal_params[1] == extraction_id
 
         admin_mod._pool = original_pool
         admin_mod._config = original_config
