@@ -97,6 +97,27 @@ class TestQueryGenreTrends:
         assert result[0]["genre"] == "Jazz"
 
 
+class TestGenreTrendsBudget:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("genre", [None, "Jazz"])
+    async def test_read_carries_the_long_internal_timeout(self, genre: str | None) -> None:
+        """The full release-genre scan runs under its own budget, not the 30 s default that cut it off."""
+        from api.queries.insights_neo4j_queries import GENRE_TRENDS_QUERY_TIMEOUT_SECONDS, query_genre_trends
+
+        run_query = AsyncMock(return_value=[])
+        with patch("api.queries.insights_neo4j_queries.run_query", run_query):
+            await query_genre_trends(AsyncMock(), genre=genre)
+
+        assert run_query.await_args.kwargs["timeout"] == GENRE_TRENDS_QUERY_TIMEOUT_SECONDS
+
+    @pytest.mark.asyncio
+    async def test_a_timeout_propagates_instead_of_returning_empty_data(self) -> None:
+        from api.queries.insights_neo4j_queries import query_genre_trends
+
+        with patch("api.queries.insights_neo4j_queries.run_query", AsyncMock(side_effect=TimeoutError)), pytest.raises(TimeoutError):
+            await query_genre_trends(AsyncMock())
+
+
 class TestQueryStyleYearCounts:
     """Tests for query_style_year_counts."""
 

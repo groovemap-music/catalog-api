@@ -2,7 +2,7 @@
 openapi: 3.1.0
 info:
   title: GrooveMap internal insights API
-  version: 1.7.0
+  version: 1.8.0
   description: Catalog API-owned contract consumed by the analytics engine.
 security:
   - InternalSecret: []
@@ -17,8 +17,15 @@ paths:
   /api/internal/insights/genre-trends:
     get:
       operationId: genre_trends
+      description: >-
+        Release counts per genre and decade of the release's own year; undated releases are
+        left out. The read scans every release-genre tag, so it runs under a long internal
+        budget.
+      x-groovemap-max-processing-seconds: 300
       responses:
         "200": {$ref: "#/components/responses/Items"}
+        "503":
+          description: Neo4j gave up on the read with a retryable error, or is not ready.
   /api/internal/insights/style-year-counts:
     get:
       operationId: style_year_counts

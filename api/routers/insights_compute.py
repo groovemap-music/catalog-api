@@ -132,10 +132,18 @@ async def artist_centrality(request: Request, limit: int = Query(100, ge=1, le=5
 @router.get("/genre-trends")
 @limiter.limit("5/minute")
 async def genre_trends(request: Request) -> JSONResponse:  # noqa: ARG001
-    """Return raw genre trends query results from Neo4j."""
+    """Return raw genre trends query results from Neo4j.
+
+    The read scans every release-genre tag, so it runs under a long internal budget (see
+    ``GENRE_TRENDS_QUERY_TIMEOUT_SECONDS``) published in the internal-insights contract. A Neo4j
+    timeout is a retryable 503, never an empty list.
+    """
     if not _neo4j:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
-    results = await query_genre_trends(_neo4j)
+    try:
+        results = await query_genre_trends(_neo4j)
+    except (TransientError, ClientError, BaseExceptionGroup) as exc:
+        return _retryable_unavailable(exc, "Genre-trends computation")
     return JSONResponse(content={"items": results})
 
 

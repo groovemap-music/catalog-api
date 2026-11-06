@@ -1564,7 +1564,7 @@ header: a missing or wrong header is `401`, and with the variable unset every ro
 | Method | Path                                       | Auth Required | Description                           |
 | ------ | ------------------------------------------ | ------------- | ------------------------------------- |
 | GET    | `/api/internal/insights/artist-centrality` | Secret header | Artist centrality data from Neo4j     |
-| GET    | `/api/internal/insights/genre-trends`      | Secret header | Genre trend data from Neo4j           |
+| GET    | `/api/internal/insights/genre-trends`      | Secret header | Genre trend data from Neo4j; full scan under a 300 s internal budget, a timeout is a retryable 503 |
 | GET    | `/api/internal/insights/style-year-counts` | Secret header | Style and genre counts per release year, and style genre shares, from Neo4j |
 | GET    | `/api/internal/insights/style-landmarks`   | Secret header | Top 25 masters per style by release count, from Neo4j |
 | GET    | `/api/internal/insights/style-cotags`      | Secret header | Top 25 co-tagged styles per style by shared release count, from Neo4j |

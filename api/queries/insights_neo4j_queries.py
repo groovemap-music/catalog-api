@@ -28,6 +28,12 @@ STYLE_YEAR_QUERY_TIMEOUT_SECONDS = 300.0
 # the style-landmarks operation.
 STYLE_LANDMARK_QUERY_TIMEOUT_SECONDS = 300.0
 
+# Server-side budget for the genre-trends read. It scans every release-genre tag (48 s cold and
+# warm on the 2026-11-06 Lux catalog, against the 30 s default read budget that cut it off), so
+# it gets the same long internal budget as the style-year read. The internal-insights contract
+# publishes this figure as ``x-groovemap-max-processing-seconds`` on the genre-trends operation.
+GENRE_TRENDS_QUERY_TIMEOUT_SECONDS = 300.0
+
 # Masters kept per style. Concept B draws the top 25 masters of each style as landmarks.
 LANDMARKS_PER_STYLE = 25
 
@@ -63,7 +69,9 @@ async def query_genre_trends(driver: Any, genre: str | None = None) -> list[dict
     """Query release counts per genre per decade.
 
     Groups releases by their genres and the decade of release,
-    counting how many releases fall into each genre/decade bucket.
+    counting how many releases fall into each genre/decade bucket. The read scans every
+    release-genre tag, so it runs under :data:`GENRE_TRENDS_QUERY_TIMEOUT_SECONDS`, not the
+    default read budget. A timeout raises; it is never turned into an empty result.
     """
     if genre:
         cypher = """
@@ -73,16 +81,16 @@ async def query_genre_trends(driver: Any, genre: str | None = None) -> list[dict
         ORDER BY decade
         RETURN genre, decade, release_count
         """
-        results = await run_query(driver, cypher, database="neo4j", genre=genre)
+        results = await run_query(driver, cypher, database="neo4j", timeout=GENRE_TRENDS_QUERY_TIMEOUT_SECONDS, genre=genre)
     else:
         cypher = """
         MATCH (r:Release)-[:IS]->(g:Genre)
         WHERE r.year IS NOT NULL AND r.year > 0
-        WITH g.name AS genre, (r.year / 10) * 10 AS decade, count(r) AS release_count
+        WITH g.name AS genre, (r.year / 10) * 10 AS decade, count(DISTINCT r) AS release_count
         ORDER BY genre, decade
         RETURN genre, decade, release_count
         """
-        results = await run_query(driver, cypher, database="neo4j")
+        results = await run_query(driver, cypher, database="neo4j", timeout=GENRE_TRENDS_QUERY_TIMEOUT_SECONDS)
     logger.info("🔍 Genre trends query complete", count=len(results), genre=genre)
     return results
 
