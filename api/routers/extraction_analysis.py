@@ -160,9 +160,26 @@ def _validate_record_id(record_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _scan_versions(data_root: Path, source: str) -> list[dict[str, Any]]:
-    """Scan *data_root*/flagged/ for version directories that contain at least one entity with violations.jsonl.
+# What marks an entity directory as holding analysis output: the extractor's per-type report, the
+# records it skipped, or the records that broke a rule. A clean run has the first two and no
+# violations.jsonl, so keying on violations alone hid it.
+_ANALYSIS_FILES = ("report.txt", "skipped.jsonl", "violations.jsonl")
 
+
+def _entity_types_with_analysis(version_dir: Path) -> list[str]:
+    """Entity directories under *version_dir* holding any of the analysis files."""
+    return [
+        entity_dir.name
+        for entity_dir in sorted(version_dir.iterdir())
+        if entity_dir.is_dir() and any((entity_dir / name).is_file() for name in _ANALYSIS_FILES)
+    ]
+
+
+def _scan_versions(data_root: Path, source: str) -> list[dict[str, Any]]:
+    """Scan *data_root*/flagged/ for version directories with analysis output for at least one entity.
+
+    A version is listed when an entity directory holds a report.txt, skipped.jsonl or
+    violations.jsonl, so a clean run (no violations) is listed too.
     Returns a list of dicts with keys: version, source, entity_types.
     """
     flagged = data_root / "flagged"
@@ -173,9 +190,7 @@ def _scan_versions(data_root: Path, source: str) -> list[dict[str, Any]]:
     for version_dir in sorted(flagged.iterdir()):
         if not version_dir.is_dir():
             continue
-        entity_types = [
-            entity_dir.name for entity_dir in sorted(version_dir.iterdir()) if entity_dir.is_dir() and (entity_dir / "violations.jsonl").is_file()
-        ]
+        entity_types = _entity_types_with_analysis(version_dir)
         if entity_types:
             results.append({"version": version_dir.name, "source": source, "entity_types": entity_types})
     return results
@@ -210,7 +225,12 @@ def _resolve_version(version: str) -> _VersionContext:
     if location is None:
         raise HTTPException(status_code=404, detail=f"Version not found: {version!r}")
     data_root, source = location
-    return _VersionContext(version=version, data_root=data_root, source=source)
+    context = _VersionContext(version=version, data_root=data_root, source=source)
+    if not _entity_types_with_analysis(context.flagged_dir):
+        raise HTTPException(
+            status_code=404, detail=f"Version {version!r} has no extraction analysis output (no report.txt, skipped.jsonl or violations.jsonl)"
+        )
+    return context
 
 
 # Aggregate caps on the JSONL scan (across every entity's violations.jsonl /
@@ -509,10 +529,10 @@ def _violations_response(violations: list[dict[str, Any]], page: _Page) -> dict[
 async def list_versions(
     _admin: Annotated[dict[str, Any], Depends(require_admin)],
 ) -> JSONResponse:
-    """List all extraction versions that have flagged records.
+    """List all extraction versions that have analysis output (a report, skipped records or violations).
 
     Scans both the Discogs and MusicBrainz flagged directories and returns
-    a unified list of versions with the entity types that contain violations.
+    a unified list of versions with the entity types that hold analysis output.
     """
     all_versions: list[dict[str, Any]] = []
     for data_root, source in [(_discogs_data_root, "discogs"), (_musicbrainz_data_root, "musicbrainz")]:
