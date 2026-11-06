@@ -239,8 +239,15 @@ class TestQueryStyleLandmarks:
         assert "MATCH (r)-[:DERIVED_FROM]->(m:Master)" in _STYLE_LANDMARK_CYPHER
         assert "OPTIONAL MATCH" not in _STYLE_LANDMARK_CYPHER
         assert "count(DISTINCT r)" in _STYLE_LANDMARK_CYPHER
-        assert "ORDER BY style, release_count DESC, m.id" in _STYLE_LANDMARK_CYPHER
-        assert "ranked[0..$limit]" in _STYLE_LANDMARK_CYPHER
+        assert "ORDER BY release_count DESC, m.id" in _STYLE_LANDMARK_CYPHER
+        assert "LIMIT $limit" in _STYLE_LANDMARK_CYPHER
+
+    def test_the_count_runs_one_style_at_a_time(self) -> None:
+        """Grouping over the whole graph exhausted the shared transaction pool on the full catalog."""
+        from api.queries.insights_neo4j_queries import _STYLE_LANDMARK_CYPHER
+
+        assert "CALL (s) {" in _STYLE_LANDMARK_CYPHER
+        assert _STYLE_LANDMARK_CYPHER.index("CALL (s) {") < _STYLE_LANDMARK_CYPHER.index("count(DISTINCT r)")
 
 
 class TestQueryStyleCotags:
@@ -277,10 +284,17 @@ class TestQueryStyleCotags:
         """Self pairs are filtered, releases are counted distinct, and ties sort by the other style's name."""
         from api.queries.insights_neo4j_queries import _STYLE_COTAG_CYPHER
 
-        assert "WHERE a.name <> b.name" in _STYLE_COTAG_CYPHER
+        assert "WHERE other <> s" in _STYLE_COTAG_CYPHER
         assert "count(DISTINCT r)" in _STYLE_COTAG_CYPHER
-        assert "ORDER BY style, release_count DESC, other" in _STYLE_COTAG_CYPHER
-        assert "ranked[0..$limit]" in _STYLE_COTAG_CYPHER
+        assert "ORDER BY release_count DESC, other.name" in _STYLE_COTAG_CYPHER
+        assert "LIMIT $limit" in _STYLE_COTAG_CYPHER
+
+    def test_the_count_runs_one_style_at_a_time(self) -> None:
+        """Grouping every pair over the whole graph exhausted the shared transaction pool in 14 s."""
+        from api.queries.insights_neo4j_queries import _STYLE_COTAG_CYPHER
+
+        assert "CALL (s) {" in _STYLE_COTAG_CYPHER
+        assert _STYLE_COTAG_CYPHER.index("CALL (s) {") < _STYLE_COTAG_CYPHER.index("count(DISTINCT r)")
 
 
 class TestQueryLabelLongevity:
@@ -303,6 +317,26 @@ class TestQueryLabelLongevity:
         result = await query_label_longevity(driver, limit=50)
         assert len(result) == 1
         assert result[0]["years_active"] == 86
+
+    @pytest.mark.asyncio
+    async def test_read_carries_the_limit_and_the_long_internal_timeout(self) -> None:
+        """The read runs under its own budget, not the 30 s default that cut it off."""
+        from api.queries.helpers import DEFAULT_READ_TIMEOUT_SECONDS
+        from api.queries.insights_neo4j_queries import LABEL_LONGEVITY_QUERY_TIMEOUT_SECONDS, query_label_longevity
+
+        run_query = AsyncMock(return_value=[])
+        with patch("api.queries.insights_neo4j_queries.run_query", run_query):
+            await query_label_longevity(AsyncMock(), limit=7)
+
+        assert run_query.await_args.kwargs["timeout"] == LABEL_LONGEVITY_QUERY_TIMEOUT_SECONDS > DEFAULT_READ_TIMEOUT_SECONDS
+        assert run_query.await_args.kwargs["limit"] == 7
+
+    @pytest.mark.asyncio
+    async def test_a_timeout_propagates_instead_of_returning_empty_data(self) -> None:
+        from api.queries.insights_neo4j_queries import query_label_longevity
+
+        with patch("api.queries.insights_neo4j_queries.run_query", AsyncMock(side_effect=TimeoutError)), pytest.raises(TimeoutError):
+            await query_label_longevity(AsyncMock())
 
 
 class TestQueryAnniversaries:

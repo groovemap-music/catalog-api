@@ -22,10 +22,9 @@ logger = structlog.get_logger(__name__)
 # ``x-groovemap-max-processing-seconds`` on this operation.
 STYLE_YEAR_QUERY_TIMEOUT_SECONDS = 300.0
 
-# Server-side budget for the landmark read. It ranks every (style, master) pair in the graph, a
-# scan of the same size as the style-year read, so it gets the same long internal budget. The
-# internal-insights contract publishes this figure as ``x-groovemap-max-processing-seconds`` on
-# the style-landmarks operation.
+# Server-side budget for the landmark read. It visits every release-style tag, one style at a time,
+# so it gets the same long internal budget as the style-year read. The internal-insights contract
+# publishes this figure as ``x-groovemap-max-processing-seconds`` on the style-landmarks operation.
 STYLE_LANDMARK_QUERY_TIMEOUT_SECONDS = 300.0
 
 # Server-side budget for the genre-trends read. It scans every release-genre tag (48 s cold and
@@ -37,14 +36,20 @@ GENRE_TRENDS_QUERY_TIMEOUT_SECONDS = 300.0
 # Masters kept per style. Concept B draws the top 25 masters of each style as landmarks.
 LANDMARKS_PER_STYLE = 25
 
-# Server-side budget for the co-tag read. It expands every release into its style pairs and
-# counts them, a scan at least the size of the style-year read, so it gets the same long
-# internal budget. The internal-insights contract publishes this figure as
+# Server-side budget for the co-tag read. It expands every release into its style pairs, one style
+# at a time, a scan at least the size of the style-year read, so it gets the same long internal
+# budget. The internal-insights contract publishes this figure as
 # ``x-groovemap-max-processing-seconds`` on the style-cotags operation.
 STYLE_COTAG_QUERY_TIMEOUT_SECONDS = 300.0
 
 # Co-tagged styles kept per style. Concept B draws the top 25 lateral neighbours of each style.
 COTAGS_PER_STYLE = 25
+
+# Server-side budget for the label-longevity read. It reads the year of every release-label edge,
+# which the 30 s default read budget cut off on the 2026-11-06 Lux catalog, so it gets the same long
+# internal budget as the style-year read. The internal-insights contract publishes this figure as
+# ``x-groovemap-max-processing-seconds`` on the label-longevity operation.
+LABEL_LONGEVITY_QUERY_TIMEOUT_SECONDS = 300.0
 
 
 async def query_artist_centrality(driver: Any, limit: int = 100) -> list[dict[str, Any]]:
@@ -180,18 +185,26 @@ async def query_style_year_counts(driver: Any) -> dict[str, list[dict[str, Any]]
 # master only through DERIVED_FROM, so masterless releases add nothing, and ``DISTINCT`` keeps a
 # release counted once per (style, master) even if the graph carries a duplicate edge. Ranking is
 # release_count descending, then master id ascending (string order), which makes the cut at the
-# cap deterministic when masters tie. The slice happens per style inside the query so only the
-# kept rows leave Neo4j. The year is the master's own and is null when the master has none.
+# cap deterministic when masters tie. The year is the master's own and is null when the master has
+# none.
+#
+# The count runs inside a subquery per style, not over the whole graph. Ranking across the graph
+# sorted every (style, master) pair at once, which exhausted the shared 3 GiB transaction pool. Each
+# subquery call releases its memory when it returns and keeps only ``$limit`` rows (``Top``), so the
+# peak follows the single largest style rather than the catalog.
 _STYLE_LANDMARK_CYPHER = """
-MATCH (r:Release)-[:IS]->(s:Style)
-MATCH (r)-[:DERIVED_FROM]->(m:Master)
-WITH s.name AS style, m, count(DISTINCT r) AS release_count
-ORDER BY style, release_count DESC, m.id
-WITH style, collect({master_id: m.id, title: m.title, year: m.year, release_count: release_count}) AS ranked
-UNWIND ranked[0..$limit] AS landmark
-RETURN style, landmark.master_id AS master_id, landmark.title AS title,
-       CASE WHEN landmark.year > 0 THEN landmark.year END AS year,
-       landmark.release_count AS release_count
+MATCH (s:Style)
+CALL (s) {
+  MATCH (r:Release)-[:IS]->(s)
+  MATCH (r)-[:DERIVED_FROM]->(m:Master)
+  WITH m, count(DISTINCT r) AS release_count
+  ORDER BY release_count DESC, m.id
+  LIMIT $limit
+  RETURN m.id AS master_id, m.title AS title,
+         CASE WHEN m.year > 0 THEN m.year END AS year,
+         release_count
+}
+RETURN s.name AS style, master_id, title, year, release_count
 ORDER BY style, release_count DESC, master_id
 """
 
@@ -215,35 +228,48 @@ async def query_style_landmarks(driver: Any) -> dict[str, list[dict[str, Any]]]:
     return {"landmarks": landmarks}
 
 
+# Longest-running labels. A label's span comes from a subquery per label, so memory stays at one
+# label's releases rather than a running aggregate for every label; the old statement also held a
+# list of every release year. The peak decade is only worked out for the labels that made the cut,
+# which is why it is a second subquery after ``LIMIT``. A label with no dated release has nothing to
+# rank and is dropped. So is a label with no name: it is a reference stub, and
+# ``insights.label_longevity.label_name`` is NOT NULL. Ties in the ranking and in the peak decade
+# have explicit orders, so a rerun on the same data returns the same rows.
+_LABEL_LONGEVITY_CYPHER = """
+MATCH (l:Label)
+WHERE l.name IS NOT NULL
+CALL (l) {
+  MATCH (r:Release)-[:ON]->(l)
+  WHERE r.year > 0
+  RETURN min(r.year) AS first_year, max(r.year) AS last_year, count(DISTINCT r) AS total_releases
+}
+WITH l, first_year, last_year, total_releases, last_year - first_year + 1 AS years_active
+WHERE total_releases > 0
+ORDER BY years_active DESC, total_releases DESC, l.id
+LIMIT $limit
+CALL (l) {
+  MATCH (r:Release)-[:ON]->(l)
+  WHERE r.year > 0
+  WITH (r.year / 10) * 10 AS decade, count(DISTINCT r) AS decade_count
+  ORDER BY decade_count DESC, decade
+  LIMIT 1
+  RETURN decade AS peak_decade
+}
+RETURN l.id AS label_id, l.name AS label_name,
+       first_year, last_year, years_active,
+       total_releases, peak_decade
+"""
+
+
 async def query_label_longevity(driver: Any, limit: int = 50) -> list[dict[str, Any]]:
     """Query labels ranked by years of active operation.
 
-    For each label, finds the earliest and latest release year,
-    calculates years active, total releases, and peak decade.
+    For each named label with a dated release, finds the earliest and latest release year, the
+    years active, total dated releases, and the peak decade. Ranks by years active, then total
+    releases, then label id. Runs under :data:`LABEL_LONGEVITY_QUERY_TIMEOUT_SECONDS`. A timeout
+    raises; it is never turned into an empty result.
     """
-    cypher = """
-    MATCH (r:Release)-[:ON]->(l:Label)
-    WHERE r.year IS NOT NULL AND r.year > 0
-    WITH l,
-         min(r.year) AS first_year,
-         max(r.year) AS last_year,
-         count(r) AS total_releases,
-         collect(r.year) AS years
-    WITH l, first_year, last_year, total_releases, years,
-         last_year - first_year + 1 AS years_active
-    UNWIND years AS y
-    WITH l, first_year, last_year, total_releases, years_active,
-         (y / 10) * 10 AS decade, count(*) AS decade_count
-    ORDER BY decade_count DESC
-    WITH l, first_year, last_year, total_releases, years_active,
-         collect({decade: decade, count: decade_count})[0].decade AS peak_decade
-    ORDER BY years_active DESC
-    LIMIT $limit
-    RETURN l.id AS label_id, l.name AS label_name,
-           first_year, last_year, years_active,
-           total_releases, peak_decade
-    """
-    results = await run_query(driver, cypher, database="neo4j", limit=limit)
+    results = await run_query(driver, _LABEL_LONGEVITY_CYPHER, database="neo4j", timeout=LABEL_LONGEVITY_QUERY_TIMEOUT_SECONDS, limit=limit)
     logger.info("🔍 Label longevity query complete", count=len(results))
     return results
 
@@ -289,17 +315,25 @@ async def query_monthly_anniversaries(
 # a release once (``DISTINCT``) however many duplicate edges the graph carries, and a style never
 # pairs with itself. Counts are symmetric, so each pair appears under both of its styles, and each
 # style keeps its own top ``$limit`` by release_count descending, then the other style's name
-# ascending (string order), which makes the cut at the cap deterministic when styles tie. The
-# slice happens per style inside the query so only the kept rows leave Neo4j.
+# ascending (string order), which makes the cut at the cap deterministic when styles tie.
+#
+# As with the landmark read, the count runs inside a subquery per style. Matched over the whole
+# graph, the two tag patterns plan as a ``NodeHashJoin`` that holds every release-style tag in memory
+# (302 MB of the 310 MB peak on a 1/20 scale graph), which exhausted the shared 3 GiB transaction pool
+# in 14 s on Lux. Starting from a bound style there is nothing to join, only an expansion. Grouping
+# on the node, not its name, reads a name per co-tagged style rather than per expanded edge.
 _STYLE_COTAG_CYPHER = """
-MATCH (r:Release)-[:IS]->(a:Style)
-MATCH (r)-[:IS]->(b:Style)
-WHERE a.name <> b.name
-WITH a.name AS style, b.name AS other, count(DISTINCT r) AS release_count
-ORDER BY style, release_count DESC, other
-WITH style, collect({other: other, release_count: release_count}) AS ranked
-UNWIND ranked[0..$limit] AS cotag
-RETURN style, cotag.other AS other, cotag.release_count AS release_count
+MATCH (s:Style)
+CALL (s) {
+  MATCH (r:Release)-[:IS]->(s)
+  MATCH (r)-[:IS]->(other:Style)
+  WHERE other <> s
+  WITH other, count(DISTINCT r) AS release_count
+  ORDER BY release_count DESC, other.name
+  LIMIT $limit
+  RETURN other.name AS other, release_count
+}
+RETURN s.name AS style, other, release_count
 ORDER BY style, release_count DESC, other
 """
 
