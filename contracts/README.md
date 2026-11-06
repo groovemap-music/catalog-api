@@ -1,6 +1,6 @@
 # Contracts
 
-`catalog-api` consumes two upstream contracts. Both are promoted from a reviewed,
+`catalog-api` consumes three upstream contracts. All are promoted from a reviewed,
 immutable commit of the owning repository rather than edited here. `scripts/check-contracts.py`
 (`just contract-check`, also run by `just source-check`) digest-verifies every promoted file
 against its `source.json` record.
@@ -15,6 +15,19 @@ this repository actually tests against is recorded separately in the consumer-ow
 digest, and its `application_runtime.tested_commit` must equal the `groovemap-runtime` /
 `groovemap-agent-tools` revision pinned in `pyproject.toml`'s `[tool.uv.sources]` -- the
 check script asserts both.
+
+## `musicbrainz-projections/v1`
+
+`musicbrainz-graph-enricher` owns the Neo4j relationship types it projects from MusicBrainz relationships.
+`relationship-types.json` is promoted byte-for-byte from its `contracts/projections/v1/`; `source.json`
+records the producer commit and the file's SHA-256 digest, which `scripts/check-contracts.py` verifies. The
+enricher's own test fails if its `MB_RELATIONSHIP_MAP` and the published file differ, so the file is the
+producer's list. `tests/test_musicbrainz_relationship_types.py` reads this promoted copy on every run and fails
+when it holds a type that `MB_ARTIST_RELATIONSHIP_TYPES` (and so both MusicBrainz routes) omits, or the reverse.
+It needs no sibling repository in the workspace and skips nothing.
+
+To take a new enricher type: promote the new file and commit into this directory, update the commit in
+`scripts/check-contracts.py`, and add the type to `MB_ARTIST_RELATIONSHIP_TYPES`.
 
 ## `catalog-events/v1`
 

@@ -1,54 +1,47 @@
-"""The typed MusicBrainz relationship query must name every type the enricher writes.
+"""The typed MusicBrainz relationship queries must name every type the enricher publishes.
 
-The enricher lives in another repository, so this test pins its MB_RELATIONSHIP_MAP as a
-snapshot (tests/fixtures/musicbrainz_relationship_map.json). The snapshot is checked against the
-query's type list on every run. When the enricher's source is present in the workspace, the
-snapshot is also checked against the live map, so an added enricher type fails here until the
-query and the snapshot both name it.
+musicbrainz-graph-enricher publishes its relationship types as a contract
+(``contracts/projections/v1/relationship-types.json``), and catalog-api promotes that file byte for byte
+into ``contracts/musicbrainz-projections/v1`` (``scripts/check-contracts.py`` verifies its digest). Every
+test here reads the promoted file, so CI fails the moment the published list holds a type the queries omit,
+with no sibling repository in the workspace and nothing skipped. A new enricher type is picked up by
+promoting the new contract and adding the type to ``MB_ARTIST_RELATIONSHIP_TYPES``.
 """
 
-import ast
 import json
-import os
 from pathlib import Path
 
-from api.queries.musicbrainz_queries import _MB_RELATIONSHIPS_CYPHER, MB_ARTIST_RELATIONSHIP_TYPES
+from api.queries.musicbrainz_queries import _MB_RELATIONSHIPS_CYPHER, MB_ARTIST_RELATIONSHIP_TYPES, MB_SOURCED_RELATIONSHIP_TYPES
 
 
-SNAPSHOT = Path(__file__).parent / "fixtures" / "musicbrainz_relationship_map.json"
-ENRICHER_PROJECTIONS = (
-    Path(os.environ.get("GIT_WORKSPACE", Path.home() / "workspaces"))
-    / "github/groovemap-music/musicbrainz-graph-enricher/brainzgraphinator/_projections.py"
-)
+PROMOTED = Path(__file__).resolve().parents[1] / "contracts" / "musicbrainz-projections" / "v1" / "relationship-types.json"
 
 
-def _snapshot_types() -> set[str]:
-    return set(json.loads(SNAPSHOT.read_text())["map"].values())
+def _published_edge_types() -> set[str]:
+    return set(json.loads(PROMOTED.read_text())["edge_types"])
 
 
-def _live_map(path: Path) -> dict[str, str]:
-    tree = ast.parse(path.read_text())
-    for node in tree.body:
-        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "MB_RELATIONSHIP_MAP":
-            return ast.literal_eval(node.value)  # type: ignore[no-any-return]
-    raise AssertionError(f"MB_RELATIONSHIP_MAP not found in {path}")
+def test_the_promoted_contract_is_the_enrichers_relationship_type_contract() -> None:
+    published = json.loads(PROMOTED.read_text())
+    assert published["contract"] == "groovemap.musicbrainz-graph-enricher.relationship-types"
+    assert published["version"] == 1
+    assert published["store"] == "neo4j"
 
 
-def test_query_names_every_type_in_the_snapshot() -> None:
-    assert set(MB_ARTIST_RELATIONSHIP_TYPES) == _snapshot_types()
+def test_the_query_names_every_published_type() -> None:
+    omitted = _published_edge_types() - set(MB_ARTIST_RELATIONSHIP_TYPES)
+    assert not omitted, f"the published contract has types the typed query omits: {sorted(omitted)}; add them to MB_ARTIST_RELATIONSHIP_TYPES"
+
+
+def test_the_query_names_no_type_the_enricher_does_not_publish() -> None:
+    extra = set(MB_ARTIST_RELATIONSHIP_TYPES) - _published_edge_types()
+    assert not extra, f"the typed query names types the enricher does not publish: {sorted(extra)}"
+
+
+def test_the_sourced_route_carries_the_same_types_plus_the_medium_edge() -> None:
+    assert set(MB_SOURCED_RELATIONSHIP_TYPES) == _published_edge_types() | {"ISSUED_ON"}
 
 
 def test_query_text_carries_exactly_the_listed_types_in_both_directions() -> None:
     assert _MB_RELATIONSHIPS_CYPHER.count(f"[r:{'|'.join(MB_ARTIST_RELATIONSHIP_TYPES)}]") == 2
     assert "[r]->" not in _MB_RELATIONSHIPS_CYPHER
-
-
-def test_snapshot_matches_the_enricher_when_its_source_is_in_the_workspace() -> None:
-    if not ENRICHER_PROJECTIONS.exists():
-        import pytest
-
-        pytest.skip(f"enricher source not in workspace: {ENRICHER_PROJECTIONS}")
-    live = set(_live_map(ENRICHER_PROJECTIONS).values())
-    assert live == _snapshot_types(), (
-        f"enricher types {sorted(live - _snapshot_types())} are not in the typed query; add them to MB_ARTIST_RELATIONSHIP_TYPES and the snapshot"
-    )
