@@ -21,6 +21,7 @@ DISCOVER = ROOT / "scripts" / "integration-files.sh"
 OTHER_LANES = {
     "tests/test_cache_budget_real.py": "needs a real noeviction Valkey: scripts/test-integration-valkey.sh (just integration-valkey)",
     "tests/test_valkey_noeviction_real.py": "needs a real noeviction Valkey: scripts/test-integration-valkey.sh (just integration-valkey)",
+    "tests/test_valkey_cache_isolation_real.py": "needs a real noeviction and a real allkeys-lru Valkey: scripts/test-integration-valkey.sh (just integration-valkey)",
 }
 
 

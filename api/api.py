@@ -96,6 +96,7 @@ from api.syncer import reconcile_stale_sync_history
 from api.telemetry import instrument_valkey
 from api.valkey_errors import valkey_write_guard
 from api.valkey_keys import REVOKED_FALLBACK_TTL_SECONDS, configure_revocable_lifetime, prepare_legacy_keys, valkey_key
+from api.valkey_routing import route_valkey
 
 
 logger = structlog.get_logger(__name__)
@@ -233,13 +234,23 @@ async def _create_pool(config: ApiConfig) -> AsyncPostgreSQLPool:
     return pool
 
 
+def _host_of(url: str) -> str:
+    return url.rsplit("@", maxsplit=1)[-1] if "@" in url else url.rsplit("://", maxsplit=1)[-1]
+
+
 async def _create_valkey(config: ApiConfig) -> aiovalkey.Valkey:
     valkey = instrument_valkey(await aiovalkey.from_url(config.valkey_url, decode_responses=True))
-    valkey_host = config.valkey_url.split("@")[-1] if "@" in config.valkey_url else config.valkey_url.split("://")[-1]
-    logger.info("✅ Valkey connected", host=valkey_host)
+    logger.info("✅ Valkey connected", host=_host_of(config.valkey_url))
     configure_revocable_lifetime(max(config.jwt_expire_minutes * 60, ADMIN_TOKEN_EXPIRE_MINUTES * 60, REVOKED_FALLBACK_TTL_SECONDS))
     await prepare_legacy_keys(valkey)
-    return valkey
+    if not config.cache_valkey_url:
+        return valkey
+    # A second, evicting instance for the catalog caches. The client connects lazily, so a cache that is down
+    # at start is a miss on first use, not a failed start. Auth keys, the import-cache marker and sync
+    # state stay on the first client (api/valkey_routing.py decides by key family).
+    cache = instrument_valkey(await aiovalkey.from_url(config.cache_valkey_url, decode_responses=True))
+    logger.info("✅ Catalog cache Valkey configured", host=_host_of(config.cache_valkey_url))
+    return route_valkey(valkey, cache)
 
 
 def _create_neo4j(config: ApiConfig) -> AsyncResilientNeo4jDriver | None:

@@ -12,6 +12,8 @@ from common.config import (
     get_secret,
     get_valkey_url,
     resolve_postgres_pool_sizes,
+    valkey_db,
+    valkey_tls_query,
 )
 
 
@@ -50,6 +52,23 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
+def get_cache_valkey_url() -> str | None:
+    """Build the catalog-cache Valkey URL from CATALOG_CACHE_VALKEY_HOST/PORT, or None when no host is set.
+
+    Everything but the host and port is the main instance's: the password (the overlay shares the secret),
+    the TLS settings and the database, so an operator sets two variables and nothing else.
+    """
+    host = getenv("CATALOG_CACHE_VALKEY_HOST", "").strip()
+    if not host:
+        return None
+    port = getenv("CATALOG_CACHE_VALKEY_PORT", "6379").strip() or "6379"
+    password = get_secret("VALKEY_PASSWORD")
+    auth = f":{quote(password, safe='')}@" if password else ""
+    tls = valkey_tls_query()
+    scheme = "valkeys" if tls else "valkey"
+    return f"{scheme}://{auth}{host}:{port}/{valkey_db()}{tls}"
+
+
 @dataclass(frozen=True)
 class ApiConfig:
     """Configuration for the catalog API."""
@@ -65,6 +84,9 @@ class ApiConfig:
     postgres_pool_min_size: int = 2
     postgres_pool_max_size: int = 8
     valkey_url: str = "valkey://valkey:6379/0"
+    # The evicting instance for catalog caches (deployment's docker-compose.cache-isolation.yml); None keeps
+    # every key on `valkey_url`. Same credentials, TLS settings and database as `valkey_url`.
+    cache_valkey_url: str | None = None
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 30
     discogs_user_agent: str = DEFAULT_DISCOGS_USER_AGENT
@@ -154,6 +176,7 @@ class ApiConfig:
             postgres_pool_min_size=pool_min,
             postgres_pool_max_size=pool_max,
             valkey_url=get_valkey_url(),
+            cache_valkey_url=get_cache_valkey_url(),
             jwt_algorithm=jwt_algorithm,
             jwt_expire_minutes=_env_int("JWT_EXPIRE_MINUTES", 30),
             discogs_user_agent=getenv("DISCOGS_USER_AGENT", DEFAULT_DISCOGS_USER_AGENT),

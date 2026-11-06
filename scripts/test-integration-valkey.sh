@@ -22,7 +22,7 @@ status=0
 CATALOG_VALKEY_INTEGRATION=1 \
 VALKEY_INTEGRATION_IMAGE="${valkey_image}" \
 POSTGRES_INTEGRATION_IMAGE="${postgres_image}" \
-    uv run pytest -m valkey_noeviction -v -p no:cacheprovider tests/test_valkey_noeviction_real.py tests/test_cache_budget_real.py "$@" || status=$?
+    uv run pytest -m valkey_noeviction -v -p no:cacheprovider tests/test_valkey_noeviction_real.py tests/test_cache_budget_real.py tests/test_valkey_cache_isolation_real.py "$@" || status=$?
 
 leftover="$(docker ps --all --quiet --filter "label=${label}")"
 if [[ -n "${leftover}" ]]; then
