@@ -31,6 +31,15 @@ def _make_flagged_dir(base: Path, version: str, entity_type: str, violations: li
     (entity_dir / "violations.jsonl").write_text("\n".join(json.dumps(v) for v in lines) + "\n")
 
 
+def _make_clean_run(base: Path, version: str, entity_type: str, skipped: list[dict] | None = None) -> None:
+    """Create a clean run: a report and skipped records per type, and no violations.jsonl."""
+    entity_dir = base / "flagged" / version / entity_type
+    entity_dir.mkdir(parents=True, exist_ok=True)
+    (entity_dir / "report.txt").write_text(f"{entity_type}: 0 violations\n")
+    lines = skipped or [{"record_id": "9", "reason": "missing required id"}, {"record_id": "10", "reason": "empty record"}]
+    (entity_dir / "skipped.jsonl").write_text("\n".join(json.dumps(r) for r in lines) + "\n")
+
+
 def _make_state_marker(base: Path, version: str, source: str) -> None:
     """Create a state marker file for the given source."""
     marker = {
@@ -128,6 +137,77 @@ class TestVersionsEndpoint:
         assert resp.status_code == 200
         # Version should not appear because it has no entity with violations
         assert resp.json() == {"versions": []}
+
+
+class TestCleanRun:
+    """A version with report.txt and skipped.jsonl only: a clean run with no violations."""
+
+    def test_clean_run_is_listed(self, test_client: TestClient, tmp_path: Path) -> None:
+        import api.routers.extraction_analysis as ea
+
+        _make_clean_run(tmp_path, "20261101", "masters")
+        _make_clean_run(tmp_path, "20261101", "releases")
+        with patch.object(ea, "_discogs_data_root", tmp_path), patch.object(ea, "_musicbrainz_data_root", None):
+            resp = test_client.get("/api/admin/extraction-analysis/versions", headers=_admin_auth_headers())
+        assert resp.status_code == 200
+        assert resp.json() == {"versions": [{"version": "20261101", "source": "discogs", "entity_types": ["masters", "releases"]}]}
+
+    def test_report_alone_lists_the_version(self, test_client: TestClient, tmp_path: Path) -> None:
+        import api.routers.extraction_analysis as ea
+
+        entity_dir = tmp_path / "flagged" / "20261101" / "labels"
+        entity_dir.mkdir(parents=True)
+        (entity_dir / "report.txt").write_text("labels: clean\n")
+        with patch.object(ea, "_discogs_data_root", tmp_path), patch.object(ea, "_musicbrainz_data_root", None):
+            resp = test_client.get("/api/admin/extraction-analysis/versions", headers=_admin_auth_headers())
+        assert [v["version"] for v in resp.json()["versions"]] == ["20261101"]
+
+    def test_every_route_handles_a_clean_run(self, test_client: TestClient, tmp_path: Path) -> None:
+        import api.routers.extraction_analysis as ea
+
+        _make_clean_run(tmp_path, "20261101", "masters")
+        _make_flagged_dir(tmp_path, "20261102", "masters")
+        headers = _admin_auth_headers()
+        base = "/api/admin/extraction-analysis/20261101"
+        with patch.object(ea, "_discogs_data_root", tmp_path), patch.object(ea, "_musicbrainz_data_root", None):
+            summary = test_client.get(f"{base}/summary", headers=headers)
+            skipped = test_client.get(f"{base}/skipped", headers=headers)
+            violations = test_client.get(f"{base}/violations", headers=headers)
+            parsing = test_client.get(f"{base}/parsing-errors", headers=headers)
+            compare = test_client.get(f"{base}/compare/20261102", headers=headers)
+            context = test_client.post(
+                f"{base}/prompt-context", headers=headers, json={"rules": [{"rule": "year-out-of-range", "entity_type": "masters"}]}
+            )
+        assert summary.status_code == 200
+        body = summary.json()
+        assert body["total"] == 0
+        assert body["by_severity"] == {}
+        assert body["by_entity"] == {}
+        assert body["by_rule"] == []
+        assert body["skipped"] == {"masters": {"count": 2, "reasons": ["missing required id", "empty record"]}}
+        assert skipped.status_code == 200
+        assert skipped.json()["total"] == 2
+        assert violations.status_code == 200
+        assert violations.json()["violations"] == []
+        assert violations.json()["pagination"]["total_items"] == 0
+        assert parsing.status_code == 200
+        assert parsing.json()["stats"]["total_analyzed"] == 0
+        assert compare.status_code == 200
+        assert compare.json()["skipped"]["version_a"] == {"masters": 2}
+        assert context.status_code == 200
+        assert [(c["rule"], c["total_violations"], c["sample_records"]) for c in context.json()["contexts"]] == [("year-out-of-range", 0, [])]
+
+    def test_version_dir_without_a_report_is_not_listed_and_404s_clearly(self, test_client: TestClient, tmp_path: Path) -> None:
+        import api.routers.extraction_analysis as ea
+
+        (tmp_path / "flagged" / "20261101" / "masters").mkdir(parents=True)
+        headers = _admin_auth_headers()
+        with patch.object(ea, "_discogs_data_root", tmp_path), patch.object(ea, "_musicbrainz_data_root", None):
+            listed = test_client.get("/api/admin/extraction-analysis/versions", headers=headers)
+            summary = test_client.get("/api/admin/extraction-analysis/20261101/summary", headers=headers)
+        assert listed.json() == {"versions": []}
+        assert summary.status_code == 404
+        assert "no extraction analysis output" in summary.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
