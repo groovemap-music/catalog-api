@@ -74,6 +74,8 @@ and, unless `VALKEY_TLS_VERIFY_HOSTNAME=false`, the hostname too. The plaintext 
 | --- | --- | --- |
 | `VALKEY_DB` | `0` | Valkey database index (`0..255`); anything else fails at startup |
 | `VALKEY_KEY_PREFIX` | `groovemap:` | Namespace for every key the API writes, reads, deletes or scans. Empty disables it. Letters, digits and `_-.:` only |
+| `CATALOG_CACHE_VALKEY_HOST` | unset | Host of a second, evicting Valkey (`allkeys-lru`) for catalog caches, as deployment's `docker-compose.cache-isolation.yml` runs it. Unset keeps every key on `VALKEY_HOST`, exactly as before. Password, TLS settings, database and key prefix are `VALKEY_*`'s |
+| `CATALOG_CACHE_VALKEY_PORT` | `6379` | Port of that instance |
 | `VALKEY_LEGACY_KEYS` | `read` | How keys written before namespacing are treated: `off`, `read` or `migrate` (below) |
 | `VALKEY_LEGACY_WINDOW_SECONDS` | `86400` | Minimum time, from the first upgraded start, that `read`/`migrate` consult unprefixed deny keys; raised automatically to cover the longest revocable token lifetime |
 
@@ -414,3 +416,14 @@ The [API service guide](../api/README.md#operator-setup) documents that operatio
 
 For runtime secret mounts, container topology, and environment promotion, follow the
 [`deployment` documentation](https://github.com/groovemap-music/deployment/tree/main/docs).
+
+### Catalog cache Valkey
+
+With `CATALOG_CACHE_VALKEY_HOST` set, `api/valkey_routing.py` sends each command to an instance by key. Explore, trends, strata, expand, search, credits, label DNA, network, NLQ, enrichment status, recommendations, the data-completeness entry and the cache budget's index and cost sets (`budget:`) go to the cache instance. Everything else stays on `VALKEY_HOST`, whose policy stays `noeviction`: revoked-token and password-change keys, reset, 2FA, OAuth-state and snapshot tokens, sync lock and cooldown, the import-cache marker and the genre-tree snapshot. A name without the key prefix is a legacy key and only ever goes to `VALKEY_HOST`.
+
+- A cache instance that is down, full, read-only or timing out gives misses: reads return nothing, writes are not stored, scans are empty, and a warning with `alert=valkey_cache_unavailable` is logged at most once a minute. An auth command that fails still raises, and still answers 503 where it does today.
+- A budget index that was evicted counts as empty. If its cost set was evicted while it survived, the index is forgotten so writes are not refused until it expires.
+- Import invalidation clears the cache instance. Cache entries written to `VALKEY_HOST` before the overlay was turned on are not read any more and expire with their TTL.
+- The account erasure and the import-cache invalidation do not treat an unreachable cache instance as an empty one: they raise, so an erasure reports `Valkey deletion failed` instead of complete (ADR 0010 verifies deletion) and the import is not recorded as handled until the next poll succeeds.
+- `/api/admin` Valkey storage statistics keep the main instance's figures at the top level and add the cache instance under `cache_instance`, with its eviction policy, evicted-key count, memory and key distribution; an unreachable cache shows `{"status": "unavailable"}`.
+- A new key family has to be added to `CACHE_FAMILIES` or `AUTH_FAMILIES`; `tests/test_valkey_routing.py` fails on a family in the source that is in neither.

@@ -12,7 +12,9 @@ from typing import Any
 from common.query_debug import execute_sql
 from psycopg.rows import dict_row
 
+from api.valkey_errors import VALKEY_UNAVAILABLE_ERRORS
 from api.valkey_keys import valkey_key_prefix, valkey_pattern
+from api.valkey_routing import RoutedValkey
 
 
 logger = logging.getLogger(__name__)
@@ -277,13 +279,11 @@ async def get_audit_log(
     }
 
 
-async def get_valkey_storage(valkey: Any) -> dict[str, Any]:
-    """Fetch Valkey memory usage and key distribution grouped by prefix."""
-    if valkey is None:
-        return {"status": "error", "error": "Valkey not configured"}
-
-    memory_info = await valkey.info("memory")
-    keyspace_info = await valkey.info("keyspace")
+async def _instance_storage(client: Any, *, scan_pattern: str, max_scan_keys: int = 10_000) -> dict[str, Any]:
+    """Memory, key counts, key distribution by prefix, eviction policy and evictions for one Valkey instance."""
+    memory_info = await client.info("memory")
+    keyspace_info = await client.info("keyspace")
+    stats_info = await client.info("stats")
 
     total_keys = 0
     for db_info in keyspace_info.values():
@@ -293,10 +293,9 @@ async def get_valkey_storage(valkey: Any) -> dict[str, Any]:
     namespace = valkey_key_prefix()
     prefix_counts: dict[str, int] = {}
     cursor = 0
-    max_scan_keys = 10_000
     total_scanned = 0
     while True:
-        cursor, keys = await valkey.scan(cursor=cursor, match=valkey_pattern("*"), count=500)
+        cursor, keys = await client.scan(cursor=cursor, match=scan_pattern, count=500)
         for key in keys:
             key_str = key if isinstance(key, str) else key.decode("utf-8", errors="replace")
             if namespace and key_str.startswith(namespace):
@@ -307,12 +306,32 @@ async def get_valkey_storage(valkey: Any) -> dict[str, Any]:
         if cursor == 0 or total_scanned >= max_scan_keys:
             break
 
-    keys_by_prefix = dict(sorted(prefix_counts.items(), key=lambda x: -x[1]))
-
     return {
-        "status": "ok",
         "memory_used": memory_info.get("used_memory_human", ""),
         "memory_peak": memory_info.get("used_memory_peak_human", ""),
+        "maxmemory_policy": memory_info.get("maxmemory_policy", ""),
+        "evicted_keys": int(stats_info.get("evicted_keys", 0)),
         "total_keys": total_keys,
-        "keys_by_prefix": keys_by_prefix,
+        "keys_by_prefix": dict(sorted(prefix_counts.items(), key=lambda x: -x[1])),
     }
+
+
+async def get_valkey_storage(valkey: Any) -> dict[str, Any]:
+    """Fetch Valkey memory usage and key distribution grouped by prefix.
+
+    The top-level figures describe the main (auth) instance, as they always have. With a separate catalog
+    cache instance (``CATALOG_CACHE_VALKEY_HOST``) its numbers follow under ``cache_instance``; an
+    unreachable cache is reported as ``{"status": "unavailable"}`` and never fails the page.
+    """
+    if valkey is None:
+        return {"status": "error", "error": "Valkey not configured"}
+
+    routed = isinstance(valkey, RoutedValkey)
+    primary = await _instance_storage(valkey.auth if routed else valkey, scan_pattern=valkey_pattern("*"))
+    result: dict[str, Any] = {"status": "ok", **primary}
+    if routed:
+        try:
+            result["cache_instance"] = {"status": "ok", **await _instance_storage(valkey.cache, scan_pattern=valkey_pattern("*"))}
+        except VALKEY_UNAVAILABLE_ERRORS as error:
+            result["cache_instance"] = {"status": "unavailable", "error": type(error).__name__}
+    return result

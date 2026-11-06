@@ -147,6 +147,25 @@ def start_valkey() -> Container:
     return container
 
 
+def start_cache_valkey() -> Container:
+    """The catalog-cache instance deployment's cache-isolation overlay adds: same cap, but it evicts."""
+    container = _run(
+        VALKEY_IMAGE,
+        6379,
+        "valkey-server",
+        "--maxmemory",
+        str(VALKEY_MAXMEMORY_BYTES),
+        "--maxmemory-policy",
+        "allkeys-lru",
+        "--save",
+        "",
+        "--appendonly",
+        "no",
+    )
+    _wait(lambda: container.exec("valkey-cli", "ping") == "PONG", "cache Valkey", container)
+    return container
+
+
 def start_postgres() -> Container:
     container = _run(
         POSTGRES_IMAGE,

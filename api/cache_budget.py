@@ -68,6 +68,14 @@ async def _evict_lightest_below(valkey: Any, index: str, costs: str, cost: int) 
     for _ in range(_EVICTION_ATTEMPTS):
         lightest = await valkey.zrange(costs, 0, 0, withscores=True)
         if not lightest:
+            # The index is full yet the cost set is empty. Both are written together with one TTL, so the only way
+            # here is an evicting cache instance (allkeys-lru) dropping the cost set while the index survived.
+            # Nothing can be ranked, so the index is forgotten and the slot is free: what it named is still
+            # served until its own TTL, just uncounted. Refusing the write instead would hold the cache shut
+            # until the index expired.
+            if await valkey.zcard(index) and not await valkey.exists(costs):
+                await valkey.delete(index)
+                return True
             return False
         victim, victim_cost = lightest[0]
         if cost <= victim_cost:
