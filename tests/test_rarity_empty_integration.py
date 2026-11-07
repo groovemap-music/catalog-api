@@ -11,7 +11,10 @@ Nothing here touches a shared database: ``just test-integration`` starts throwaw
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 import pytest
+import pytest_asyncio
 from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver
 
 from api.queries.helpers import run_query
@@ -22,6 +25,15 @@ from tests.test_real_databases import neo4j_driver, postgres_pool
 __all__ = ["neo4j_driver", "postgres_pool"]
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _leave_release_rarity_empty(postgres_pool: AsyncPostgreSQLPool) -> AsyncIterator[None]:
+    """These tests truncate and reseed insights.release_rarity; the next file must not inherit their rows (gm-catalog-api-bqul)."""
+    yield
+    async with postgres_pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("TRUNCATE insights.release_rarity")
+        await cur.execute("DELETE FROM insights.computation_log WHERE insight_type = 'release_rarity'")
 
 
 async def _graph(driver: AsyncResilientNeo4jDriver) -> None:
