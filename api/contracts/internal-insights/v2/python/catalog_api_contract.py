@@ -1,0 +1,22 @@
+"""Generated from api/contracts/internal-insights/v2/openapi.yaml; do not edit."""
+
+CONTRACT_VERSION = "2.0.0"
+ANNIVERSARIES_PATH = "/api/internal/insights/anniversaries"
+ARTIST_CENTRALITY_PATH = "/api/internal/insights/artist-centrality"
+COMMUNITY_ENRICHMENT_PATH = "/api/internal/insights/community-enrichment"
+DATA_COMPLETENESS_PATH = "/api/internal/insights/data-completeness"
+GENRE_TRENDS_PATH = "/api/internal/insights/genre-trends"
+LABEL_LONGEVITY_PATH = "/api/internal/insights/label-longevity"
+RARITY_PAGE_PATH = "/api/internal/insights/rarity-scores/page"
+RARITY_QUALITY_COUNTS_PATH = "/api/internal/insights/rarity-scores/quality-counts"
+STYLE_COTAGS_PATH = "/api/internal/insights/style-cotags"
+STYLE_LANDMARKS_PATH = "/api/internal/insights/style-landmarks"
+STYLE_YEAR_COUNTS_PATH = "/api/internal/insights/style-year-counts"
+COMMUNITY_ENRICHMENT_MAX_PROCESSING_SECONDS = 1500
+GENRE_TRENDS_MAX_PROCESSING_SECONDS = 300
+LABEL_LONGEVITY_MAX_PROCESSING_SECONDS = 300
+RARITY_PAGE_MAX_PROCESSING_SECONDS = 300
+RARITY_QUALITY_COUNTS_MAX_PROCESSING_SECONDS = 300
+STYLE_COTAGS_MAX_PROCESSING_SECONDS = 300
+STYLE_LANDMARKS_MAX_PROCESSING_SECONDS = 300
+STYLE_YEAR_COUNTS_MAX_PROCESSING_SECONDS = 300

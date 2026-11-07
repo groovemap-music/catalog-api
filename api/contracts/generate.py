@@ -12,8 +12,8 @@ import yaml
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-OPENAPI_PATH = Path(__file__).resolve().parent / "internal-insights" / "v1" / "openapi.yaml"
-OUTPUT_PATH = Path(__file__).resolve().parent / "internal-insights" / "v1" / "python" / "catalog_api_contract.py"
+OPENAPI_PATH = Path(__file__).resolve().parent / "internal-insights" / "v2" / "openapi.yaml"
+OUTPUT_PATH = Path(__file__).resolve().parent / "internal-insights" / "v2" / "python" / "catalog_api_contract.py"
 ADMIN_ROUTES_PATH = Path(__file__).resolve().parent / "operations-console" / "v1" / "routes.json"
 ADMIN_OUTPUT_PATH = Path(__file__).resolve().parent / "operations-console" / "v1" / "python" / "catalog_admin_contract.py"
 
@@ -34,7 +34,7 @@ def render_insights() -> str:
     budget_constants = "\n".join(
         f"{name.upper()}_MAX_PROCESSING_SECONDS = {json.dumps(seconds)}" for name, seconds in sorted(processing_budgets.items())
     )
-    return f'''"""Generated from api/contracts/internal-insights/v1/openapi.yaml; do not edit."""
+    return f'''"""Generated from api/contracts/internal-insights/v2/openapi.yaml; do not edit."""
 
 CONTRACT_VERSION = {json.dumps(document["info"]["version"])}
 {constants}

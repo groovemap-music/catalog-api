@@ -26,6 +26,7 @@ Producer-owned, versioned compatibility surfaces for independently deployed Groo
 - `graph-explorer/v1/routes.json` records the Catalog API methods and paths used by the public graph application.
 - `mcp-server/v1/routes.json` records the API surface exposed to MCP clients.
 - `operations-console/v1/routes.json` records the privileged console surface.
-- `internal-insights/v1/openapi.yaml` records the analytics engine surface.
+- `internal-insights/v2/openapi.yaml` records the analytics engine surface. v2 removes the whole-catalog
+  `rarity-scores` route; `internal-insights/v1` stays frozen as the copy analytics-engine pins.
 
 Consumers promote an immutable copy plus source commit and digest. Changes remain compatible within a contract version; breaking changes require a new version.

@@ -102,6 +102,7 @@ groovemap-database-schema = { git = "https://github.com/groovemap-music/database
 extend-exclude = [
     "api/catalog_contract.py",
     "api/contracts/internal-insights/v1/python/catalog_api_contract.py",
+    "api/contracts/internal-insights/v2/python/catalog_api_contract.py",
     "contracts/catalog-events/v1/discogs/python/catalog_contract.py",
     "contracts/catalog-events/v1/musicbrainz/python/catalog_contract.py",
     "docs/superpowers",

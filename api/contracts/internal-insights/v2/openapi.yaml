@@ -1,0 +1,473 @@
+---
+openapi: 3.1.0
+info:
+  title: GrooveMap internal insights API
+  version: 2.0.0
+  description: Catalog API-owned contract consumed by the analytics engine.
+security:
+  - InternalSecret: []
+paths:
+  /api/internal/insights/artist-centrality:
+    get:
+      operationId: artist_centrality
+      parameters:
+        - $ref: "#/components/parameters/ArtistCentralityLimit"
+      responses:
+        "200": {$ref: "#/components/responses/Items"}
+  /api/internal/insights/genre-trends:
+    get:
+      operationId: genre_trends
+      description: >-
+        Release counts per genre and decade of the release's own year; undated releases are
+        left out. The read scans every release-genre tag, so it runs under a long internal
+        budget.
+      x-groovemap-max-processing-seconds: 300
+      responses:
+        "200": {$ref: "#/components/responses/Items"}
+        "503":
+          description: Neo4j gave up on the read with a retryable error, or is not ready.
+  /api/internal/insights/style-year-counts:
+    get:
+      operationId: style_year_counts
+      description: >-
+        Release and master counts per style and release year, each style's genre
+        co-occurrence shares, and release counts per genre and release year. Release year,
+        never master year, is the bucket; undated releases are left out of the year cells.
+        Shares are raw: no floor is applied, the consumer owns the parent threshold. The read
+        scans every release-style tag, so it runs under a long internal budget.
+      x-groovemap-max-processing-seconds: 300
+      responses:
+        "200": {$ref: "#/components/responses/StyleYearCounts"}
+        "503":
+          description: Neo4j gave up on the read with a retryable error, or is not ready.
+  /api/internal/insights/style-landmarks:
+    get:
+      operationId: style_landmarks
+      description: >-
+        Landmark masters per style: up to 25 masters of each style, ranked by the number of
+        releases that carry the style and derive from the master, ties broken by master id
+        ascending. Releases without a master do not count. The year is the master's own,
+        `null` when it has none. The read visits every release-style tag one style at a time,
+        so it runs under a long internal budget.
+      x-groovemap-max-processing-seconds: 300
+      responses:
+        "200": {$ref: "#/components/responses/StyleLandmarks"}
+        "503":
+          description: Neo4j gave up on the read with a retryable error, or is not ready.
+  /api/internal/insights/style-cotags:
+    get:
+      operationId: style_cotags
+      description: >-
+        Co-tagged styles per style: up to 25 other styles for each style, ranked by the number
+        of releases tagged with both, ties broken by the other style's name ascending. A style
+        is never paired with itself. Each pair appears under both of its styles, with the same
+        count. The read counts every release's style pairs one style at a time, so it runs
+        under a long internal budget.
+      x-groovemap-max-processing-seconds: 300
+      responses:
+        "200": {$ref: "#/components/responses/StyleCotags"}
+        "503":
+          description: Neo4j gave up on the read with a retryable error, or is not ready.
+  /api/internal/insights/label-longevity:
+    get:
+      operationId: label_longevity
+      description: >-
+        Longest-running labels: first and last release year, years active, dated releases and
+        peak decade per label, ranked by years active, then releases, then label id ascending.
+        Ties for the peak decade go to the earlier decade. Undated releases are left out, and
+        labels with no name or no dated release are not ranked. The read takes the year of every
+        release-label edge, so it runs under a long internal budget. Every row carries
+        is_placeholder, which marks a Discogs entry for releases with no label, such as Not On
+        Label, rather than a label. Placeholders are left out by default, so limit real labels are
+        ranked. With include_placeholders, the same real labels come back with the placeholders
+        that rank among them, at most limit more. Those rows take no place from a real label: a
+        real label's rank is its position among the rows with is_placeholder false.
+      x-groovemap-max-processing-seconds: 300
+      parameters:
+        - $ref: "#/components/parameters/LabelLongevityLimit"
+        - $ref: "#/components/parameters/LabelLongevityIncludePlaceholders"
+      responses:
+        "200": {$ref: "#/components/responses/Items"}
+        "503":
+          description: Neo4j gave up on the read with a retryable error, or is not ready.
+  /api/internal/insights/anniversaries:
+    get:
+      operationId: anniversaries
+      parameters:
+        - $ref: "#/components/parameters/AnniversaryYear"
+        - $ref: "#/components/parameters/AnniversaryMonth"
+        - $ref: "#/components/parameters/AnniversaryMilestones"
+      responses:
+        "200": {$ref: "#/components/responses/Items"}
+  /api/internal/insights/data-completeness:
+    get:
+      operationId: data_completeness
+      responses:
+        "200": {$ref: "#/components/responses/Items"}
+  /api/internal/insights/community-enrichment:
+    get:
+      operationId: community_enrichment
+      x-groovemap-max-processing-seconds: 1500
+      responses:
+        "200": {$ref: "#/components/responses/CommunityEnrichment"}
+  /api/internal/insights/rarity-scores/quality-counts:
+    get:
+      operationId: rarity_quality_counts
+      x-groovemap-max-processing-seconds: 300
+      description: >-
+        One keyset page of the first rarity pass. Follow next_after until it is null, summing the
+        counts of each signal value and keeping the first release_total. A request is whole or
+        fails: on a 429, 5xx or dropped connection, retry the same `after`.
+      parameters:
+        - $ref: "#/components/parameters/RarityAfter"
+        - $ref: "#/components/parameters/RarityPageLimit"
+      responses:
+        "200": {$ref: "#/components/responses/RarityQualityCounts"}
+  /api/internal/insights/rarity-scores/page:
+    post:
+      operationId: rarity_page
+      x-groovemap-max-processing-seconds: 300
+      description: >-
+        One keyset page of scored rows, ranked against the summed counts in the body. Follow
+        next_after until it is null. A request is whole or fails: on a 429, 5xx or dropped
+        connection, retry the same `after`. A complete walk returns at least the first
+        release_total rows; fewer means releases were missed, and the walk must not be stored.
+      parameters:
+        - $ref: "#/components/parameters/RarityAfter"
+        - $ref: "#/components/parameters/RarityPageLimit"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/RarityDistributions"}
+      responses:
+        "200": {$ref: "#/components/responses/RarityPage"}
+components:
+  securitySchemes:
+    InternalSecret:
+      type: apiKey
+      in: header
+      name: X-Internal-Secret
+  parameters:
+    ArtistCentralityLimit:
+      name: limit
+      in: query
+      required: false
+      schema: {type: integer, minimum: 1, maximum: 500, default: 100}
+    LabelLongevityLimit:
+      name: limit
+      in: query
+      required: false
+      schema: {type: integer, minimum: 1, maximum: 500, default: 50}
+    LabelLongevityIncludePlaceholders:
+      name: include_placeholders
+      in: query
+      required: false
+      schema: {type: boolean, default: false}
+    AnniversaryYear:
+      name: year
+      in: query
+      required: true
+      schema: {type: integer}
+    AnniversaryMonth:
+      name: month
+      in: query
+      required: true
+      schema: {type: integer, minimum: 1, maximum: 12}
+    AnniversaryMilestones:
+      name: milestones
+      in: query
+      required: false
+      schema: {type: string, default: "25,30,40,50,75,100"}
+    RarityAfter:
+      name: after
+      in: query
+      required: false
+      description: The next_after of the previous page; empty for the first page.
+      schema: {type: string, default: ""}
+    RarityPageLimit:
+      name: limit
+      in: query
+      required: false
+      schema: {type: integer, minimum: 1, maximum: 20000, default: 20000}
+  schemas:
+    RarityValueCounts:
+      type: array
+      description: "`[value, count]` pairs: how many releases have this signal value."
+      items:
+        type: array
+        prefixItems:
+          - {type: number}
+          - {type: integer}
+        minItems: 2
+        maxItems: 2
+    RarityDistributions:
+      type: object
+      description: Quality-signal counts summed over every page of rarity-scores/quality-counts.
+      required: [artist, label, genre]
+      properties:
+        artist: {$ref: "#/components/schemas/RarityValueCounts"}
+        label: {$ref: "#/components/schemas/RarityValueCounts"}
+        genre: {$ref: "#/components/schemas/RarityValueCounts"}
+      additionalProperties: false
+    StyleYearCount:
+      description: One style and release year that has at least one dated release.
+      type: object
+      required: [style, year, release_count, master_count]
+      properties:
+        style: {type: string}
+        year: {type: integer, minimum: 1}
+        release_count:
+          type: integer
+          minimum: 1
+          description: Distinct releases tagged with the style whose own release year is `year`.
+        master_count:
+          type: integer
+          minimum: 0
+          description: Distinct masters those releases derive from; masterless releases add none.
+      additionalProperties: false
+    GenreYearCount:
+      description: One genre and release year that has at least one dated release.
+      type: object
+      required: [genre, year, release_count]
+      properties:
+        genre: {type: string}
+        year: {type: integer, minimum: 1}
+        release_count:
+          type: integer
+          minimum: 1
+          description: Distinct releases tagged with the genre whose own release year is `year`.
+      additionalProperties: false
+    StyleParentShare:
+      description: A genre that co-occurs with a style, with its raw share of the style's releases.
+      type: object
+      required: [style, genre, release_count, style_release_count, share]
+      properties:
+        style: {type: string}
+        genre: {type: string}
+        release_count:
+          type: integer
+          minimum: 1
+          description: Releases tagged with both the style and the genre.
+        style_release_count:
+          type: integer
+          minimum: 1
+          description: All releases tagged with the style, dated or not.
+        share:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: >-
+            `release_count / style_release_count`. Shares do not sum to one because releases
+            carry several genres. Unfloored.
+      additionalProperties: false
+    StyleLandmark:
+      description: One master among the top 25 of a style.
+      type: object
+      required: [style, master_id, title, year, release_count]
+      properties:
+        style: {type: string}
+        master_id: {type: string}
+        title:
+          type: [string, "null"]
+        year:
+          type: [integer, "null"]
+          minimum: 1
+          description: The master's own year; `null` when the master has none.
+        release_count:
+          type: integer
+          minimum: 1
+          description: Distinct releases tagged with the style that derive from the master.
+      additionalProperties: false
+    StyleCotag:
+      description: One style among the top 25 co-tagged with a style.
+      type: object
+      required: [style, other, release_count]
+      properties:
+        style: {type: string}
+        other:
+          type: string
+          description: The co-tagged style; never equal to `style`.
+        release_count:
+          type: integer
+          minimum: 1
+          description: Distinct releases tagged with both `style` and `other`.
+      additionalProperties: false
+    CommunityEnrichmentResult:
+      type: object
+      required: [enriched, skipped, errors, remaining]
+      properties:
+        enriched: {type: integer, minimum: 0}
+        skipped: {type: integer, minimum: 0}
+        errors: {type: integer, minimum: 0}
+        remaining: {type: integer, minimum: 0}
+        error:
+          type: string
+          enum: [no_credentials]
+      additionalProperties: false
+    RarityScoreItem:
+      description: >-
+        One release's rarity computation. Per ADR 0007 the core score is media-neutral;
+        `pressing_scarcity` is populated only for grooved media (vinyl, shellac,
+        grooved_other) and is `null` otherwise. `format_rarity` is deprecated for one
+        minor version: still computed and present at weight `0.0`, superseded by
+        `medium_rarity`.
+      type: object
+      required:
+        - release_id
+        - title
+        - artist_name
+        - year
+        - rarity_score
+        - tier
+        - hidden_gem_score
+        - pressing_scarcity
+        - label_catalog
+        - format_rarity
+        - temporal_scarcity
+        - graph_isolation
+        - collection_prevalence
+        - medium_rarity
+        - media_families
+        - family_signals
+        - label_ids
+        - artist_ids
+      properties:
+        release_id: {type: string}
+        title: {type: string}
+        artist_name: {type: string}
+        year: {type: [integer, "null"]}
+        rarity_score: {type: number}
+        tier: {type: string}
+        hidden_gem_score: {type: number}
+        pressing_scarcity:
+          type: [number, "null"]
+          description: Grooved-only signal; `null` when no family extension claims the release.
+        label_catalog: {type: number}
+        format_rarity:
+          type: number
+          deprecated: true
+          description: Raw Discogs format name signal, kept for one minor version at weight 0.0.
+        temporal_scarcity: {type: number}
+        graph_isolation: {type: number}
+        collection_prevalence: {type: number}
+        medium_rarity:
+          type: [number, "null"]
+          description: Canonical-medium rarity score (ADR 0007); replaces `format_rarity`.
+        media_families:
+          type: array
+          items: {type: string}
+          description: Canonical ADR 0007 media family ids the release covers.
+        family_signals:
+          type: object
+          additionalProperties: true
+          description: Per-family-extension signal scores keyed by module id (e.g. `grooved`).
+        label_ids:
+          type: array
+          items: {type: integer, format: int64}
+          description: Every distinct label the release is ON, ascending. Empty when it has none.
+        artist_ids:
+          type: array
+          items: {type: integer, format: int64}
+          description: Every distinct artist the release is BY, ascending. Empty when it has none.
+      additionalProperties: true
+  responses:
+    Items:
+      description: A successful computation input response.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [items]
+            properties:
+              items:
+                type: array
+                items: {type: object, additionalProperties: true}
+            additionalProperties: false
+    CommunityEnrichment:
+      description: Community enrichment counters for the completed bounded batch.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/CommunityEnrichmentResult"}
+    StyleYearCounts:
+      description: Style-by-release-year counts, per-style genre shares and genre-by-release-year counts.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [style_years, style_parents, genre_years]
+            properties:
+              style_years:
+                type: array
+                items: {$ref: "#/components/schemas/StyleYearCount"}
+              style_parents:
+                type: array
+                items: {$ref: "#/components/schemas/StyleParentShare"}
+              genre_years:
+                type: array
+                items: {$ref: "#/components/schemas/GenreYearCount"}
+            additionalProperties: false
+    StyleLandmarks:
+      description: >-
+        Landmark masters, grouped by style and ordered by `release_count` descending, then
+        `master_id`.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [landmarks]
+            properties:
+              landmarks:
+                type: array
+                items: {$ref: "#/components/schemas/StyleLandmark"}
+            additionalProperties: false
+    StyleCotags:
+      description: >-
+        Co-tagged styles, grouped by style and ordered by `release_count` descending, then
+        `other`.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [cotags]
+            properties:
+              cotags:
+                type: array
+                items: {$ref: "#/components/schemas/StyleCotag"}
+            additionalProperties: false
+    RarityQualityCounts:
+      description: One page of quality-signal value counts.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [artist, label, genre, releases, release_total, next_after]
+            properties:
+              artist: {$ref: "#/components/schemas/RarityValueCounts"}
+              label: {$ref: "#/components/schemas/RarityValueCounts"}
+              genre: {$ref: "#/components/schemas/RarityValueCounts"}
+              releases:
+                type: integer
+                description: Releases this page covered.
+              release_total:
+                type: integer
+                description: Releases in the graph when this page was read.
+              next_after:
+                type: [string, "null"]
+                description: The `after` of the next page; null on the last page.
+            additionalProperties: false
+    RarityPage:
+      description: One page of rarity score data, media-neutral core plus family extensions.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [items, next_after]
+            properties:
+              items:
+                type: array
+                items: {$ref: "#/components/schemas/RarityScoreItem"}
+              next_after:
+                type: [string, "null"]
+                description: The `after` of the next page; null on the last page.
+            additionalProperties: false
