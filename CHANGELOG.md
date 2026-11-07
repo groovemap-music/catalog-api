@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v1.0.0 (2026-11-07)
+
+### Release notes
+
+No schema change. Breaking for internal callers only: GET /api/internal/insights/rarity-scores is removed, and internal-insights v2 is published while v1 stays frozen for analytics-engine, which no longer calls the route. The rarity membership check runs once per completed run, in the background. The rarity integration tests no longer interfere, so CI is green.
+
+### Feat
+
+- **contracts**: remove the whole-catalog rarity-scores route in internal-insights v2
+
 ## v0.9.1 (2026-11-07)
 
 ### Release notes
