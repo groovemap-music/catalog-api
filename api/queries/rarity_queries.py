@@ -23,7 +23,6 @@ import binascii
 import bisect
 import json
 import math
-import time
 from collections import Counter
 from collections.abc import AsyncIterator, Iterable
 from datetime import UTC, datetime
@@ -896,7 +895,6 @@ async def _release_rarity_has_rows(pool: Any) -> bool:
 
 
 _BIGINT_MAX_ID = 2**63 - 1
-_MEMBERSHIP_CHECK_TTL_SECONDS = 900.0
 
 # One statement for a label's or an artist's rarity page and its exact total (database-schema
 # docs/architecture.md, "Rarity by label and by artist"). It always returns a row: a page past the end,
@@ -929,10 +927,14 @@ _ARTIST_COLUMN = "artist_ids"
 _PAGE_SQL_BY_COLUMN = {_LABEL_COLUMN: _LABEL_PAGE_SQL, _ARTIST_COLUMN: _ARTIST_PAGE_SQL}
 
 # A `@>` match is complete only if no row has the column NULL (a row written by an older stream is
-# invisible to it). That check is a scan of the whole table, so it runs once per completed rarity run
-# (the table only changes when one finishes) and is remembered for a bounded time.
-_membership_checked: dict[str, Any] = {"run_id": None, "at": 0.0, "complete": {}}
+# invisible to it). That check is a scan of the whole table, and its answer can only change when a new
+# rarity run completes (the table is written by a run, not by a request). So the answer is remembered
+# per completed run, with no timer, and refreshed off the request path by run_rarity_membership_refresh,
+# which the app lifespan starts. A request pays the scan only when it arrives before that refresh has
+# seen a new completed run.
+_membership_checked: dict[str, Any] = {"run_id": None, "complete": {}}
 _membership_lock = asyncio.Lock()
+RARITY_MEMBERSHIP_REFRESH_SECONDS = 60.0
 
 
 async def _membership_columns_complete(pool: Any, column: str) -> bool:
@@ -948,8 +950,7 @@ async def _membership_columns_complete(pool: Any, column: str) -> bool:
         return False
 
     async with _membership_lock:
-        fresh = _membership_checked["run_id"] == run_id and time.monotonic() - _membership_checked["at"] < _MEMBERSHIP_CHECK_TTL_SECONDS
-        if not fresh:
+        if _membership_checked["run_id"] != run_id:
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
                     "SELECT NOT EXISTS (SELECT 1 FROM insights.release_rarity WHERE label_ids IS NULL) AS label_ids,"
@@ -958,7 +959,6 @@ async def _membership_columns_complete(pool: Any, column: str) -> bool:
                 found = await cur.fetchone()
             _membership_checked.update(
                 run_id=run_id,
-                at=time.monotonic(),
                 complete={_LABEL_COLUMN: bool(found and found["label_ids"]), _ARTIST_COLUMN: bool(found and found["artist_ids"])},
             )
             if not all(_membership_checked["complete"].values()):
@@ -968,6 +968,20 @@ async def _membership_columns_complete(pool: Any, column: str) -> bool:
                     complete=_membership_checked["complete"],
                 )
         return bool(_membership_checked["complete"].get(column))
+
+
+async def run_rarity_membership_refresh(pool: Any, interval_seconds: float = RARITY_MEMBERSHIP_REFRESH_SECONDS) -> None:
+    """Keep the membership verdict current for the latest completed run, outside any request.
+
+    Each tick is one small lookup of the latest completed run; the table scan runs only when that run is
+    new. A failed tick is logged and retried on the next one; the request path still checks on demand.
+    """
+    while True:
+        try:
+            await _membership_columns_complete(pool, _LABEL_COLUMN)
+        except Exception as exc:
+            logger.warning("rarity membership refresh failed; the next tick retries", error=str(exc))
+        await asyncio.sleep(interval_seconds)
 
 
 async def _rarity_page_by_membership(pool: Any, column: str, key: int, page: int, page_size: int) -> tuple[list[dict[str, Any]], int]:

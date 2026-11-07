@@ -81,6 +81,7 @@ from api.ledger_refresh import run_refresh_loop
 from api.limiter import limiter
 from api.neo4j_timeouts import install_neo4j_timeout_handler
 from api.notifications import LogNotificationChannel, ResendNotificationChannel
+from api.queries.rarity_queries import run_rarity_membership_refresh
 from api.queries.search_queries import ALL_TYPES, execute_search
 from api.reattach_trigger import run_trigger_loop
 from api.services.discogs import (
@@ -388,6 +389,9 @@ async def _start_service(_app: FastAPI) -> _LifecycleResources:
 
     await _activity.ensure_startup_partitions()
     _app.state.prewarm_task = asyncio.create_task(_prewarm_search_cache())
+    # Keeps the rarity by-label / by-artist membership verdict warm, so the table scan that proves it runs
+    # off the request path (once per process and once per completed rarity run).
+    _app.state.rarity_membership_task = asyncio.create_task(run_rarity_membership_refresh(pool))
     _start_identity_maintenance(_app, config, pool, _neo4j)
     _start_ledger_refresh(_app, config, pool)
     _start_import_cache_watch(_app, config, pool, valkey, neo4j)
@@ -486,6 +490,8 @@ async def _stop_service(_app: FastAPI, resources: _LifecycleResources) -> None:
     await _cancel_tasks(list(_admin_router._tracking_tasks.values()))
     if hasattr(_app.state, "prewarm_task"):
         await _cancel_tasks([_app.state.prewarm_task])
+    if hasattr(_app.state, "rarity_membership_task"):
+        await _cancel_tasks([_app.state.rarity_membership_task])
     identity_maintenance_task = getattr(_app.state, "identity_maintenance_task", None)
     if isinstance(identity_maintenance_task, asyncio.Task):
         await _cancel_tasks([identity_maintenance_task])

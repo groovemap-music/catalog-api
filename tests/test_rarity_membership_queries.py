@@ -65,9 +65,9 @@ class _Pool:
 
 @pytest.fixture(autouse=True)
 def _fresh_cache() -> Iterator[None]:
-    rq._membership_checked.update(run_id=None, at=0.0, complete={})
+    rq._membership_checked.update(run_id=None, complete={})
     yield
-    rq._membership_checked.update(run_id=None, at=0.0, complete={})
+    rq._membership_checked.update(run_id=None, complete={})
 
 
 def _pool(*, run_id: int | None = 5, label_ok: bool = True, artist_ok: bool = True, page_rows: list[dict[str, Any]] | None = None) -> _Pool:
@@ -100,9 +100,30 @@ async def test_completeness_is_checked_once_per_run_and_remembered() -> None:
     scans = [q for q, _ in pool.executed if "NOT EXISTS" in q]
     assert len(scans) == 1  # the second call used the remembered answer
 
-    rq._membership_checked["at"] -= rq._MEMBERSHIP_CHECK_TTL_SECONDS + 1  # expired: scan again
+    # No timer: the same completed run stays remembered on a later call, with no time having passed.
     await rq._membership_columns_complete(pool, "label_ids")
-    assert len([q for q, _ in pool.executed if "NOT EXISTS" in q]) == 2
+    assert len([q for q, _ in pool.executed if "NOT EXISTS" in q]) == 1
+
+
+class _Stop(Exception):
+    pass
+
+
+@pytest.mark.asyncio
+async def test_background_refresh_scans_once_per_completed_run() -> None:
+    pool = _pool(run_id=5)
+    ticks = 0
+
+    async def two_ticks(_seconds: float) -> None:
+        nonlocal ticks
+        ticks += 1
+        if ticks == 2:
+            raise _Stop
+
+    with patch("api.queries.rarity_queries.asyncio.sleep", side_effect=two_ticks), pytest.raises(_Stop):
+        await rq.run_rarity_membership_refresh(pool, 60.0)
+    assert ticks == 2
+    assert len([q for q, _ in pool.executed if "NOT EXISTS" in q]) == 1  # the second tick saw the same run
 
 
 @pytest.mark.asyncio
