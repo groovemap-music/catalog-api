@@ -2,7 +2,9 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
-## v1.0.0 (2026-11-07)
+## v0.10.0 (2026-11-07)
+
+This release was first prepared as v1.0.0 because Commitizen took the breaking change past 0.x without major_version_zero. Going to 1.0 is a product decision, so it ships as v0.10.0 and 0.x bumps now stay below 1.0.
 
 ### Release notes
 
