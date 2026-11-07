@@ -8,7 +8,8 @@ All notable changes to this project will be documented here by Commitizen.
 
 No schema change and no required deploy order; deploy catalog-api alone.
 
-- The internal-insights contract is 1.8.0: genre-trends now publishes a 300 s processing budget and answers a retryable 503 when Neo4j times out. analytics-engine's default 900 s read timeout already covers it, so no analytics-engine release is needed.
+- The internal-insights contract is 1.10.0: 1.8.0 gives genre-trends a published 300 s processing budget, 1.9.0 does the same for label-longevity, and 1.10.0 adds `include_placeholders` to label-longevity. analytics-engine's default 900 s read timeout is above every one of these budgets, so no analytics-engine release is needed.
+- style-landmarks, style-cotags and label-longevity now complete on the full catalog: each counts one group at a time instead of in one pass. Label-longevity runs under a 300 s budget, and a Neo4j timeout or memory failure on any of the three is a retryable 503, never empty data. Genre-trends does the same.
 - The label-longevity route leaves Discogs placeholder labels (such as Not On Label) out by default; `include_placeholders=true` brings them back and every row carries `is_placeholder`.
 - `CATALOG_CACHE_VALKEY_HOST` is optional. Unset, the single Valkey client is used exactly as before; set, catalog caches go to a second allkeys-lru instance.
 
