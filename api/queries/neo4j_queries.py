@@ -87,6 +87,10 @@ def _build_autocomplete_query(query: str) -> str:
 class _AutocompleteSpec:
     index: str
     id_expression: str
+    rank_expression: str | None = None
+    # Lucene's cut keeps the first `limit` names it scored, so a tie straddling that cut drops names that the
+    # rank would have put first. A ranked spec scores a wider pool and cuts after it.
+    candidate_pool: int | None = None
 
 
 async def _autocomplete(
@@ -98,17 +102,22 @@ async def _autocomplete(
     # The limit goes to Lucene, which then keeps the highest-scoring names instead of scoring every match
     # ('the*' matches tens of thousands; 119 ms warm before, 4 to 7 ms now). The tie-break only orders names
     # Lucene scored equally: a name equal to what was typed, then the shorter, then the lower id.
+    # A spec with a rank expression orders names Lucene scored equally by it, after the exact-name check
+    # and before the length: an artist with more releases comes first. A missing property counts as 0, so
+    # names without it keep the order they had.
+    rank = f"{spec.rank_expression} DESC, " if spec.rank_expression else ""
+    pool = max(limit, spec.candidate_pool or limit)
     cypher = f"""
-    CALL db.index.fulltext.queryNodes('{spec.index}', $query, {{limit: $limit}})
+    CALL db.index.fulltext.queryNodes('{spec.index}', $query, {{limit: $pool}})
     YIELD node, score
     RETURN {spec.id_expression} AS id, node.name AS name, score
-    ORDER BY score DESC, toLower(node.name) = $typed DESC, size(node.name), id
+    ORDER BY score DESC, toLower(node.name) = $typed DESC, {rank}size(node.name), id
     LIMIT $limit
     """
-    return await run_query(driver, cypher, query=_build_autocomplete_query(query), limit=limit, typed=" ".join(query.split()).lower())
+    return await run_query(driver, cypher, query=_build_autocomplete_query(query), limit=limit, pool=pool, typed=" ".join(query.split()).lower())
 
 
-_ARTIST_AUTOCOMPLETE = _AutocompleteSpec("artist_name_fulltext", "node.id")
+_ARTIST_AUTOCOMPLETE = _AutocompleteSpec("artist_name_fulltext", "node.id", rank_expression="coalesce(node.release_count, 0)", candidate_pool=50)
 _LABEL_AUTOCOMPLETE = _AutocompleteSpec("label_name_fulltext", "node.id")
 _GENRE_AUTOCOMPLETE = _AutocompleteSpec("genre_name_fulltext", "node.name")
 _STYLE_AUTOCOMPLETE = _AutocompleteSpec("style_name_fulltext", "node.name")
