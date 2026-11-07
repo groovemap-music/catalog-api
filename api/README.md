@@ -468,8 +468,8 @@ module docstring has the full design.
   the automatic trigger) and every applying `catalog-identity-ledger-backfill --apply` refreshes
   the views itself, after its audit entry is final and before it reports done. A failed run
   refreshes too, because its items or batches commit one at a time. The refresh adds its own
-  duration to the run: 195 s at 50% synthetic scale, and about 6 to 7 minutes extrapolated to
-  full scale.
+  duration to the run: on the first real catalog (2026-11-07) a refresh averaged 354 s over four
+  calls, three of which ran the full rebuild (379 s each on average).
 - **After loads, by change detection.** A background poll sums `n_tup_ins + n_tup_upd +
   n_tup_del` from `pg_stat_user_tables` over the ledger's sources (`provider_aliases`,
   `catalog_items`, `catalog_item_supersessions`, `identity_link_events`, `graph.derived_from`,
@@ -501,7 +501,7 @@ module docstring has the full design.
 | After | At most | With the defaults |
 | --- | --- | --- |
 | A re-attachment or backfill run | Nothing beyond the refresh itself: the run returns once its changes are in the views | 0 |
-| The last write of a load | Quiet interval + one poll interval + one refresh | 10 + 5 min + the refresh (about 6 to 7 min at full scale, extrapolated) |
+| The last write of a load | Quiet interval + one poll interval + one refresh | 10 + 5 min + the refresh (about 6 min on the first real catalog, measured 2026-11-07) |
 | A write during a load still writing | Maximum staleness + one poll interval + one refresh | 6 h + 5 min + the refresh |
 | Any write, with the poll disabled | Until the next re-attachment or backfill run | Unbounded |
 
@@ -1524,33 +1524,43 @@ $ curl -H "Authorization: Bearer $ADMIN_JWT" \
 The payload is `{kind, buckets, refreshed_at}`.
 
 **Latency at catalog scale.** Until `gm-catalog-api-gorv` the list and the density strip
-computed every release item's event history on each request: a window over all of
-`provider_aliases` joined to `catalog_items`, filtered only afterwards, so no index helped. They
-now read the precomputed views. Both were measured on a synthetic catalog in
-`gm-design-loj9`'s proportions (`scripts/ledger_scale/README.md`), warm cache, production
-PostgreSQL settings, on a 6-vCPU Colima VM, on 2026-10-25.
+computed every release item's event history on each request, and the live figures were over the
+2 s budget on a synthetic catalog. They now read the precomputed views. Measured on lux, the first
+real catalog (PostgreSQL 18.6, schema v0.10.0, catalog-api v0.10.0), on **2026-11-07**, read-only
+(`gm-catalog-api-kmlo`).
 
-| Case | Live p95, 25% scale | Live p95, 50% scale | Views p95, 50% scale |
-| --- | ---: | ---: | ---: |
-| Works list, no filter | 28.5 s | 71.5 s | 137 ms |
-| Works list, `event=link_added` | 22.7 s | 66.1 s | 298 ms |
-| Works list, any other event filter | 7.1 to 27.4 s | 15.7 to 63.6 s | 4 to 382 ms |
-| Works list, one-month window | 9.1 s | 27.7 s | 18 ms |
-| Density, `release` / `master` / `artist` / `label` | 15.1 / 4.2 / 6.6 / 1.7 s | 45.6 / 8.8 / 12.7 / 3.1 s | 4 / 4 / 3 / 3 ms |
-| One work (the Discogs master with the most releases), read live | 28 ms | 59 ms | 35 ms |
+The real catalog: about 78.4M provider aliases (planner estimate), 23,588,010 release items
+(every one an edition, because there are no supersessions), 6,880,002 master items (works),
+12,034,568 artist and 2,622,480 label items, 1,874,658 release editions linked at ingest (1,874,658
+evented editions, 1,938,932 works with an event), **0 supersessions**, **0 link events**, and
+232,790 `evidence_attached` release events. Editions by parent works: 1,307,170 with one,
+565,939 with two, 1,549 with three or more (567,488 in all with several).
 
-The views figures are 20 timed calls per case after one warm-up, against the views
-`database-schema` declares. The live list and density were far over the 2 s budget; every case
-is now within it. The slowest is `event=linked_at_ingest` at 382 ms, the filter that matches the
-most works. A read grows with the works that match, not with the history, so doubling it once
-more for full scale gives under 0.8 s (extrapolated, not measured).
+| Case | p50 | p95 | Notes |
+| --- | ---: | ---: | --- |
+| Works list, no filter | 317 ms | 320 ms | 280 ms in the page read (851,630 buffers, all hits) |
+| Works list, `event=linked_at_ingest` | 305 ms | 320 ms | |
+| Works list, `event=evidence_attached` | 145 ms | 158 ms | |
+| Works list, `event=reattached`, `promoted`, `reverted`, `alias_closed`, `link_added`, `link_changed`, `link_removed` | 3 to 4 ms | 4 ms | no such events exist yet: zero rows |
+| Works list, one-month window, 2026-11 | **5,058 ms** | **5,146 ms** | over the 2 s budget: reads 1.92M buffers and writes 13,814 temp blocks |
+| Works list, one-month window, 2026-10 | 4 ms | 4 ms | zero rows: nothing was loaded then |
+| Density, `release` / `master` / `artist` / `label` | 2 ms each | 2 ms | 3 buckets each |
+| One work (the Discogs master with the most releases) | 57 ms | 58 ms | 12 statements, 33 ms in the first |
 
-At 50% scale `identity_ledger_refresh()` built the views in 140 s the first time and refreshed
-them concurrently in 195 s. That is about 6 to 7 minutes extrapolated to full scale. The four
-views take about 970 MB beside a 9.3 GB catalog. The refresh runs after re-attachment and
-backfill runs and after loads (see
-[Keeping the Identity Ledger Fresh](#keeping-the-identity-ledger-fresh)). `gm-catalog-api-l7ek`
-replaces these synthetic figures with measurements on the first real catalog.
+The times are 20 timed calls per case after one warm-up, as the server's planning plus execution
+time summed over the statements of one call. They exclude the network, the pool and Python, because
+the run went through a read-only SQL wrapper rather than the harness's own connection, so add a few
+milliseconds per statement for a request. The cache was warm. The slowest unwindowed case is the
+unfiltered list at 320 ms, about 2.4x the 137 ms the synthetic 50% scale measured; the filters that
+match no events are as fast as before. The window case is the exception and is slow because it
+scans the edition events in range and groups them per work instead of reading the summary.
+
+`identity_ledger_refresh()` on the real catalog: the server's function counters (cumulative, kept
+since the statistics were last reset) record four calls, a mean of 354 s (5.9 min) each, of which
+three included `identity_ledger_rebuild()`, a mean of 379 s. No single call's duration is recorded,
+so this is a mean, and the incremental path alone was not timed apart from the rebuild. The ledger
+tables hold 45.07M `item_mints` rows (7.4 GB), 3.87M item events, 2.09M edition events, 2.44M
+edition parents and 4.13M work summaries.
 
 ### Internal analytics computation
 
