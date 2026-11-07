@@ -41,6 +41,7 @@ from api.queries.taste_queries import get_taste_projection
 from api.routers import insights_compute
 from api.strata import MAX_ROOT_RELEASES, Budget, apply_labels, build_strata, label_targets
 from api.syncer import DISCOGS_API_BASE, sync_collection, sync_wantlist
+from tests.placeholder_labels import PLACEHOLDER_LABEL_CASES
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -1060,6 +1061,7 @@ async def test_label_longevity_ranks_named_dated_labels_on_a_seeded_graph(neo4j_
         "years_active": 27,
         "total_releases": 5,
         "peak_decade": 1960,
+        "is_placeholder": False,
     }
     # Equal spans rank by releases; equal spans and releases rank by id as a string, so '50' precedes '6'.
     assert [row["label_name"] for row in labels] == ["Old", "More", "Fewer", "Tie A", "Tie B"]
@@ -1068,6 +1070,55 @@ async def test_label_longevity_ranks_named_dated_labels_on_a_seeded_graph(neo4j_
     assert all(row["label_name"] for row in labels)
 
     assert [row["label_name"] for row in await query_label_longevity(neo4j_driver, limit=2)] == ["Old", "More"]
+
+
+# One label per case, each spanning a different number of years, longest first.
+_SEED_PLACEHOLDER_CASES = """
+UNWIND $labels AS label
+CREATE (l:Label {id: label.id, name: label.name})
+CREATE (:Release {id: label.id + 'a', year: 1900})-[:ON]->(l), (:Release {id: label.id + 'b', year: label.last_year})-[:ON]->(l)
+"""
+
+
+async def _seed_placeholder_cases(driver: AsyncResilientNeo4jDriver) -> None:
+    labels = [
+        {"id": label_id, "name": name, "last_year": 2026 - index} for index, (label_id, name, _placeholder) in enumerate(PLACEHOLDER_LABEL_CASES)
+    ]
+    await _consume(driver, _SEED_PLACEHOLDER_CASES, labels=labels)
+
+
+async def test_the_engine_applies_the_placeholder_rule_to_real_catalog_names(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    """Neo4j's regex engine, not Python's, decides in production: it must agree on every case."""
+    await _seed_placeholder_cases(neo4j_driver)
+    real = [label_id for label_id, _name, placeholder in PLACEHOLDER_LABEL_CASES if not placeholder]
+    placeholders = {label_id for label_id, _name, placeholder in PLACEHOLDER_LABEL_CASES if placeholder}
+
+    default = await query_label_longevity(neo4j_driver, limit=500)
+    assert [row["label_id"] for row in default] == real
+    assert not any(row["is_placeholder"] for row in default)
+
+    included = await query_label_longevity(neo4j_driver, limit=500, include_placeholders=True)
+    assert {row["label_id"] for row in included if row["is_placeholder"]} == placeholders
+    assert [row for row in included if not row["is_placeholder"]] == default
+    assert [row["label_id"] for row in included] == [label_id for label_id, _name, _placeholder in PLACEHOLDER_LABEL_CASES]
+
+
+async def test_the_route_ranks_real_labels_and_includes_placeholders_by_choice(
+    neo4j_driver: AsyncResilientNeo4jDriver,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Placeholders rank above every real label here, and still take no place from one."""
+    await _seed_placeholder_cases(neo4j_driver)
+    first_real = [label_id for label_id, _name, placeholder in PLACEHOLDER_LABEL_CASES if not placeholder][:2]
+    path = "/api/internal/insights/label-longevity?limit=2"
+
+    default = (await _get_insights_route(neo4j_driver, monkeypatch, path)).json()["items"]
+    included = (await _get_insights_route(neo4j_driver, monkeypatch, f"{path}&include_placeholders=true")).json()["items"]
+
+    assert [row["label_id"] for row in default] == first_real
+    assert [row for row in included if not row["is_placeholder"]] == default
+    assert [row["label_id"] for row in included if row["is_placeholder"]] == ["1818", "147757"]
+    assert included[0]["label_name"] == "Not On Label"
 
 
 _GROUP_READ_ROUTES = [

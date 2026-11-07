@@ -1,9 +1,17 @@
 """Tests for insights Neo4j query functions."""
 
+import re
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from neo4j.exceptions import TransientError
+
+from tests.placeholder_labels import PLACEHOLDER_LABEL_CASES
+
+
+def _longevity_row(label_id: str, years_active: int, *, placeholder: bool = False) -> dict[str, Any]:
+    return {"label_id": label_id, "years_active": years_active, "total_releases": 10, "is_placeholder": placeholder}
 
 
 class _AsyncIterator:
@@ -317,6 +325,73 @@ class TestQueryLabelLongevity:
         result = await query_label_longevity(driver, limit=50)
         assert len(result) == 1
         assert result[0]["years_active"] == 86
+
+    @pytest.mark.parametrize(("label_id", "name", "placeholder"), PLACEHOLDER_LABEL_CASES)
+    def test_placeholder_rule_on_real_catalog_names(self, label_id: str, name: str, placeholder: bool) -> None:
+        """Every name here is from the Lux catalog: placeholders go, and real lookalikes stay."""
+        from api.queries.insights_neo4j_queries import PLACEHOLDER_LABEL_IDS, PLACEHOLDER_LABEL_NAME, REAL_LABELS_NAMED_LIKE_PLACEHOLDERS
+
+        matched = label_id in PLACEHOLDER_LABEL_IDS or (
+            re.fullmatch(PLACEHOLDER_LABEL_NAME, name) is not None and label_id not in REAL_LABELS_NAMED_LIKE_PLACEHOLDERS
+        )
+        assert matched is placeholder
+
+    @pytest.mark.asyncio
+    async def test_default_is_one_read_of_real_labels(self) -> None:
+        """An analytics-engine that knows nothing of placeholders gets real labels, at the old cost."""
+        from api.queries.insights_neo4j_queries import query_label_longevity
+
+        run_query = AsyncMock(return_value=[_longevity_row("1", 50)])
+        with patch("api.queries.insights_neo4j_queries.run_query", run_query):
+            assert await query_label_longevity(AsyncMock(), limit=1) == [_longevity_row("1", 50)]
+
+        run_query.assert_awaited_once()
+        assert run_query.await_args.kwargs["placeholders"] is False
+
+    @pytest.mark.asyncio
+    async def test_included_placeholders_take_no_place_from_a_real_label(self) -> None:
+        """Real rows and their order are untouched; a placeholder ranks among them, or stays out."""
+        from api.queries.insights_neo4j_queries import query_label_longevity
+
+        real = [_longevity_row("1", 90), _longevity_row("2", 80)]
+        inside = _longevity_row("1818", 85, placeholder=True)
+        below = _longevity_row("7", 70, placeholder=True)
+
+        async def read(*_args: object, placeholders: bool, **_kwargs: object) -> list[dict[str, Any]]:
+            return [inside, below] if placeholders else real
+
+        with patch("api.queries.insights_neo4j_queries.run_query", read):
+            rows = await query_label_longevity(AsyncMock(), limit=2, include_placeholders=True)
+
+        assert rows == [real[0], inside, real[1]]
+        assert [row for row in rows if not row["is_placeholder"]] == real
+
+    @pytest.mark.asyncio
+    async def test_a_short_ranking_keeps_every_placeholder_it_read(self) -> None:
+        """With fewer real labels than the limit, no real label marks where the ranking ends."""
+        from api.queries.insights_neo4j_queries import query_label_longevity
+
+        real = _longevity_row("1", 90)
+        below = _longevity_row("7", 70, placeholder=True)
+
+        async def read(*_args: object, placeholders: bool, **_kwargs: object) -> list[dict[str, Any]]:
+            return [below] if placeholders else [real]
+
+        with patch("api.queries.insights_neo4j_queries.run_query", read):
+            assert await query_label_longevity(AsyncMock(), limit=5, include_placeholders=True) == [real, below]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_placeholder_read_fails_the_whole_read(self) -> None:
+        """A partial ranking must not pass for the complete one."""
+        from api.queries.insights_neo4j_queries import query_label_longevity
+
+        async def read(*_args: object, placeholders: bool, **_kwargs: object) -> list[dict[str, Any]]:
+            if placeholders:
+                raise TransientError("out of memory")
+            return [_longevity_row("1", 90)]
+
+        with patch("api.queries.insights_neo4j_queries.run_query", read), pytest.raises(ExceptionGroup):
+            await query_label_longevity(AsyncMock(), limit=1, include_placeholders=True)
 
     @pytest.mark.asyncio
     async def test_read_carries_the_limit_and_the_long_internal_timeout(self) -> None:

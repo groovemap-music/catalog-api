@@ -146,7 +146,7 @@ def test_style_year_counts_contract_publishes_the_producer_read_budget() -> None
     contract = yaml.safe_load(_CONTRACT.read_text(encoding="utf-8"))
     operation = contract["paths"]["/api/internal/insights/style-year-counts"]["get"]
     assert operation["x-groovemap-max-processing-seconds"] == STYLE_YEAR_QUERY_TIMEOUT_SECONDS
-    assert contract["info"]["version"] == "1.9.0"
+    assert contract["info"]["version"] == "1.10.0"
 
 
 _STYLE_YEAR_RESULT = {
@@ -350,6 +350,16 @@ class TestLabelLongevityEndpoint:
         assert response.status_code == 200
         assert response.json() == {"items": items}
 
+    def test_placeholders_stay_out_unless_asked_for(self, test_client: TestClient) -> None:
+        """A caller that names no choice, such as an older analytics-engine, gets the default."""
+        read = AsyncMock(return_value=[])
+        with patch("api.routers.insights_compute.query_label_longevity", read):
+            test_client.get("/api/internal/insights/label-longevity?limit=7")
+            test_client.get("/api/internal/insights/label-longevity?limit=7&include_placeholders=true")
+
+        assert [call.kwargs["include_placeholders"] for call in read.await_args_list] == [False, True]
+        assert {call.kwargs["limit"] for call in read.await_args_list} == {7}
+
     def test_not_ready(self, test_client: TestClient) -> None:
         """Returns 503 when Neo4j is not configured."""
         import api.routers.insights_compute as mod
@@ -388,6 +398,20 @@ class TestLabelLongevityEndpoint:
         with patch("api.routers.insights_compute.query_label_longevity", new=AsyncMock(side_effect=err)):
             response = test_client.get("/api/internal/insights/label-longevity")
         assert response.status_code == 500
+
+
+def test_label_longevity_contract_publishes_the_placeholder_choice() -> None:
+    """Off by default, so a consumer that predates the parameter keeps real labels only."""
+    contract = yaml.safe_load(_CONTRACT.read_text(encoding="utf-8"))
+    operation = contract["paths"]["/api/internal/insights/label-longevity"]["get"]
+    names = [parameter["$ref"].rsplit("/", 1)[-1] for parameter in operation["parameters"]]
+    parameter = contract["components"]["parameters"]["LabelLongevityIncludePlaceholders"]
+
+    assert "LabelLongevityIncludePlaceholders" in names
+    assert parameter["name"] == "include_placeholders"
+    assert parameter["required"] is False
+    assert parameter["schema"] == {"type": "boolean", "default": False}
+    assert "is_placeholder" in operation["description"]
 
 
 def test_label_longevity_contract_publishes_the_producer_read_budget() -> None:
