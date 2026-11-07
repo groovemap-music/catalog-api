@@ -237,15 +237,32 @@ async def query_style_landmarks(driver: Any) -> dict[str, list[dict[str, Any]]]:
 # rank and is dropped. So is a label with no name: it is a reference stub, and
 # ``insights.label_longevity.label_name`` is NOT NULL. Ties in the ranking and in the peak decade
 # have explicit orders, so a rerun on the same data returns the same rows.
+# What a placeholder label is, in one place: a Discogs entry for releases with no label, not a label.
+# Not On Label itself, its per-artist "Not On Label (Artist)" holding areas, and the "Not On Label
+# (Artist Self-released)" family, typed many ways (case, brackets, "Self-Released", stray characters).
+# Doubtful names stay real: showing a placeholder costs little, and dropping a real label is the
+# failure this rule must not have. Audited against every Discogs profile on the 2026-11-07 Lux catalog:
+# - Not On Label (2) and (3) are real netlabels, which only their ids can tell from the band 311's
+#   Not On Label (311). A real label sharing the name can only be named this way.
+# - Not On Label Records, Not On Label Releases and Not On LabelA do not match the name rule.
+# - Unknown, Bootleg, Promo, Blank, Test Pressing, No Label (n) and White Label (n) are not in the rule:
+#   Discogs marks several of them as actual record labels.
+PLACEHOLDER_LABEL_IDS = ("1818",)
+PLACEHOLDER_LABEL_NAME = r"(?is)not on label *[(\[{].*|.*not on label.*self.?release.*"
+REAL_LABELS_NAMED_LIKE_PLACEHOLDERS = ("109707", "2614996")
+
 _LABEL_LONGEVITY_CYPHER = """
 MATCH (l:Label)
 WHERE l.name IS NOT NULL
+WITH l, l.id IN $placeholder_ids
+        OR (l.name =~ $placeholder_name AND NOT l.id IN $real_lookalike_ids) AS is_placeholder
+WHERE is_placeholder = $placeholders
 CALL (l) {
   MATCH (r:Release)-[:ON]->(l)
   WHERE r.year > 0
   RETURN min(r.year) AS first_year, max(r.year) AS last_year, count(DISTINCT r) AS total_releases
 }
-WITH l, first_year, last_year, total_releases, last_year - first_year + 1 AS years_active
+WITH l, is_placeholder, first_year, last_year, total_releases, last_year - first_year + 1 AS years_active
 WHERE total_releases > 0
 ORDER BY years_active DESC, total_releases DESC, l.id
 LIMIT $limit
@@ -259,20 +276,55 @@ CALL (l) {
 }
 RETURN l.id AS label_id, l.name AS label_name,
        first_year, last_year, years_active,
-       total_releases, peak_decade
+       total_releases, peak_decade, is_placeholder
 """
 
 
-async def query_label_longevity(driver: Any, limit: int = 50) -> list[dict[str, Any]]:
+def _longevity_rank(row: dict[str, Any]) -> tuple[int, int, str]:
+    """Sort key for the ranking the statement applies: years active, then releases, then label id."""
+    return (-row["years_active"], -row["total_releases"], row["label_id"])
+
+
+async def _read_label_longevity(driver: Any, limit: int, *, placeholders: bool) -> list[dict[str, Any]]:
+    return await run_query(
+        driver,
+        _LABEL_LONGEVITY_CYPHER,
+        database="neo4j",
+        timeout=LABEL_LONGEVITY_QUERY_TIMEOUT_SECONDS,
+        limit=limit,
+        placeholders=placeholders,
+        placeholder_ids=list(PLACEHOLDER_LABEL_IDS),
+        placeholder_name=PLACEHOLDER_LABEL_NAME,
+        real_lookalike_ids=list(REAL_LABELS_NAMED_LIKE_PLACEHOLDERS),
+    )
+
+
+async def query_label_longevity(driver: Any, limit: int = 50, *, include_placeholders: bool = False) -> list[dict[str, Any]]:
     """Query labels ranked by years of active operation.
 
     For each named label with a dated release, finds the earliest and latest release year, the
     years active, total dated releases, and the peak decade. Ranks by years active, then total
     releases, then label id. Runs under :data:`LABEL_LONGEVITY_QUERY_TIMEOUT_SECONDS`. A timeout
     raises; it is never turned into an empty result.
+
+    Placeholder labels are left out, so ``limit`` real labels are ranked. With
+    ``include_placeholders``, the same real labels come back with the placeholders that rank among
+    them, at most ``limit`` more, each marked ``is_placeholder``. Those rows take no place from a
+    real label: a real label's rank is its position among the rows that are not placeholders.
     """
-    results = await run_query(driver, _LABEL_LONGEVITY_CYPHER, database="neo4j", timeout=LABEL_LONGEVITY_QUERY_TIMEOUT_SECONDS, limit=limit)
-    logger.info("🔍 Label longevity query complete", count=len(results))
+    if not include_placeholders:
+        results = await _read_label_longevity(driver, limit, placeholders=False)
+        logger.info("🔍 Label longevity query complete", count=len(results))
+        return results
+
+    async with asyncio.TaskGroup() as group:
+        real_read = group.create_task(_read_label_longevity(driver, limit, placeholders=False))
+        placeholder_read = group.create_task(_read_label_longevity(driver, limit, placeholders=True))
+    real = real_read.result()
+    window_is_full = len(real) == limit
+    placeholders = [row for row in placeholder_read.result() if not window_is_full or _longevity_rank(row) < _longevity_rank(real[-1])]
+    results = sorted(real + placeholders, key=_longevity_rank)
+    logger.info("🔍 Label longevity query complete", count=len(real), placeholders=len(placeholders))
     return results
 
 

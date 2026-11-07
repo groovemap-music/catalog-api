@@ -2,7 +2,7 @@
 openapi: 3.1.0
 info:
   title: GrooveMap internal insights API
-  version: 1.9.0
+  version: 1.10.0
   description: Catalog API-owned contract consumed by the analytics engine.
 security:
   - InternalSecret: []
@@ -76,10 +76,16 @@ paths:
         peak decade per label, ranked by years active, then releases, then label id ascending.
         Ties for the peak decade go to the earlier decade. Undated releases are left out, and
         labels with no name or no dated release are not ranked. The read takes the year of every
-        release-label edge, so it runs under a long internal budget.
+        release-label edge, so it runs under a long internal budget. Every row carries
+        is_placeholder, which marks a Discogs entry for releases with no label, such as Not On
+        Label, rather than a label. Placeholders are left out by default, so limit real labels are
+        ranked. With include_placeholders, the same real labels come back with the placeholders
+        that rank among them, at most limit more. Those rows take no place from a real label: a
+        real label's rank is its position among the rows with is_placeholder false.
       x-groovemap-max-processing-seconds: 300
       parameters:
         - $ref: "#/components/parameters/LabelLongevityLimit"
+        - $ref: "#/components/parameters/LabelLongevityIncludePlaceholders"
       responses:
         "200": {$ref: "#/components/responses/Items"}
         "503":
@@ -162,6 +168,11 @@ components:
       in: query
       required: false
       schema: {type: integer, minimum: 1, maximum: 500, default: 50}
+    LabelLongevityIncludePlaceholders:
+      name: include_placeholders
+      in: query
+      required: false
+      schema: {type: boolean, default: false}
     AnniversaryYear:
       name: year
       in: query

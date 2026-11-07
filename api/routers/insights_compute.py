@@ -209,17 +209,24 @@ async def style_cotags(request: Request) -> JSONResponse:  # noqa: ARG001
 
 @router.get("/label-longevity")
 @limiter.limit("5/minute")
-async def label_longevity(request: Request, limit: int = Query(50, ge=1, le=500)) -> JSONResponse:  # noqa: ARG001
+async def label_longevity(
+    request: Request,  # noqa: ARG001
+    limit: int = Query(50, ge=1, le=500),
+    include_placeholders: bool = Query(False),
+) -> JSONResponse:
     """Return raw label longevity query results from Neo4j.
 
     The read takes the year of every release-label edge, so it runs under a long internal budget
     (see ``LABEL_LONGEVITY_QUERY_TIMEOUT_SECONDS``) published in the internal-insights contract. A
     Neo4j timeout or memory failure is a retryable 503, never an empty list.
+
+    Placeholder labels such as Not On Label are left out unless ``include_placeholders`` is set,
+    and then they take no place from a real label. Every row carries ``is_placeholder``.
     """
     if not _neo4j:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     try:
-        results = await query_label_longevity(_neo4j, limit=limit)
+        results = await query_label_longevity(_neo4j, limit=limit, include_placeholders=include_placeholders)
     except (TransientError, ClientError, BaseExceptionGroup) as exc:
         return _retryable_unavailable(exc, "Label-longevity computation")
     return JSONResponse(content={"items": results})
