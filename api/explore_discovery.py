@@ -317,9 +317,11 @@ RETURN 'Label' AS label, o.id AS id, o.name AS name, pop, false AS placeholder
 """
 # The display path needs one release that links hub and discovery. Fetched for the chosen 100 only, so the
 # scan above keeps one row per candidate instead of a title per candidate (Rock has 953,658 artists).
+# The target carries its label so the planner starts from the indexed (:Artist|:Label {id}) node; unlabeled, it
+# walked every release of the hub for each id (Rock, 3 ids: 58 s and 362.8M db hits; labeled: 4.5 s and 29.8M).
 _HUB_WITNESS_Q = """
 UNWIND $ids AS oid
-MATCH {releases}-[:{rel}]->(o {{id: oid}})
+MATCH {releases}-[:{rel}]->(o:{kind} {{id: oid}})
 RETURN oid AS id, min(r.title) AS witness
 """
 
@@ -404,7 +406,7 @@ async def _build_hub(driver: Any, entity_type: str, entity_id: str, name: str, r
     for kind, rel in (("Artist", "BY"), ("Label", "ON")):
         chosen = [r["id"] for r in al if r["label"] == kind]
         if chosen:
-            template = _HUB_WITNESS_Q.replace("{rel}", rel)
+            template = _HUB_WITNESS_Q.replace("{rel}", rel).replace("{kind}", kind)
             found = {
                 w["id"]: w["witness"] for w in await run_query(driver, cypher(template), timeout=HUB_QUERY_TIMEOUT_SECONDS, ids=chosen, id=entity_id)
             }

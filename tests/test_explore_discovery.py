@@ -168,9 +168,13 @@ class FakeValkey:
 
 
 def _reset() -> None:
+    witness_cyphers.clear()
     ed.configure(None)
     ed._failures.clear()
     ed._stages.clear()
+
+
+witness_cyphers: list[str] = []
 
 
 def _hub_queries(release_count: int = 60_000) -> Any:
@@ -187,6 +191,7 @@ def _hub_queries(release_count: int = 60_000) -> Any:
         if "AS pop" in cypher and "Label" in cypher:
             return [{"label": "Label", "id": "l", "name": "One", "pop": 5, "placeholder": False}]
         if "UNWIND $ids" in cypher:
+            witness_cyphers.append(cypher)
             return [{"id": i, "witness": f"W-{i}"} for i in params["ids"]]
         raise AssertionError(cypher)
 
@@ -204,6 +209,10 @@ async def test_refresh_builds_stores_and_survives_a_restart() -> None:
     assert [r["id"] for r in held.rows] == ["Punk", "a", "l", "b"]  # genres/styles, then people by credits
     assert held.rows[1]["path_names"] == ["Rock", "W-a", "Alpha"]
     assert held.rows[1]["rel_types"] == ["IS", "BY"]
+    # The witness target is labeled, so the planner starts from the indexed node rather than the hub's releases.
+    assert any("-[:BY]->(o:Artist {id: oid})" in c for c in witness_cyphers)
+    assert any("-[:ON]->(o:Label {id: oid})" in c for c in witness_cyphers)
+    assert not any("(o {id" in c for c in witness_cyphers)
     ed._hubs.clear()  # a new process: memory empty, Valkey kept
     assert (await ed._hub_result("genre", "Rock")).rows == held.rows  # type: ignore[union-attr]
     ed.configure(None)
