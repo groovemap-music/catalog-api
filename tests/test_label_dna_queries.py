@@ -14,6 +14,7 @@ from api.queries.label_dna_queries import (
     get_label_full_profile,
     get_label_genre_profile,
     get_label_identity,
+    get_label_media_counts,
     get_label_media_families_fallback,
     get_label_media_family_counts,
     get_label_media_profile,
@@ -337,23 +338,54 @@ class TestLabelMediaFamiliesFallback:
         assert "ISSUED_ON" not in cypher
 
 
-class TestLabelMediaProfile:
-    """Tests for get_label_media_profile — combines family + medium counts, with fallback."""
+class TestLabelMediaCounts:
+    """get_label_media_counts — family and medium counts from one pass."""
 
     @pytest.mark.asyncio
-    @patch("api.queries.label_dna_queries.get_label_medium_counts", new_callable=AsyncMock)
-    @patch("api.queries.label_dna_queries.get_label_media_family_counts", new_callable=AsyncMock)
-    async def test_nests_mediums_under_their_family(
-        self,
-        mock_families: AsyncMock,
-        mock_mediums: AsyncMock,
-    ) -> None:
-        mock_families.return_value = [{"family": "vinyl", "count": 40}, {"family": "optical", "count": 10}]
-        mock_mediums.return_value = [
+    @patch("api.queries.label_dna_queries.run_query", new_callable=AsyncMock)
+    async def test_derives_family_counts_from_the_first_medium_of_each_release(self, mock_run_query: AsyncMock) -> None:
+        mock_run_query.return_value = [
+            {"family": "vinyl", "medium_id": "vinyl_7", "medium_label": '7" Vinyl', "count": 10, "family_count": 9},
+            {"family": "vinyl", "medium_id": "vinyl_12", "medium_label": '12" Vinyl', "count": 30, "family_count": 29},
+            {"family": "optical", "medium_id": "cd", "medium_label": "CD", "count": 10, "family_count": 10},
+        ]
+        families, mediums = await get_label_media_counts(AsyncMock(), "L1")
+
+        # 38 releases are in vinyl: 2 of them hold both a 7" and a 12", and count once.
+        assert families == [{"family": "vinyl", "count": 38}, {"family": "optical", "count": 10}]
+        assert mediums == [
+            {"family": "optical", "medium_id": "cd", "medium_label": "CD", "count": 10},
             {"family": "vinyl", "medium_id": "vinyl_12", "medium_label": '12" Vinyl', "count": 30},
             {"family": "vinyl", "medium_id": "vinyl_7", "medium_label": '7" Vinyl', "count": 10},
-            {"family": "optical", "medium_id": "cd", "medium_label": "CD", "count": 10},
         ]
+
+    @pytest.mark.asyncio
+    @patch("api.queries.label_dna_queries.run_query", new_callable=AsyncMock)
+    async def test_reads_each_release_once_for_both_counts(self, mock_run_query: AsyncMock) -> None:
+        mock_run_query.return_value = []
+        families, mediums = await get_label_media_counts(AsyncMock(), "L1")
+
+        assert (families, mediums) == ([], [])
+        mock_run_query.assert_called_once()
+        cypher = mock_run_query.call_args.args[1]
+        assert cypher.count("ISSUED_ON") == 1
+        assert mock_run_query.call_args.kwargs == {"label_id": "L1"}
+
+
+class TestLabelMediaProfile:
+    """Tests for get_label_media_profile — nests medium counts under families, with fallback."""
+
+    @pytest.mark.asyncio
+    @patch("api.queries.label_dna_queries.get_label_media_counts", new_callable=AsyncMock)
+    async def test_nests_mediums_under_their_family(self, mock_counts: AsyncMock) -> None:
+        mock_counts.return_value = (
+            [{"family": "vinyl", "count": 40}, {"family": "optical", "count": 10}],
+            [
+                {"family": "vinyl", "medium_id": "vinyl_12", "medium_label": '12" Vinyl', "count": 30},
+                {"family": "vinyl", "medium_id": "vinyl_7", "medium_label": '7" Vinyl', "count": 10},
+                {"family": "optical", "medium_id": "cd", "medium_label": "CD", "count": 10},
+            ],
+        )
         driver = AsyncMock()
         result = await get_label_media_profile(driver, "L1")
         assert result[0]["family"] == "vinyl"
@@ -365,17 +397,10 @@ class TestLabelMediaProfile:
 
     @pytest.mark.asyncio
     @patch("api.queries.label_dna_queries.get_label_media_families_fallback", new_callable=AsyncMock)
-    @patch("api.queries.label_dna_queries.get_label_medium_counts", new_callable=AsyncMock)
-    @patch("api.queries.label_dna_queries.get_label_media_family_counts", new_callable=AsyncMock)
-    async def test_falls_back_to_media_families_when_no_issued_on_edges(
-        self,
-        mock_families: AsyncMock,
-        mock_mediums: AsyncMock,
-        mock_fallback: AsyncMock,
-    ) -> None:
-        """Pre-cutover graph: no ISSUED_ON edges yet, so the family query is empty."""
-        mock_families.return_value = []
-        mock_mediums.return_value = []
+    @patch("api.queries.label_dna_queries.get_label_media_counts", new_callable=AsyncMock)
+    async def test_falls_back_to_media_families_when_no_issued_on_edges(self, mock_counts: AsyncMock, mock_fallback: AsyncMock) -> None:
+        """Pre-cutover graph: no ISSUED_ON edges yet, so the media counts are empty."""
+        mock_counts.return_value = ([], [])
         mock_fallback.return_value = [{"family": "vinyl", "count": 8}]
 
         driver = AsyncMock()
@@ -385,16 +410,12 @@ class TestLabelMediaProfile:
 
     @pytest.mark.asyncio
     @patch("api.queries.label_dna_queries.get_label_media_families_fallback", new_callable=AsyncMock)
-    @patch("api.queries.label_dna_queries.get_label_medium_counts", new_callable=AsyncMock)
-    @patch("api.queries.label_dna_queries.get_label_media_family_counts", new_callable=AsyncMock)
-    async def test_no_fallback_when_families_present(
-        self,
-        mock_families: AsyncMock,
-        mock_mediums: AsyncMock,
-        mock_fallback: AsyncMock,
-    ) -> None:
-        mock_families.return_value = [{"family": "vinyl", "count": 1}]
-        mock_mediums.return_value = [{"family": "vinyl", "medium_id": "vinyl_12", "medium_label": '12" Vinyl', "count": 1}]
+    @patch("api.queries.label_dna_queries.get_label_media_counts", new_callable=AsyncMock)
+    async def test_no_fallback_when_families_present(self, mock_counts: AsyncMock, mock_fallback: AsyncMock) -> None:
+        mock_counts.return_value = (
+            [{"family": "vinyl", "count": 1}],
+            [{"family": "vinyl", "medium_id": "vinyl_12", "medium_label": '12" Vinyl', "count": 1}],
+        )
 
         driver = AsyncMock()
         result = await get_label_media_profile(driver, "L1")
