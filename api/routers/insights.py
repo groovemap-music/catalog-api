@@ -76,8 +76,12 @@ async def proxy_style_atlas_cotags(request: Request, style: str = Query(..., min
 
 
 @router.get("/api/insights/label-longevity")
-async def proxy_label_longevity(request: Request) -> JSONResponse:
-    """Proxy label longevity endpoint."""
+async def proxy_label_longevity(
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),  # noqa: ARG001
+    include_placeholders: bool = Query(False),  # noqa: ARG001
+) -> JSONResponse:
+    """Proxy label longevity endpoint; the raw query string is forwarded unchanged."""
     try:
         return await _forward(request, "/api/insights/label-longevity")
     except Exception:

@@ -236,6 +236,27 @@ class TestStyleAtlasCotagsForwarding:
         assert response.status_code == 503
         assert response.json() == {"error": "Insights service unavailable"}
 
+    def test_label_longevity_forwards_include_placeholders_and_limit(self, test_client: TestClient) -> None:
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"labels": []}
+        mock_response.status_code = 200
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("api.routers.insights.httpx.AsyncClient", return_value=mock_client):
+            response = test_client.get("/api/insights/label-longevity", params={"include_placeholders": "true", "limit": "10"})
+        assert response.status_code == 200
+        mock_client.get.assert_awaited_once_with("http://insights:8008/api/insights/label-longevity?include_placeholders=true&limit=10")
+
+    def test_label_longevity_rejects_out_of_range_limit(self, test_client: TestClient) -> None:
+        """Out-of-range limits are rejected before anything is forwarded."""
+        with patch("api.routers.insights._forward", side_effect=AssertionError("must not forward")):
+            assert test_client.get("/api/insights/label-longevity", params={"limit": "0"}).status_code == 422
+            assert test_client.get("/api/insights/label-longevity", params={"limit": "201"}).status_code == 422
+
     def test_cotags_require_a_style(self, test_client: TestClient) -> None:
         """A request without ``style`` is rejected before anything is forwarded."""
         with patch("api.routers.insights._forward", side_effect=AssertionError("must not forward")):
