@@ -1093,7 +1093,7 @@ PostgreSQL query results.
 | GET    | `/api/insights/genre-trends`      | No            | Genre popularity trends over time   |
 | GET    | `/api/insights/style-atlas`       | No            | Style lifecycle stages and atlas layout |
 | GET    | `/api/insights/style-atlas/cotags` | No           | Top 25 co-tagged styles of one style (`style`, required) |
-| GET    | `/api/insights/label-longevity`   | No            | Label longevity rankings; optional `limit` (1-500, default 50) and `include_placeholders` (default false) |
+| GET    | `/api/insights/label-longevity`   | No            | Label longevity rankings; optional `limit` (1-200, default 50) and `include_placeholders` (default false) |
 | GET    | `/api/insights/this-month`        | No            | Releases and trends for this month  |
 | GET    | `/api/insights/data-completeness` | No            | Data quality and completeness stats |
 | GET    | `/api/insights/status`            | No            | Computation status of analytics data |
