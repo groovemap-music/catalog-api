@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v0.8.0 (2026-11-06)
+
+### Release notes
+
+No schema change and no required deploy order; deploy catalog-api alone.
+
+- The internal-insights contract is 1.10.0: 1.8.0 gives genre-trends a published 300 s processing budget, 1.9.0 does the same for label-longevity, and 1.10.0 adds `include_placeholders` to label-longevity. analytics-engine's default 900 s read timeout is above every one of these budgets, so no analytics-engine release is needed.
+- style-landmarks, style-cotags and label-longevity now complete on the full catalog: each counts one group at a time instead of in one pass. Label-longevity runs under a 300 s budget, and a Neo4j timeout or memory failure on any of the three is a retryable 503, never empty data. Genre-trends does the same.
+- The label-longevity route leaves Discogs placeholder labels (such as Not On Label) out by default; `include_placeholders=true` brings them back and every row carries `is_placeholder`.
+- `CATALOG_CACHE_VALKEY_HOST` is optional. Unset, the single Valkey client is used exactly as before; set, catalog caches go to a second allkeys-lru instance.
+
+### Feat
+
+- **insights**: leave placeholder labels out of label longevity by default
+- **contracts**: pin the MusicBrainz relationship types through the enricher's contract
+- **cache**: send catalog caches to a dedicated evicting Valkey
+
+### Fix
+
+- **insights**: count landmarks, co-tags and label longevity one group at a time
+- **insights**: run genre trends under a long read budget and fail retryably on timeout
+- **admin**: record a finished extraction as completed, not waiting
+- **extraction-analysis**: list extraction versions that have no violations
+- **cache**: fail an erasure or an invalidation when the cache instance is down
+
+### Perf
+
+- **explore**: label the target of the hub witness query so the planner starts from the indexed node
+
 ## v0.7.0 (2026-11-05)
 
 ### Release notes
