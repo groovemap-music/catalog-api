@@ -186,9 +186,9 @@ async def test_works_list_pages_and_joins_each_works_summary() -> None:
 
     data = await get_ledger_works(pool, event="reattached", since=since, until=until, page=2, page_size=2)
 
-    works_call = next(call for call in pool.calls if call.sql == queries._WORKS)
+    works_call = next(call for call in pool.calls if call.sql == queries._WORKS_WINDOWED)
     assert works_call.params == {"event": "reattached", "since": since, "until": until, "limit": 2, "offset": 2}
-    assert _statements(pool)[1:4] == [queries._READ_ONLY, queries._FRESHNESS, queries._WORKS]
+    assert _statements(pool)[1:4] == [queries._READ_ONLY, queries._FRESHNESS, queries._WORKS_WINDOWED]
     assert pool.calls[2].params == {"views": ["identity_ledger_edition_events", "identity_ledger_edition_parents", "identity_ledger_work_summary"]}
     assert next(call.params for call in pool.calls if call.sql == queries._WORK_SUMMARIES) == {"works": [W, E]}
     assert data == {
@@ -322,3 +322,19 @@ async def test_list_and_density_read_only_the_views() -> None:
     for statement in (queries._WORKS, queries._DENSITY):
         for base in ("provider_aliases", "catalog_items", "catalog_item_supersessions", "identity_link_events", "graph.derived_from"):
             assert base not in statement
+
+
+def test_only_a_window_materializes_its_aggregation() -> None:
+    # Inlined, the window's aggregation runs for the count and again for the page; materialized
+    # for the unwindowed read, the summary page loses its index walk (320 ms to about 1.9 s).
+    assert "windowed AS MATERIALIZED (" in queries._WORKS_WINDOWED
+    assert "MATERIALIZED (" not in queries._WORKS.replace("NOT MATERIALIZED", "")
+
+
+async def test_works_list_without_a_window_reads_the_unwindowed_statement() -> None:
+    pool = FakePool([[], FRESH, []])
+
+    await get_ledger_works(pool)
+
+    assert queries._WORKS in _statements(pool)
+    assert queries._WORKS_WINDOWED not in _statements(pool)
