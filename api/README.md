@@ -1573,7 +1573,6 @@ header: a missing or wrong header is `401`, and with the variable unset every ro
 | GET    | `/api/internal/insights/data-completeness` | Secret header | Data completeness from PostgreSQL (cached in Valkey for 6 hours) |
 | GET    | `/api/internal/insights/rarity-scores/quality-counts` | Secret header | First rarity pass, one keyset page: how often each quality-signal value occurs |
 | POST   | `/api/internal/insights/rarity-scores/page` | Secret header | Second rarity pass, one keyset page of scored rows, ranked against the summed counts in the body |
-| GET    | `/api/internal/insights/rarity-scores`     | Secret header | Deprecated: every rarity row in one streamed response, which cannot be retried |
 | GET    | `/api/internal/insights/community-enrichment` | Secret header | Fetch Discogs community have/want counts for collected releases (at most 1,500 per call) |
 
 ### Health

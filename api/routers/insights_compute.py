@@ -7,14 +7,14 @@ service can fetch data over HTTP instead of importing query modules directly.
 import asyncio
 import json
 import secrets
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import Awaitable
 from typing import Annotated, Any
 
 import httpx
 import structlog
 from common import describe_exception
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response
 from neo4j.exceptions import ClientError, Neo4jError, TransientError
 from psycopg import Error as PsycopgError
 from psycopg.rows import dict_row
@@ -38,7 +38,6 @@ from api.queries.rarity_queries import (
     RARITY_PAGE_SIZE,
     fetch_rarity_page,
     fetch_rarity_quality_counts,
-    iter_rarity_signals,
 )
 from api.syncer import DISCOGS_API_BASE, MAX_RATE_LIMIT_RETRIES, SYNC_DELAY_SECONDS, _auth_header
 from api.telemetry import CACHE_INSIGHTS_COMPLETENESS, cache_get, record_cache_write_failure
@@ -338,36 +337,6 @@ def _retryable_unavailable(exc: BaseException, computation: str) -> JSONResponse
     )
 
 
-# Rows encoded per chunk written to the client. The body is `{"items":[...]}`, byte for byte what
-# `JSONResponse({"items": rows})` produced, written as the rows are scored.
-_RARITY_CHUNK_ROWS = 500
-
-
-def _encode_rarity_row(row: dict[str, Any]) -> str:
-    """Encode one row exactly as `JSONResponse` encodes it (compact, UTF-8, no NaN)."""
-    return json.dumps(row, ensure_ascii=False, allow_nan=False, indent=None, separators=(",", ":"))
-
-
-async def _rarity_body(first: dict[str, Any], rest: AsyncIterator[dict[str, Any]]) -> AsyncIterator[bytes]:
-    """Stream `{"items":[...]}` one chunk of rows at a time, so no response is ever held whole."""
-    chunk = ['{"items":[', _encode_rarity_row(first)]
-    rows = 1
-    try:
-        async for row in rest:
-            chunk.append("," + _encode_rarity_row(row))
-            rows += 1
-            if rows % _RARITY_CHUNK_ROWS == 0:
-                yield "".join(chunk).encode("utf-8")
-                chunk = []
-        chunk.append("]}")
-        yield "".join(chunk).encode("utf-8")
-    except Exception:
-        # Headers are already sent. Ending the body early gives the client a broken document, which
-        # its JSON parser rejects, rather than a complete-looking one with rows missing.
-        logger.exception("⚠️ Rarity stream failed after it began", rows_sent=rows)
-        raise
-
-
 # How often a long read checks whether its client is still there.
 _DISCONNECT_POLL_SECONDS = 1.0
 
@@ -461,34 +430,6 @@ async def rarity_page(
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     work = fetch_rarity_page(_neo4j, _pool, after=after, limit=limit, distributions=distributions.model_dump())
     return await _rarity_page_response(request, work, "Rarity page")
-
-
-@router.get("/rarity-scores", response_model=None)
-@limiter.limit("5/minute")
-async def rarity_scores(request: Request) -> Response:
-    """Return computed rarity scores for all releases from Neo4j.
-
-    Deprecated for :func:`rarity_quality_counts` and :func:`rarity_page`: this is one response for the
-    whole catalog, so it cannot be retried, and a client has to hold all of it.
-
-    The body is `{"items": [...]}` with every release, as before, but it is streamed: the API process
-    holds one page of rows rather than one row per release in the graph (about 1.7 KB each, so about
-    17 GB at 10M releases). The first row is read before the response starts, which covers the first
-    pass over the quality signals and the first page, so a Neo4j error there is still a 503. Starlette
-    ends the stream when the client leaves; before that first row, :func:`_unless_client_left` does.
-    """
-    if not _neo4j:
-        return JSONResponse(content={"error": "Service not ready"}, status_code=503)
-    rows = iter_rarity_signals(_neo4j, _pool)
-    try:
-        first = await _unless_client_left(request, anext(rows))
-    except _ClientLeft:
-        return Response(status_code=_CLIENT_CLOSED_REQUEST)
-    except StopAsyncIteration:
-        return JSONResponse(content={"items": []})
-    except (TransientError, ClientError, BaseExceptionGroup) as exc:
-        return _retryable_unavailable(exc, "Rarity computation")
-    return StreamingResponse(_rarity_body(first, rows), media_type="application/json")
 
 
 async def _enrich_community_counts(

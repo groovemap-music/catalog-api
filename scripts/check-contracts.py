@@ -57,6 +57,12 @@ agent_tools_source = pyproject["tool"]["uv"]["sources"]["groovemap-agent-tools"]
 assert agent_tools_source["rev"] == consumer_runtime["application_runtime"]["tested_commit"]
 assert agent_tools_source["subdirectory"] == "agent-tools"
 
+internal_root = ROOT / "api/contracts/internal-insights/v2"
+internal_source = json.loads((internal_root / "python/source.json").read_text())
+assert digest(internal_root / "openapi.yaml") == internal_source["contract_sha256"]
+assert digest(internal_root / "python/catalog_api_contract.py") == internal_source["binding_sha256"]
+assert internal_source["contract_version"] == "2.0.0"
+
 internal_root = ROOT / "api/contracts/internal-insights/v1"
 internal_source = json.loads((internal_root / "python/source.json").read_text())
 assert digest(internal_root / "openapi.yaml") == internal_source["contract_sha256"]

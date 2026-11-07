@@ -154,7 +154,7 @@ variables, the metrics, and the spans.
   verified by digest.
 - Persistence compatibility is promoted from `database-schema` and pins the tested runtime.
 - The internal Analytics OpenAPI document and generated consumer binding are owned in
-  `api/contracts/internal-insights/v1/`; downstream consumers promote the artifact rather
+  `api/contracts/internal-insights/v2/` (v1 stays frozen for the copy analytics-engine pins); downstream consumers promote the artifact rather
   than this repository writing across a boundary.
 
 ## Release and license

@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -24,37 +23,11 @@ def _neo4j_error(code: str, message: str = "boom") -> Neo4jError:
     return Neo4jError._hydrate_neo4j(code=code, message=message)
 
 
-def _rows(rows: list[dict[str, Any]]) -> Callable[..., AsyncIterator[dict[str, Any]]]:
-    """A stand-in for ``iter_rarity_signals`` that yields ``rows``."""
-
-    def _iter(*_args: object, **_kwargs: object) -> AsyncIterator[dict[str, Any]]:
-        async def _gen() -> AsyncIterator[dict[str, Any]]:
-            for row in rows:
-                yield row
-
-        return _gen()
-
-    return _iter
-
-
-def _failing(error: BaseException) -> Callable[..., AsyncIterator[dict[str, Any]]]:
-    """A stand-in for ``iter_rarity_signals`` that raises ``error`` before its first row."""
-
-    def _iter(*_args: object, **_kwargs: object) -> AsyncIterator[dict[str, Any]]:
-        async def _gen() -> AsyncIterator[dict[str, Any]]:
-            raise error
-            yield {}
-
-        return _gen()
-
-    return _iter
-
-
 def test_community_enrichment_contract_covers_producer_worst_case() -> None:
     """Keep the published processing budget synchronized with the bounded producer."""
     from api.routers.insights_compute import _ENRICHMENT_DELAY_SECONDS, MAX_ENRICHMENT_RELEASES
 
-    contract = yaml.safe_load((Path(__file__).parents[1] / "api/contracts/internal-insights/v1/openapi.yaml").read_text(encoding="utf-8"))
+    contract = yaml.safe_load((Path(__file__).parents[1] / "api/contracts/internal-insights/v2/openapi.yaml").read_text(encoding="utf-8"))
     operation = contract["paths"]["/api/internal/insights/community-enrichment"]["get"]
     assert operation["x-groovemap-max-processing-seconds"] == MAX_ENRICHMENT_RELEASES * _ENRICHMENT_DELAY_SECONDS
 
@@ -107,7 +80,7 @@ class TestGenreTrendsEndpoint:
             mod._neo4j = original
 
 
-_CONTRACT = Path(__file__).parents[1] / "api/contracts/internal-insights/v1/openapi.yaml"
+_CONTRACT = Path(__file__).parents[1] / "api/contracts/internal-insights/v2/openapi.yaml"
 
 
 class TestGenreTrendsTimeout:
@@ -146,7 +119,7 @@ def test_style_year_counts_contract_publishes_the_producer_read_budget() -> None
     contract = yaml.safe_load(_CONTRACT.read_text(encoding="utf-8"))
     operation = contract["paths"]["/api/internal/insights/style-year-counts"]["get"]
     assert operation["x-groovemap-max-processing-seconds"] == STYLE_YEAR_QUERY_TIMEOUT_SECONDS
-    assert contract["info"]["version"] == "1.10.0"
+    assert contract["info"]["version"] == "2.0.0"
 
 
 _STYLE_YEAR_RESULT = {
@@ -566,112 +539,6 @@ class TestConfigureWithValkey:
             mod._valkey = original
 
 
-class TestRarityScoresEndpoint:
-    """Tests for GET /api/internal/insights/rarity-scores."""
-
-    def test_success(self, test_client: TestClient) -> None:
-        """Returns 200 with rarity score results."""
-        mock_results = [{"release_id": "1", "rarity_score": 85.0, "tier": "ultra-rare"}]
-        with patch("api.routers.insights_compute.iter_rarity_signals", new=_rows(mock_results)):
-            response = test_client.get("/api/internal/insights/rarity-scores")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["items"] == mock_results
-
-    def test_body_is_byte_identical_to_the_json_response_it_replaced(self, test_client: TestClient) -> None:
-        """Streaming changes how the body is written, not a byte of it, across chunk boundaries."""
-        from fastapi.responses import JSONResponse
-
-        import api.routers.insights_compute as ic_router
-
-        rows = [
-            {"release_id": f"{i:05d}", "title": f'Ünï "{i}"', "rarity_score": i / 7, "family_signals": {"a": [1, None]}}
-            for i in range(ic_router._RARITY_CHUNK_ROWS * 2 + 3)
-        ]
-        with patch("api.routers.insights_compute.iter_rarity_signals", new=_rows(rows)):
-            response = test_client.get("/api/internal/insights/rarity-scores")
-        assert response.status_code == 200
-        assert response.content == JSONResponse(content={"items": rows}).body
-
-    def test_no_releases_is_an_empty_list(self, test_client: TestClient) -> None:
-        with patch("api.routers.insights_compute.iter_rarity_signals", new=_rows([])):
-            response = test_client.get("/api/internal/insights/rarity-scores")
-        assert response.status_code == 200
-        assert response.json() == {"items": []}
-
-    def test_rows_are_pulled_as_the_body_is_written_not_collected_first(self, test_client: TestClient) -> None:
-        """The route never asks for a row it has not yet written, which is what bounds the process."""
-        pulled: list[int] = []
-
-        def _counting(*_args: object, **_kwargs: object) -> AsyncIterator[dict[str, int]]:
-            async def _gen() -> AsyncIterator[dict[str, int]]:
-                for i in range(3):
-                    pulled.append(i)
-                    yield {"release_id": i}
-
-            return _gen()
-
-        with patch("api.routers.insights_compute.iter_rarity_signals", new=_counting):
-            response = test_client.get("/api/internal/insights/rarity-scores")
-        assert response.json() == {"items": [{"release_id": 0}, {"release_id": 1}, {"release_id": 2}]}
-        assert pulled == [0, 1, 2]
-
-    def test_503_when_not_ready(self, test_client: TestClient) -> None:
-        """Returns 503 when Neo4j is not configured."""
-        import api.routers.insights_compute as ic_router
-
-        original = ic_router._neo4j
-        ic_router._neo4j = None
-        try:
-            response = test_client.get("/api/internal/insights/rarity-scores")
-            assert response.status_code == 503
-        finally:
-            ic_router._neo4j = original
-
-    def test_503_on_transient_neo4j_error(self, test_client: TestClient) -> None:
-        """A transient Neo4j error (e.g. out-of-memory) returns 503, not 500."""
-        from neo4j.exceptions import TransientError
-
-        err = TransientError("MemoryPoolOutOfMemoryError")
-        with patch("api.routers.insights_compute.iter_rarity_signals", new=_failing(err)):
-            response = test_client.get("/api/internal/insights/rarity-scores")
-        assert response.status_code == 503
-        assert "error" in response.json()
-
-    def test_503_on_transaction_timeout_client_error(self, test_client: TestClient) -> None:
-        """The 600s transaction timeout is a ClientError.
-
-        The previous handler only caught TransientError, so this escaped as an
-        unhandled 500 on every production run.
-        """
-        err = _neo4j_error("Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration", "transaction timed out")
-        with patch("api.routers.insights_compute.iter_rarity_signals", new=_failing(err)):
-            response = test_client.get("/api/internal/insights/rarity-scores")
-        assert response.status_code == 503
-        body = response.json()
-        assert body["code"] == "Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration"
-
-    def test_503_when_the_timeout_arrives_inside_an_exception_group(self, test_client: TestClient) -> None:
-        """The driver can surface the failure wrapped in an ExceptionGroup."""
-        err = _neo4j_error("Neo.ClientError.Transaction.TransactionTimedOut", "transaction timed out")
-        group = ExceptionGroup("unhandled errors in a TaskGroup", [err])
-        with patch("api.routers.insights_compute.iter_rarity_signals", new=_failing(group)):
-            response = test_client.get("/api/internal/insights/rarity-scores")
-        assert response.status_code == 503
-
-    def test_non_retryable_client_error_is_not_masked_as_503(self, test_client: TestClient) -> None:
-        """A genuine query bug must still surface as a server error, not a 503."""
-        from neo4j.exceptions import ClientError
-
-        err = _neo4j_error("Neo.ClientError.Statement.SyntaxError", "invalid syntax")
-        assert isinstance(err, ClientError)  # same class, non-retryable code
-        with patch("api.routers.insights_compute.iter_rarity_signals", new=_failing(err)):
-            # The fixture's TestClient uses raise_server_exceptions=False, so an
-            # unhandled exception surfaces as a 500 rather than propagating.
-            response = test_client.get("/api/internal/insights/rarity-scores")
-        assert response.status_code == 500
-
-
 _DISTRIBUTIONS = {"artist": [[1, 2], [5, 1]], "label": [], "genre": [[1000, 3]]}
 _QUALITY_PATH = "/api/internal/insights/rarity-scores/quality-counts"
 _PAGE_PATH = "/api/internal/insights/rarity-scores/page"
@@ -789,28 +656,6 @@ class TestClientDisconnect:
         assert response.status_code == 499
         assert stopped.is_set()
 
-    @pytest.mark.asyncio
-    async def test_the_old_route_stops_in_its_first_pass(self) -> None:
-        """The old route read for hours before its first byte, with nothing to notice a dropped client."""
-        import api.routers.insights_compute as ic_router
-
-        started, stopped = asyncio.Event(), asyncio.Event()
-        blocked = self._blocked_read
-
-        async def _rows_after_the_first_pass(*_args: object) -> AsyncIterator[dict[str, Any]]:
-            yield await blocked(started, stopped)
-
-        request = _disconnected_request()
-        request.app.state.limiter = ic_router.limiter
-        with (
-            patch("api.routers.insights_compute._neo4j", MagicMock()),
-            patch("api.routers.insights_compute.iter_rarity_signals", new=_rows_after_the_first_pass),
-            patch("api.routers.insights_compute._DISCONNECT_POLL_SECONDS", 0.01),
-        ):
-            response = await ic_router.rarity_scores.__wrapped__(request)
-        assert response.status_code == 499
-        assert stopped.is_set()
-
 
 def test_rarity_page_contract_publishes_what_the_producer_enforces() -> None:
     from api.queries.rarity_queries import RARITY_PAGE_BUDGET_SECONDS, RARITY_PAGE_SIZE
@@ -820,7 +665,7 @@ def test_rarity_page_contract_publishes_what_the_producer_enforces() -> None:
     page = contract["paths"][_PAGE_PATH]["post"]
     assert quality["x-groovemap-max-processing-seconds"] == page["x-groovemap-max-processing-seconds"] == RARITY_PAGE_BUDGET_SECONDS
     assert contract["components"]["parameters"]["RarityPageLimit"]["schema"]["maximum"] == RARITY_PAGE_SIZE
-    assert contract["paths"]["/api/internal/insights/rarity-scores"]["get"]["deprecated"] is True
+    assert "/api/internal/insights/rarity-scores" not in contract["paths"]
 
 
 class TestAnniversariesValidation:
@@ -845,7 +690,6 @@ class TestInternalInsightsAuth:
         "/api/internal/insights/label-longevity",
         "/api/internal/insights/anniversaries?year=2025&month=3",
         "/api/internal/insights/data-completeness",
-        "/api/internal/insights/rarity-scores",
         "/api/internal/insights/community-enrichment",
     )
 
