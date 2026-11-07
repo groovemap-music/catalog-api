@@ -95,9 +95,9 @@ class TestQueryDataCompleteness:
         by_type = {r["entity_type"]: r for r in results}
         assert by_type["masters"]["completeness_pct"] == 80.0
         assert by_type["releases"]["completeness_pct"] == 80.0
-        # artists and labels have only the unscored image field: nothing to average, so 0.0, not 80 or 100
-        assert by_type["artists"]["completeness_pct"] == 0.0
-        assert by_type["labels"]["completeness_pct"] == 0.0
+        # artists and labels have only the unscored image field: nothing to score, so null, not 0.0, 80 or 100
+        assert by_type["artists"]["completeness_pct"] is None
+        assert by_type["labels"]["completeness_pct"] is None
         assert by_type["artists"]["with_image"] == 80  # still reported
 
     @pytest.mark.asyncio
@@ -109,11 +109,11 @@ class TestQueryDataCompleteness:
         assert by_type["releases"]["completeness_pct"] == 100.0
         assert by_type["masters"]["completeness_pct"] == 100.0
         assert by_type["releases"]["with_image"] == 0
-        assert by_type["artists"]["completeness_pct"] == 0.0
+        assert by_type["artists"]["completeness_pct"] is None
 
     @pytest.mark.asyncio
-    async def test_zero_total_count_returns_zero_completeness(self) -> None:
-        # Each entity returns 0 total (remaining columns don't matter)
+    async def test_zero_total_count_returns_null_completeness(self) -> None:
+        # Each entity returns 0 total (remaining columns don't matter): nothing to score, so null, not 0.0
         sequence: list[tuple[int, ...] | None] = [
             (0, 0),
             (0, 0),
@@ -125,7 +125,7 @@ class TestQueryDataCompleteness:
 
         for result in results:
             assert result["total_count"] == 0
-            assert result["completeness_pct"] == 0.0
+            assert result["completeness_pct"] is None
 
     @pytest.mark.asyncio
     async def test_none_fetchone_returns_zero_count(self) -> None:

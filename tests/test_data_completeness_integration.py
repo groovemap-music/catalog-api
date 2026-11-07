@@ -20,7 +20,7 @@ import pytest
 import pytest_asyncio
 from common import AsyncPostgreSQLPool
 
-from api.queries.insights_pg_queries import _COMBINED_QUERIES, _COMPLETENESS_FIELDS, query_data_completeness
+from api.queries.insights_pg_queries import _COMBINED_QUERIES, _COMPLETENESS_FIELDS, _UNSCORED_FIELD, query_data_completeness
 from tests.test_real_databases import postgres_pool
 
 
@@ -118,3 +118,22 @@ async def test_the_route_query_reports_the_same_numbers(pool: AsyncPostgreSQLPoo
             assert results[table]["total_count"] == row[0]
             for index, (field_name, _) in enumerate(_COMPLETENESS_FIELDS[table]):
                 assert results[table][field_name] == row[index + 1]
+
+
+async def test_null_for_nothing_to_score_and_releases_masters_unchanged(pool: AsyncPostgreSQLPool) -> None:
+    results = {item["entity_type"]: item for item in await query_data_completeness(pool)}
+
+    # Artists and labels have no scored field: null on the real route, not 0.0.
+    assert results["artists"]["completeness_pct"] is None
+    assert results["labels"]["completeness_pct"] is None
+
+    # Masters and releases keep the score they always had: the mean of the scored fields' percentages.
+    async with pool.connection() as conn, conn.cursor() as cur:
+        for table in ("masters", "releases"):
+            await cur.execute(_oracle(table))
+            row = await cur.fetchone()
+            assert row is not None
+            total = row[0]
+            scored = [count for (field_name, _), count in zip(_COMPLETENESS_FIELDS[table], row[1:], strict=True) if field_name != _UNSCORED_FIELD]
+            expected = round(sum(count / total * 100 for count in scored) / len(scored), 2)
+            assert results[table]["completeness_pct"] == expected

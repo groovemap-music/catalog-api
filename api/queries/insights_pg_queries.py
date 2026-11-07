@@ -25,8 +25,8 @@ logger = structlog.get_logger(__name__)
 # image-like property on the Neo4j Release, Artist, Label or Master nodes, and the 2% release
 # sample of docs/sql-performance-audit-2026-11-04.md (78,212 rows) found none either. The field
 # stays so the response shape is unchanged, and so a future image source that writes `images`
-# into `data` is counted without a code change. Until then it holds `completeness_pct` of artists
-# and labels at 0.0 and takes a third to a fifth off the others.
+# into `data` is counted without a code change. Until then, artists and labels have no scored field,
+# so their `completeness_pct` is null, and the image field takes a third to a fifth off the others.
 _COMPLETENESS_FIELDS: dict[str, list[tuple[str, str]]] = {
     "artists": [("with_image", "images")],
     "labels": [("with_image", "images")],
@@ -92,13 +92,14 @@ async def _query_single_entity(pool: Any, entity_type: str, fields: list[tuple[s
 
         # `with_image` is reported but not scored: no source carries images (see _COMPLETENESS_FIELDS), so
         # averaging it would cap every entity type at a fraction of what its real fields show. An entity
-        # type with no other field (artists, labels) has nothing to average and reports 0.0, not 100: the
-        # honest value there is "not measurable", which the insights.data_completeness column
-        # (NUMERIC NOT NULL) cannot hold until that schema and analytics-engine accept null.
+        # type with no other field (artists, labels) has nothing to score, so it reports null, not 0.0 and
+        # not 100: a stored zero would read as a measured zero.
         field_pcts = [item[field_name] / total_count * 100 for field_name, _ in fields if field_name != _UNSCORED_FIELD]
-        item["completeness_pct"] = round(sum(field_pcts) / len(field_pcts), 2) if field_pcts else 0.0
+        item["completeness_pct"] = round(sum(field_pcts) / len(field_pcts), 2) if field_pcts else None
     else:
-        item["completeness_pct"] = 0.0
+        # An empty table has nothing to score either. Null, not 0.0, so "nothing to score" does not read
+        # the same as a table whose scored fields are all empty.
+        item["completeness_pct"] = None
 
     return item
 
