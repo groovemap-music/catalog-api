@@ -27,6 +27,7 @@ docker run --detach --rm \
     --env "NEO4J_AUTH=neo4j/${password}" \
     --env NEO4J_server_memory_heap_initial__size=256m \
     --env NEO4J_server_memory_heap_max__size=256m \
+    --env NEO4J_dbms_memory_transaction_total_max=128m \
     "${neo4j_image}" >/dev/null
 
 postgres_ready=false

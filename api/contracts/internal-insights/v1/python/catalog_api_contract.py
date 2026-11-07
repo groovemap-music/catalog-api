@@ -1,6 +1,6 @@
 """Generated from api/contracts/internal-insights/v1/openapi.yaml; do not edit."""
 
-CONTRACT_VERSION = "1.8.0"
+CONTRACT_VERSION = "1.9.0"
 ANNIVERSARIES_PATH = "/api/internal/insights/anniversaries"
 ARTIST_CENTRALITY_PATH = "/api/internal/insights/artist-centrality"
 COMMUNITY_ENRICHMENT_PATH = "/api/internal/insights/community-enrichment"
@@ -15,6 +15,7 @@ STYLE_LANDMARKS_PATH = "/api/internal/insights/style-landmarks"
 STYLE_YEAR_COUNTS_PATH = "/api/internal/insights/style-year-counts"
 COMMUNITY_ENRICHMENT_MAX_PROCESSING_SECONDS = 1500
 GENRE_TRENDS_MAX_PROCESSING_SECONDS = 300
+LABEL_LONGEVITY_MAX_PROCESSING_SECONDS = 300
 RARITY_PAGE_MAX_PROCESSING_SECONDS = 300
 RARITY_QUALITY_COUNTS_MAX_PROCESSING_SECONDS = 300
 STYLE_COTAGS_MAX_PROCESSING_SECONDS = 300

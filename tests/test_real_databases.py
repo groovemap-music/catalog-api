@@ -15,24 +15,30 @@ import pytest
 import pytest_asyncio
 import respx
 from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver, parse_postgres_host_port
+from fastapi import FastAPI
 from groovemap_schema.postgres import create_postgres_schema
 from neo4j.exceptions import ClientError as Neo4jClientError
 from neo4j.exceptions import Neo4jError
 from psycopg.errors import QueryCanceled
 from psycopg.rows import dict_row
 
-from api.queries import strata_queries
+from api.limiter import limiter
+from api.queries import insights_neo4j_queries, strata_queries
 from api.queries.credits_queries import get_person_connections
 from api.queries.helpers import run_count, run_query, run_single
 from api.queries.insights_neo4j_queries import (
+    _STYLE_COTAG_CYPHER,
+    _STYLE_LANDMARK_CYPHER,
     COTAGS_PER_STYLE,
     LANDMARKS_PER_STYLE,
+    query_label_longevity,
     query_style_cotags,
     query_style_landmarks,
     query_style_year_counts,
 )
 from api.queries.strata_queries import get_shared_personnel, get_strata_catalog, get_strata_labels, get_strata_marks, get_strata_root
 from api.queries.taste_queries import get_taste_projection
+from api.routers import insights_compute
 from api.strata import MAX_ROOT_RELEASES, Budget, apply_labels, build_strata, label_targets
 from api.syncer import DISCOGS_API_BASE, sync_collection, sync_wantlist
 
@@ -957,6 +963,178 @@ async def test_style_cotags_count_tie_break_cap_and_self_pairs_on_a_seeded_graph
     assert set(cotags[0]) == {"style", "other", "release_count"}
     # Rows come back grouped by style, count descending, then name.
     assert [row["style"] for row in cotags] == sorted(row["style"] for row in cotags)
+
+
+# One group of three equal styles: 1,000 releases carry all three, over 100 masters of the group's own.
+# Adding groups grows the catalog without growing any one style. Written a group at a time, because the
+# integration Neo4j has a 256 MB heap.
+_STYLE_GROUP = """
+CREATE (a:Style {name: 'A' + toString($group)}), (b:Style {name: 'B' + toString($group)}), (c:Style {name: 'C' + toString($group)})
+WITH a, b, c
+UNWIND range(1, 100) AS m
+CREATE (master:Master {id: toString($group) + '-' + toString(m), title: 't', year: 1970})
+WITH a, b, c, m, master
+UNWIND range(1, 10) AS n
+CREATE (r:Release {id: toString($group) + '-' + toString(m) + '-' + toString(n)}),
+       (r)-[:IS]->(a), (r)-[:IS]->(b), (r)-[:IS]->(c), (r)-[:DERIVED_FROM]->(master)
+"""
+
+
+async def _peak_memory(driver: AsyncResilientNeo4jDriver, cypher: str, **params: object) -> int:
+    async with driver.session(database="neo4j") as session:
+        result = await session.run(f"PROFILE {cypher}", params)
+        # The profile only exists once the rows have been read.
+        _ = [record async for record in result]
+        summary = await result.consume()
+    assert summary.profile is not None
+    return int(summary.profile["args"]["GlobalMemory"])
+
+
+@pytest.mark.parametrize(
+    ("cypher", "limit"),
+    [(_STYLE_LANDMARK_CYPHER, LANDMARKS_PER_STYLE), (_STYLE_COTAG_CYPHER, COTAGS_PER_STYLE)],
+    ids=["landmarks", "cotags"],
+)
+async def test_style_reads_peak_at_one_style_however_large_the_catalog(neo4j_driver: AsyncResilientNeo4jDriver, cypher: str, limit: int) -> None:
+    """Six times the catalog costs about the same memory, because each style's count is released in turn.
+
+    The shared transaction pool ran out on the full graph when these reads counted every style at
+    once, however long their timeout was. Their peak has to follow the largest style, not the catalog.
+
+    The old statements fail this: the landmark read at 2.55 times the memory, and the co-tag read at
+    6.00. The co-tag read only plans its whole-graph hash join with the production ``Style.name`` index
+    in place, so the test creates it. The graph is removed in batches, because the next file's
+    single-transaction cleanup cannot fit this many nodes in the integration transaction pool.
+    """
+    await _consume(neo4j_driver, "CREATE CONSTRAINT peak_memory_style_name IF NOT EXISTS FOR (s:Style) REQUIRE s.name IS UNIQUE")
+    try:
+        for group in range(1, 9):
+            await _consume(neo4j_driver, _STYLE_GROUP, group=group)
+        small = await _peak_memory(neo4j_driver, cypher, limit=limit)
+
+        for group in range(9, 49):
+            await _consume(neo4j_driver, _STYLE_GROUP, group=group)
+        large = await _peak_memory(neo4j_driver, cypher, limit=limit)
+    finally:
+        await _consume(neo4j_driver, "MATCH (n) CALL (n) { DETACH DELETE n } IN TRANSACTIONS OF 2000 ROWS")
+        await _consume(neo4j_driver, "DROP CONSTRAINT peak_memory_style_name IF EXISTS")
+
+    assert large < small * 2
+
+
+# Labels for the longevity ranking. The releases are written so each rule changes the outcome if it
+# breaks: the undated and year-zero releases would widen or inflate Old's figures, the duplicate edge
+# would give Old a sixth release, and the stub spans more years than anything else, so it would come
+# first if a nameless label were ranked.
+_LONGEVITY_LABELS = """
+CREATE (old:Label {id: '20', name: 'Old'}), (stub:Label {id: '1818'}), (undated:Label {id: '30', name: 'Undated'}),
+       (more:Label {id: '40', name: 'More'}), (fewer:Label {id: '41', name: 'Fewer'}),
+       (tie_b:Label {id: '6', name: 'Tie B'}), (tie_a:Label {id: '50', name: 'Tie A'})
+CREATE (o1:Release {id: 'o1', year: 1950}), (o2:Release {id: 'o2', year: 1961}), (o3:Release {id: 'o3', year: 1962}),
+       (o4:Release {id: 'o4', year: 1975}), (o5:Release {id: 'o5', year: 1976}), (o6:Release {id: 'o6', year: 0}),
+       (o7:Release {id: 'o7'})
+CREATE (o1)-[:ON]->(old), (o2)-[:ON]->(old), (o3)-[:ON]->(old), (o4)-[:ON]->(old), (o5)-[:ON]->(old),
+       (o5)-[:ON]->(old), (o6)-[:ON]->(old), (o7)-[:ON]->(old)
+CREATE (s1:Release {id: 's1', year: 1900}), (s2:Release {id: 's2', year: 2020}), (s1)-[:ON]->(stub), (s2)-[:ON]->(stub)
+CREATE (u1:Release {id: 'u1', year: 0}), (u2:Release {id: 'u2'}), (u1)-[:ON]->(undated), (u2)-[:ON]->(undated)
+CREATE (m1:Release {id: 'm1', year: 1990}), (m2:Release {id: 'm2', year: 2000}), (m3:Release {id: 'm3', year: 2000}),
+       (m1)-[:ON]->(more), (m2)-[:ON]->(more), (m3)-[:ON]->(more)
+CREATE (f1:Release {id: 'f1', year: 1990}), (f2:Release {id: 'f2', year: 2000}), (f1)-[:ON]->(fewer), (f2)-[:ON]->(fewer)
+CREATE (a1:Release {id: 'a1', year: 2001}), (a2:Release {id: 'a2', year: 2002}), (a1)-[:ON]->(tie_a), (a2)-[:ON]->(tie_a)
+CREATE (b1:Release {id: 'b1', year: 2001}), (b2:Release {id: 'b2', year: 2002}), (b1)-[:ON]->(tie_b), (b2)-[:ON]->(tie_b)
+"""
+
+
+async def test_label_longevity_ranks_named_dated_labels_on_a_seeded_graph(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    """Span, totals, peak decade, tie-breaks and exclusions hold on the real engine, under the long timeout."""
+    await _consume(neo4j_driver, _LONGEVITY_LABELS)
+
+    labels = await query_label_longevity(neo4j_driver, limit=10)
+
+    # Old spans 1950-1976 on five dated releases: the 1960s and 1970s tie, so the earlier decade wins.
+    assert labels[0] == {
+        "label_id": "20",
+        "label_name": "Old",
+        "first_year": 1950,
+        "last_year": 1976,
+        "years_active": 27,
+        "total_releases": 5,
+        "peak_decade": 1960,
+    }
+    # Equal spans rank by releases; equal spans and releases rank by id as a string, so '50' precedes '6'.
+    assert [row["label_name"] for row in labels] == ["Old", "More", "Fewer", "Tie A", "Tie B"]
+    assert labels[1]["peak_decade"] == 2000
+    # The stub has no name, and Undated has no dated release, so neither can be stored.
+    assert all(row["label_name"] for row in labels)
+
+    assert [row["label_name"] for row in await query_label_longevity(neo4j_driver, limit=2)] == ["Old", "More"]
+
+
+_GROUP_READ_ROUTES = [
+    pytest.param("/api/internal/insights/label-longevity", "_LABEL_LONGEVITY_CYPHER", "LABEL_LONGEVITY_QUERY_TIMEOUT_SECONDS", id="label-longevity"),
+    pytest.param("/api/internal/insights/style-landmarks", "_STYLE_LANDMARK_CYPHER", "STYLE_LANDMARK_QUERY_TIMEOUT_SECONDS", id="style-landmarks"),
+    pytest.param("/api/internal/insights/style-cotags", "_STYLE_COTAG_CYPHER", "STYLE_COTAG_QUERY_TIMEOUT_SECONDS", id="style-cotags"),
+]
+
+_OUTLASTS_ITS_BUDGET = "UNWIND range(1, 1000000000) AS value RETURN sum(toFloat(value)) AS total"
+# Grows many small lists, so the 128 MiB pool fails it in about a second. One long collect() doubles a
+# single array and runs the 256 MB heap out instead, a different failure from the one Lux logged. The
+# integration script sets that pool: at Neo4j's default of 70% of heap, this read hung late in a full
+# suite run instead of failing.
+_OUTGROWS_THE_POOL = "UNWIND range(1, 1000000000) AS value WITH value % 1000 AS bucket, collect(value) AS values RETURN count(*) AS total"
+
+
+async def _get_insights_route(driver: AsyncResilientNeo4jDriver, monkeypatch: pytest.MonkeyPatch, path: str) -> httpx.Response:
+    """Call the real route handler over ASGI, on the real driver, in this test's event loop."""
+    app = FastAPI()
+    app.include_router(insights_compute.router)
+    app.dependency_overrides[insights_compute.require_internal_secret] = lambda: None
+    monkeypatch.setattr(insights_compute, "_neo4j", driver)
+    monkeypatch.setattr(limiter, "enabled", False)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://catalog-api.invalid") as client:
+        return await client.get(path)
+
+
+@pytest.mark.parametrize(("path", "statement", "budget"), _GROUP_READ_ROUTES)
+async def test_a_real_timeout_reaches_the_caller_as_a_retryable_503(
+    neo4j_driver: AsyncResilientNeo4jDriver,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    statement: str,
+    budget: str,
+) -> None:
+    """The server's own timeout, through the route, is a retryable 503 and never an empty result."""
+    monkeypatch.setattr(insights_neo4j_queries, statement, _OUTLASTS_ITS_BUDGET)
+    monkeypatch.setattr(insights_neo4j_queries, budget, 0.05)
+
+    response = await _get_insights_route(neo4j_driver, monkeypatch, path)
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": "Neo4j temporarily unavailable (retryable error)",
+        "code": "Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration",
+    }
+
+
+@pytest.mark.parametrize(("path", "statement", "budget"), _GROUP_READ_ROUTES)
+async def test_a_real_memory_pool_failure_reaches_the_caller_as_a_retryable_503(
+    neo4j_driver: AsyncResilientNeo4jDriver,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    statement: str,
+    budget: str,
+) -> None:
+    """The failure Lux logged, raised by a real pool, is a retryable 503 and never an empty result."""
+    monkeypatch.setattr(insights_neo4j_queries, statement, _OUTGROWS_THE_POOL)
+    monkeypatch.setattr(insights_neo4j_queries, budget, 30.0)
+
+    response = await _get_insights_route(neo4j_driver, monkeypatch, path)
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": "Neo4j temporarily unavailable (retryable error)",
+        "code": "Neo.TransientError.General.MemoryPoolOutOfMemoryError",
+    }
 
 
 async def test_rarity_masterless_hubs_and_duplicate_edges(neo4j_driver: AsyncResilientNeo4jDriver) -> None:

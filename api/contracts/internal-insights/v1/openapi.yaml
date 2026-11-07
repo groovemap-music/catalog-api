@@ -2,7 +2,7 @@
 openapi: 3.1.0
 info:
   title: GrooveMap internal insights API
-  version: 1.8.0
+  version: 1.9.0
   description: Catalog API-owned contract consumed by the analytics engine.
 security:
   - InternalSecret: []
@@ -47,8 +47,8 @@ paths:
         Landmark masters per style: up to 25 masters of each style, ranked by the number of
         releases that carry the style and derive from the master, ties broken by master id
         ascending. Releases without a master do not count. The year is the master's own,
-        `null` when it has none. The read ranks every style-master pair, so it runs under a
-        long internal budget.
+        `null` when it has none. The read visits every release-style tag one style at a time,
+        so it runs under a long internal budget.
       x-groovemap-max-processing-seconds: 300
       responses:
         "200": {$ref: "#/components/responses/StyleLandmarks"}
@@ -61,8 +61,8 @@ paths:
         Co-tagged styles per style: up to 25 other styles for each style, ranked by the number
         of releases tagged with both, ties broken by the other style's name ascending. A style
         is never paired with itself. Each pair appears under both of its styles, with the same
-        count. The read counts every release's style pairs, so it runs under a long internal
-        budget.
+        count. The read counts every release's style pairs one style at a time, so it runs
+        under a long internal budget.
       x-groovemap-max-processing-seconds: 300
       responses:
         "200": {$ref: "#/components/responses/StyleCotags"}
@@ -71,10 +71,19 @@ paths:
   /api/internal/insights/label-longevity:
     get:
       operationId: label_longevity
+      description: >-
+        Longest-running labels: first and last release year, years active, dated releases and
+        peak decade per label, ranked by years active, then releases, then label id ascending.
+        Ties for the peak decade go to the earlier decade. Undated releases are left out, and
+        labels with no name or no dated release are not ranked. The read takes the year of every
+        release-label edge, so it runs under a long internal budget.
+      x-groovemap-max-processing-seconds: 300
       parameters:
         - $ref: "#/components/parameters/LabelLongevityLimit"
       responses:
         "200": {$ref: "#/components/responses/Items"}
+        "503":
+          description: Neo4j gave up on the read with a retryable error, or is not ready.
   /api/internal/insights/anniversaries:
     get:
       operationId: anniversaries
