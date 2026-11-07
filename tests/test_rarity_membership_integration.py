@@ -44,9 +44,9 @@ def _artists(i: int) -> list[int]:
 
 @pytest.fixture(autouse=True)
 def _fresh_membership_cache() -> Iterator[None]:
-    rarity_queries._membership_checked.update(run_id=None, at=0.0, complete={})
+    rarity_queries._membership_checked.update(run_id=None, complete={})
     yield
-    rarity_queries._membership_checked.update(run_id=None, at=0.0, complete={})
+    rarity_queries._membership_checked.update(run_id=None, complete={})
 
 
 async def _seed(pool: AsyncPostgreSQLPool, driver: AsyncResilientNeo4jDriver, *, null_label_row: int | None = None) -> None:
