@@ -412,8 +412,11 @@ class TestGetRarityHiddenGems:
 
 @pytest.fixture
 def _rarity_populated():
-    """These tests exercise the id-list path, which only runs when the rarity table has rows."""
-    with patch("api.queries.rarity_queries._release_rarity_has_rows", new=AsyncMock(return_value=True)):
+    """These tests exercise the id-list fallback: the table has rows, but the membership columns cannot be trusted."""
+    with (
+        patch("api.queries.rarity_queries._release_rarity_has_rows", new=AsyncMock(return_value=True)),
+        patch("api.queries.rarity_queries._membership_columns_complete", new=AsyncMock(return_value=False)),
+    ):
         yield
 
 

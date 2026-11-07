@@ -17,11 +17,13 @@ Graph model:
   (Release)-[:ISSUED_ON {qty, source}]->(Medium {id, family})
 """
 
+import asyncio
 import base64
 import binascii
 import bisect
 import json
 import math
+import time
 from collections import Counter
 from collections.abc import AsyncIterator, Iterable
 from datetime import UTC, datetime
@@ -893,39 +895,134 @@ async def _release_rarity_has_rows(pool: Any) -> bool:
     return bool(row and row["present"])
 
 
-async def get_rarity_by_artist(
+_BIGINT_MAX_ID = 2**63 - 1
+_MEMBERSHIP_CHECK_TTL_SECONDS = 900.0
+
+# One statement for a label's or an artist's rarity page and its exact total (database-schema
+# docs/architecture.md, "Rarity by label and by artist"). It always returns a row: a page past the end,
+# or a group no release belongs to, returns a single row whose release columns are NULL and whose total is
+# still right. The two statements differ only in the column, written out so no SQL is built at run time.
+_LABEL_PAGE_SQL = """
+SELECT p.release_id, p.title, p.artist_name, p.year, p.rarity_score, p.tier, p.hidden_gem_score, t.total
+FROM (SELECT count(*) AS total FROM insights.release_rarity WHERE label_ids @> ARRAY[%(key)s]::bigint[]) AS t
+LEFT JOIN LATERAL (
+    SELECT release_id, title, artist_name, year, rarity_score, tier, hidden_gem_score
+    FROM insights.release_rarity
+    WHERE label_ids @> ARRAY[%(key)s]::bigint[]
+    ORDER BY rarity_score DESC, release_id
+    LIMIT %(limit)s OFFSET %(offset)s
+) AS p ON true
+"""
+_ARTIST_PAGE_SQL = """
+SELECT p.release_id, p.title, p.artist_name, p.year, p.rarity_score, p.tier, p.hidden_gem_score, t.total
+FROM (SELECT count(*) AS total FROM insights.release_rarity WHERE artist_ids @> ARRAY[%(key)s]::bigint[]) AS t
+LEFT JOIN LATERAL (
+    SELECT release_id, title, artist_name, year, rarity_score, tier, hidden_gem_score
+    FROM insights.release_rarity
+    WHERE artist_ids @> ARRAY[%(key)s]::bigint[]
+    ORDER BY rarity_score DESC, release_id
+    LIMIT %(limit)s OFFSET %(offset)s
+) AS p ON true
+"""
+_LABEL_COLUMN = "label_ids"
+_ARTIST_COLUMN = "artist_ids"
+_PAGE_SQL_BY_COLUMN = {_LABEL_COLUMN: _LABEL_PAGE_SQL, _ARTIST_COLUMN: _ARTIST_PAGE_SQL}
+
+# A `@>` match is complete only if no row has the column NULL (a row written by an older stream is
+# invisible to it). That check is a scan of the whole table, so it runs once per completed rarity run
+# (the table only changes when one finishes) and is remembered for a bounded time.
+_membership_checked: dict[str, Any] = {"run_id": None, "at": 0.0, "complete": {}}
+_membership_lock = asyncio.Lock()
+
+
+async def _membership_columns_complete(pool: Any, column: str) -> bool:
+    """Whether ``column`` is non-NULL on every row of ``insights.release_rarity``.
+
+    False when that cannot be shown, so the caller answers from the Neo4j id list as it always has.
+    """
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT max(id) AS run_id FROM insights.computation_log WHERE insight_type = 'release_rarity' AND status = 'completed'")
+        row = await cur.fetchone()
+    run_id = row["run_id"] if row else None
+    if run_id is None:
+        return False
+
+    async with _membership_lock:
+        fresh = _membership_checked["run_id"] == run_id and time.monotonic() - _membership_checked["at"] < _MEMBERSHIP_CHECK_TTL_SECONDS
+        if not fresh:
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT NOT EXISTS (SELECT 1 FROM insights.release_rarity WHERE label_ids IS NULL) AS label_ids,"
+                    " NOT EXISTS (SELECT 1 FROM insights.release_rarity WHERE artist_ids IS NULL) AS artist_ids"
+                )
+                found = await cur.fetchone()
+            _membership_checked.update(
+                run_id=run_id,
+                at=time.monotonic(),
+                complete={_LABEL_COLUMN: bool(found and found["label_ids"]), _ARTIST_COLUMN: bool(found and found["artist_ids"])},
+            )
+            if not all(_membership_checked["complete"].values()):
+                logger.warning(
+                    "rarity membership columns have NULL rows; answering from the graph id list",
+                    run_id=run_id,
+                    complete=_membership_checked["complete"],
+                )
+        return bool(_membership_checked["complete"].get(column))
+
+
+async def _rarity_page_by_membership(pool: Any, column: str, key: int, page: int, page_size: int) -> tuple[list[dict[str, Any]], int]:
+    """One page and the exact total of the releases whose ``column`` holds ``key``, in one statement."""
+    query = _PAGE_SQL_BY_COLUMN[column]
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(query, {"key": key, "limit": page_size, "offset": (page - 1) * page_size})
+        rows = await cur.fetchall()
+    total = int(rows[0]["total"]) if rows else 0
+    items = [{k: v for k, v in row.items() if k != "total"} for row in rows if row["release_id"] is not None]
+    return items, total
+
+
+def _numeric_graph_id(value: str) -> int | None:
+    """The graph id as a BIGINT, or None when it is not a plain integer that fits one."""
+    if not value.isascii() or not value.isdigit():
+        return None
+    number = int(value)
+    return number if number <= _BIGINT_MAX_ID else None
+
+
+async def _rarity_by_graph_members(
     driver: Any,
     pool: Any,
-    artist_id: str,
-    page: int = 1,
-    page_size: int = 20,
+    node_label: str,
+    relation: str,
+    column: str,
+    node_id: str,
+    page: int,
+    page_size: int,
 ) -> tuple[list[dict[str, Any]], int] | None:
-    """Get rarest releases by a specific artist.
-
-    First queries Neo4j for release_ids, then fetches from PostgreSQL.
-    Returns None if artist not found.
-    """
-    artist_rows = await run_query(
+    """Rarity page for a Label (ON) or an Artist (BY); None when the node does not exist."""
+    node_rows = await run_query(
         driver,
-        "MATCH (a:Artist {id: $artist_id}) RETURN a.id AS id, a.name AS name LIMIT 1",
+        f"MATCH (n:{node_label} {{id: $node_id}}) RETURN n.id AS id, n.name AS name LIMIT 1",
         database="neo4j",
-        artist_id=artist_id,
+        node_id=node_id,
     )
-    if not artist_rows:
+    if not node_rows:
         return None
 
     if not await _release_rarity_has_rows(pool):
         return [], 0
 
+    key = _numeric_graph_id(node_id)
+    if key is not None and await _membership_columns_complete(pool, column):
+        return await _rarity_page_by_membership(pool, column, key, page, page_size)
+
+    # Fallback: an id the BIGINT column cannot hold, or rows the membership column cannot see.
     release_rows = await run_query(
         driver,
-        "MATCH (a:Artist {id: $artist_id})<-[:BY]-(r:Release) RETURN r.id AS release_id",
+        f"MATCH (n:{node_label} {{id: $node_id}})<-[:{relation}]-(r:Release) RETURN r.id AS release_id",
         database="neo4j",
-        artist_id=artist_id,
+        node_id=node_id,
     )
-    if not release_rows:
-        return [], 0
-
     release_ids = [int(r["release_id"]) for r in release_rows if str(r["release_id"]).isdigit()]
     if not release_ids:
         return [], 0
@@ -952,6 +1049,21 @@ async def get_rarity_by_artist(
         total = count_row["total"] if count_row else 0
 
     return items, total
+
+
+async def get_rarity_by_artist(
+    driver: Any,
+    pool: Any,
+    artist_id: str,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[list[dict[str, Any]], int] | None:
+    """Get rarest releases by a specific artist, filtered inside PostgreSQL on ``artist_ids``.
+
+    Neo4j is asked only whether the artist exists (None, a 404, when it does not). Falls back to the
+    Neo4j release-id list when any row's ``artist_ids`` is NULL.
+    """
+    return await _rarity_by_graph_members(driver, pool, "Artist", "BY", _ARTIST_COLUMN, artist_id, page, page_size)
 
 
 async def get_rarity_by_label(
@@ -961,55 +1073,9 @@ async def get_rarity_by_label(
     page: int = 1,
     page_size: int = 20,
 ) -> tuple[list[dict[str, Any]], int] | None:
-    """Get rarest releases on a specific label.
+    """Get rarest releases on a specific label, filtered inside PostgreSQL on ``label_ids``.
 
-    First queries Neo4j for release_ids, then fetches from PostgreSQL.
-    Returns None if label not found.
+    Neo4j is asked only whether the label exists (None, a 404, when it does not). Falls back to the
+    Neo4j release-id list when any row's ``label_ids`` is NULL.
     """
-    label_rows = await run_query(
-        driver,
-        "MATCH (l:Label {id: $label_id}) RETURN l.id AS id, l.name AS name LIMIT 1",
-        database="neo4j",
-        label_id=label_id,
-    )
-    if not label_rows:
-        return None
-
-    if not await _release_rarity_has_rows(pool):
-        return [], 0
-
-    release_rows = await run_query(
-        driver,
-        "MATCH (l:Label {id: $label_id})<-[:ON]-(r:Release) RETURN r.id AS release_id",
-        database="neo4j",
-        label_id=label_id,
-    )
-    if not release_rows:
-        return [], 0
-
-    release_ids = [int(r["release_id"]) for r in release_rows if str(r["release_id"]).isdigit()]
-    if not release_ids:
-        return [], 0
-    offset = (page - 1) * page_size
-
-    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            """
-            SELECT release_id, title, artist_name, year, rarity_score, tier, hidden_gem_score
-            FROM insights.release_rarity
-            WHERE release_id = ANY(%s)
-            ORDER BY rarity_score DESC, release_id
-            LIMIT %s OFFSET %s
-            """,
-            (release_ids, page_size, offset),
-        )
-        items = await cur.fetchall()
-
-        await cur.execute(
-            "SELECT count(*) AS total FROM insights.release_rarity WHERE release_id = ANY(%s)",
-            (release_ids,),
-        )
-        count_row = await cur.fetchone()
-        total = count_row["total"] if count_row else 0
-
-    return items, total
+    return await _rarity_by_graph_members(driver, pool, "Label", "ON", _LABEL_COLUMN, label_id, page, page_size)
