@@ -35,6 +35,7 @@
     "genre_tree": {"method": "GET", "path": "/api/genre-tree"},
     "insights_completeness": {"method": "GET", "path": "/api/insights/data-completeness"},
     "insights_genre_trends": {"method": "GET", "path": "/api/insights/genre-trends"},
+    "insights_label_longevity": {"method": "GET", "path": "/api/insights/label-longevity", "parameters": ["include_placeholders", "limit"]},
     "insights_status": {"method": "GET", "path": "/api/insights/status"},
     "insights_style_atlas": {"method": "GET", "path": "/api/insights/style-atlas"},
     "insights_style_atlas_cotags": {"method": "GET", "path": "/api/insights/style-atlas/cotags", "parameters": ["style"]},
