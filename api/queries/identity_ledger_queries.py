@@ -154,7 +154,11 @@ _REFRESHED_AT = "SELECT refreshed_at FROM identity_ledger_refresh_state"
 # Works with evented editions, read from the views. Without a window it pages the per-work
 # summary for the event filter ('any' is every event type). A window reads the edition events in
 # its range and counts them per work through the editions' parents, as the live statement did.
-# per_work is NOT MATERIALIZED so the count and the page each plan alone.
+# per_work is NOT MATERIALIZED so the unwindowed count and page each plan alone (the page walks
+# idx_identity_ledger_work_summary_page). _WORKS_WINDOWED materializes `windowed`, so a window's
+# aggregation runs once and feeds both the count and the page. Inlined, it ran twice (count and page),
+# which doubled the one-month window's time. Materializing it for the unwindowed read made that read
+# slower (320 ms to about 1.9 s on the real catalog), so only a window takes this variant.
 _WORKS = f"""
 WITH summary AS (
     SELECT work_id, evented_editions, repaired_editions, first_event, last_event
@@ -194,6 +198,8 @@ LEFT JOIN LATERAL (
 ) AS page ON TRUE
 ORDER BY page.last_event DESC, page.work_id
 """  # noqa: S608 — composed of module constants only
+
+_WORKS_WINDOWED = _WORKS.replace("windowed AS (", "windowed AS MATERIALIZED (", 1)
 
 # Each page work's edition count and how many of those editions have two or more works.
 _WORK_SUMMARIES = f"""
@@ -509,7 +515,7 @@ async def get_ledger_works(
         async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
             await cur.execute(_READ_ONLY)
             refreshed_at = await _refreshed_at(cur, _WORKS_VIEWS)
-            page_rows = await _rows(cur, _WORKS, params)
+            page_rows = await _rows(cur, _WORKS_WINDOWED if since is not None or until is not None else _WORKS, params)
             total = int(page_rows[0][0]) if page_rows else 0
             listed = [row[1:] for row in page_rows if row[1] is not None]
             works = [str(row[0]) for row in listed]
