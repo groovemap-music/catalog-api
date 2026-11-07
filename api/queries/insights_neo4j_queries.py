@@ -22,9 +22,10 @@ logger = structlog.get_logger(__name__)
 # ``x-groovemap-max-processing-seconds`` on this operation.
 STYLE_YEAR_QUERY_TIMEOUT_SECONDS = 300.0
 
-# Server-side budget for the landmark read. It visits every release-style tag, one style at a time,
-# so it gets the same long internal budget as the style-year read. The internal-insights contract
-# publishes this figure as ``x-groovemap-max-processing-seconds`` on the style-landmarks operation.
+# Server-side budget for the landmark read. It visits every release-style tag, one style at a time
+# (82 s at a 74 MB peak on the 2026-11-06 Lux catalog), so it gets the same long internal budget as
+# the style-year read. The internal-insights contract publishes this figure as
+# ``x-groovemap-max-processing-seconds`` on the style-landmarks operation.
 STYLE_LANDMARK_QUERY_TIMEOUT_SECONDS = 300.0
 
 # Server-side budget for the genre-trends read. It scans every release-genre tag (48 s cold and
@@ -37,18 +38,19 @@ GENRE_TRENDS_QUERY_TIMEOUT_SECONDS = 300.0
 LANDMARKS_PER_STYLE = 25
 
 # Server-side budget for the co-tag read. It expands every release into its style pairs, one style
-# at a time, a scan at least the size of the style-year read, so it gets the same long internal
-# budget. The internal-insights contract publishes this figure as
-# ``x-groovemap-max-processing-seconds`` on the style-cotags operation.
+# at a time (85 s at a 57 MB peak on the 2026-11-06 Lux catalog), a scan at least the size of the
+# style-year read, so it gets the same long internal budget. The internal-insights contract
+# publishes this figure as ``x-groovemap-max-processing-seconds`` on the style-cotags operation.
 STYLE_COTAG_QUERY_TIMEOUT_SECONDS = 300.0
 
 # Co-tagged styles kept per style. Concept B draws the top 25 lateral neighbours of each style.
 COTAGS_PER_STYLE = 25
 
-# Server-side budget for the label-longevity read. It reads the year of every release-label edge,
-# which the 30 s default read budget cut off on the 2026-11-06 Lux catalog, so it gets the same long
-# internal budget as the style-year read. The internal-insights contract publishes this figure as
-# ``x-groovemap-max-processing-seconds`` on the label-longevity operation.
+# Server-side budget for the label-longevity read. It reads the year of every release-label edge
+# (58 s at a 25 MB peak on the 2026-11-06 Lux catalog, against the 30 s default read budget that cut
+# it off), so it gets the same long internal budget as the style-year read. The internal-insights
+# contract publishes this figure as ``x-groovemap-max-processing-seconds`` on the label-longevity
+# operation.
 LABEL_LONGEVITY_QUERY_TIMEOUT_SECONDS = 300.0
 
 

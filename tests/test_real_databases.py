@@ -15,13 +15,15 @@ import pytest
 import pytest_asyncio
 import respx
 from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver, parse_postgres_host_port
+from fastapi import FastAPI
 from groovemap_schema.postgres import create_postgres_schema
 from neo4j.exceptions import ClientError as Neo4jClientError
 from neo4j.exceptions import Neo4jError
 from psycopg.errors import QueryCanceled
 from psycopg.rows import dict_row
 
-from api.queries import strata_queries
+from api.limiter import limiter
+from api.queries import insights_neo4j_queries, strata_queries
 from api.queries.credits_queries import get_person_connections
 from api.queries.helpers import run_count, run_query, run_single
 from api.queries.insights_neo4j_queries import (
@@ -36,6 +38,7 @@ from api.queries.insights_neo4j_queries import (
 )
 from api.queries.strata_queries import get_shared_personnel, get_strata_catalog, get_strata_labels, get_strata_marks, get_strata_root
 from api.queries.taste_queries import get_taste_projection
+from api.routers import insights_compute
 from api.strata import MAX_ROOT_RELEASES, Budget, apply_labels, build_strata, label_targets
 from api.syncer import DISCOGS_API_BASE, sync_collection, sync_wantlist
 
@@ -1065,6 +1068,73 @@ async def test_label_longevity_ranks_named_dated_labels_on_a_seeded_graph(neo4j_
     assert all(row["label_name"] for row in labels)
 
     assert [row["label_name"] for row in await query_label_longevity(neo4j_driver, limit=2)] == ["Old", "More"]
+
+
+_GROUP_READ_ROUTES = [
+    pytest.param("/api/internal/insights/label-longevity", "_LABEL_LONGEVITY_CYPHER", "LABEL_LONGEVITY_QUERY_TIMEOUT_SECONDS", id="label-longevity"),
+    pytest.param("/api/internal/insights/style-landmarks", "_STYLE_LANDMARK_CYPHER", "STYLE_LANDMARK_QUERY_TIMEOUT_SECONDS", id="style-landmarks"),
+    pytest.param("/api/internal/insights/style-cotags", "_STYLE_COTAG_CYPHER", "STYLE_COTAG_QUERY_TIMEOUT_SECONDS", id="style-cotags"),
+]
+
+_OUTLASTS_ITS_BUDGET = "UNWIND range(1, 1000000000) AS value RETURN sum(toFloat(value)) AS total"
+# Grows many small lists, so the 128 MiB pool fails it in about a second. One long collect() doubles a
+# single array and runs the 256 MB heap out instead, a different failure from the one Lux logged. The
+# integration script sets that pool: at Neo4j's default of 70% of heap, this read hung late in a full
+# suite run instead of failing.
+_OUTGROWS_THE_POOL = "UNWIND range(1, 1000000000) AS value WITH value % 1000 AS bucket, collect(value) AS values RETURN count(*) AS total"
+
+
+async def _get_insights_route(driver: AsyncResilientNeo4jDriver, monkeypatch: pytest.MonkeyPatch, path: str) -> httpx.Response:
+    """Call the real route handler over ASGI, on the real driver, in this test's event loop."""
+    app = FastAPI()
+    app.include_router(insights_compute.router)
+    app.dependency_overrides[insights_compute.require_internal_secret] = lambda: None
+    monkeypatch.setattr(insights_compute, "_neo4j", driver)
+    monkeypatch.setattr(limiter, "enabled", False)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://catalog-api.invalid") as client:
+        return await client.get(path)
+
+
+@pytest.mark.parametrize(("path", "statement", "budget"), _GROUP_READ_ROUTES)
+async def test_a_real_timeout_reaches_the_caller_as_a_retryable_503(
+    neo4j_driver: AsyncResilientNeo4jDriver,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    statement: str,
+    budget: str,
+) -> None:
+    """The server's own timeout, through the route, is a retryable 503 and never an empty result."""
+    monkeypatch.setattr(insights_neo4j_queries, statement, _OUTLASTS_ITS_BUDGET)
+    monkeypatch.setattr(insights_neo4j_queries, budget, 0.05)
+
+    response = await _get_insights_route(neo4j_driver, monkeypatch, path)
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": "Neo4j temporarily unavailable (retryable error)",
+        "code": "Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration",
+    }
+
+
+@pytest.mark.parametrize(("path", "statement", "budget"), _GROUP_READ_ROUTES)
+async def test_a_real_memory_pool_failure_reaches_the_caller_as_a_retryable_503(
+    neo4j_driver: AsyncResilientNeo4jDriver,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    statement: str,
+    budget: str,
+) -> None:
+    """The failure Lux logged, raised by a real pool, is a retryable 503 and never an empty result."""
+    monkeypatch.setattr(insights_neo4j_queries, statement, _OUTGROWS_THE_POOL)
+    monkeypatch.setattr(insights_neo4j_queries, budget, 30.0)
+
+    response = await _get_insights_route(neo4j_driver, monkeypatch, path)
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": "Neo4j temporarily unavailable (retryable error)",
+        "code": "Neo.TransientError.General.MemoryPoolOutOfMemoryError",
+    }
 
 
 async def test_rarity_masterless_hubs_and_duplicate_edges(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
