@@ -11,11 +11,12 @@ Nothing here touches a shared database: ``just test-integration`` starts throwaw
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import pytest_asyncio
 from common import AsyncPostgreSQLPool, AsyncResilientNeo4jDriver
 
 from api.queries import rarity_queries
@@ -40,6 +41,15 @@ def _labels(i: int) -> list[int]:
 
 def _artists(i: int) -> list[int]:
     return sorted({*([BIG_ARTIST] if i % 2 == 0 else []), 100 + i % 17})
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _leave_release_rarity_empty(postgres_pool: AsyncPostgreSQLPool) -> AsyncIterator[None]:
+    """These tests truncate and reseed insights.release_rarity; the next file must not inherit their rows (gm-catalog-api-bqul)."""
+    yield
+    async with postgres_pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("TRUNCATE insights.release_rarity")
+        await cur.execute("DELETE FROM insights.computation_log WHERE insight_type = 'release_rarity'")
 
 
 @pytest.fixture(autouse=True)

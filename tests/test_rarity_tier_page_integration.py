@@ -51,7 +51,9 @@ async def pool() -> AsyncIterator[AsyncPostgreSQLPool]:
     await pool.initialize()
     await create_postgres_schema(pool)
     async with pool.connection() as conn:
-        await conn.execute("DELETE FROM insights.release_rarity WHERE tier = %s", (TIER,))
+        # This file owns the table for its tests: rows another integration file left behind change the row
+        # counts and statistics the planner costs the keyset page with (gm-catalog-api-bqul).
+        await conn.execute("TRUNCATE insights.release_rarity")
         await conn.execute(
             """
             INSERT INTO insights.release_rarity (release_id, title, artist_name, year, rarity_score, tier, hidden_gem_score)
@@ -61,14 +63,14 @@ async def pool() -> AsyncIterator[AsyncPostgreSQLPool]:
             {"scores": list(SCORES), "k": len(SCORES), "tier": TIER, "total": ROWS_PER_SCORE * len(SCORES), "base": ID_BASE},
         )
         await conn.execute(
-            "INSERT INTO insights.release_rarity (release_id, title, artist_name, year, rarity_score, tier, hidden_gem_score) VALUES (999999, 'Other', 'A', 1990, 0.3, 'other-tier', 0.5) ON CONFLICT (release_id) DO NOTHING"
+            "INSERT INTO insights.release_rarity (release_id, title, artist_name, year, rarity_score, tier, hidden_gem_score) VALUES (999999, 'Other', 'A', 1990, 0.3, 'other-tier', 0.5)"
         )
         await conn.commit()
     try:
         yield pool
     finally:
         async with pool.connection() as conn:
-            await conn.execute("DELETE FROM insights.release_rarity WHERE tier = %s OR release_id = 999999", (TIER,))
+            await conn.execute("TRUNCATE insights.release_rarity")
             await conn.commit()
         await pool.close()
 
@@ -116,6 +118,15 @@ async def test_the_walk_order_is_score_descending_then_release_id_ascending(pool
         after = (float(last["rarity_score"]), int(last["release_id"]))
 
     assert rows == sorted(rows, key=lambda pair: (-pair[0], pair[1]))
+
+
+async def test_the_table_holds_only_this_files_rows(pool: AsyncPostgreSQLPool) -> None:
+    """Whatever an earlier integration file seeded, the tests here start from their own rows alone."""
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT tier, count(*) FROM insights.release_rarity GROUP BY tier")
+        counts = dict(await cur.fetchall())
+
+    assert counts == {TIER: ROWS_PER_SCORE * len(SCORES), "other-tier": 1}
 
 
 async def test_other_tiers_are_never_returned(pool: AsyncPostgreSQLPool) -> None:
