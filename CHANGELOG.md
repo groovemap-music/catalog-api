@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v0.9.1 (2026-11-07)
+
+### Release notes
+
+No schema change. The rarity membership check runs once per completed rarity run, in the background, instead of a 4 to 6 s table scan on one request every 15 minutes.
+
+### Perf
+
+- **rarity**: take the membership table scan off the request path
+
 ## v0.9.0 (2026-11-06)
 
 ### Release notes
