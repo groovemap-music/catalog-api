@@ -2,15 +2,23 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
-## Unreleased
+## v0.9.0 (2026-11-06)
 
 ### Release notes
 
-Deploy order: analytics-engine first, then catalog-api. analytics-engine (the release that stores a null `completeness_pct`, on database-schema v0.8.0, where the column is nullable) must be live before this release, or its non-optional float fails the daily job on the first null. graph-explorer v0.3.3 or later must be live too, so artists and labels render as n/a instead of 0%.
+Deploy after analytics-engine v0.6.2 and graph-explorer v0.3.3: artists and labels now return a null completeness_pct. Rarity by label and artist runs inside PostgreSQL, about 0.7 s instead of 15.7 s for the largest label. Autocomplete ranks established artists first among equal matches. No schema change.
 
-- `/api/internal/insights/data-completeness` and `/api/insights/data-completeness` return `completeness_pct: null` for artists and labels, which have no scored field (images are not in the score), and for an empty table. Before, they returned `0.0`, which read as a measured zero.
-- Masters and releases are unchanged: the score is the same mean of their scored fields, and the counts are the same.
-- The response shape is unchanged; only the value for those entity types moves from `0.0` to `null`. The internal-insights contract is not bumped, because its `Items` response is `additionalProperties: true`.
+### Feat
+
+- **explore**: rank established artists first among equal autocomplete matches
+
+### Fix
+
+- **insights**: report null completeness for artists and labels
+
+### Perf
+
+- **rarity**: filter by label and artist inside PostgreSQL
 
 ## v0.8.0 (2026-11-06)
 
