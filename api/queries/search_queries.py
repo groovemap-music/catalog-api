@@ -274,6 +274,16 @@ def _country_filter_clause(countries: list[str], column: sql.Composable | None =
     return (sql.SQL("({c} IS NULL OR {c} = ANY(%s::text[]))").format(c=col), [countries])
 
 
+def _uses_release_search(entity_type: str, filter_params: list[Any]) -> bool:
+    """True when a branch can match on ``public.release_search.title_tsv`` instead of the document.
+
+    Only an unfiltered releases branch can: the year, genre, media and country filters read
+    ``releases.data`` for every match anyway, so the stored vector would save nothing there and
+    those branches keep ``to_tsvector(...)`` over the document (``idx_releases_fts``).
+    """
+    return entity_type == "release" and not filter_params
+
+
 def _entity_select(
     entity_type: str,
     name_field: str,
@@ -333,26 +343,36 @@ def _entity_select(
     # The tsquery comes from the caller's ``q`` CTE, which must be NOT MATERIALIZED: a CTE
     # referenced by every branch otherwise materializes, and a CTE scan is
     # parallel-restricted, which forces a serial plan.
+    if _uses_release_search(entity_type, filter_params):
+        # Rank the stored title vector (public.release_search, database-schema v0.11.0): no
+        # releases.data is read, and so detoasted, per match. Same expression, same index
+        # order as below, so the ranks and the top rows are identical.
+        ranked_sql: sql.Composable = sql.SQL(
+            "SELECT release_id AS data_id, ts_rank(title_tsv, q.tsq) AS rank FROM public.release_search, q WHERE title_tsv @@ q.tsq"
+        )
+    else:
+        ranked_sql = sql.SQL(
+            "SELECT data_id, ts_rank(to_tsvector('english', COALESCE(data->>{name}, '')), q.tsq) AS rank"
+            " FROM {table}, q"
+            " WHERE to_tsvector('english', COALESCE(data->>{name}, '')) @@ q.tsq"
+            "{filter_clause}"
+        ).format(name=name_lit, table=table, filter_clause=filter_clause)
     select_sql = sql.SQL(
         "(SELECT {entity_type}::text AS type, d.data_id AS id, d.data->>{name} AS name,"
         " top.rank AS rank,"
         " ts_headline('english', COALESCE(d.data->>{name}, ''), q.tsq) AS highlight,"
         " {year_col} AS year, {genres_col} AS genres, {country_col} AS country"
-        " FROM q, (SELECT data_id,"
-        " ts_rank(to_tsvector('english', COALESCE(data->>{name}, '')), q.tsq) AS rank"
-        " FROM {table}, q"
-        " WHERE to_tsvector('english', COALESCE(data->>{name}, '')) @@ q.tsq"
-        "{filter_clause}"
+        " FROM q, ({ranked}"
         "{limit_clause}) top"
         " JOIN {table} d ON d.data_id = top.data_id)"
     ).format(
+        ranked=ranked_sql,
         entity_type=sql.Literal(entity_type),
         name=name_lit,
         year_col=year_col,
         genres_col=genres_col,
         country_col=country_col,
         table=table,
-        filter_clause=filter_clause,
         limit_clause=limit_clause,
     )
     return select_sql, filter_params
@@ -503,11 +523,16 @@ def _build_count_union(
             if branch_params
             else sql.SQL("")
         )
-        parts.append(
-            sql.SQL(
-                "(SELECT 1 FROM {table}, q WHERE to_tsvector('english', COALESCE(data->>{name}, '')) @@ q.tsq{filter_clause} LIMIT {cap})"
-            ).format(table=sql.Identifier(table), name=sql.Literal(name_field), filter_clause=filter_clause, cap=sql.Literal(_TOTAL_COUNT_CAP))
-        )
+        if _uses_release_search(t, branch_params):
+            parts.append(
+                sql.SQL("(SELECT 1 FROM public.release_search, q WHERE title_tsv @@ q.tsq LIMIT {cap})").format(cap=sql.Literal(_TOTAL_COUNT_CAP))
+            )
+        else:
+            parts.append(
+                sql.SQL(
+                    "(SELECT 1 FROM {table}, q WHERE to_tsvector('english', COALESCE(data->>{name}, '')) @@ q.tsq{filter_clause} LIMIT {cap})"
+                ).format(table=sql.Identifier(table), name=sql.Literal(name_field), filter_clause=filter_clause, cap=sql.Literal(_TOTAL_COUNT_CAP))
+            )
         params.extend(branch_params)
     return sql.SQL(" UNION ALL ").join(parts), params
 
@@ -561,17 +586,15 @@ async def _run_type_counts(pool: AsyncPostgreSQLPool, q: str, types: list[str]) 
     union_parts = []
     for t in types:
         table, name_field, _, _, _, _ = _ENTITY_CONFIG[t]
+        if _uses_release_search(t, []):
+            matched: sql.Composable = sql.SQL("SELECT 1 FROM public.release_search, q WHERE title_tsv @@ q.tsq")
+        else:
+            matched = sql.SQL("SELECT 1 FROM {table}, q WHERE to_tsvector('english', COALESCE(data->>{name}, '')) @@ q.tsq").format(
+                table=sql.Identifier(table), name=sql.Literal(name_field)
+            )
         union_parts.append(
-            sql.SQL(
-                "SELECT {type}::text AS type,"
-                " (SELECT COUNT(*) FROM (SELECT 1 FROM {table}, q"
-                " WHERE to_tsvector('english', COALESCE(data->>{name}, '')) @@ q.tsq"
-                " LIMIT {cap}) sub) AS cnt"
-            ).format(
-                type=sql.Literal(t),
-                table=sql.Identifier(table),
-                name=sql.Literal(name_field),
-                cap=sql.Literal(_TOTAL_COUNT_CAP),
+            sql.SQL("SELECT {type}::text AS type, (SELECT COUNT(*) FROM ({matched} LIMIT {cap}) sub) AS cnt").format(
+                type=sql.Literal(t), matched=matched, cap=sql.Literal(_TOTAL_COUNT_CAP)
             )
         )
     union_sql = sql.SQL(" UNION ALL ").join(union_parts)
@@ -582,6 +605,12 @@ async def _run_type_counts(pool: AsyncPostgreSQLPool, q: str, types: list[str]) 
     return {row["type"]: int(row["cnt"]) for row in rows}
 
 
+# The genre, decade and media facets keep ``to_tsvector(...)`` over the document on purpose.
+# Each reads the first _TOTAL_COUNT_CAP matches in no defined order and then reads every one's
+# ``releases.data`` anyway, so public.release_search saves little there; measured on lux
+# (2026-11-08) it is 2-3x faster on 'love' and 'rock' but slower on a rare term, and which
+# 10,000 rows it samples differs from idx_releases_fts, so the facet counts of a term over the
+# cap would change.
 async def _run_genre_facets(pool: AsyncPostgreSQLPool, q: str) -> dict[str, int]:
     """Count matching releases per genre (for genre facet).
 
