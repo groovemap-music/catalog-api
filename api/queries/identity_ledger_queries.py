@@ -37,7 +37,7 @@ counted per supersession and table.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from common.query_debug import execute_sql
@@ -199,7 +199,153 @@ LEFT JOIN LATERAL (
 ORDER BY page.last_event DESC, page.work_id
 """  # noqa: S608 — composed of module constants only
 
-_WORKS_WINDOWED = _WORKS.replace("windowed AS (", "windowed AS MATERIALIZED (", 1)
+_WORKS_WINDOWED_RAW = _WORKS.replace("windowed AS (", "windowed AS MATERIALIZED (", 1)
+
+# The windowed read from database-schema's per-day rollup (`identity_ledger_work_summary_day`,
+# v0.11.0): the window's full UTC days [first_day, end_day) come from the rollup and only the
+# partial edge days (`since` up to the first midnight, the last midnight up to `until`) from raw
+# edition events. The rollup's grain is (event, day, prev_day, work_id), `prev_day` being that
+# edition's previous event day of the same filter ('-infinity' for its first), so an edition counts
+# once, at its first day in the range: `prev_day < first_day`. An edge-day edition that already has
+# an event of the same kind inside the full-day range is skipped, or the work counts it twice
+# (once here, once in the rollup); `covered_any` and `covered_repaired` decide that separately, as an
+# edition's evented and repaired counts come from different rows. first_event and last_event take
+# every rollup row in range and every edge event. Same results as `_WORKS_WINDOWED_RAW` (the live
+# aggregation, kept for a rollup that is not populated yet).
+#   full: whether any full day exists; head_end/tail_start: the edge ranges' bounds, NULL for none;
+#   first_day/end_day: the full days' bounds as dates, NULL for unbounded; first_at/end_at: the same as instants.
+_WORKS_WINDOWED = f"""
+WITH day_row AS (
+    SELECT work_id, event, editions, first_event, last_event,
+           (prev_day IS NULL OR prev_day = '-infinity' OR prev_day < %(first_day)s::date) AS first_in_range
+    FROM identity_ledger_work_summary_day
+    WHERE %(full)s::boolean
+      AND event IN (COALESCE(%(event)s::text, 'any'), 'repaired')
+      AND (%(first_day)s::date IS NULL OR day >= %(first_day)s::date)
+      AND (%(end_day)s::date IS NULL OR day < %(end_day)s::date)
+),
+rolled AS (
+    SELECT work_id,
+           COALESCE(sum(editions) FILTER (WHERE event = COALESCE(%(event)s::text, 'any') AND first_in_range), 0) AS evented_editions,
+           COALESCE(sum(editions) FILTER (WHERE first_in_range AND event = CASE
+               WHEN %(event)s::text IS NULL THEN 'repaired'
+               WHEN %(event)s::text IN {_REPAIRS} THEN %(event)s::text END), 0) AS repaired_editions,
+           min(first_event) FILTER (WHERE event = COALESCE(%(event)s::text, 'any')) AS first_event,
+           max(last_event) FILTER (WHERE event = COALESCE(%(event)s::text, 'any')) AS last_event
+    FROM day_row
+    GROUP BY work_id
+    HAVING bool_or(event = COALESCE(%(event)s::text, 'any'))
+),
+edge_event AS (
+    SELECT edition_id, at, type
+    FROM identity_ledger_edition_events
+    WHERE %(head_end)s::timestamptz IS NOT NULL
+      AND (%(event)s::text IS NULL OR type = %(event)s::text)
+      AND (%(since)s::timestamptz IS NULL OR at >= %(since)s::timestamptz)
+      AND at < %(head_end)s::timestamptz
+    UNION ALL
+    SELECT edition_id, at, type
+    FROM identity_ledger_edition_events
+    WHERE %(tail_start)s::timestamptz IS NOT NULL
+      AND (%(event)s::text IS NULL OR type = %(event)s::text)
+      AND at >= %(tail_start)s::timestamptz
+      AND (%(until)s::timestamptz IS NULL OR at < %(until)s::timestamptz)
+),
+edge_edition AS (
+    SELECT edition_id, min(at) AS first_at, max(at) AS last_at, bool_or(type IN {_REPAIRS}) AS repaired
+    FROM edge_event
+    GROUP BY edition_id
+),
+edge_flagged AS (
+    SELECT edge.*,
+           %(full)s::boolean AND EXISTS (
+               SELECT 1 FROM identity_ledger_edition_events AS inside
+               WHERE inside.edition_id = edge.edition_id
+                 AND (%(event)s::text IS NULL OR inside.type = %(event)s::text)
+                 AND (%(first_at)s::timestamptz IS NULL OR inside.at >= %(first_at)s::timestamptz)
+                 AND (%(end_at)s::timestamptz IS NULL OR inside.at < %(end_at)s::timestamptz)
+           ) AS covered_any,
+           %(full)s::boolean AND edge.repaired AND EXISTS (
+               SELECT 1 FROM identity_ledger_edition_events AS inside
+               WHERE inside.edition_id = edge.edition_id AND inside.type IN {_REPAIRS}
+                 AND (%(event)s::text IS NULL OR inside.type = %(event)s::text)
+                 AND (%(first_at)s::timestamptz IS NULL OR inside.at >= %(first_at)s::timestamptz)
+                 AND (%(end_at)s::timestamptz IS NULL OR inside.at < %(end_at)s::timestamptz)
+           ) AS covered_repaired
+    FROM edge_edition AS edge
+),
+edge_work AS (
+    SELECT parent.work_id,
+           count(*) FILTER (WHERE NOT edge.covered_any) AS evented_editions,
+           count(*) FILTER (WHERE edge.repaired AND NOT edge.covered_repaired) AS repaired_editions,
+           min(edge.first_at) AS first_event, max(edge.last_at) AS last_event
+    FROM identity_ledger_edition_parents AS parent
+    JOIN edge_flagged AS edge ON edge.edition_id = parent.edition_id
+    GROUP BY parent.work_id
+),
+windowed AS MATERIALIZED (
+    SELECT work_id,
+           (COALESCE(rolled.evented_editions, 0) + COALESCE(edge_work.evented_editions, 0))::bigint AS evented_editions,
+           (COALESCE(rolled.repaired_editions, 0) + COALESCE(edge_work.repaired_editions, 0))::bigint AS repaired_editions,
+           LEAST(rolled.first_event, edge_work.first_event) AS first_event,
+           GREATEST(rolled.last_event, edge_work.last_event) AS last_event
+    FROM rolled
+    FULL JOIN edge_work USING (work_id)
+)
+SELECT total.works, page.work_id, page.evented_editions, page.repaired_editions, page.first_event, page.last_event
+FROM (SELECT count(*) AS works FROM windowed) AS total
+LEFT JOIN LATERAL (
+    SELECT * FROM windowed ORDER BY last_event DESC, work_id LIMIT %(limit)s OFFSET %(offset)s
+) AS page ON TRUE
+ORDER BY page.last_event DESC, page.work_id
+"""  # noqa: S608 — composed of module constants only
+
+# What a windowed read checks before it picks a statement: the first and last event of the filter
+# (both are index-only reads, under a millisecond) and whether the rollup is populated. A window
+# that holds every event of the filter answers exactly what the unwindowed read does, from the
+# per-work summary's index walk (about 0.3 s on the real catalog) instead of aggregating a rollup
+# row per work: the real catalog's 2.09M events all fall on one UTC day, so a window over that day
+# reads a rollup row per work and no less than the raw aggregation did.
+_WINDOW_FACTS = """
+SELECT COALESCE((SELECT min(at) FROM identity_ledger_edition_events WHERE %(event)s::text IS NULL),
+                (SELECT min(at) FROM identity_ledger_edition_events WHERE type = %(event)s::text)),
+       COALESCE((SELECT max(at) FROM identity_ledger_edition_events WHERE %(event)s::text IS NULL),
+                (SELECT max(at) FROM identity_ledger_edition_events WHERE type = %(event)s::text)),
+       EXISTS (SELECT 1 FROM identity_ledger_work_summary_day)
+"""
+
+_DAY = timedelta(days=1)
+
+
+def _window_params(since: datetime | None, until: datetime | None) -> dict[str, Any]:
+    """Split a window into the rollup's full UTC days and the raw partial edge days.
+
+    ``since`` rounds up to the next midnight and ``until`` down to the previous one. When no
+    whole day fits between them the whole window is one raw edge. Unwindowed reads use neither.
+    """
+    none: dict[str, Any] = {"full": False, "first_day": None, "end_day": None, "first_at": None, "end_at": None, "head_end": None, "tail_start": None}
+    if since is None and until is None:
+        return none
+    first_at = end_at = None
+    if since is not None:
+        since_utc = since.astimezone(UTC)
+        first_at = since_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        if first_at < since_utc:
+            first_at += _DAY
+    if until is not None:
+        end_at = until.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    if first_at is not None and end_at is not None and first_at >= end_at:
+        return {**none, "head_end": until}
+    return {
+        "full": True,
+        "first_day": first_at.date() if first_at else None,
+        "end_day": end_at.date() if end_at else None,
+        "first_at": first_at,
+        "end_at": end_at,
+        "head_end": first_at if since is not None and since < first_at else None,  # type: ignore[operator]
+        "tail_start": end_at if until is not None and until > end_at else None,  # type: ignore[operator]
+    }
+
 
 # Each page work's edition count and how many of those editions have two or more works.
 _WORK_SUMMARIES = f"""
@@ -515,7 +661,18 @@ async def get_ledger_works(
         async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
             await cur.execute(_READ_ONLY)
             refreshed_at = await _refreshed_at(cur, _WORKS_VIEWS)
-            page_rows = await _rows(cur, _WORKS_WINDOWED if since is not None or until is not None else _WORKS, params)
+            statement = _WORKS
+            if since is not None or until is not None:
+                first, last, rolled = (await _rows(cur, _WINDOW_FACTS, {"event": event}))[0]
+                if first is not None and (since is None or since <= first) and (until is None or last < until):
+                    params = {**params, "since": None, "until": None}  # holds every event: same as no window
+                else:
+                    # A rollup the last rebuild has not filled would read as no works at all; the
+                    # live aggregation answers until it is populated.
+                    statement = _WORKS_WINDOWED if rolled else _WORKS_WINDOWED_RAW
+                    if rolled:
+                        params = {**params, **_window_params(since, until)}
+            page_rows = await _rows(cur, statement, params)
             total = int(page_rows[0][0]) if page_rows else 0
             listed = [row[1:] for row in page_rows if row[1] is not None]
             works = [str(row[0]) for row in listed]

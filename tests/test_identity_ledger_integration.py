@@ -409,6 +409,7 @@ async def _live(http: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, path: 
     """The same request answered by the live statements the routes ran before the views."""
     with monkeypatch.context() as live:
         live.setattr(identity_ledger_queries, "_WORKS", identity_ledger_live.WORKS.replace("%(kind)s", "'release'"))
+        live.setattr(identity_ledger_queries, "_WORKS_WINDOWED", identity_ledger_live.WORKS.replace("%(kind)s", "'release'"))
         live.setattr(identity_ledger_queries, "_DENSITY", identity_ledger_live.DENSITY)
         return await _get(http, path, params)
 
@@ -424,6 +425,49 @@ async def test_works_list_from_the_views_equals_the_live_statement(
     precomputed = await _get(catalog, "/api/admin/identity/ledger/works", params)
 
     assert precomputed == await _live(catalog, monkeypatch, "/api/admin/identity/ledger/works", params)
+
+
+# Windows whose edges are not midnights, so the rollup serves the full days and raw events the rest
+# (gm-catalog-api-tn5r). Release E8 has its mint on 2026-08-01 02:00 and evidence at 2026-09-12 00:00:
+# the first window puts the mint on the head edge, the second puts the evidence on the tail edge, and
+# the third has an edition with an event on an edge day AND one inside the full days.
+_EDGE_WINDOW_CASES: list[dict[str, Any]] = [
+    {"since": "2026-08-01T01:00:00Z", "until": "2026-09-13T06:00:00Z"},
+    {"since": "2026-08-01T01:00:00Z", "until": "2026-09-12T06:00:00Z"},
+    {"since": "2026-08-01T03:00:00Z", "until": "2026-09-14T00:00:00Z"},
+    {"since": "2026-08-01T01:00:00Z", "until": "2026-09-30T12:00:00Z", "event": "reattached"},
+    {"since": "2026-09-15T00:00:00Z", "until": "2026-09-15T00:00:01Z"},
+    {"since": "2026-09-14T12:00:00Z", "until": "2026-09-15T12:00:00Z"},
+    {"since": "2026-08-01T00:00:00Z", "until": "2026-10-02T00:00:00Z"},
+    {"since": "2026-08-01T00:00:01Z"},
+    {"until": "2026-09-12T00:00:01Z"},
+]
+
+
+@pytest.mark.parametrize("params", _EDGE_WINDOW_CASES, ids=_case_id)
+async def test_window_from_the_rollup_equals_the_live_statement(
+    catalog: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, params: dict[str, Any]
+) -> None:
+    served = await _get(catalog, "/api/admin/identity/ledger/works", params)
+
+    assert served == await _live(catalog, monkeypatch, "/api/admin/identity/ledger/works", params)
+
+
+async def test_an_edition_with_events_on_an_edge_day_and_inside_the_range_counts_once(
+    every_event: httpx.AsyncClient, postgres_pool: AsyncPostgreSQLPool
+) -> None:
+    # The window reads the rollup only when it is populated; otherwise it falls back to raw events.
+    assert (await _query(postgres_pool, "SELECT count(*) FROM identity_ledger_work_summary_day"))[0][0] > 0
+    # E8: minted 2026-08-01 02:00 (head edge), evidence 2026-09-12 (inside the full days).
+    params = {"since": "2026-08-01T01:00:00Z", "until": "2026-09-13T06:00:00Z"}
+    body = await _get(every_event, "/api/admin/identity/ledger/works", params)
+    wide = await _get(every_event, "/api/admin/identity/ledger/works", {"since": "2026-07-01T00:00:00Z", "until": "2026-11-01T00:00:00Z"})
+
+    narrow = {row["gm_id"]: row["evented_editions"] for row in body["works"]}
+    whole = {row["gm_id"]: row["evented_editions"] for row in wide["works"]}
+    assert all(count <= whole[work] for work, count in narrow.items())
+    # Each edition is counted at most once per work: no count exceeds the work's editions.
+    assert all(row["evented_editions"] <= row["editions"] for row in body["works"])
 
 
 async def test_every_parity_case_has_works_to_compare(every_event: httpx.AsyncClient) -> None:
