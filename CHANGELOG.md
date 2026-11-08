@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v0.11.0 (2026-11-07)
+
+### Release notes
+
+Deploy after database-schema v0.11.0 is applied and `public.release_search` is backfilled: `SELECT * FROM public.release_search_drift()` must return `(0,0,0)`. Unfiltered release search now ranks from that table, so on lux the first `love` search fell from 16.7 s to 0.58 s with identical results. The graph-explorer contract gains `insights_label_longevity` with `include_placeholders` and `limit` (1-200). Label DNA and ledger routes do less work per request. No API shape changes for existing callers.
+
+### Feat
+
+- **insights**: declare label-longevity parameters in the graph-explorer contract
+
+### Perf
+
+- **search**: rank release matches from public.release_search
+- **label-dna**: read media family and medium counts in one pass
+- **ledger**: compute the windowed works aggregation once
+
 ## v0.10.0 (2026-11-07)
 
 This release was first prepared as v1.0.0 because Commitizen took the breaking change past 0.x without major_version_zero. Going to 1.0 is a product decision, so it ships as v0.10.0 and 0.x bumps now stay below 1.0.
