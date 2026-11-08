@@ -252,6 +252,45 @@ class TestSearchQueryModuleHelpers:
         assert "ORDER BY rank DESC, data_id LIMIT 50" in rendered
         assert params == []
 
+    def test_unfiltered_release_select_ranks_the_stored_title_vector(self) -> None:
+        """Unfiltered releases rank public.release_search.title_tsv, so no document is read per match."""
+        from api.queries.search_queries import _entity_select
+
+        frag, params = _entity_select("release", "title", has_year=True, has_genres=True, per_table_limit=40)
+        rendered = frag.as_string(None)
+        assert "FROM public.release_search" in rendered
+        assert "ts_rank(title_tsv, q.tsq)" in rendered
+        assert "to_tsvector" not in rendered
+        assert "ORDER BY rank DESC, data_id LIMIT 40" in rendered
+        assert params == []
+
+    def test_filtered_release_select_keeps_the_document_expression(self) -> None:
+        """A filter reads releases.data per match anyway, so that branch keeps idx_releases_fts."""
+        from api.queries.search_queries import _entity_select
+
+        frag, _ = _entity_select("release", "title", has_year=True, has_genres=True, per_table_limit=40, year_min=1960)
+        rendered = frag.as_string(None)
+        assert "release_search" not in rendered
+        assert "to_tsvector('english', COALESCE(data->>'title', ''))" in rendered
+
+    def test_other_entity_selects_never_use_release_search(self) -> None:
+        from api.queries.search_queries import _entity_select
+
+        for entity, field in (("artist", "name"), ("label", "name"), ("master", "title")):
+            frag, _ = _entity_select(entity, field, has_year=False, has_genres=False, per_table_limit=40)
+            assert "release_search" not in frag.as_string(None)
+
+    def test_count_union_uses_release_search_only_for_unfiltered_releases(self) -> None:
+        from api.queries.search_queries import _build_count_union
+
+        plain, _ = _build_count_union(["release"])
+        assert "public.release_search" in plain.as_string(None)
+        assert "to_tsvector" not in plain.as_string(None)
+        filtered, _ = _build_count_union(["release"], year_min=1960)
+        assert "release_search" not in filtered.as_string(None)
+        artists, _ = _build_count_union(["artist"])
+        assert "release_search" not in artists.as_string(None)
+
     def test_entity_select_pushes_year_filter_before_limit(self) -> None:
         """Year filter must land in the subquery WHERE,
         BEFORE its ORDER BY rank LIMIT — not only in an outer WHERE applied
