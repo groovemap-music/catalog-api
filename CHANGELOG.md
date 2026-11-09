@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v0.11.1 (2026-11-08)
+
+### Release notes
+
+The ledger works read with a time window now reads the unwindowed per-work summary when the window holds every event of the filter, which gives an identical result: 2.73 s down to 0.28 s on lux for 2026-11. Otherwise it reads full days from `public.identity_ledger_work_summary_day` and only the edge days from raw events. No new schema floor: this release runs on database-schema v0.11.0, and the rollup path needs a filled `work_summary_day`, which database-schema v0.12.0 requests as a rebuild. Results are unchanged.
+
+### Perf
+
+- **ledger**: read windowed works from the per-day rollup
+
 ## v0.11.0 (2026-11-07)
 
 ### Release notes
