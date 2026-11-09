@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v0.11.3 (2026-11-09)
+
+### Release notes
+
+A search restricted to types that exclude releases (for example `types=master`) no longer computes the genre and media facets, or the releases half of the decade facet, over every matching release. Those queries ran concurrently and set a ~0.6 s floor on master search (584 ms for "love" on lux after v0.11.2) although the master query and count take ~40 ms and ~15 ms. For such searches `facets.genre` and `facets.media` are now empty, and the decade facet counts only the requested types (it previously also counted releases the search did not return). Mixed-type searches, results, totals and pagination are unchanged. Same requirement as v0.11.2: database-schema 0.12.0 or later. Cut on the release branch `release/v0.11.x-search` (gm-catalog-api-zi2r only), so it still carries none of the unreleased prototype or Missing/copy source on main.
+
+### Perf
+
+- **search**: skip release facets for searches that exclude releases
+
 ## v0.11.2 (2026-11-09)
 
 ### Release notes
