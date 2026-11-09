@@ -19,6 +19,28 @@ the contract and its binding against that record.
 Breaking path or envelope changes require a new contract version and a coordinated
 rollout. Authentication material is deliberately absent: the contract states shape,
 not deployment secrets.
+
+## Graph Explorer v1 promotion
+
+The producer registry is `graph-explorer/v1/routes.json`. The reviewed source revision for
+this change is `fab7e993384f032a0ea78817cbdcba798a2e97f8`, and its contract SHA-256 is
+`3726ff54d5d76ee3c0bc91d1b0c40314e9fa63def7c1ce7017c06f53569c69d7`. This source revision
+is immutable and will be an ancestor of `main` after the bead is merged. A consumer must
+verify that ancestry and digest before promoting; source integration does not imply deployment.
+Run these commands from the consumer checkout, with `CATALOG_API_REPO` set to a local checkout
+of the producer repository:
+
+```bash
+CATALOG_API_REPO=/path/to/groovemap-music/catalog-api
+git -C "$CATALOG_API_REPO" merge-base --is-ancestor fab7e993384f032a0ea78817cbdcba798a2e97f8 main
+git -C "$CATALOG_API_REPO" show fab7e993384f032a0ea78817cbdcba798a2e97f8:api/contracts/graph-explorer/v1/routes.json > /tmp/graph-explorer-routes-v1.json
+printf '%s  %s\n' '3726ff54d5d76ee3c0bc91d1b0c40314e9fa63def7c1ce7017c06f53569c69d7' /tmp/graph-explorer-routes-v1.json | shasum -a 256 -c -
+```
+
+Promote those exact bytes with the source repository, revision, and verified digest in
+the consumer's provenance record. The existing observation GET/POST operations remain in
+the registry with unchanged semantics; the new copy-list route only enumerates the current
+session owner's copies and does not change observation timeline ordering or writes.
 # Consumer contracts
 
 Producer-owned, versioned compatibility surfaces for independently deployed GrooveMap consumers:
