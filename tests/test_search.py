@@ -276,9 +276,44 @@ class TestSearchQueryModuleHelpers:
     def test_other_entity_selects_never_use_release_search(self) -> None:
         from api.queries.search_queries import _entity_select
 
-        for entity, field in (("artist", "name"), ("label", "name"), ("master", "title")):
+        for entity, field in (("artist", "name"), ("label", "name")):
             frag, _ = _entity_select(entity, field, has_year=False, has_genres=False, per_table_limit=40)
             assert "release_search" not in frag.as_string(None)
+
+    def test_master_select_ranks_the_stored_title_vector(self) -> None:
+        from api.queries.search_queries import _entity_select
+
+        frag, params = _entity_select("master", "title", has_year=True, has_genres=False, per_table_limit=40)
+        rendered = frag.as_string(None)
+        assert "FROM public.master_search" in rendered
+        assert "ts_rank(title_tsv, q.tsq)" in rendered
+        assert "to_tsvector" not in rendered
+        assert params == []
+
+    def test_filtered_master_select_filters_on_the_year_column(self) -> None:
+        """The year filter reads master_search.year before the cap; genre/media/country params are dropped (TRUE for masters)."""
+        from api.queries.search_queries import _entity_select
+
+        frag, params = _entity_select(
+            "master", "title", has_year=True, has_genres=False, per_table_limit=40, year_min=1960, year_max=1969, genres=["Rock"]
+        )
+        rendered = frag.as_string(None)
+        ranked = rendered[: rendered.index("ORDER BY rank DESC")]
+        assert "public.master_search" in ranked
+        assert "(year IS NULL OR year::int >= %s)" in ranked
+        assert "to_tsvector" not in rendered
+        assert params == [1960, 1969]
+
+    def test_master_count_union_and_type_counts_use_master_search(self) -> None:
+        from api.queries.search_queries import _build_count_union
+
+        plain, p0 = _build_count_union(["master"])
+        assert "public.master_search" in plain.as_string(None)
+        assert "to_tsvector" not in plain.as_string(None)
+        assert p0 == []
+        filtered, p1 = _build_count_union(["master"], year_min=1990, genres=["Rock"])
+        assert "year::int >= %s" in filtered.as_string(None)
+        assert p1 == [1990]
 
     def test_count_union_uses_release_search_only_for_unfiltered_releases(self) -> None:
         from api.queries.search_queries import _build_count_union
