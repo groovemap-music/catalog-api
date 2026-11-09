@@ -21,6 +21,8 @@ flowchart TD
 - [Configuration](configuration.md)
 - [Administration](admin-guide.md)
 - [Native identity and first-party activity](identity-and-activity.md)
+- [Authority-separated evidence readers](evidence-readers.md)
+- [Prototype baselines and serving proposal](prototypes/README.md)
 - [CrateFit item-in-hand fit profile](cratefit.md)
 - [Catalogue identifiers, credits, and country](catalog-identifiers.md)
 - [Usage examples](usage-examples.md)

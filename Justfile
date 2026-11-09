@@ -52,6 +52,10 @@ coverage: test
 evaluate:
     uv run python -m api.evaluation.report
 
+# Replay catalog-context discovery policies against the frozen synthetic harness.
+evaluate-discovery:
+    uv run python -m api.evaluation.discovery
+
 # Regenerate the committed synthetic golden set (deterministic; commit the result).
 generate-golden-set:
     uv run python scripts/generate_golden_set.py

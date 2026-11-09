@@ -63,6 +63,14 @@ _SELECT_COPY = """
 SELECT id FROM owned_copies WHERE id = %s::uuid AND user_id = %s::uuid
 """
 
+_SELECT_OWNED_COPIES_FOR_ITEM = """
+SELECT id, item_id, collection_row_id, acquired_at, created_at, updated_at
+FROM owned_copies
+WHERE item_id = %s::uuid AND user_id = %s::uuid
+ORDER BY acquired_at ASC NULLS LAST, id ASC
+LIMIT %s
+"""
+
 _COPY_NOT_FOUND = "Copy not found"
 
 
@@ -104,10 +112,58 @@ def _isoformat(value: Any) -> str | None:
     return str(value)
 
 
+def _shape_copy(row: dict[str, Any]) -> dict[str, Any]:
+    """Render one owner-scoped physical-copy row without merging duplicates."""
+    return {
+        "id": str(row["id"]),
+        "item_id": str(row["item_id"]),
+        "collection_row_id": str(row["collection_row_id"]) if row.get("collection_row_id") is not None else None,
+        "acquired_at": _isoformat(row.get("acquired_at")),
+        "created_at": _isoformat(row.get("created_at")),
+        "updated_at": _isoformat(row.get("updated_at")),
+    }
+
+
 def _require_pool() -> Any:
     if _pool is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
     return _pool
+
+
+async def list_owned_copies(item_id: str, user_id: str, *, limit: int = 50, pool: Any = None) -> dict[str, Any]:
+    """List at most ``limit`` physical copies of one native item owned by ``user_id``.
+
+    ``item_id`` is the native catalog UUID; copy IDs are separate UUIDs. The extra row is
+    fetched only to expose truncation, so the database result remains bounded at 101 rows.
+    ``user_id`` must come from trusted authentication state, never a request parameter.
+    """
+    if not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
+    try:
+        UUID(item_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found") from None
+    active_pool = pool if pool is not None else _require_pool()
+    async with active_pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await execute_sql(cur, _SELECT_OWNED_COPIES_FOR_ITEM, (item_id, user_id, limit + 1))
+        rows = await cur.fetchall()
+    return {
+        "item_id": item_id,
+        "copies": [_shape_copy(row) for row in rows[:limit]],
+        "truncated": len(rows) > limit,
+    }
+
+
+async def _read_copy_timeline(copy_id: str, user_id: str, pool: Any) -> list[dict[str, Any]]:
+    """Read the chronological observations for one explicitly selected owned copy."""
+    copy_id = _validated_copy_id(copy_id)
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await execute_sql(cur, _SELECT_COPY, (copy_id, user_id))
+        if await cur.fetchone() is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_COPY_NOT_FOUND)
+        await execute_sql(cur, _SELECT_OBSERVATIONS, (copy_id, user_id))
+        rows = await cur.fetchall()
+    return [_shape(row) for row in rows]
 
 
 @router.post("/api/user/copies/{copy_id}/observations", status_code=status.HTTP_201_CREATED)
@@ -159,14 +215,5 @@ async def list_observations(
     user_id = auth.user_id
     copy_id = _validated_copy_id(copy_id)
     pool = _require_pool()
-
-    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        # A copy with no observations and a copy the caller does not own both read as an
-        # empty result set, so ownership is established before the listing is believed.
-        await execute_sql(cur, _SELECT_COPY, (copy_id, user_id))
-        if await cur.fetchone() is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_COPY_NOT_FOUND)
-        await execute_sql(cur, _SELECT_OBSERVATIONS, (copy_id, user_id))
-        rows = await cur.fetchall()
-
-    return JSONResponse(content={"copy_id": copy_id, "observations": [_shape(row) for row in rows]})
+    observations = await _read_copy_timeline(copy_id, user_id, pool)
+    return JSONResponse(content={"copy_id": copy_id, "observations": observations})
