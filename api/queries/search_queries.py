@@ -721,14 +721,27 @@ _DECADE_MASTERS_MATCHES = "(SELECT year FROM public.master_search, q WHERE title
 _DECADE_RELEASES_MATCHES = "(SELECT year FROM public.release_search, q WHERE title_tsv @@ q.tsq AND year IS NOT NULL{limit})"
 
 
-async def _run_decade_facets(pool: AsyncPostgreSQLPool, q: str) -> dict[str, int]:
+async def _run_empty_facet() -> dict[str, int]:
+    """A facet over entity types the search did not ask for: nothing to count, no statement to run."""
+    return {}
+
+
+async def _run_decade_facets(pool: AsyncPostgreSQLPool, q: str, types: list[str] | None = None) -> dict[str, int]:
     """Count matching masters+releases per decade (for decade facet).
 
     Releases are counted in full (:data:`_FACET_COUNT_CAP`); the masters half keeps its own cap.
+    Each half runs only when its entity type is among ``types`` (all of them when omitted).
     """
+    halves = []
+    if types is None or "master" in types:
+        halves.append(_DECADE_MASTERS_MATCHES)
+    if types is None or "release" in types:
+        halves.append(_DECADE_RELEASES_MATCHES)
+    if not halves:
+        return {}
     query = sql.SQL(
         "WITH q AS (SELECT plainto_tsquery('english', %s) AS tsq),"
-        " matches AS (" + _DECADE_MASTERS_MATCHES + " UNION ALL " + _DECADE_RELEASES_MATCHES + ")"
+        " matches AS (" + " UNION ALL ".join(halves) + ")"
         " SELECT (year::int / 10 * 10)::text || 's' AS decade, COUNT(*) AS cnt"
         " FROM matches"
         " WHERE year ~ '^[0-9]{{4}}$'"
@@ -851,9 +864,12 @@ async def execute_search(
         _run_results(pool, q, types, genres, year_min, year_max, limit, offset, media_families, media_mediums, countries),
         _run_total(pool, q, types, genres, year_min, year_max, media_families, media_mediums, countries),
         _run_type_counts(pool, q, types),
-        _run_genre_facets(pool, q),
-        _run_decade_facets(pool, q),
-        _run_media_facets(pool, q),
+        # Genre and media facets count releases only, so a search that excludes releases has
+        # nothing for them to count; the decade facet counts each half it asked for. Skipping
+        # them saved ~0.5-0.8 s of a 'love' masters search on lux (gm-catalog-api-zi2r).
+        _run_genre_facets(pool, q) if "release" in types else _run_empty_facet(),
+        _run_decade_facets(pool, q, types),
+        _run_media_facets(pool, q) if "release" in types else _run_empty_facet(),
         return_exceptions=True,
     )
     # Let every sibling statement finish (each is bounded by its timeout) before raising, so none
