@@ -665,9 +665,9 @@ async def _run_genre_facets(pool: AsyncPostgreSQLPool, q: str) -> dict[str, int]
 
 # The decade facet counts masters and releases. 2jka owns the masters fragment, 4asm the releases one.
 _DECADE_MASTERS_MATCHES = (
-    "(SELECT data->>'year' AS year FROM masters, q"
-    " WHERE to_tsvector('english', COALESCE(data->>'title', '')) @@ q.tsq"
-    " AND data->>'year' IS NOT NULL"
+    "(SELECT year FROM public.master_search, q"
+    " WHERE title_tsv @@ q.tsq"
+    " AND year IS NOT NULL"
     " LIMIT {cap})"
 )
 _DECADE_RELEASES_MATCHES = (
