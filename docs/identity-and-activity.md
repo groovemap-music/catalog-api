@@ -66,6 +66,18 @@ with no hint that the id names a real row. `kind` and `value` are free text; `so
 validated against the identity vocabulary's alias sources (who or what asserted the fact);
 `confidence` is an optional `0.0`–`1.0` float.
 
+`api.routers.observations.list_owned_copies` is the bounded reader for selecting among the
+caller's physical copies of one native `item_id`. It returns each `owned_copies.id` separately,
+ordered by `acquired_at ASC NULLS LAST, id ASC`, with a `truncated` flag when the bounded result has more rows.
+The trusted caller supplies the owner id. The selected copy id is then passed to the existing
+owner-scoped observation reader; unknown, malformed, and foreign copy ids remain the same 404.
+This reader is a lower-level prototype for a separately gated UI/API integration; it does
+not add a route or choose an earliest-copy default.
+
+Observation timelines sort by `observed_at DESC, id DESC`: `observed_at` is when the user says
+the evidence applied, while `created_at` is when the row was stored. They are distinct timestamps;
+no correction or supersession relationship is inferred.
+
 ### The `gm_id` graph projection job
 
 PostgreSQL's `provider_aliases` table is the authority; Neo4j only ever holds a projection of
