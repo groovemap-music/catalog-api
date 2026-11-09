@@ -215,7 +215,13 @@ def _genre_filter_clause(genres: list[str], column: sql.Composable | None = None
     return (sql.SQL("({c} IS NULL OR {c} ?| %s::text[])").format(c=col), [genres])
 
 
-def _media_filter_clause(families: list[str], mediums: list[str], column: sql.Composable | None = None) -> tuple[sql.Composable, list[Any]]:
+def _media_filter_clause(
+    families: list[str],
+    mediums: list[str],
+    column: sql.Composable | None = None,
+    *,
+    mediums_column: sql.Composable | None = None,
+) -> tuple[sql.Composable, list[Any]]:
     """Return (SQL_clause, params) for optional media (family/medium) filtering.
 
     Rows with NULL media (artists, labels, masters — no media column) are
@@ -233,20 +239,32 @@ def _media_filter_clause(families: list[str], mediums: list[str], column: sql.Co
     instead of the default ``media`` identifier — needed to push the filter
     into a per-table subquery *before* its rank LIMIT, same as
     :func:`_year_filter_clause` and :func:`_genre_filter_clause`.
+
+    ``mediums_column`` selects the ``public.release_search`` shape, where ``column`` is the
+    hoisted ``media_families`` array and ``mediums_column`` the hoisted ``media_mediums``
+    array (database-schema v0.12.0): a family is ``media_families ?| ...`` and a medium is
+    ``media_mediums ? m``, both plain GIN-friendly jsonb operators with no document read.
+    A NULL ``media_mediums`` is a release with no media block, so it always passes.
     """
     if not families and not mediums:
         return (sql.SQL("TRUE"), [])
-    col = column if column is not None else sql.SQL("media")
+    narrow = mediums_column is not None
+    col = column if column is not None else sql.SQL("media_families" if narrow else "media")
+    null_col = mediums_column if narrow else col
     parts: list[sql.Composable] = []
     params: list[Any] = []
     if families:
-        parts.append(sql.SQL("({c}->'families') ?| %s::text[]").format(c=col))
+        fam = sql.SQL("{c} ?| %s::text[]") if narrow else sql.SQL("({c}->'families') ?| %s::text[]")
+        parts.append(fam.format(c=col))
         params.append(families)
     for medium in mediums:
-        parts.append(sql.SQL("jsonb_path_exists({c}, '$.items[*] ? (@.medium == $m)', jsonb_build_object('m', %s::text))").format(c=col))
+        if narrow:
+            parts.append(sql.SQL("{m} ? %s::text").format(m=mediums_column))
+        else:
+            parts.append(sql.SQL("jsonb_path_exists({c}, '$.items[*] ? (@.medium == $m)', jsonb_build_object('m', %s::text))").format(c=col))
         params.append(medium)
     match_clause = sql.SQL(" OR ").join(parts)
-    return (sql.SQL("({c} IS NULL OR ({match}))").format(c=col, match=match_clause), params)
+    return (sql.SQL("({c} IS NULL OR ({match}))").format(c=null_col, match=match_clause), params)
 
 
 def _country_filter_clause(countries: list[str], column: sql.Composable | None = None) -> tuple[sql.Composable, list[Any]]:
@@ -274,14 +292,13 @@ def _country_filter_clause(countries: list[str], column: sql.Composable | None =
     return (sql.SQL("({c} IS NULL OR {c} = ANY(%s::text[]))").format(c=col), [countries])
 
 
-def _uses_release_search(entity_type: str, filter_params: list[Any]) -> bool:
-    """True when a branch can match on ``public.release_search.title_tsv`` instead of the document.
+def _uses_release_search(entity_type: str) -> bool:
+    """True when a branch matches on ``public.release_search`` instead of the document.
 
-    Only an unfiltered releases branch can: the year, genre, media and country filters read
-    ``releases.data`` for every match anyway, so the stored vector would save nothing there and
-    those branches keep ``to_tsvector(...)`` over the document (``idx_releases_fts``).
+    Every releases branch does, filtered or not: since database-schema v0.12.0 the table carries
+    the genres, year, country and media the filters read, so no branch needs ``releases.data``.
     """
-    return entity_type == "release" and not filter_params
+    return entity_type == "release"
 
 
 def _uses_master_search(entity_type: str) -> bool:
@@ -336,10 +353,21 @@ def _entity_select(
     # deterministic subset among tied ts_rank values across page executions.
     limit_clause = sql.SQL(" ORDER BY rank DESC, data_id LIMIT {n}").format(n=sql.Literal(per_table_limit)) if per_table_limit else sql.SQL("")
 
-    year_clause, year_params = _year_filter_clause(year_min, year_max, column=year_col)
-    genre_clause, genre_params = _genre_filter_clause(genres or [], column=genres_col)
-    media_clause, media_params = _media_filter_clause(media_families or [], media_mediums or [], column=media_col)
-    country_clause, country_params = _country_filter_clause(countries or [], column=country_col)
+    # A release branch filters the stored attributes on public.release_search (database-schema
+    # v0.12.0), the same expressions the document columns above spell out, so no releases.data is
+    # read per match. Every other branch filters its own document columns.
+    if entity_type == "release":
+        year_clause, year_params = _year_filter_clause(year_min, year_max, column=sql.SQL("year"))
+        genre_clause, genre_params = _genre_filter_clause(genres or [], column=sql.SQL("genres"))
+        media_clause, media_params = _media_filter_clause(
+            media_families or [], media_mediums or [], column=sql.SQL("media_families"), mediums_column=sql.SQL("media_mediums")
+        )
+        country_clause, country_params = _country_filter_clause(countries or [], column=sql.SQL("country"))
+    else:
+        year_clause, year_params = _year_filter_clause(year_min, year_max, column=year_col)
+        genre_clause, genre_params = _genre_filter_clause(genres or [], column=genres_col)
+        media_clause, media_params = _media_filter_clause(media_families or [], media_mediums or [], column=media_col)
+        country_clause, country_params = _country_filter_clause(countries or [], column=country_col)
     filter_params = [*year_params, *genre_params, *media_params, *country_params]
     filter_clause = (
         sql.SQL(" AND {y} AND {g} AND {m} AND {c}").format(y=year_clause, g=genre_clause, m=media_clause, c=country_clause)
@@ -353,13 +381,13 @@ def _entity_select(
     # The tsquery comes from the caller's ``q`` CTE, which must be NOT MATERIALIZED: a CTE
     # referenced by every branch otherwise materializes, and a CTE scan is
     # parallel-restricted, which forces a serial plan.
-    if _uses_release_search(entity_type, filter_params):
-        # Rank the stored title vector (public.release_search, database-schema v0.11.0): no
-        # releases.data is read, and so detoasted, per match. Same expression, same index
-        # order as below, so the ranks and the top rows are identical.
+    if entity_type == "release":
+        # Rank the stored title vector (public.release_search, database-schema v0.11.0) and
+        # filter its stored attributes (v0.12.0): no releases.data is read, and so detoasted,
+        # per match. Same expressions as the document, so the ranks and rows are identical.
         ranked_sql: sql.Composable = sql.SQL(
-            "SELECT release_id AS data_id, ts_rank(title_tsv, q.tsq) AS rank FROM public.release_search, q WHERE title_tsv @@ q.tsq"
-        )
+            "SELECT release_id AS data_id, ts_rank(title_tsv, q.tsq) AS rank FROM public.release_search, q WHERE title_tsv @@ q.tsq{filter_clause}"
+        ).format(filter_clause=filter_clause)
     elif _uses_master_search(entity_type):
         # Rank the stored title vector (public.master_search, database-schema v0.12.0); the year
         # filter, when given, reads its own year column. Same expression as below.
@@ -527,23 +555,38 @@ def _build_count_union(
     params: list[Any] = []
     for t in types:
         table, name_field, has_year, has_genres, has_media, has_country = _ENTITY_CONFIG[t]
-        year_clause, year_params = _year_filter_clause(year_min, year_max, column=sql.SQL("(data->>'year')") if has_year else sql.SQL("NULL::text"))
-        genre_clause, genre_params = _genre_filter_clause(genres or [], column=sql.SQL("(data->'genres')") if has_genres else sql.SQL("NULL::jsonb"))
-        media_clause, media_params = _media_filter_clause(
-            media_families or [], media_mediums or [], column=sql.SQL("media") if has_media else sql.SQL("NULL::jsonb")
-        )
-        country_clause, country_params = _country_filter_clause(
-            countries or [], column=sql.SQL("(data->>'country')") if has_country else sql.SQL("NULL::text")
-        )
+        if t == "release":
+            # The stored attributes on public.release_search (database-schema v0.12.0).
+            year_clause, year_params = _year_filter_clause(year_min, year_max, column=sql.SQL("year"))
+            genre_clause, genre_params = _genre_filter_clause(genres or [], column=sql.SQL("genres"))
+            media_clause, media_params = _media_filter_clause(
+                media_families or [], media_mediums or [], column=sql.SQL("media_families"), mediums_column=sql.SQL("media_mediums")
+            )
+            country_clause, country_params = _country_filter_clause(countries or [], column=sql.SQL("country"))
+        else:
+            year_clause, year_params = _year_filter_clause(
+                year_min, year_max, column=sql.SQL("(data->>'year')") if has_year else sql.SQL("NULL::text")
+            )
+            genre_clause, genre_params = _genre_filter_clause(
+                genres or [], column=sql.SQL("(data->'genres')") if has_genres else sql.SQL("NULL::jsonb")
+            )
+            media_clause, media_params = _media_filter_clause(
+                media_families or [], media_mediums or [], column=sql.SQL("media") if has_media else sql.SQL("NULL::jsonb")
+            )
+            country_clause, country_params = _country_filter_clause(
+                countries or [], column=sql.SQL("(data->>'country')") if has_country else sql.SQL("NULL::text")
+            )
         branch_params = [*year_params, *genre_params, *media_params, *country_params]
         filter_clause = (
             sql.SQL(" AND {y} AND {g} AND {m} AND {c}").format(y=year_clause, g=genre_clause, m=media_clause, c=country_clause)
             if branch_params
             else sql.SQL("")
         )
-        if _uses_release_search(t, branch_params):
+        if _uses_release_search(t):
             parts.append(
-                sql.SQL("(SELECT 1 FROM public.release_search, q WHERE title_tsv @@ q.tsq LIMIT {cap})").format(cap=sql.Literal(_TOTAL_COUNT_CAP))
+                sql.SQL("(SELECT 1 FROM public.release_search, q WHERE title_tsv @@ q.tsq{filter_clause} LIMIT {cap})").format(
+                    filter_clause=filter_clause, cap=sql.Literal(_TOTAL_COUNT_CAP)
+                )
             )
         elif _uses_master_search(t):
             m_year_clause, m_year_params = _year_filter_clause(year_min, year_max, column=sql.SQL("year"))
@@ -612,7 +655,7 @@ async def _run_type_counts(pool: AsyncPostgreSQLPool, q: str, types: list[str]) 
     union_parts = []
     for t in types:
         table, name_field, _, _, _, _ = _ENTITY_CONFIG[t]
-        if _uses_release_search(t, []):
+        if _uses_release_search(t):
             matched: sql.Composable = sql.SQL("SELECT 1 FROM public.release_search, q WHERE title_tsv @@ q.tsq")
         elif _uses_master_search(t):
             matched = sql.SQL("SELECT 1 FROM public.master_search, q WHERE title_tsv @@ q.tsq")
@@ -633,12 +676,21 @@ async def _run_type_counts(pool: AsyncPostgreSQLPool, q: str, types: list[str]) 
     return {row["type"]: int(row["cnt"]) for row in rows}
 
 
-# The genre, decade and media facets keep ``to_tsvector(...)`` over the document on purpose.
-# Each reads the first _TOTAL_COUNT_CAP matches in no defined order and then reads every one's
-# ``releases.data`` anyway, so public.release_search saves little there; measured on lux
-# (2026-11-08) it is 2-3x faster on 'love' and 'rock' but slower on a rare term, and which
-# 10,000 rows it samples differs from idx_releases_fts, so the facet counts of a term over the
-# cap would change.
+# The genre, decade (releases half) and media facets read public.release_search: its stored title
+# vector matches and its stored genres/year/media_families columns are counted, so no
+# releases.data is read, or detoasted, per match (database-schema v0.12.0).
+#
+# Each still reads the first _FACET_COUNT_CAP matches, in no defined order. Counting every match
+# was measured on lux (2026-11-09) and does not fit: 'love' (497,272 matches) reads ~265k
+# buffers and takes ~0.4-0.5 s per facet (0.5-0.9 s with the three run together), against ~4.8k
+# buffers and ~0.11 s capped. Set this to None to count every match; that is an operator choice.
+_FACET_COUNT_CAP: int | None = _TOTAL_COUNT_CAP
+
+
+def _facet_limit() -> sql.Composable:
+    return sql.SQL(" LIMIT {cap}").format(cap=sql.Literal(_FACET_COUNT_CAP)) if _FACET_COUNT_CAP is not None else sql.SQL("")
+
+
 async def _run_genre_facets(pool: AsyncPostgreSQLPool, q: str) -> dict[str, int]:
     """Count matching releases per genre (for genre facet).
 
@@ -647,16 +699,16 @@ async def _run_genre_facets(pool: AsyncPostgreSQLPool, q: str) -> dict[str, int]
     query = sql.SQL(
         "WITH q AS (SELECT plainto_tsquery('english', %s) AS tsq),"
         " matched AS ("
-        " SELECT data->'genres' AS genres FROM releases, q"
-        " WHERE to_tsvector('english', COALESCE(data->>'title', '')) @@ q.tsq"
-        " LIMIT {cap})"
+        " SELECT genres FROM public.release_search, q"
+        " WHERE title_tsv @@ q.tsq"
+        "{limit})"
         " SELECT genre, COUNT(*) AS cnt"
         " FROM matched,"
         " jsonb_array_elements_text(genres) AS genre"
         " GROUP BY genre"
         " ORDER BY cnt DESC"
         " LIMIT 20"
-    ).format(cap=sql.Literal(_TOTAL_COUNT_CAP))
+    ).format(limit=_facet_limit())
     async with _search_cursor(pool) as cur:
         await execute_sql(cur, query, [q])
         rows = await cur.fetchall()
@@ -665,12 +717,7 @@ async def _run_genre_facets(pool: AsyncPostgreSQLPool, q: str) -> dict[str, int]
 
 # The decade facet counts masters and releases. 2jka owns the masters fragment, 4asm the releases one.
 _DECADE_MASTERS_MATCHES = "(SELECT year FROM public.master_search, q WHERE title_tsv @@ q.tsq AND year IS NOT NULL LIMIT {cap})"
-_DECADE_RELEASES_MATCHES = (
-    "(SELECT data->>'year' FROM releases, q"
-    " WHERE to_tsvector('english', COALESCE(data->>'title', '')) @@ q.tsq"
-    " AND data->>'year' IS NOT NULL"
-    " LIMIT {cap})"
-)
+_DECADE_RELEASES_MATCHES = "(SELECT year FROM public.release_search, q WHERE title_tsv @@ q.tsq AND year IS NOT NULL{limit})"
 
 
 async def _run_decade_facets(pool: AsyncPostgreSQLPool, q: str) -> dict[str, int]:
@@ -686,7 +733,7 @@ async def _run_decade_facets(pool: AsyncPostgreSQLPool, q: str) -> dict[str, int
         " WHERE year ~ '^[0-9]{{4}}$'"
         " GROUP BY decade"
         " ORDER BY decade"
-    ).format(cap=sql.Literal(_TOTAL_COUNT_CAP))
+    ).format(cap=sql.Literal(_TOTAL_COUNT_CAP), limit=_facet_limit())
     async with _search_cursor(pool) as cur:
         await execute_sql(cur, query, [q])
         rows = await cur.fetchall()
@@ -704,15 +751,15 @@ async def _run_media_facets(pool: AsyncPostgreSQLPool, q: str) -> dict[str, int]
     query = sql.SQL(
         "WITH q AS (SELECT plainto_tsquery('english', %s) AS tsq),"
         " matched AS ("
-        " SELECT media FROM releases, q"
-        " WHERE to_tsvector('english', COALESCE(data->>'title', '')) @@ q.tsq"
-        " LIMIT {cap})"
+        " SELECT media_families FROM public.release_search, q"
+        " WHERE title_tsv @@ q.tsq"
+        "{limit})"
         " SELECT family, COUNT(*) AS cnt"
         " FROM matched,"
-        " jsonb_array_elements_text(media->'families') AS family"
+        " jsonb_array_elements_text(media_families) AS family"
         " GROUP BY family"
         " ORDER BY cnt DESC"
-    ).format(cap=sql.Literal(_TOTAL_COUNT_CAP))
+    ).format(limit=_facet_limit())
     async with _search_cursor(pool) as cur:
         await execute_sql(cur, query, [q])
         rows = await cur.fetchall()
