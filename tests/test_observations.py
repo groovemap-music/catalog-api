@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 from uuid import UUID
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import api.routers.observations as observations_module
@@ -236,3 +237,61 @@ class TestIsoformat:
 
     def test_stringifies_a_value_without_isoformat(self) -> None:
         assert observations_module._isoformat("2026-03-01") == "2026-03-01"
+
+
+class TestCopySelectionReaders:
+    """Bounded item-copy listing and explicit-copy timeline composition."""
+
+    @pytest.mark.asyncio
+    async def test_lists_only_owner_item_rows_and_marks_truncation(self, mock_pool: MagicMock, mock_cur: MagicMock) -> None:
+        item_id = "66666666-6666-6666-6666-666666666666"
+        mock_cur.fetchall.return_value = [
+            {"id": UUID(_COPY_ID), "item_id": UUID(item_id), "collection_row_id": UUID("77777777-7777-7777-7777-777777777777"), "acquired_at": None},
+            {"id": UUID(_OTHER_COPY_ID), "item_id": UUID(item_id), "collection_row_id": None, "acquired_at": None},
+        ]
+
+        result = await observations_module.list_owned_copies(item_id, "00000000-0000-0000-0000-000000000001", limit=1, pool=mock_pool)
+
+        assert [copy["id"] for copy in result["copies"]] == [_COPY_ID]
+        assert result["truncated"] is True
+        query, params = mock_cur.execute.call_args.args
+        assert "WHERE item_id = %s::uuid AND user_id = %s::uuid" in query
+        assert params == (item_id, "00000000-0000-0000-0000-000000000001", 2)
+
+    @pytest.mark.asyncio
+    async def test_duplicate_copies_have_independent_observation_timelines(self, mock_pool: MagicMock, mock_cur: MagicMock) -> None:
+        mock_cur.fetchone.return_value = {"id": UUID(_COPY_ID)}
+        second_id = "33333333-3333-3333-3333-333333333333"
+        mock_cur.fetchall.side_effect = [[_row()], [_row(owned_copy_id=UUID(second_id), kind="grading", value="VG+")]]
+
+        first = await observations_module._read_copy_timeline(_COPY_ID, "owner-id", mock_pool)
+        second = await observations_module._read_copy_timeline(second_id, "owner-id", mock_pool)
+
+        assert [row["owned_copy_id"] for row in first] == [_COPY_ID]
+        assert [row["owned_copy_id"] for row in second] == [second_id]
+        observation_queries = [call.args[0] for call in mock_cur.execute.await_args_list if "FROM observations AS observation" in call.args[0]]
+        assert len(observation_queries) == 2
+        assert all("copy.user_id = %s::uuid" in query for query in observation_queries)
+
+    @pytest.mark.asyncio
+    async def test_unknown_foreign_and_malformed_selected_copy_share_not_found_semantics(self, mock_pool: MagicMock, mock_cur: MagicMock) -> None:
+        from tests.conftest import TEST_USER_ID
+
+        mock_cur.fetchone.return_value = None
+        for copy_id in (_OTHER_COPY_ID, "not-a-uuid"):
+            with pytest.raises(HTTPException) as error:
+                await observations_module._read_copy_timeline(copy_id, TEST_USER_ID, mock_pool)
+            assert error.value.status_code == 404
+            assert error.value.detail == "Copy not found"
+        # The malformed UUID never reaches PostgreSQL; the foreign UUID runs only the owner predicate.
+        assert mock_cur.execute.await_count == 1
+        assert "user_id = %s::uuid" in mock_cur.execute.await_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_copy_list_rejects_invalid_bounds_and_malformed_item_ids(self, mock_pool: MagicMock, mock_cur: MagicMock) -> None:
+        with pytest.raises(ValueError, match="limit"):
+            await observations_module.list_owned_copies("66666666-6666-6666-6666-666666666666", "owner", limit=101, pool=mock_pool)
+        with pytest.raises(HTTPException) as error:
+            await observations_module.list_owned_copies("not-a-uuid", "owner", pool=mock_pool)
+        assert error.value.status_code == 404
+        mock_cur.execute.assert_not_awaited()
