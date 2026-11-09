@@ -18,11 +18,11 @@ from uuid import UUID
 
 import structlog
 from common.query_debug import execute_sql
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
 
-from api.dependencies import UnifiedAuth, require_user_or_app_token
+from api.dependencies import UnifiedAuth, require_user, require_user_or_app_token
 from api.models import CreateObservationRequest
 
 
@@ -164,6 +164,24 @@ async def _read_copy_timeline(copy_id: str, user_id: str, pool: Any) -> list[dic
         await execute_sql(cur, _SELECT_OBSERVATIONS, (copy_id, user_id))
         rows = await cur.fetchall()
     return [_shape(row) for row in rows]
+
+
+@router.get(
+    "/api/user/items/{native_item_id}/copies",
+    responses={401: {"description": "First-party session authentication required"}, 404: {"description": "Native item not found"}},
+)
+async def get_owned_copies(
+    native_item_id: str,
+    current_user: Annotated[dict[str, Any], Depends(require_user)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+) -> JSONResponse:
+    """List the authenticated user's physical copies of a native catalog item.
+
+    This is a first-party-only selection route. App tokens remain limited to their
+    existing per-copy observation scopes and cannot enumerate a user's collection.
+    """
+    result = await list_owned_copies(native_item_id, current_user.get("sub", ""), limit=limit)
+    return JSONResponse(content=result)
 
 
 @router.post("/api/user/copies/{copy_id}/observations", status_code=status.HTTP_201_CREATED)

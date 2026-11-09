@@ -3,7 +3,7 @@
 `api.pursuit_scope.preview_scope` is an offline, deterministic evaluator for a Missing-style
 preview over a caller-materialized catalog snapshot and an already-authorized folded
 collection. It has no database, network, identity-resolution, persistence, or scheduler
-behavior. It is not wired into the API.
+behavior. The authenticated [Missing adapter](missing-preview.md) now wraps it in the API with conservative source-completeness limits.
 
 ## Identity inputs
 

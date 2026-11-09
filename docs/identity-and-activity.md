@@ -57,6 +57,7 @@ a grading, a purchase price — asserted by the user rather than derived from a 
 
 | Method | Path | Auth Required | Description |
 | --- | --- | --- | --- |
+| GET | `/api/user/items/{native_item_id}/copies` | First-party JWT | List the caller's physical copies of a native catalog item (bounded, with truncation metadata) |
 | POST | `/api/user/copies/{copy_id}/observations` | JWT or `observations:write` token | Record one observation about a copy the caller owns |
 | GET | `/api/user/copies/{copy_id}/observations` | JWT or `observations:read` token | List observations for a copy the caller owns, newest first |
 
@@ -66,13 +67,15 @@ with no hint that the id names a real row. `kind` and `value` are free text; `so
 validated against the identity vocabulary's alias sources (who or what asserted the fact);
 `confidence` is an optional `0.0`–`1.0` float.
 
-`api.routers.observations.list_owned_copies` is the bounded reader for selecting among the
-caller's physical copies of one native `item_id`. It returns each `owned_copies.id` separately,
-ordered by `acquired_at ASC NULLS LAST, id ASC`, with a `truncated` flag when the bounded result has more rows.
-The trusted caller supplies the owner id. The selected copy id is then passed to the existing
-owner-scoped observation reader; unknown, malformed, and foreign copy ids remain the same 404.
-This reader is a lower-level prototype for a separately gated UI/API integration; it does
-not add a route or choose an earliest-copy default.
+`GET /api/user/items/{native_item_id}/copies` returns
+`{"item_id":"<native UUID>","copies":[...],"truncated":false}`. Its `limit` query parameter
+defaults to 50 and accepts 1–100; the API fetches one extra row to set `truncated`. The native
+item ID is distinct from each copy's `id`. Copies remain separate even when they refer to the
+same native item, ordered by `acquired_at ASC NULLS LAST, id ASC`. Ownership comes only from the
+first-party JWT; there is no owner query parameter and app tokens cannot call this route. A
+foreign item therefore returns the same empty list as an item with no copies. The selected copy
+id is then passed to the existing owner-scoped observation reader; unknown, malformed, and
+foreign copy ids remain the same 404.
 
 Observation timelines sort by `observed_at DESC, id DESC`: `observed_at` is when the user says
 the evidence applied, while `created_at` is when the row was stored. They are distinct timestamps;
@@ -298,6 +301,9 @@ app token minted under `POST /api/user/app-tokens` and carrying the matching sco
 | `fit:read` | `GET /api/fit/release/{release_id}`, without the session-only `evidence_entries` |
 | `observations:read` | `GET /api/user/copies/{copy_id}/observations` |
 | `observations:write` | `POST /api/user/copies/{copy_id}/observations` |
+
+Owned-copy enumeration (`GET /api/user/items/{native_item_id}/copies`) remains first-party JWT
+only and is not included in the delegated observation scopes.
 
 `require_user_or_app_token` routes on the credential's `dscg_` prefix and resolves either
 path to the same `UnifiedAuth`, from which the handler reads `user_id` — the session's user

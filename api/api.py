@@ -59,6 +59,7 @@ import api.routers.insights as _insights_router
 import api.routers.insights_compute as _insights_compute_router
 import api.routers.label_dna as _label_dna_router
 import api.routers.lookup as _lookup_router
+import api.routers.missing as _missing_router
 import api.routers.musicbrainz as _musicbrainz_router
 import api.routers.network as _network_router
 import api.routers.nlq as _nlq_router
@@ -291,6 +292,7 @@ def _configure_routers(
     _app_tokens.configure(pool)
     _identity.configure(pool)
     _observations_router.configure(pool)
+    _missing_router.configure(neo4j, pool)
     # One writer for every event and impression, and the sync's change events flow through
     # the same one: `api.syncer` holds a no-op recorder until this hands it the real thing.
     _activity.configure(pool, valkey)
@@ -557,6 +559,7 @@ _ROUTERS = (
     _musicbrainz_router.router,
     _app_tokens_router.router,
     _observations_router.router,
+    _missing_router.router,
 )
 
 

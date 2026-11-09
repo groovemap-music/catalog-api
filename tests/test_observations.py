@@ -38,8 +38,10 @@ _AUTH_HEADER = {"Authorization": f"Bearer {make_test_jwt()}"}
 _AUTH_HEADER_EMPTY_SUB = {"Authorization": f"Bearer {_jwt_with_empty_sub()}"}
 _COPY_ID = "22222222-2222-2222-2222-222222222222"
 _OTHER_COPY_ID = "33333333-3333-3333-3333-333333333333"
+_ITEM_ID = "66666666-6666-6666-6666-666666666666"
 _OBSERVATION_ID = UUID("44444444-4444-4444-4444-444444444444")
 _PATH = f"/api/user/copies/{_COPY_ID}/observations"
+_COPIES_PATH = f"/api/user/items/{_ITEM_ID}/copies"
 
 
 def _row(**overrides: Any) -> dict[str, Any]:
@@ -241,6 +243,74 @@ class TestIsoformat:
 
 class TestCopySelectionReaders:
     """Bounded item-copy listing and explicit-copy timeline composition."""
+
+    def test_lists_authenticated_owners_copies_for_native_item(self, test_client: TestClient, mock_cur: MagicMock) -> None:
+        from tests.conftest import TEST_USER_ID
+
+        second_copy_id = "88888888-8888-8888-8888-888888888888"
+        mock_cur.fetchall.return_value = [
+            {"id": UUID(_COPY_ID), "item_id": UUID(_ITEM_ID), "collection_row_id": None, "acquired_at": None},
+            {"id": UUID(second_copy_id), "item_id": UUID(_ITEM_ID), "collection_row_id": None, "acquired_at": None},
+        ]
+
+        response = test_client.get(_COPIES_PATH, headers=_AUTH_HEADER)
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "item_id": _ITEM_ID,
+            "copies": [
+                {"id": _COPY_ID, "item_id": _ITEM_ID, "collection_row_id": None, "acquired_at": None, "created_at": None, "updated_at": None},
+                {"id": second_copy_id, "item_id": _ITEM_ID, "collection_row_id": None, "acquired_at": None, "created_at": None, "updated_at": None},
+            ],
+            "truncated": False,
+        }
+        query, params = mock_cur.execute.call_args.args
+        assert "WHERE item_id = %s::uuid AND user_id = %s::uuid" in query
+        assert "ORDER BY acquired_at ASC NULLS LAST, id ASC" in query
+        assert params == (_ITEM_ID, TEST_USER_ID, 51)
+
+    def test_owner_context_changes_with_first_party_jwt(self, test_client: TestClient, mock_cur: MagicMock) -> None:
+        from tests.conftest import make_test_jwt
+
+        mock_cur.fetchall.return_value = []
+        response = test_client.get(_COPIES_PATH, headers={"Authorization": f"Bearer {make_test_jwt(user_id='00000000-0000-0000-0000-000000000002')}"})
+
+        assert response.status_code == 200
+        assert response.json()["copies"] == []
+        assert mock_cur.execute.call_args.args[1][1] == "00000000-0000-0000-0000-000000000002"
+
+    def test_requires_first_party_authentication_and_rejects_app_token(self, test_client: TestClient) -> None:
+        assert test_client.get(_COPIES_PATH).status_code == 401
+        assert test_client.get(_COPIES_PATH, headers={"Authorization": "Bearer dscg_not-a-jwt"}).status_code == 401
+
+    def test_invalid_native_item_id_is_not_a_copy_lookup(self, test_client: TestClient, mock_cur: MagicMock) -> None:
+        response = test_client.get("/api/user/items/not-a-uuid/copies", headers=_AUTH_HEADER)
+
+        assert response.status_code == 404
+        mock_cur.execute.assert_not_awaited()
+
+    def test_empty_and_foreign_items_have_the_same_empty_shape(self, test_client: TestClient, mock_cur: MagicMock) -> None:
+        mock_cur.fetchall.return_value = []
+
+        response = test_client.get(_COPIES_PATH, headers=_AUTH_HEADER)
+
+        assert response.status_code == 200
+        assert response.json() == {"item_id": _ITEM_ID, "copies": [], "truncated": False}
+        assert mock_cur.execute.call_args.args[1][1] == "00000000-0000-0000-0000-000000000001"
+
+    @pytest.mark.parametrize("limit", [0, 101])
+    def test_route_rejects_limits_outside_one_to_one_hundred(self, test_client: TestClient, limit: int) -> None:
+        assert test_client.get(f"{_COPIES_PATH}?limit={limit}", headers=_AUTH_HEADER).status_code == 422
+
+    def test_route_fetches_at_most_limit_plus_one_and_marks_truncated(self, test_client: TestClient, mock_cur: MagicMock) -> None:
+        mock_cur.fetchall.return_value = [{"id": UUID(f"00000000-0000-0000-0000-{index:012d}"), "item_id": UUID(_ITEM_ID)} for index in range(1, 4)]
+
+        response = test_client.get(f"{_COPIES_PATH}?limit=2", headers=_AUTH_HEADER)
+
+        assert response.status_code == 200
+        assert len(response.json()["copies"]) == 2
+        assert response.json()["truncated"] is True
+        assert mock_cur.execute.call_args.args[1][2] == 3
 
     @pytest.mark.asyncio
     async def test_lists_only_owner_item_rows_and_marks_truncation(self, mock_pool: MagicMock, mock_cur: MagicMock) -> None:
