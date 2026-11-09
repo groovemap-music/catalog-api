@@ -96,7 +96,7 @@ override-dependencies = [
 [tool.uv.sources]
 groovemap-runtime = { git = "https://github.com/groovemap-music/python-libraries.git", rev = "5f35c03f68b0dd2c1955c731886c0ad8d8f9de63" }
 groovemap-agent-tools = { git = "https://github.com/groovemap-music/python-libraries.git", subdirectory = "agent-tools", rev = "5f35c03f68b0dd2c1955c731886c0ad8d8f9de63" }
-groovemap-database-schema = { git = "https://github.com/groovemap-music/database-schema.git", rev = "8e1117f8fbf2d3ad419e30851494d6ee9978edf7" }
+groovemap-database-schema = { git = "https://github.com/groovemap-music/database-schema.git", rev = "df17cecead1ec8cfd83f103bb63e7ddb8d5db9b5" }
 
 [tool.ruff]
 extend-exclude = [

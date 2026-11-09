@@ -1108,6 +1108,28 @@
     },
     "views": 37
   },
+  "master_search": {
+    "backfill": "CALL public.master_search_backfill(batch_pages integer DEFAULT 1000, first_page bigint DEFAULT 0), run once by the operator outside a transaction block; the initializer never runs it. Each batch takes SHARE on public.master_search (never a lock on masters beyond a read's ACCESS SHARE), so readers never block and a load's trigger waits at most one batch; first_page resumes from its last progress notice; its heap pass upserts, rewriting a row only when its vector or year differs, so it also repairs stale rows; rerunning it is harmless; its SQL runs in step functions with a pinned search_path, and PUBLIC has no EXECUTE on it or them",
+    "columns": {
+      "master_id": "VARCHAR PRIMARY KEY, equal to masters.data_id",
+      "title_tsv": "TSVECTOR NOT NULL",
+      "year": "TEXT, NULL when the document has no year"
+    },
+    "consumers": [
+      "catalog-api"
+    ],
+    "consumer_rollout": "expand phase: catalog-api ranks, year-filters and decade-facets masters by master_search only after master_search_drift() reports no missing rows on that database; until then it keeps reading masters.data through idx_masters_fts, which this change leaves in place",
+    "design_decision": "Master search and the masters half of the decade facet computed to_tsvector over masters.data for every match and read each match's heap row of whole documents (lux: 2.6M masters, 2.4 GB of heap at about nine a page; 'love' 71,692 matches, 69,224 buffers for the ranked branch, 0.97 per match). A side table built by the same generator as release_search holds the vector and the year, so a ranking or a facet reads a narrow row per match and reads masters only for the rows that survive its LIMIT; on a lux-shaped 2.6M-row sample 'love' falls from 1.05 to 0.38 buffers per match (2.8x) and from 6.6 s to 0.18 s cold, with the same 40 results in the same order; a side table rather than columns on masters for the reasons release_search gives (gm-database-schema-nu0c)",
+    "drift": "public.master_search_drift() RETURNS TABLE (missing bigint, orphaned bigint, stale bigint); missing and orphaned read keys only, stale recomputes every vector and year together and so reads every document",
+    "index": "idx_master_search_title_tsv ON public.master_search USING GIN (title_tsv)",
+    "introduced_in_contract_version": 1,
+    "kind": "additive",
+    "maintenance": "triggers on public.masters keep it current, so no loader changes: an insert or delete is captured once per statement, an update only when it sets data_id or data (so the loaders' updated_at refresh and identity backfill pay nothing), and a truncate empties it; a capture writes a row only when its vector or year changed; the capture functions are SECURITY DEFINER, so a role that writes masters needs no grant on master_search; each refuses to run on any table but public.masters, and PUBLIC has no EXECUTE on them",
+    "relation": "public.master_search",
+    "rollback": "the statements in MASTER_SEARCH_ROLLBACK_STATEMENTS, in order; they touch no masters row and nothing of release_search",
+    "vector": "to_tsvector('english', COALESCE(data->>'title', '')) of the master's data, the expression idx_masters_fts indexes, for every master and no other row",
+    "year": "data->>'year' of the master's data verbatim, as text: catalog-api's (year)::int filter and its '^[0-9]{4}$' decade test apply to it unchanged, and no document value can make a capture fail"
+  },
   "musicbrainz_delete_reconciliation": {
     "columns": {
       "musicbrainz.external_links.updated_at": "TIMESTAMPTZ NOT NULL DEFAULT NOW()",
@@ -1179,23 +1201,30 @@
     "database-schema"
   ],
   "release_search": {
-    "backfill": "CALL public.release_search_backfill(batch_pages integer DEFAULT 1000, first_page bigint DEFAULT 0), run once by the operator outside a transaction block; the initializer never runs it. Each batch takes SHARE on public.release_search (never a lock on releases beyond a read's ACCESS SHARE), so readers never block and a load's trigger waits at most one batch; first_page resumes from its last progress notice; rerunning it is harmless; its SQL runs in step functions with a pinned search_path, and PUBLIC has no EXECUTE on it or them",
+    "attributes": "gm-database-schema-1sle: catalog-api's facet and filter inputs, each exactly the expression it evaluates over releases today, so its genre, decade and media facets and its year, genre, media and country filters can read release_search instead of detoasting releases.data per match; nothing is typed or cleaned, so a clause answers the same for every row and no value can make a capture trigger fail",
+    "backfill": "CALL public.release_search_backfill(batch_pages integer DEFAULT 1000, first_page bigint DEFAULT 0), run once by the operator outside a transaction block; the initializer never runs it. Each batch takes SHARE on public.release_search (never a lock on releases beyond a read's ACCESS SHARE), so readers never block and a load's trigger waits at most one batch; first_page resumes from its last progress notice; its heap pass upserts, rewriting a row only when one of its values differs, so it fills columns added to a populated table and repairs stale rows; rerunning it is harmless; its SQL runs in step functions with a pinned search_path, and PUBLIC has no EXECUTE on it or them",
     "columns": {
+      "country": "TEXT, data->>'country' of the release, exactly as catalog-api's country filter (= ANY) reads it",
+      "genres": "JSONB, data->'genres' of the release, exactly as catalog-api's genre filter (?|) and facet (jsonb_array_elements_text) read it",
+      "media_families": "JSONB, media->'families' of the release, exactly as catalog-api's media filter (?|) and facet (jsonb_array_elements_text) read it",
+      "media_mediums": "JSONB, jsonb_path_query_array(media, '$.items[*].medium[*]'): NULL exactly when media is NULL (catalog-api's media IS NULL), and media_mediums ? m exactly when jsonb_path_exists(media, '$.items[*] ? (@.medium == $m)', ...)",
       "release_id": "VARCHAR PRIMARY KEY, equal to releases.data_id",
-      "title_tsv": "TSVECTOR NOT NULL"
+      "title_tsv": "TSVECTOR NOT NULL",
+      "year": "TEXT, data->>'year' of the release, exactly as catalog-api's year filter (::int) and decade facet (~ '^[0-9]{4}$') read it; TEXT like master_search.year"
     },
+    "consumer_rollout": "expand phase: catalog-api ranks by title_tsv only after release_search_drift() reports no missing rows on that database; until then it keeps ranking by idx_releases_fts, which this change leaves in place; catalog-api moves its facets and filtered release branches onto the attribute columns only after the backfill that follows this upgrade and a drift of (0, 0, 0); until then it reads releases as today",
     "consumers": [
       "catalog-api"
     ],
-    "consumer_rollout": "expand phase: catalog-api ranks by title_tsv only after release_search_drift() reports no missing rows on that database; until then it keeps ranking by idx_releases_fts, which this change leaves in place",
     "design_decision": "Ranking a common title term computed to_tsvector for every match, detoasting the whole releases.data document per match (lux: 'love' 497k matches, about 4.7 buffers each, 16.6 s first run). A side table holds the vector so a ranking reads a row of about 86 bytes per match and reads releases only for the rows that survive its LIMIT. A side table rather than a column on releases: a stored generated column rewrites the table under ACCESS EXCLUSIVE, and a nullable column filled in batches writes a new version of all 19.6M rows into every index on releases, while the side table is created empty and filled without writing to releases (gm-database-schema-fi4a)",
-    "drift": "public.release_search_drift() RETURNS TABLE (missing bigint, orphaned bigint, stale bigint); missing and orphaned read keys only, stale recomputes every vector and so reads every document",
+    "drift": "public.release_search_drift() RETURNS TABLE (missing bigint, orphaned bigint, stale bigint); missing and orphaned read keys only, stale recomputes every carried column and so reads every document",
     "index": "idx_release_search_title_tsv ON public.release_search USING GIN (title_tsv)",
     "introduced_in_contract_version": 1,
     "kind": "additive",
-    "maintenance": "triggers on public.releases keep it current, so no loader changes: an insert or delete is captured once per statement, an update only when it sets data_id or data (so the loaders' updated_at refresh and media and identity backfills pay nothing), and a truncate empties it; the capture functions are SECURITY DEFINER, so a role that writes releases needs no grant on release_search; each refuses to run on any table but public.releases, and PUBLIC has no EXECUTE on them",
+    "maintenance": "triggers on public.releases keep it current, so no loader changes: an insert or delete is captured once per statement, an update that sets data_id or data rewrites every column, an update that changes media (WHEN OLD.media IS DISTINCT FROM NEW.media, via release_search_capture_update_media) rewrites media_families and media_mediums only and never reads data, and a truncate empties it; so the loaders' updated_at refresh and identity backfills pay nothing; the capture functions are SECURITY DEFINER, so a role that writes releases needs no grant on release_search; each refuses to run on any table but public.releases, and PUBLIC has no EXECUTE on them",
     "relation": "public.release_search",
-    "rollback": "the statements in RELEASE_SEARCH_ROLLBACK_STATEMENTS, in order; they touch no releases row",
+    "rollback": "move catalog-api's readers back to releases first; then the statements in RELEASE_SEARCH_ROLLBACK_STATEMENTS, in order (they also drop the media trigger and its function); they touch no releases row",
+    "upgrade": "from v0.11.0's (release_id, title_tsv): each attribute column is added by ALTER TABLE public.release_search ADD COLUMN IF NOT EXISTS, nullable with no default (a catalog change under ACCESS EXCLUSIVE on release_search only, about 1 ms each on a populated table; skipped, taking no lock, once the column exists), and the five triggers are recreated together under SHARE ROW EXCLUSIVE on releases (about 4-6 ms); the columns are NULL until CALL public.release_search_backfill() fills them",
     "vector": "to_tsvector('english', COALESCE(data->>'title', '')) of the release's data, the expression idx_releases_fts indexes, for every release and no other row"
   },
   "retired_relations": {

@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from psycopg import sql
 
 
 def _transaction() -> MagicMock:
@@ -264,14 +265,35 @@ class TestSearchQueryModuleHelpers:
         assert "ORDER BY rank DESC, data_id LIMIT 40" in rendered
         assert params == []
 
-    def test_filtered_release_select_keeps_the_document_expression(self) -> None:
-        """A filter reads releases.data per match anyway, so that branch keeps idx_releases_fts."""
+    def test_filtered_release_select_filters_the_stored_attributes(self) -> None:
+        """A filtered releases branch ranks and filters public.release_search; the document is read only after the cap."""
         from api.queries.search_queries import _entity_select
 
-        frag, _ = _entity_select("release", "title", has_year=True, has_genres=True, per_table_limit=40, year_min=1960)
+        frag, params = _entity_select(
+            "release",
+            "title",
+            has_year=True,
+            has_genres=True,
+            has_media=True,
+            has_country=True,
+            per_table_limit=40,
+            year_min=1960,
+            genres=["Rock"],
+            media_families=["vinyl"],
+            media_mediums=["CD"],
+            countries=["UK"],
+        )
         rendered = frag.as_string(None)
-        assert "release_search" not in rendered
-        assert "to_tsvector('english', COALESCE(data->>'title', ''))" in rendered
+        ranked = rendered[rendered.index("FROM q, (") : rendered.index("ORDER BY rank DESC, data_id LIMIT 40")]
+        assert "FROM public.release_search" in ranked
+        assert "to_tsvector" not in rendered
+        assert "title_tsv @@ q.tsq AND (year IS NULL OR year::int >= %s)" in ranked
+        assert "(genres IS NULL OR genres ?| %s::text[])" in ranked
+        assert "media_mediums IS NULL OR (media_families ?| %s::text[] OR media_mediums ? %s::text)" in ranked
+        assert "(country IS NULL OR country = ANY(%s::text[]))" in ranked
+        assert "data->" not in ranked
+        assert "jsonb_path_exists" not in ranked
+        assert params == [1960, ["Rock"], ["vinyl"], "CD", ["UK"]]
 
     def test_other_entity_selects_never_use_release_search(self) -> None:
         from api.queries.search_queries import _entity_select
@@ -315,14 +337,18 @@ class TestSearchQueryModuleHelpers:
         assert "year::int >= %s" in filtered.as_string(None)
         assert p1 == [1990]
 
-    def test_count_union_uses_release_search_only_for_unfiltered_releases(self) -> None:
+    def test_count_union_uses_release_search_for_every_releases_branch(self) -> None:
         from api.queries.search_queries import _build_count_union
 
         plain, _ = _build_count_union(["release"])
         assert "public.release_search" in plain.as_string(None)
         assert "to_tsvector" not in plain.as_string(None)
-        filtered, _ = _build_count_union(["release"], year_min=1960)
-        assert "release_search" not in filtered.as_string(None)
+        filtered, _ = _build_count_union(["release"], year_min=1960, media_mediums=["CD"])
+        rendered = filtered.as_string(None)
+        assert "public.release_search" in rendered
+        assert "to_tsvector" not in rendered
+        assert "data->" not in rendered
+        assert "media_mediums ?" in rendered
         artists, _ = _build_count_union(["artist"])
         assert "release_search" not in artists.as_string(None)
 
@@ -658,6 +684,14 @@ class TestMediaFacetFilter:
         assert "jsonb_path_exists" in rendered
         assert " OR " in rendered
         assert params == [["vinyl"], "optical_cd"]
+
+    def test_media_filter_clause_on_release_search_uses_the_hoisted_arrays(self) -> None:
+        from api.queries.search_queries import _media_filter_clause
+
+        clause, params = _media_filter_clause(["vinyl"], ["CD", "LP"], column=sql.SQL("media_families"), mediums_column=sql.SQL("media_mediums"))
+        rendered = clause.as_string(None)
+        assert rendered == "(media_mediums IS NULL OR (media_families ?| %s::text[] OR media_mediums ? %s::text OR media_mediums ? %s::text))"
+        assert params == [["vinyl"], "CD", "LP"]
 
     def test_media_filter_clause_null_passthrough_for_non_release_types(self) -> None:
         """Entity types without a media column pass the filter (NULL IS NULL)."""
@@ -1161,6 +1195,65 @@ class TestSearchQueryAsyncFunctions:
         assert "ORDER BY rank DESC, data_id LIMIT" in rendered
 
 
+class TestReleaseFacetsReadReleaseSearch:
+    """The genre, decade (releases half) and media facets count public.release_search, never releases.data."""
+
+    @staticmethod
+    async def _rendered(fn_name: str) -> str:
+        from api.queries import search_queries
+
+        mock_cursor = AsyncMock()
+        mock_cursor.fetchall = AsyncMock(return_value=[])
+        mock_cursor.__aenter__ = AsyncMock(return_value=mock_cursor)
+        mock_cursor.__aexit__ = AsyncMock(return_value=False)
+        mock_conn = AsyncMock()
+        mock_conn.cursor = MagicMock(return_value=mock_cursor)
+        mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_conn.transaction = MagicMock(return_value=_transaction())
+        mock_conn.__aexit__ = AsyncMock(return_value=False)
+        mock_pool = MagicMock()
+        mock_pool.connection = MagicMock(return_value=mock_conn)
+        with patch("api.queries.search_queries.execute_sql", new_callable=AsyncMock) as mock_exec:
+            await getattr(search_queries, fn_name)(mock_pool, "love")
+        return str(mock_exec.call_args[0][1].as_string(None))
+
+    @pytest.mark.asyncio
+    async def test_genre_facet(self) -> None:
+        rendered = await self._rendered("_run_genre_facets")
+        assert "FROM public.release_search" in rendered
+        assert "LIMIT" not in rendered.replace("LIMIT 20", "")
+        assert "jsonb_array_elements_text(genres)" in rendered
+        assert "to_tsvector" not in rendered
+        assert "releases" not in rendered.replace("release_search", "")
+
+    @pytest.mark.asyncio
+    async def test_media_facet(self) -> None:
+        rendered = await self._rendered("_run_media_facets")
+        assert "FROM public.release_search" in rendered
+        assert "jsonb_array_elements_text(media_families)" in rendered
+        assert "to_tsvector" not in rendered
+        assert "data->" not in rendered
+
+    @pytest.mark.asyncio
+    async def test_decade_facet_reads_release_search_for_releases(self) -> None:
+        rendered = await self._rendered("_run_decade_facets")
+        assert "(SELECT year FROM public.release_search, q WHERE title_tsv @@ q.tsq AND year IS NOT NULL)" in rendered
+        assert "FROM releases" not in rendered
+
+    @pytest.mark.asyncio
+    async def test_facets_count_every_match_by_default(self) -> None:
+        for fn in ("_run_genre_facets", "_run_media_facets"):
+            assert "LIMIT 10000" not in await self._rendered(fn)
+
+    @pytest.mark.asyncio
+    async def test_facet_cap_can_be_set_again(self) -> None:
+        with patch("api.queries.search_queries._FACET_COUNT_CAP", 500):
+            for fn in ("_run_genre_facets", "_run_media_facets"):
+                assert "title_tsv @@ q.tsq LIMIT 500)" in await self._rendered(fn)
+            decade = await self._rendered("_run_decade_facets")
+            assert "FROM public.release_search, q WHERE title_tsv @@ q.tsq AND year IS NOT NULL LIMIT 500)" in decade
+
+
 class TestSearchCountryFacet:
     """The ADR 0011 `country` facet on the releases branch of the union."""
 
@@ -1202,7 +1295,8 @@ class TestSearchCountryFacet:
         where_idx = rendered.index("WHERE")
         limit_idx = rendered.index("ORDER BY rank DESC, data_id LIMIT")
         assert where_idx < limit_idx
-        assert "data->>'country'" in rendered[where_idx:limit_idx]
+        assert "country = ANY" in rendered[where_idx:limit_idx]
+        assert "data->>'country'" not in rendered[where_idx:limit_idx]
         assert params == [["UK"]]
 
     def test_entity_select_projects_null_country_when_has_country_false(self) -> None:
@@ -1264,7 +1358,9 @@ class TestSearchCountryFacet:
         with patch("api.queries.search_queries.execute_sql", new_callable=AsyncMock) as mock_exec:
             await _run_total(mock_pool, "love", ["release"], [], None, None, [], [], ["UK"])
 
-        assert "data->>'country'" in mock_exec.call_args[0][1].as_string(None)
+        rendered = mock_exec.call_args[0][1].as_string(None)
+        assert "country = ANY" in rendered
+        assert "data->>'country'" not in rendered
 
     def test_format_result_carries_country(self) -> None:
         from api.queries.search_queries import _format_result
