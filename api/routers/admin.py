@@ -1,4 +1,4 @@
-"""Admin router — login, logout, session introspection, extraction history, trigger, gm_id projection, catalog re-attachment, the identity ledger, and DLQ purge."""
+"""Admin router — login, logout, session introspection, extraction history, trigger, gm_id projection, catalog re-attachment, the identity ledger, and DLQ purge and replay."""
 
 import asyncio
 import json
@@ -6,8 +6,10 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
+import aio_pika
 import httpx
 import structlog
+from aio_pika.exceptions import ChannelNotFoundEntity
 from common import AsyncResilientRabbitMQ, describe_exception
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
@@ -33,6 +35,7 @@ from api.models import (
     AuditLogEntry,
     AuditLogResponse,
     DlqPurgeResponse,
+    DlqReplayResponse,
     ExtractionHistoryResponse,
     ExtractionListResponse,
     ExtractionSource,
@@ -73,6 +76,9 @@ _tracking_tasks: dict[str, asyncio.Task[Any]] = {}
 # Valid DLQ names (one per data type per consumer)
 # Must match actual RabbitMQ queue names: {queue_prefix}-{data_type}.dlq
 _DLQ_PURGE_TIMEOUT_SECONDS = 10.0
+_DLQ_REPLAY_TIMEOUT_SECONDS = 120.0
+_DLQ_REPLAY_MAX_LIMIT = 5000
+_DLQ_SUFFIX = ".dlq"
 _VALID_DLQ_NAMES: set[str] = set()
 for _dt in DATA_TYPES:
     _VALID_DLQ_NAMES.add(dead_letter_queue_name("graphinator", _dt))
@@ -932,6 +938,116 @@ async def purge_dlq(
     return JSONResponse(
         content=DlqPurgeResponse(queue=queue, messages_purged=messages_purged).model_dump(),
     )
+
+
+# ---------------------------------------------------------------------------
+# DLQ replay
+# ---------------------------------------------------------------------------
+
+
+async def _replay_messages(channel: Any, source: Any, work_queue: str, limit: int, progress: list[int]) -> None:
+    """Move up to ``limit`` dead letters back to ``work_queue``, losing none.
+
+    Each message is fetched unacknowledged, republished with a publisher confirm and only then
+    acknowledged. A failure at any step leaves it in the dead-letter queue (it may be delivered
+    twice, never zero times). Broker-set ``x-*`` headers (``x-death`` and the delivery counters)
+    are dropped so the retry count starts over; application headers and properties are kept.
+    """
+    while progress[0] < limit:
+        message = await source.get(no_ack=False, fail=False)
+        if message is None:
+            break
+        try:
+            headers = {k: v for k, v in (message.headers or {}).items() if not str(k).startswith("x-")}
+            confirmation = await channel.default_exchange.publish(
+                aio_pika.Message(
+                    body=message.body,
+                    headers=headers,
+                    content_type=message.content_type,
+                    content_encoding=message.content_encoding,
+                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                    message_id=message.message_id,
+                    correlation_id=message.correlation_id,
+                    timestamp=message.timestamp,
+                    type=message.type,
+                    app_id=message.app_id,
+                ),
+                routing_key=work_queue,
+                mandatory=True,
+            )
+            if getattr(confirmation, "delivery", None) is not None:
+                # a mandatory publish the broker returned is confirmed but unroutable; it is not a replay
+                raise RuntimeError(f"Replay of a dead letter was unroutable to {work_queue}")
+        except BaseException:
+            try:
+                await message.nack(requeue=True)
+            except Exception:  # the channel is already gone; closing it requeues the message
+                logger.warning("⚠️ DLQ replay could not nack after a failed republish", queue=work_queue)
+            raise
+        await message.ack()
+        progress[0] += 1
+
+
+@router.post("/api/admin/dlq/replay/{queue}", response_model=DlqReplayResponse)
+async def replay_dlq(
+    queue: str,
+    current_admin: Annotated[dict[str, Any], Depends(require_admin)],
+    limit: Annotated[int, Query(ge=1, le=_DLQ_REPLAY_MAX_LIMIT)] = _DLQ_REPLAY_MAX_LIMIT,
+) -> JSONResponse:
+    """Replay a dead-letter queue's messages onto its work queue, with publisher confirms."""
+    if _config is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not ready")
+
+    if queue not in _VALID_DLQ_NAMES:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown DLQ: {queue}")
+
+    work_queue = queue.removesuffix(_DLQ_SUFFIX)
+    progress = [0]
+    remaining = 0
+    failed = False
+    missing_work_queue = False
+    rabbitmq = AsyncResilientRabbitMQ(_config.rabbitmq_url, max_retries=1)
+    try:
+        async with asyncio.timeout(_DLQ_REPLAY_TIMEOUT_SECONDS):
+            connection = await rabbitmq.connect()
+            channel = await connection.channel(publisher_confirms=True)
+            try:
+                await channel.get_queue(work_queue, ensure=True)
+            except ChannelNotFoundEntity:
+                missing_work_queue = True
+            else:
+                source = await channel.get_queue(queue, ensure=True)
+                try:
+                    await _replay_messages(channel, source, work_queue, limit, progress)
+                finally:
+                    # a failed replay left its message in the DLQ; count what is still there
+                    # aio-pika's robust channel caches queues, so re-issue the passive declare for a live count
+                    remaining = 0 if channel.is_closed else (await source.declare()).message_count or 0
+    except Exception:  # the shared client wraps connect failures in a bare Exception
+        failed = True
+    finally:
+        await rabbitmq.close()
+
+    replayed = progress[0]
+    admin_id = current_admin.get("sub", "unknown")
+    if missing_work_queue:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Work queue does not exist: {work_queue}")
+    logger.info("♻️ DLQ replayed", queue=queue, replayed=replayed, remaining=remaining, failed=failed, admin_id=admin_id)
+    if _pool is not None:
+        await record_audit_entry(
+            pool=_pool,
+            admin_id=current_admin["sub"],
+            action="dlq.replay",
+            target=queue,
+            details={"replayed_count": replayed, "remaining": remaining, "limit": limit, "failed": failed},
+        )
+    if failed:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"RabbitMQ unreachable or replay failed after {replayed} replayed; unreplayed messages remain in the DLQ",
+        )
+
+    return JSONResponse(content=DlqReplayResponse(queue=queue, replayed=replayed, remaining=remaining).model_dump())
 
 
 # ---------------------------------------------------------------------------
