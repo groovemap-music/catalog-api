@@ -1,0 +1,13 @@
+{
+  "kind": "synthetic",
+  "cases": [
+    {"id": "synthetic-1", "inscription": "A1 12345-1A SYNTHETIC PLANT X", "expected_attributions": [{"role": "pressing_plant", "candidate": "fixture:plant-x"}]},
+    {"id": "synthetic-2", "inscription": "B1 12345-1B SYNTHETIC PLANT Y", "expected_attributions": [{"role": "pressing_plant", "candidate": "fixture:plant-y"}]},
+    {"id": "synthetic-3", "inscription": "C1 12345-1C SYNTHETIC PLANT Z", "expected_attributions": [{"role": "pressing_plant", "candidate": "fixture:plant-z"}]},
+    {"id": "synthetic-4", "inscription": "MATRIX C1 SYNTHETIC PLANT Z", "expected_attributions": [{"role": "pressing_plant", "candidate": "fixture:plant-z"}]},
+    {"id": "synthetic-5", "inscription": "E1 98765-1A UNKNOWN MARK", "expected_attributions": []},
+    {"id": "synthetic-6", "inscription": "C1 12345-1C SYNTHETIC PLANT Z", "expected_attributions": [{"role": "pressing_plant", "candidate": "fixture:alternate-z"}]},
+    {"id": "synthetic-7", "inscription": "F1 88888-1F CUT BY TEST ENGINEER", "expected_attributions": [{"role": "cutting_engineer", "candidate": "fixture:engineer-1"}]},
+    {"id": "synthetic-8", "inscription": "A1 12345-1A synthetic plant x", "expected_attributions": []}
+  ]
+}

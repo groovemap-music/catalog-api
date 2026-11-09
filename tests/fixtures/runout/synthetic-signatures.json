@@ -1,0 +1,11 @@
+{
+  "entries": [
+    {"signature": "A1 12345-1A SYNTHETIC PLANT X", "role": "pressing_plant", "candidate": "fixture:plant-x", "source_ref": "synthetic://casebook/x"},
+    {"signature": "SYNTHETIC PLANT X", "role": "pressing_plant", "candidate": "fixture:plant-x", "source_ref": "synthetic://casebook/x"},
+    {"signature": "B1 12345-1B SYNTHETIC PLANT Y", "role": "pressing_plant", "candidate": "fixture:plant-y", "source_ref": "synthetic://casebook/y"},
+    {"signature": "SYNTHETIC PLANT Y", "role": "pressing_plant", "candidate": "fixture:plant-y", "source_ref": "synthetic://casebook/y"},
+    {"signature": "SYNTHETIC PLANT Z", "role": "pressing_plant", "candidate": "fixture:plant-z", "source_ref": "synthetic://casebook/z"},
+    {"signature": "SYNTHETIC PLANT Z", "role": "pressing_plant", "candidate": "fixture:alternate-z", "source_ref": "synthetic://casebook/alternate-z"},
+    {"signature": "CUT BY TEST ENGINEER", "role": "cutting_engineer", "candidate": "fixture:engineer-1", "source_ref": "synthetic://casebook/engineer-1"}
+  ]
+}
