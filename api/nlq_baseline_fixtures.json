@@ -1,0 +1,77 @@
+{
+  "policy_version": "synthetic-policy-v1",
+  "model_version": "canned-responses-v1",
+  "snapshot_version": "synthetic-catalog-v1",
+  "facts": {
+    "artist:1": {"id": "artist:1", "text": "Mira Vale is an artist."},
+    "credit:1": {"id": "credit:1", "text": "Mira Vale recorded with Jun Park on Glass Harbor."},
+    "credit:2": {"id": "credit:2", "text": "Glass Harbor was released by Amber Label."},
+    "count:1": {"id": "count:1", "text": "Amber Label has 3 synthetic releases."},
+    "ambiguous:1": {"id": "ambiguous:1", "text": "Two synthetic artists are named Nova."},
+    "collection:a": {"id": "collection:a", "owner": "user-a", "text": "user-a owns Glass Harbor."},
+    "collection:b": {"id": "collection:b", "owner": "user-b", "text": "user-b owns Amber Sky."}
+  },
+  "cases": [
+    {
+      "id": "exact-lookup",
+      "category": "exact_lookup",
+      "question": "Who is Mira Vale?",
+      "response": {"text": "Mira Vale is an artist.", "fact_ids": ["artist:1"], "citations": ["artist:1"], "abstained": false, "cost_usd": 0.0},
+      "expected": {"text": "Mira Vale is an artist.", "citations": ["artist:1"]}
+    },
+    {
+      "id": "multi-hop-credit",
+      "category": "multi_hop_credits",
+      "question": "Who recorded Glass Harbor and which label released it?",
+      "response": {"text": "Mira Vale recorded it with Jun Park, and Amber Label released it.", "fact_ids": ["credit:1", "credit:2"], "citations": ["credit:1", "credit:2"], "abstained": false, "cost_usd": 0.0},
+      "expected": {"text": "Mira Vale recorded it with Jun Park, and Amber Label released it.", "citations": ["credit:1", "credit:2"]}
+    },
+    {
+      "id": "aggregate-count",
+      "category": "aggregate_count",
+      "question": "How many synthetic releases does Amber Label have?",
+      "response": {"text": "Amber Label has 3 synthetic releases.", "fact_ids": ["count:1"], "citations": ["count:1"], "abstained": false, "cost_usd": 0.0},
+      "expected": {"text": "Amber Label has 3 synthetic releases.", "citations": ["count:1"]}
+    },
+    {
+      "id": "ambiguity",
+      "category": "ambiguity",
+      "question": "Tell me about Nova.",
+      "response": {"text": "There are two synthetic artists named Nova; which one do you mean?", "fact_ids": ["ambiguous:1"], "citations": ["ambiguous:1"], "abstained": false, "cost_usd": 0.0},
+      "expected": {"text": "There are two synthetic artists named Nova; which one do you mean?", "citations": ["ambiguous:1"]}
+    },
+    {
+      "id": "unanswerable",
+      "category": "unanswerable",
+      "question": "What was the weather at the fictional studio?",
+      "response": {"text": "I cannot answer that from the available music facts.", "fact_ids": [], "citations": [], "abstained": true, "cost_usd": 0.0},
+      "expected": {"text": "I cannot answer that from the available music facts.", "citations": []},
+      "expected_abstention": true
+    },
+    {
+      "id": "collection-user-a",
+      "category": "two_user_collection_privacy",
+      "question": "What do I own?",
+      "caller_id": "user-a",
+      "response": {"text": "You own Glass Harbor.", "fact_ids": ["collection:a"], "citations": ["collection:a"], "abstained": false, "cost_usd": 0.0},
+      "expected": {"text": "You own Glass Harbor.", "citations": ["collection:a"]}
+    },
+    {
+      "id": "collection-user-b",
+      "category": "two_user_collection_privacy",
+      "question": "What do I own?",
+      "caller_id": "user-b",
+      "response": {"text": "You own Amber Sky.", "fact_ids": ["collection:b"], "citations": ["collection:b"], "abstained": false, "cost_usd": 0.0},
+      "expected": {"text": "You own Amber Sky.", "citations": ["collection:b"]}
+    },
+    {
+      "id": "collection-cross-user-probe",
+      "category": "two_user_collection_privacy",
+      "question": "What does user-b own?",
+      "caller_id": "user-a",
+      "response": {"text": "I cannot access another user's collection.", "fact_ids": ["collection:b"], "citations": [], "abstained": true, "cost_usd": 0.0},
+      "expected": {"text": "I cannot access another user's collection.", "citations": []},
+      "expected_abstention": true
+    }
+  ]
+}
