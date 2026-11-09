@@ -1001,6 +1001,27 @@ class TestSearchQueryAsyncFunctions:
         assert result == {"1960s": 30, "1970s": 45}
 
     @pytest.mark.asyncio
+    async def test_master_only_search_skips_release_facets(self) -> None:
+        """A search that excludes releases runs no release-facet statement and no release decade half."""
+        from api.queries import search_queries as sq
+
+        with (
+            patch.object(sq, "_run_results", new=AsyncMock(return_value=[])),
+            patch.object(sq, "_run_total", new=AsyncMock(return_value=0)),
+            patch.object(sq, "_run_type_counts", new=AsyncMock(return_value={"master": 0})),
+            patch.object(sq, "_run_genre_facets", new=AsyncMock(return_value={"x": 1})) as genre,
+            patch.object(sq, "_run_media_facets", new=AsyncMock(return_value={"x": 1})) as media,
+            patch.object(sq, "_run_decade_facets", new=AsyncMock(return_value={})) as decade,
+            patch.object(sq, "native_ids_for_pairs", new=AsyncMock(return_value={})),
+        ):
+            result = await sq.execute_search(MagicMock(), None, "love", ["master"], [], None, None, 20, 0)
+        genre.assert_not_called()
+        media.assert_not_called()
+        assert decade.await_args.args[2] == ["master"]
+        assert result["facets"]["genre"] == {}
+        assert result["facets"]["media"] == {}
+
+    @pytest.mark.asyncio
     async def test_execute_search_raises_on_empty_types(self) -> None:
         from api.queries.search_queries import execute_search
 
