@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from aio_pika.exceptions import AMQPChannelError
+from aio_pika.exceptions import AMQPChannelError, ChannelNotFoundEntity
 
 
 if TYPE_CHECKING:
@@ -721,6 +721,178 @@ class TestDlqPurge:
             assert entry.get("admin_id") == TEST_ADMIN_ID
             assert "admin_email" not in entry
             assert TEST_ADMIN_EMAIL not in str(entry.values())
+
+
+class _FakeMessage:
+    def __init__(self, broker: _FakeBroker, body: bytes, headers: dict[str, Any]) -> None:
+        self.broker = broker
+        self.body = body
+        self.headers = headers
+        self.content_type = "application/json"
+        self.content_encoding = None
+        self.message_id = "m-" + body.decode()
+        self.correlation_id = None
+        self.timestamp = None
+        self.type = None
+        self.app_id = None
+        self.acked = False
+
+    async def ack(self) -> None:
+        self.acked = True
+        self.broker.unacked.remove(self)
+
+    async def nack(self, requeue: bool = True) -> None:
+        self.broker.unacked.remove(self)
+        if requeue:
+            self.broker.dlq.insert(0, self)
+
+
+class _FakeBroker:
+    """An in-memory dead-letter queue and work queue with publisher confirms that can fail."""
+
+    def __init__(self, dead: int, *, fail_publish_at: int | None = None, work_exists: bool = True, unroutable: bool = False) -> None:
+        self.dlq = [_FakeMessage(self, str(i).encode(), {"x-death": [1], "x-delivery-count": 3, "tenant": "t"}) for i in range(dead)]
+        self.unacked: list[_FakeMessage] = []
+        self.work: list[Any] = []
+        self.publish_calls: list[dict[str, Any]] = []
+        self.fail_publish_at = fail_publish_at
+        self.work_exists = work_exists
+        self.unroutable = unroutable
+
+    async def get(self, *, no_ack: bool = False, **_: Any) -> _FakeMessage | None:
+        assert no_ack is False
+        if not self.dlq:
+            return None
+        message = self.dlq.pop(0)
+        self.unacked.append(message)
+        return message
+
+    async def declare(self) -> Any:
+        return MagicMock(message_count=len(self.dlq))
+
+    async def publish(self, message: Any, routing_key: str, *, mandatory: bool = False) -> Any:
+        assert mandatory is True
+        if self.unroutable:
+            return MagicMock(delivery=MagicMock())  # aio-pika hands back the Basic.Return instead of raising
+        if self.fail_publish_at is not None and len(self.work) == self.fail_publish_at:
+            raise AMQPChannelError("publish not confirmed")
+        self.publish_calls.append({"routing_key": routing_key, "headers": message.headers})
+        self.work.append(message)
+
+    def rabbitmq(self) -> MagicMock:
+        broker = self
+
+        async def get_queue(name: str, **_: Any) -> Any:
+            if name.endswith(".dlq"):
+                return broker
+            if not broker.work_exists:
+                raise ChannelNotFoundEntity("no queue")
+            return MagicMock()
+
+        channel = MagicMock()
+        channel.is_closed = False
+        channel.get_queue = get_queue
+        channel.default_exchange.publish = broker.publish
+        connection = MagicMock()
+        connection.channel = AsyncMock(return_value=channel)
+        rabbitmq = MagicMock()
+        rabbitmq.connect = AsyncMock(return_value=connection)
+        rabbitmq.close = AsyncMock()
+        rabbitmq.connection = connection
+        return rabbitmq
+
+
+class TestDlqReplay:
+    def _post(self, test_client: TestClient, broker: _FakeBroker, query: str = "", queue: str = _DLQ) -> Any:
+        with patch("api.routers.admin.AsyncResilientRabbitMQ", return_value=broker.rabbitmq()):
+            return test_client.post(f"/api/admin/dlq/replay/{queue}{query}", headers=_admin_auth_headers())
+
+    @patch("api.routers.admin.record_audit_entry", new_callable=AsyncMock)
+    def test_replays_everything_once_and_audits(self, mock_audit: AsyncMock, test_client: TestClient) -> None:
+        broker = _FakeBroker(3)
+        resp = self._post(test_client, broker)
+        assert resp.status_code == 200
+        assert resp.json() == {"queue": _DLQ, "replayed": 3, "remaining": 0}
+        assert [m.body for m in broker.work] == [b"0", b"1", b"2"]
+        assert all(call["routing_key"] == _DLQ.removesuffix(".dlq") for call in broker.publish_calls)
+        assert broker.unacked == []
+        assert mock_audit.await_args.kwargs["action"] == "dlq.replay"
+        assert mock_audit.await_args.kwargs["target"] == _DLQ
+        assert mock_audit.await_args.kwargs["details"]["replayed_count"] == 3
+
+    def test_publishes_with_confirms_and_drops_x_headers(self, test_client: TestClient) -> None:
+        broker = _FakeBroker(1)
+        rabbitmq = broker.rabbitmq()
+        with patch("api.routers.admin.AsyncResilientRabbitMQ", return_value=rabbitmq):
+            resp = test_client.post(f"/api/admin/dlq/replay/{_DLQ}", headers=_admin_auth_headers())
+        assert resp.status_code == 200
+        rabbitmq.connection.channel.assert_awaited_once_with(publisher_confirms=True)
+        assert broker.publish_calls[0]["headers"] == {"tenant": "t"}
+
+    def test_limit_replays_part_and_reports_remaining(self, test_client: TestClient) -> None:
+        broker = _FakeBroker(5)
+        resp = self._post(test_client, broker, "?limit=2")
+        assert resp.status_code == 200
+        assert resp.json() == {"queue": _DLQ, "replayed": 2, "remaining": 3}
+        assert len(broker.dlq) == 3
+
+    def test_empty_queue(self, test_client: TestClient) -> None:
+        resp = self._post(test_client, _FakeBroker(0))
+        assert resp.status_code == 200
+        assert resp.json() == {"queue": _DLQ, "replayed": 0, "remaining": 0}
+
+    @patch("api.routers.admin.record_audit_entry", new_callable=AsyncMock)
+    def test_confirm_failure_loses_nothing(self, mock_audit: AsyncMock, test_client: TestClient) -> None:
+        broker = _FakeBroker(3, fail_publish_at=1)
+        resp = self._post(test_client, broker)
+        assert resp.status_code == 502
+        assert len(broker.work) == 1
+        assert [m.body for m in broker.dlq] == [b"1", b"2"]  # the unconfirmed message is back in the DLQ
+        assert broker.unacked == []
+        assert mock_audit.await_args.kwargs["details"]["replayed_count"] == 1
+        assert mock_audit.await_args.kwargs["details"]["failed"] is True
+
+    def test_unroutable_publish_loses_nothing(self, test_client: TestClient) -> None:
+        broker = _FakeBroker(2, unroutable=True)
+        resp = self._post(test_client, broker)
+        assert resp.status_code == 502
+        assert len(broker.dlq) == 2
+        assert broker.unacked == []
+
+    def test_missing_work_queue_is_conflict_and_moves_nothing(self, test_client: TestClient) -> None:
+        broker = _FakeBroker(2, work_exists=False)
+        resp = self._post(test_client, broker)
+        assert resp.status_code == 409
+        assert len(broker.dlq) == 2
+        assert broker.work == []
+
+    def test_invalid_queue(self, test_client: TestClient) -> None:
+        with patch("api.routers.admin.AsyncResilientRabbitMQ") as rabbitmq_cls:
+            resp = test_client.post("/api/admin/dlq/replay/nonexistent-queue", headers=_admin_auth_headers())
+        assert resp.status_code == 404
+        rabbitmq_cls.assert_not_called()
+
+    def test_work_queue_name_is_not_replayable(self, test_client: TestClient) -> None:
+        resp = test_client.post(f"/api/admin/dlq/replay/{_DLQ.removesuffix('.dlq')}", headers=_admin_auth_headers())
+        assert resp.status_code == 404
+
+    def test_unauthorized(self, test_client: TestClient) -> None:
+        resp = test_client.post(f"/api/admin/dlq/replay/{_DLQ}")
+        assert resp.status_code in (401, 403)
+
+    def test_limit_is_bounded(self, test_client: TestClient) -> None:
+        for bad in ("0", "5001"):
+            resp = test_client.post(f"/api/admin/dlq/replay/{_DLQ}?limit={bad}", headers=_admin_auth_headers())
+            assert resp.status_code == 422
+
+    def test_broker_unreachable_returns_502(self, test_client: TestClient) -> None:
+        rabbitmq = MagicMock()
+        rabbitmq.connect = AsyncMock(side_effect=Exception("Failed to establish RabbitMQ connection after 1 attempts"))
+        rabbitmq.close = AsyncMock()
+        with patch("api.routers.admin.AsyncResilientRabbitMQ", return_value=rabbitmq):
+            resp = test_client.post(f"/api/admin/dlq/replay/{_DLQ}", headers=_admin_auth_headers())
+        assert resp.status_code == 502
+        rabbitmq.close.assert_awaited_once()
 
 
 class TestRabbitmqUrl:

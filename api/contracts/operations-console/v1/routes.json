@@ -4,6 +4,7 @@
   "operations": {
     "admin_audit_log": {"method": "GET", "path": "/api/admin/audit-log"},
     "admin_dlq_purge": {"method": "POST", "path": "/api/admin/dlq/purge/{queue}"},
+    "admin_dlq_replay": {"method": "POST", "path": "/api/admin/dlq/replay/{queue}", "query": ["limit"], "response_fields": ["queue", "remaining", "replayed"]},
     "admin_extraction": {"method": "GET", "path": "/api/admin/extractions/{extraction_id}"},
     "admin_extraction_analysis_compare": {"method": "GET", "path": "/api/admin/extraction-analysis/{version}/compare/{other_version}"},
     "admin_extraction_analysis_generate_ai_prompt": {"method": "POST", "path": "/api/admin/extraction-analysis/{version}/generate-ai-prompt"},

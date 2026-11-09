@@ -565,6 +565,14 @@ class DlqPurgeResponse(BaseModel):
     messages_purged: int
 
 
+class DlqReplayResponse(BaseModel):
+    """Response to POST /api/admin/dlq/replay/{queue}."""
+
+    queue: str
+    replayed: int
+    remaining: int
+
+
 class AuditLogEntry(BaseModel):
     """A single audit log entry for admin actions."""
 
