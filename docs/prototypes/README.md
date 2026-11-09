@@ -7,8 +7,10 @@ usefulness remains pending unless stated otherwise.
 
 The placement and existing UI homes follow [ADR 0019](https://github.com/groovemap-music/design/blob/6303d58e89be71b651ea55d4d9c9588641b82475/docs/adr/0019-metadata-and-collection-prototype-boundaries.md),
 accepted for bounded offline prototypes. The API production baseline is still tag `v0.11.1`
-at `c04b540b8c005612505be99f3b614e0f90e04d3a`; these prototype commits are assembled in the
-`gm-catalog-api-ifqv` epic and are not a released API change.
+at `c04b540b8c005612505be99f3b614e0f90e04d3a`. The Missing preview and owner-copy reads
+have reviewed changes on their producer bead branches, including a producer-owned Graph
+Explorer v1 contract; those changes are pending integration and are not a released or
+deployed API change.
 
 ## Disposition
 
@@ -115,8 +117,10 @@ mapping. No user outcome, cost, or latency metric is available. Full check: 4,12
 deselected, 98.47% coverage; focused tests 26 and module coverage 100%.
 
 **GO to controlled integration design only after** catalog completeness, authenticated collection
-ownership, and producer/consumer contract proofs. Saved pursuit state requires a separate consent,
-retention, and erasure design.
+ownership, and producer/consumer contract proofs. Those proofs are represented by the reviewed
+transient route implementation and producer contract; the changes are pending integration, with no
+consumer promotion or production release recorded here. Saved pursuit state requires a separate
+consent, retention, and erasure design.
 
 ## GM07 — Discover replay
 
@@ -194,7 +198,9 @@ check passed with at least 98.46% total coverage, but its exact test count is un
 
 **GO to controlled integration design only after** proving the UI uses authenticated owner context,
 the selected copy is explicit, and the producer/consumer contract covers the existing read shape.
-Editing, retracting, correcting, or superseding an observation remains separately gated.
+The reviewed producer change covers the bounded owner-copy listing and is pending integration;
+consumer promotion and production release remain separate. Editing, retracting, correcting, or
+superseding an observation remains separately gated.
 
 ## GM12 — Run-out interpreter
 
@@ -243,10 +249,13 @@ ADR 0014 section 6 matching remains DEFER.
 
 ## Integration gates
 
-The next two candidates for controlled integration design are GM06 Missing preview and GM10
-copy selection. Before either becomes a serving implementation, its owning consumer and producer
-must prove source completeness, authenticated owner scope where applicable, and a versioned
-contract through their normal repository review. The other prototypes remain in their limited
+GM06 Missing preview and the GM10 copy-listing read have reviewed serving-source and producer
+contract changes on their bead branches, pending integration. The Missing response still reports
+an incomplete denominator and null
+completion fraction; independently-windowed source versions remain unknown. Alias conflicts,
+unknown ownership, and reverse-lookup truncation remain review states. Copy listing is session-only,
+owner-scoped, bounded, and preserves one row per physical copy. Consumer promotion and production
+release/deployment have not been recorded. The other prototypes remain in their limited
 offline/selected-input roles until their per-feature evidence gates are met.
 
 No saved pursuit persistence or observation correction semantics are included. Those need

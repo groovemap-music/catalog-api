@@ -166,7 +166,10 @@ async def _read_copy_timeline(copy_id: str, user_id: str, pool: Any) -> list[dic
     return [_shape(row) for row in rows]
 
 
-@router.get("/api/user/items/{native_item_id}/copies")
+@router.get(
+    "/api/user/items/{native_item_id}/copies",
+    responses={401: {"description": "First-party session authentication required"}, 404: {"description": "Native item not found"}},
+)
 async def get_owned_copies(
     native_item_id: str,
     current_user: Annotated[dict[str, Any], Depends(require_user)],

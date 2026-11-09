@@ -26,7 +26,14 @@ def configure(driver: Any, pool: Any) -> None:
     _source = MissingSource(driver, pool) if driver is not None and pool is not None else None
 
 
-@router.post("/api/user/missing/preview")
+@router.post(
+    "/api/user/missing/preview",
+    responses={
+        401: {"description": "First-party session authentication required"},
+        403: {"description": "Session is not authorized"},
+        503: {"description": "Preview sources unavailable"},
+    },
+)
 async def preview_missing(body: MissingRequest, request: Request, user: Annotated[dict[str, Any], Depends(require_user)]) -> dict[str, Any]:
     """Read a bounded Discogs artist/label projection using the session owner's copies."""
     if request.query_params:
