@@ -214,8 +214,17 @@ the allowlist and the AMQP `queue.purge` call; processing behavior belongs to th
 - [`musicbrainz-graph-enricher`](https://github.com/groovemap-music/musicbrainz-graph-enricher)
 - [`musicbrainz-sql-loader`](https://github.com/groovemap-music/musicbrainz-sql-loader)
 
-Operators should diagnose and correct the consumer failure before purging. Replay and queue
-recovery procedures belong to the relevant consumer and deployment runbooks.
+Operators should diagnose and correct the consumer failure before purging or replaying.
+
+## Dead-letter queue replay
+
+`POST /api/admin/dlq/replay/{queue}?limit=N` (default and maximum 5000) moves dead letters back
+to the queue's work queue, which is the allow-listed name without its `.dlq` suffix. Each message
+is fetched unacknowledged, republished with a publisher confirm, and acknowledged only after the
+confirm, so a failure leaves it in the dead-letter queue. A message may be delivered twice, never
+lost, so consumers must be idempotent. Broker-set `x-*` headers are dropped so the retry count
+starts over. The response is `{queue, replayed, remaining}`, an audit entry (`dlq.replay`) is
+written, a missing work queue returns 409, and a broker failure returns 502.
 
 The audit table definitions are owned by
 [`database-schema`](https://github.com/groovemap-music/database-schema). Apply schema changes
