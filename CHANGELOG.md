@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v0.11.2 (2026-11-09)
+
+### Release notes
+
+Search reads the side tables database-schema v0.12.0 maintains instead of the full documents. The genre, decade and media facets and every filtered release branch (year, genre, media, country) read `public.release_search`, and master search, its count, its year filter and the masters half of the decade facet read `public.master_search`. The release facets now count every match instead of the first 10,000 (exact counts; about 0.5-0.8 s per facet for the most common terms on lux). Results are otherwise unchanged. On lux: the "love" genre facet went from 365 ms to 112 ms capped (580 ms uncapped and exact), decade 686 to 209 ms, media 192 to 103 ms, the "love" + Jazz + 1970 + vinyl filtered results 10.4 s to 0.67 s, and ranked master search 140 to 39 ms. Requires database-schema 0.12.0 with `release_search_drift()` and `master_search_drift()` both `(0,0,0)`; on an older schema these queries fail. Cut from v0.11.1 on the release branch `release/v0.11.x-search` with only the search commits (gm-catalog-api-2jka, gm-catalog-api-4asm), so it carries none of the unreleased prototype or Missing/copy serving source on main.
+
+### Refactor
+
+- **search**: split decade facet into masters and releases fragments
+
+### Perf
+
+- **search**: count every match in the release facets
+- **search**: serve facets and filtered release branches from release_search
+- **search**: read the decade facet's masters half from public.master_search
+- **search**: rank master matches from public.master_search
+
 ## v0.11.1 (2026-11-08)
 
 ### Release notes
