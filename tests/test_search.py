@@ -1221,7 +1221,7 @@ class TestReleaseFacetsReadReleaseSearch:
     async def test_genre_facet(self) -> None:
         rendered = await self._rendered("_run_genre_facets")
         assert "FROM public.release_search" in rendered
-        assert "title_tsv @@ q.tsq LIMIT 10000" in rendered
+        assert "LIMIT" not in rendered.replace("LIMIT 20", "")
         assert "jsonb_array_elements_text(genres)" in rendered
         assert "to_tsvector" not in rendered
         assert "releases" not in rendered.replace("release_search", "")
@@ -1237,16 +1237,21 @@ class TestReleaseFacetsReadReleaseSearch:
     @pytest.mark.asyncio
     async def test_decade_facet_reads_release_search_for_releases(self) -> None:
         rendered = await self._rendered("_run_decade_facets")
-        assert "(SELECT year FROM public.release_search, q WHERE title_tsv @@ q.tsq AND year IS NOT NULL LIMIT 10000)" in rendered
+        assert "(SELECT year FROM public.release_search, q WHERE title_tsv @@ q.tsq AND year IS NOT NULL)" in rendered
         assert "FROM releases" not in rendered
 
     @pytest.mark.asyncio
-    async def test_facet_cap_none_counts_every_match(self) -> None:
-        with patch("api.queries.search_queries._FACET_COUNT_CAP", None):
-            for fn in ("_run_genre_facets", "_run_media_facets", "_run_decade_facets"):
-                rendered = await self._rendered(fn)
-                assert "release_search" in rendered
-                assert "LIMIT 10000)" not in rendered.split("UNION ALL")[-1]
+    async def test_facets_count_every_match_by_default(self) -> None:
+        for fn in ("_run_genre_facets", "_run_media_facets"):
+            assert "LIMIT 10000" not in await self._rendered(fn)
+
+    @pytest.mark.asyncio
+    async def test_facet_cap_can_be_set_again(self) -> None:
+        with patch("api.queries.search_queries._FACET_COUNT_CAP", 500):
+            for fn in ("_run_genre_facets", "_run_media_facets"):
+                assert "title_tsv @@ q.tsq LIMIT 500)" in await self._rendered(fn)
+            decade = await self._rendered("_run_decade_facets")
+            assert "FROM public.release_search, q WHERE title_tsv @@ q.tsq AND year IS NOT NULL LIMIT 500)" in decade
 
 
 class TestSearchCountryFacet:

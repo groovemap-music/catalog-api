@@ -680,11 +680,12 @@ async def _run_type_counts(pool: AsyncPostgreSQLPool, q: str, types: list[str]) 
 # vector matches and its stored genres/year/media_families columns are counted, so no
 # releases.data is read, or detoasted, per match (database-schema v0.12.0).
 #
-# Each still reads the first _FACET_COUNT_CAP matches, in no defined order. Counting every match
-# was measured on lux (2026-11-09) and does not fit: 'love' (497,272 matches) reads ~265k
-# buffers and takes ~0.4-0.5 s per facet (0.5-0.9 s with the three run together), against ~4.8k
-# buffers and ~0.11 s capped. Set this to None to count every match; that is an operator choice.
-_FACET_COUNT_CAP: int | None = _TOTAL_COUNT_CAP
+# Each counts every match, so a facet is exact however common the term is (it used to count the
+# first 10,000 matches in no defined order). Measured on lux (2026-11-09), uncapped, EXPLAIN
+# ANALYZE: 'love' (497,272 matches) genre 0.58 s, decade 0.80 s, media 0.44 s (0.57/0.82/0.46 s run
+# together); 'rock' 0.19/0.38/0.19 s; a rare term 7/24/7 ms. Set this to a row count to cap them
+# again if that stops fitting; the sample then is whatever the heap returns first.
+_FACET_COUNT_CAP: int | None = None
 
 
 def _facet_limit() -> sql.Composable:
@@ -723,7 +724,7 @@ _DECADE_RELEASES_MATCHES = "(SELECT year FROM public.release_search, q WHERE tit
 async def _run_decade_facets(pool: AsyncPostgreSQLPool, q: str) -> dict[str, int]:
     """Count matching masters+releases per decade (for decade facet).
 
-    Caps each table scan to prevent full traversal on common terms.
+    Releases are counted in full (:data:`_FACET_COUNT_CAP`); the masters half keeps its own cap.
     """
     query = sql.SQL(
         "WITH q AS (SELECT plainto_tsquery('english', %s) AS tsq),"
