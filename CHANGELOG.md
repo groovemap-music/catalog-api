@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v0.11.4 (2026-11-09)
+
+### Release notes
+
+Genre and style trends read the per-year release series that discogs-graph-enricher v0.7.0 stores on each Genre and Style node (`release_years`, `release_year_counts`) instead of traversing every release on request: one point read, about 9 database hits instead of about 20.7M for Rock, with results equal to the live traversal row for row (checked for Rock and Trance on lux). The stored series is used only when the newest ExtractionCompletion has `maintained_at` and `stats_version >= 2`; otherwise, or when a node has no series, the unchanged live traversal answers, so it is safe on an older enricher. Cut on the release branch `release/v0.11.x-search` (gm-catalog-api-2hrn only), so it still carries none of the unreleased prototype or Missing/copy source on main.
+
+### Perf
+
+- **trends**: read the stored genre/style release series, live traversal as fallback
+
 ## v0.11.3 (2026-11-09)
 
 ### Release notes
