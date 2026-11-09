@@ -848,7 +848,7 @@ class TestTrendsQueries:
         from api.queries.neo4j_queries import trends_genre
 
         records = [{"year": 1970, "count": 200}]
-        driver = _make_driver(records=records)
+        driver = _make_driver(records=records)  # no stored series (single() is None): live traversal
         result = await trends_genre(driver, "Rock")
         assert result == records
 
@@ -866,9 +866,60 @@ class TestTrendsQueries:
         from api.queries.neo4j_queries import trends_style
 
         records = [{"year": 1985, "count": 15}]
-        driver = _make_driver(records=records)
+        driver = _make_driver(records=records)  # no stored series: live traversal
         result = await trends_style(driver, "Art Rock")
         assert result == records
+
+    @staticmethod
+    def _stored(**over: Any) -> dict[str, Any]:
+        base: dict[str, Any] = {
+            "years": [1946, 1947, 1970],
+            "counts": [1, 9, 200],
+            "maintained": True,
+            "stats_version": 2,
+        }
+        return base | over
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("fn", "label"), [("trends_genre", "Genre"), ("trends_style", "Style")])
+    async def test_trends_read_stored_series_equal_to_live(self, fn: str, label: str) -> None:
+        from api.queries import neo4j_queries
+
+        live = [{"year": 1946, "count": 1}, {"year": 1947, "count": 9}, {"year": 1970, "count": 200}]
+        driver = _make_driver(records=live, single=self._stored())
+        result = await getattr(neo4j_queries, fn)(driver, "X")
+        assert result == live  # the stored series is what the live traversal returns
+        session = driver.session.return_value
+        assert session.run.await_count == 1  # one point read, no traversal
+        assert f"(n:{label} " in str(session.run.call_args[0][0].text)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("fn", ["trends_genre", "trends_style"])
+    @pytest.mark.parametrize(
+        "stored",
+        [
+            None,  # node absent, or no ExtractionCompletion
+            {"years": None, "counts": None, "maintained": True, "stats_version": 2},
+            {"years": [1970], "counts": [1], "maintained": False, "stats_version": 2},
+            {"years": [1970], "counts": [1], "maintained": True, "stats_version": None},
+            {"years": [1970], "counts": [1], "maintained": True, "stats_version": 1},
+            {"years": [1970, 1971], "counts": [1], "maintained": True, "stats_version": 2},
+        ],
+    )
+    async def test_trends_fall_back_to_live_traversal(self, fn: str, stored: dict[str, Any] | None) -> None:
+        from api.queries import neo4j_queries
+
+        live = [{"year": 1970, "count": 200}]
+        driver = _make_driver(records=live, single=stored)
+        assert await getattr(neo4j_queries, fn)(driver, "X") == live
+        assert driver.session.return_value.run.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_trends_stored_series_drops_non_positive_years_and_sorts(self) -> None:
+        from api.queries.neo4j_queries import trends_genre
+
+        driver = _make_driver(single=self._stored(years=[1980, 0, 1970], counts=[3, 7, 2]))
+        assert await trends_genre(driver, "X") == [{"year": 1970, "count": 2}, {"year": 1980, "count": 3}]
 
     @pytest.mark.asyncio
     async def test_trends_empty_returns_empty_list(self) -> None:

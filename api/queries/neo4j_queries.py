@@ -875,8 +875,8 @@ async def trends_artist(driver: AsyncResilientNeo4jDriver, name: str) -> list[di
     return await run_query(driver, cypher, name=name)
 
 
-async def trends_genre(driver: AsyncResilientNeo4jDriver, name: str) -> list[dict[str, Any]]:
-    """Get release count by year for a genre.
+async def _trends_genre_live(driver: AsyncResilientNeo4jDriver, name: str) -> list[dict[str, Any]]:
+    """Get release count by year for a genre by traversing its releases.
 
     Uses CALL {} barrier with post-expansion year filter to force
     genre-first traversal.  The year filter is placed OUTSIDE the MATCH
@@ -911,8 +911,8 @@ async def trends_label(driver: AsyncResilientNeo4jDriver, name: str) -> list[dic
     return await run_query(driver, cypher, name=name)
 
 
-async def trends_style(driver: AsyncResilientNeo4jDriver, name: str) -> list[dict[str, Any]]:
-    """Get release count by year for a style.
+async def _trends_style_live(driver: AsyncResilientNeo4jDriver, name: str) -> list[dict[str, Any]]:
+    """Get release count by year for a style by traversing its releases.
 
     Uses CALL {} barrier with post-expansion year filter to force
     style-first traversal (see trends_genre for rationale).
@@ -930,6 +930,48 @@ async def trends_style(driver: AsyncResilientNeo4jDriver, name: str) -> list[dic
     ORDER BY year
     """
     return await run_query(driver, cypher, name=name)
+
+
+_STORED_SERIES = """
+MATCH (n:%(label)s {name: $name})
+CALL {
+    MATCH (m:ExtractionCompletion)
+    RETURN m.maintained_at IS NOT NULL AS maintained, m.stats_version AS stats_version
+    ORDER BY m.version DESC
+    LIMIT 1
+}
+RETURN n.release_years AS years, n.release_year_counts AS counts, maintained, stats_version
+"""
+_MIN_STATS_VERSION = 2
+
+
+async def _stored_series(driver: AsyncResilientNeo4jDriver, label: str, name: str) -> list[dict[str, Any]] | None:
+    """The enricher's stored release-by-year series for a Genre or Style, or ``None`` to use the live traversal.
+
+    The series (``release_years`` with parallel ``release_year_counts``) is only trusted when the newest
+    ``ExtractionCompletion`` has ``maintained_at`` and ``stats_version`` >= 2: before that the stored values can predate the
+    import. Absent series, absent node or a malformed pair all return ``None``.
+    """
+    record = await run_single(driver, _STORED_SERIES % {"label": label}, name=name)
+    if not record or not record.get("maintained") or (record.get("stats_version") or 0) < _MIN_STATS_VERSION:
+        return None
+    years, counts = record.get("years"), record.get("counts")
+    if years is None or counts is None or len(years) != len(counts):
+        return None
+    series = {int(y): int(c) for y, c in zip(years, counts, strict=True) if y is not None and int(y) > 0}
+    return [{"year": y, "count": series[y]} for y in sorted(series)]
+
+
+async def trends_genre(driver: AsyncResilientNeo4jDriver, name: str) -> list[dict[str, Any]]:
+    """Release count by year for a genre: the stored series, else the live traversal."""
+    stored = await _stored_series(driver, "Genre", name)
+    return stored if stored is not None else await _trends_genre_live(driver, name)
+
+
+async def trends_style(driver: AsyncResilientNeo4jDriver, name: str) -> list[dict[str, Any]]:
+    """Release count by year for a style: the stored series, else the live traversal."""
+    stored = await _stored_series(driver, "Style", name)
+    return stored if stored is not None else await _trends_style_live(driver, name)
 
 
 # --- Year range and genre emergence ---
