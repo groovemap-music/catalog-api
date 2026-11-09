@@ -284,6 +284,16 @@ def _uses_release_search(entity_type: str, filter_params: list[Any]) -> bool:
     return entity_type == "release" and not filter_params
 
 
+def _uses_master_search(entity_type: str) -> bool:
+    """True when a masters branch can match on ``public.master_search.title_tsv``.
+
+    Every masters branch can, filtered or not: masters carry no genres, media or country (those
+    filters are TRUE for them), and the year filter reads ``master_search.year``, which is
+    ``masters.data->>'year'``, so no ``masters.data`` is read per match.
+    """
+    return entity_type == "master"
+
+
 def _entity_select(
     entity_type: str,
     name_field: str,
@@ -350,6 +360,14 @@ def _entity_select(
         ranked_sql: sql.Composable = sql.SQL(
             "SELECT release_id AS data_id, ts_rank(title_tsv, q.tsq) AS rank FROM public.release_search, q WHERE title_tsv @@ q.tsq"
         )
+    elif _uses_master_search(entity_type):
+        # Rank the stored title vector (public.master_search, database-schema v0.12.0); the year
+        # filter, when given, reads its own year column. Same expression as below.
+        m_year_clause, m_year_params = _year_filter_clause(year_min, year_max, column=sql.SQL("year"))
+        filter_params = m_year_params  # the genre, media and country filters are TRUE for masters
+        ranked_sql = sql.SQL(
+            "SELECT master_id AS data_id, ts_rank(title_tsv, q.tsq) AS rank FROM public.master_search, q WHERE title_tsv @@ q.tsq AND {y}"
+        ).format(y=m_year_clause)
     else:
         ranked_sql = sql.SQL(
             "SELECT data_id, ts_rank(to_tsvector('english', COALESCE(data->>{name}, '')), q.tsq) AS rank"
@@ -527,6 +545,14 @@ def _build_count_union(
             parts.append(
                 sql.SQL("(SELECT 1 FROM public.release_search, q WHERE title_tsv @@ q.tsq LIMIT {cap})").format(cap=sql.Literal(_TOTAL_COUNT_CAP))
             )
+        elif _uses_master_search(t):
+            m_year_clause, m_year_params = _year_filter_clause(year_min, year_max, column=sql.SQL("year"))
+            branch_params = m_year_params
+            parts.append(
+                sql.SQL("(SELECT 1 FROM public.master_search, q WHERE title_tsv @@ q.tsq AND {y} LIMIT {cap})").format(
+                    y=m_year_clause, cap=sql.Literal(_TOTAL_COUNT_CAP)
+                )
+            )
         else:
             parts.append(
                 sql.SQL(
@@ -588,6 +614,8 @@ async def _run_type_counts(pool: AsyncPostgreSQLPool, q: str, types: list[str]) 
         table, name_field, _, _, _, _ = _ENTITY_CONFIG[t]
         if _uses_release_search(t, []):
             matched: sql.Composable = sql.SQL("SELECT 1 FROM public.release_search, q WHERE title_tsv @@ q.tsq")
+        elif _uses_master_search(t):
+            matched = sql.SQL("SELECT 1 FROM public.master_search, q WHERE title_tsv @@ q.tsq")
         else:
             matched = sql.SQL("SELECT 1 FROM {table}, q WHERE to_tsvector('english', COALESCE(data->>{name}, '')) @@ q.tsq").format(
                 table=sql.Identifier(table), name=sql.Literal(name_field)
