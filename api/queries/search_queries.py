@@ -663,6 +663,21 @@ async def _run_genre_facets(pool: AsyncPostgreSQLPool, q: str) -> dict[str, int]
     return {row["genre"]: int(row["cnt"]) for row in rows}
 
 
+# The decade facet counts masters and releases. 2jka owns the masters fragment, 4asm the releases one.
+_DECADE_MASTERS_MATCHES = (
+    "(SELECT data->>'year' AS year FROM masters, q"
+    " WHERE to_tsvector('english', COALESCE(data->>'title', '')) @@ q.tsq"
+    " AND data->>'year' IS NOT NULL"
+    " LIMIT {cap})"
+)
+_DECADE_RELEASES_MATCHES = (
+    "(SELECT data->>'year' FROM releases, q"
+    " WHERE to_tsvector('english', COALESCE(data->>'title', '')) @@ q.tsq"
+    " AND data->>'year' IS NOT NULL"
+    " LIMIT {cap})"
+)
+
+
 async def _run_decade_facets(pool: AsyncPostgreSQLPool, q: str) -> dict[str, int]:
     """Count matching masters+releases per decade (for decade facet).
 
@@ -671,15 +686,10 @@ async def _run_decade_facets(pool: AsyncPostgreSQLPool, q: str) -> dict[str, int
     query = sql.SQL(
         "WITH q AS (SELECT plainto_tsquery('english', %s) AS tsq),"
         " matches AS ("
-        " (SELECT data->>'year' AS year FROM masters, q"
-        " WHERE to_tsvector('english', COALESCE(data->>'title', '')) @@ q.tsq"
-        " AND data->>'year' IS NOT NULL"
-        " LIMIT {cap})"
-        " UNION ALL"
-        " (SELECT data->>'year' FROM releases, q"
-        " WHERE to_tsvector('english', COALESCE(data->>'title', '')) @@ q.tsq"
-        " AND data->>'year' IS NOT NULL"
-        " LIMIT {cap}))"
+        + _DECADE_MASTERS_MATCHES
+        + " UNION ALL "
+        + _DECADE_RELEASES_MATCHES
+        + ")"
         " SELECT (year::int / 10 * 10)::text || 's' AS decade, COUNT(*) AS cnt"
         " FROM matches"
         " WHERE year ~ '^[0-9]{{4}}$'"
