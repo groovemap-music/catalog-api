@@ -9,6 +9,8 @@ statement runs with JIT off, scoped to its own transaction.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -52,9 +54,6 @@ class TestSearchPoolFloor:
 
     def test_one_search_runs_no_more_statements_than_the_floor(self) -> None:
         """The floor is only right while it matches the gather in execute_search: count the cursors one search opens."""
-        import asyncio
-        import contextlib
-
         opened = 0
 
         @contextlib.asynccontextmanager
@@ -171,3 +170,136 @@ class TestSearchStatementsRunWithoutJit:
         assert "set_config('statement_timeout', %s, true)" in statement
         assert params == (f"{int(search_queries.SEARCH_STATEMENT_TIMEOUT_SECONDS * 1000)}ms",)
         pool.connection.return_value.transaction.assert_called_once_with()
+
+
+def _slow_pool(max_connections: int = 8) -> tuple[MagicMock, dict[str, Any]]:
+    """A pool whose statements are counted while they run, by priority."""
+    from api.queries.search_queries import _background
+
+    seen: dict[str, Any] = {"background": 0, "user": 0, "max_background": 0, "max_user": 0, "overlap": 0}
+    pool, _ = _fake_pool()
+    pool.max_connections = max_connections
+    conn = pool.connection.return_value
+
+    @contextlib.asynccontextmanager
+    async def connection() -> Any:
+        kind = "background" if _background.get() else "user"
+        seen[kind] += 1
+        seen[f"max_{kind}"] = max(seen[f"max_{kind}"], seen[kind])
+        if seen["background"] and seen["user"]:
+            seen["overlap"] += 1
+        try:
+            yield conn
+        finally:
+            seen[kind] -= 1
+
+    pool.connection = MagicMock(side_effect=connection)
+    return pool, seen
+
+
+async def _statements(pool: Any, count: int, seconds: float) -> None:
+    async def one() -> None:
+        async with _search_cursor(pool):
+            await asyncio.sleep(seconds)
+
+    await asyncio.gather(*[one() for _ in range(count)])
+
+
+class TestPrewarmYieldsToUserSearches:
+    @pytest.mark.asyncio
+    async def test_a_background_search_runs_one_statement_at_a_time(self) -> None:
+        from api.queries.search_queries import background_searches
+
+        pool, seen = _slow_pool()
+        with background_searches():
+            await _statements(pool, SEARCH_STATEMENTS_PER_SEARCH, 0.01)
+        assert seen["max_background"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_user_search_gets_every_slot_but_the_one_a_running_background_statement_holds(self) -> None:
+        from api.queries.search_queries import background_searches
+
+        pool, seen = _slow_pool()
+
+        async def prewarm() -> None:
+            with background_searches():
+                await _statements(pool, SEARCH_STATEMENTS_PER_SEARCH, 0.05)
+
+        background = asyncio.create_task(prewarm())
+        await asyncio.sleep(0.01)  # one background statement is running
+        assert seen["background"] == 1
+        await _statements(pool, SEARCH_STATEMENTS_PER_SEARCH - 1, 0.05)  # a master search's width and more
+        # Five slots were free: all five user statements ran at once, beside the background one, without waiting for it.
+        assert seen["max_user"] == SEARCH_STATEMENTS_PER_SEARCH - 1
+        assert seen["overlap"] > 0
+        await background
+
+    @pytest.mark.asyncio
+    async def test_no_background_statement_starts_while_a_user_search_runs(self) -> None:
+        from api.queries.search_queries import background_searches
+
+        pool, seen = _slow_pool()
+        user = asyncio.create_task(_statements(pool, 3, 0.05))
+        await asyncio.sleep(0)  # the user statements hold their slots
+
+        with background_searches():
+            await _statements(pool, 2, 0.01)
+
+        assert user.done()
+        assert seen["overlap"] == 0
+
+    @pytest.mark.asyncio
+    async def test_a_background_statement_hands_back_a_slot_a_user_arrived_for(self) -> None:
+        from api.queries.search_queries import _background_slot, _slot_state
+
+        pool, _ = _slow_pool(max_connections=3)  # one search slot
+        state = _slot_state(pool)
+        await state.slots.acquire()  # something holds the only slot; no user is waiting yet
+        entered = asyncio.Event()
+
+        async def background() -> None:
+            async with _background_slot(state):
+                entered.set()
+
+        task = asyncio.create_task(background())
+        await asyncio.sleep(0)  # it is queued on the slot
+        state.user_enters()  # a user shows up
+        state.slots.release()  # the slot frees: the background statement takes it, sees the user, gives it back
+        await asyncio.sleep(0.01)
+        assert not entered.is_set()
+        assert not state.slots.locked()  # handed back for the user
+        state.user_leaves()
+        await asyncio.wait_for(task, 1.0)
+        assert entered.is_set()
+
+    @pytest.mark.asyncio
+    async def test_the_startup_prewarm_searches_at_background_priority(self) -> None:
+        import api.api as api_module
+        from api.queries.search_queries import _background
+
+        priorities: list[bool] = []
+
+        async def search(*args: Any, **kwargs: Any) -> dict[str, Any]:  # noqa: ARG001
+            priorities.append(_background.get())
+            if len(priorities) == 1:
+                raise RuntimeError("one term fails; the rest still run")
+            return {}
+
+        with (
+            patch.object(api_module, "_pool", MagicMock()),
+            patch.object(api_module, "_valkey", MagicMock()),
+            patch.object(api_module, "execute_search", search),
+        ):
+            await api_module._prewarm_search_cache()
+
+        assert priorities == [True] * len(api_module._PREWARM_SEARCH_TERMS)
+        assert _background.get() is False
+
+    @pytest.mark.asyncio
+    async def test_the_prewarm_does_nothing_before_the_stores_are_ready(self) -> None:
+        import api.api as api_module
+
+        search = AsyncMock()
+        with patch.object(api_module, "_pool", None), patch.object(api_module, "execute_search", search):
+            await api_module._prewarm_search_cache()
+        assert search.await_count == 0

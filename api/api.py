@@ -83,7 +83,7 @@ from api.limiter import limiter
 from api.neo4j_timeouts import install_neo4j_timeout_handler
 from api.notifications import LogNotificationChannel, ResendNotificationChannel
 from api.queries.rarity_queries import run_rarity_membership_refresh
-from api.queries.search_queries import ALL_TYPES, execute_search, search_pool_floor
+from api.queries.search_queries import ALL_TYPES, background_searches, execute_search, search_pool_floor
 from api.reattach_trigger import run_trigger_loop
 from api.services.discogs import (
     DISCOGS_AUTHORIZE_URL,
@@ -200,18 +200,23 @@ async def _get_current_user(
 _PREWARM_SEARCH_TERMS = ["Rock", "Electronic", "Jazz", "Pop", "Punk", "Hip Hop", "Trance", "Blues", "Country", "Metal"]
 
 
-async def _prewarm_search_cache() -> None:  # pragma: no cover
+async def _prewarm_search_cache() -> None:
     """Pre-warm Valkey search cache for common high-cardinality terms.
 
     Runs as a background task after startup. Each term is searched with
     default parameters, populating the Valkey cache (1h TTL). Errors are
     logged and swallowed — pre-warming is best-effort.
+
+    The searches run at background priority (``background_searches``): one statement at a time, and
+    only while no user search wants a slot. Right after a restart on lux they took all six search slots
+    and the first user all-types search waited behind them (gm-catalog-api-0n70); finishing later is fine.
     """
     if not _pool or not _valkey:
         return
     for term in _PREWARM_SEARCH_TERMS:
         try:
-            await execute_search(_pool, _valkey, term, ALL_TYPES, [], None, None, 20, 0)
+            with background_searches():
+                await execute_search(_pool, _valkey, term, ALL_TYPES, [], None, None, 20, 0)
             logger.debug("🔥 Search cache pre-warmed", term=term)
         except Exception:
             logger.debug("⚠️ Search pre-warm failed", term=term)
