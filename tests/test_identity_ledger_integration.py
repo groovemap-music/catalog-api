@@ -427,20 +427,12 @@ async def test_works_list_from_the_views_equals_the_live_statement(
     assert precomputed == await _live(catalog, monkeypatch, "/api/admin/identity/ledger/works", params)
 
 
-# database-schema's work-level events (gm-database-schema-xq8r), as that bead defines them: one row
-# per distinct (event, work_id, at) over the edition events and their editions' parents, `event`
-# being 'any' or one event type, with the work's neighbouring instants of the same filter.
-# TODO(gm-database-schema-xq8r): once the pinned schema creates and refreshes this table, the
-# fixture below finds it and uses it as the refresh left it; then drop the DDL and the fill.
-_WORK_EVENTS_DDL = (
-    "CREATE TABLE identity_ledger_work_events ("
-    " event text NOT NULL, work_id uuid NOT NULL, at timestamptz NOT NULL, prev_at timestamptz, next_at timestamptz)",
-    "CREATE UNIQUE INDEX idx_identity_ledger_work_events_key ON identity_ledger_work_events (work_id, event, at)",
-    "CREATE INDEX idx_identity_ledger_work_events_window ON identity_ledger_work_events (event, at) INCLUDE (prev_at)",
-    "CREATE INDEX idx_identity_ledger_work_events_page ON identity_ledger_work_events (event, at DESC, work_id) INCLUDE (next_at)",
-)
-_WORK_EVENTS_FILL = """
-INSERT INTO identity_ledger_work_events (event, work_id, at, prev_at, next_at)
+# database-schema's work-level events (gm-database-schema-xq8r, database-schema v0.15.0), which
+# `identity_ledger_refresh()` fills: one row per distinct (event, work_id, at) over the edition
+# events and their editions' parents, `event` being 'any' or one event type, with the work's
+# neighbouring instants of the same filter. `_WORKS_WINDOWED` relies on exactly these rows, so
+# `test_the_refresh_fills_the_work_events_as_the_windowed_read_expects` holds the refresh to them.
+_WORK_EVENTS_EXPECTED = """
 SELECT event, work_id, at,
        lag(at) OVER (PARTITION BY event, work_id ORDER BY at),
        lead(at) OVER (PARTITION BY event, work_id ORDER BY at)
@@ -453,26 +445,24 @@ FROM (
     FROM identity_ledger_edition_events AS edition_event
     JOIN identity_ledger_edition_parents AS parent ON parent.edition_id = edition_event.edition_id
 ) AS work_instant
+ORDER BY event, work_id, at
 """
 
 
 @pytest_asyncio.fixture
-async def work_events(
-    catalog: httpx.AsyncClient, postgres_pool: AsyncPostgreSQLPool, monkeypatch: pytest.MonkeyPatch
-) -> AsyncIterator[httpx.AsyncClient]:
-    """`catalog` with the work-level events filled, so a window reads `_WORKS_WINDOWED`."""
-    [(present,)] = await _query(postgres_pool, "SELECT to_regclass('public.identity_ledger_work_events') IS NOT NULL")
-    if not present:
-        for statement in _WORK_EVENTS_DDL:
-            await _execute(postgres_pool, statement)
-        await _execute(postgres_pool, _WORK_EVENTS_FILL)
+async def work_events(catalog: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch) -> httpx.AsyncClient:
+    """`catalog` as the refresh left it, so a window reads `_WORKS_WINDOWED` from the filled table."""
     # A process that has not looked for the table yet, rather than one that found it absent.
     monkeypatch.setattr(identity_ledger_queries, "_work_events", identity_ledger_queries._WorkEventsReadiness())
-    try:
-        yield catalog
-    finally:
-        if not present:
-            await _execute(postgres_pool, "DROP TABLE identity_ledger_work_events")
+    return catalog
+
+
+@pytest.mark.usefixtures("work_events")
+async def test_the_refresh_fills_the_work_events_as_the_windowed_read_expects(postgres_pool: AsyncPostgreSQLPool) -> None:
+    stored = await _query(postgres_pool, "SELECT event, work_id, at, prev_at, next_at FROM identity_ledger_work_events ORDER BY event, work_id, at")
+
+    assert stored
+    assert stored == await _query(postgres_pool, _WORK_EVENTS_EXPECTED)
 
 
 def _instant(value: str | None) -> datetime | None:

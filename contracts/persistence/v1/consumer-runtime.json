@@ -1,6 +1,6 @@
 {
   "consumer": "catalog-api",
-  "producer_compatibility_sha256": "46347a902a4af72cc5bd44c150b11994e0921c362693db91cd16340cb27e0863",
+  "producer_compatibility_sha256": "44fc0c0c848e8d8e642d5b1ada8fc7fe01a2a7385bc4b4a99c63839b11199f2d",
   "application_runtime": {
     "package": "groovemap-runtime",
     "tested_version": "0.1.0",

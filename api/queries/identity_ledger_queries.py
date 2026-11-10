@@ -211,9 +211,10 @@ _WORKS_WINDOWED_RAW = _WORKS.replace("windowed AS (", "windowed AS MATERIALIZED 
 # `prev_at` and `next_at` the work's neighbouring event instants of the same filter (NULL at either
 # end). That shape answers any [since, until) exactly, without grouping the window's events per work:
 #   - the total counts each work once, at its first event in the window: `prev_at` before `since`
-#     (an index-only count on (event, at) INCLUDE (prev_at));
+#     (an index-only count over the window's range of idx_identity_ledger_work_events_page,
+#     (event, at DESC, work_id) INCLUDE (prev_at, next_at));
 #   - the page is each work's last event in the window, `next_at` at or after `until`, walked in
-#     page order on (event, at DESC, work_id) INCLUDE (next_at), so it stops after LIMIT + OFFSET;
+#     page order on that same index, so it stops after LIMIT + OFFSET;
 #   - evented and repaired editions and the first event are counted live for the page's works only,
 #     from the editions' parents and their events in the window, as `_WORKS_WINDOWED_RAW` counts them.
 # An open side is bound to the earliest or latest instant PostgreSQL holds (`_window_bounds`), which
