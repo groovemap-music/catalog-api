@@ -2,6 +2,63 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v0.12.0 (2026-11-09)
+
+### Release notes
+
+Three additions, cut on the release branch `release/v0.11.x-search` (v0.11.4 plus gm-catalog-api-axbs, gm-catalog-api-vflb and gm-catalog-api-3uvj only), so it still carries none of the unreleased prototype or Missing/copy serving source on main.
+
+- **Dead-letter replay** (`POST /api/admin/dlq/replay/{queue}?limit=N`, 1..5000): the same admin auth and queue allow-list as purge. Each message is fetched unacked, republished to its work queue with a publisher confirm and `mandatory`, and acked only after the confirm; an unroutable return or a failed confirm leaves it in the DLQ and stops the replay; `x-*` headers are dropped. It returns `{queue, replayed, remaining}` and writes a `dlq.replay` audit row. On a partial failure the 502 body carries `{detail, replayed, remaining}`, where `remaining` is null when the depth is unknown and 0 when the queue is empty. Published in the operations-console v1 contract (`admin_dlq_replay`, with `error_fields`).
+- **Label longevity on label details** (`GET /api/node/{id}?type=label`): `is_placeholder`, `first_year`, `last_year`, `years_active`, `total_releases` and `peak_decade`, computed by label id and matching `/api/insights/label-longevity`. They are read from the fields discogs-graph-enricher v0.8.0 stores on Label nodes when the newest ExtractionCompletion has `stats_version >= 3`, and computed live otherwise. Published in the graph-explorer v1 contract (`node_label`).
+
+No schema change; runs on database-schema 0.12.0 or later, like v0.11.2.
+
+### Feat
+
+- **label**: add is_placeholder and longevity fields to label details
+- **admin**: add POST /api/admin/dlq/replay/{queue}
+
+### Fix
+
+- **admin**: return partial DLQ replay count as fields on 502
+
+## v0.11.4 (2026-11-09)
+
+### Release notes
+
+Genre and style trends read the per-year release series that discogs-graph-enricher v0.7.0 stores on each Genre and Style node (`release_years`, `release_year_counts`) instead of traversing every release on request: one point read, about 9 database hits instead of about 20.7M for Rock, with results equal to the live traversal row for row (checked for Rock and Trance on lux). The stored series is used only when the newest ExtractionCompletion has `maintained_at` and `stats_version >= 2`; otherwise, or when a node has no series, the unchanged live traversal answers, so it is safe on an older enricher. Cut on the release branch `release/v0.11.x-search` (gm-catalog-api-2hrn only), so it still carries none of the unreleased prototype or Missing/copy source on main.
+
+### Perf
+
+- **trends**: read the stored genre/style release series, live traversal as fallback
+
+## v0.11.3 (2026-11-09)
+
+### Release notes
+
+A search restricted to types that exclude releases (for example `types=master`) no longer computes the genre and media facets, or the releases half of the decade facet, over every matching release. Those queries ran concurrently and set a ~0.6 s floor on master search (584 ms for "love" on lux after v0.11.2) although the master query and count take ~40 ms and ~15 ms. For such searches `facets.genre` and `facets.media` are now empty, and the decade facet counts only the requested types (it previously also counted releases the search did not return). Mixed-type searches, results, totals and pagination are unchanged. Same requirement as v0.11.2: database-schema 0.12.0 or later. Cut on the release branch `release/v0.11.x-search` (gm-catalog-api-zi2r only), so it still carries none of the unreleased prototype or Missing/copy source on main.
+
+### Perf
+
+- **search**: skip release facets for searches that exclude releases
+
+## v0.11.2 (2026-11-09)
+
+### Release notes
+
+Search reads the side tables database-schema v0.12.0 maintains instead of the full documents. The genre, decade and media facets and every filtered release branch (year, genre, media, country) read `public.release_search`, and master search, its count, its year filter and the masters half of the decade facet read `public.master_search`. The release facets now count every match instead of the first 10,000 (exact counts; about 0.5-0.8 s per facet for the most common terms on lux). Results are otherwise unchanged. On lux: the "love" genre facet went from 365 ms to 112 ms capped (580 ms uncapped and exact), decade 686 to 209 ms, media 192 to 103 ms, the "love" + Jazz + 1970 + vinyl filtered results 10.4 s to 0.67 s, and ranked master search 140 to 39 ms. Requires database-schema 0.12.0 with `release_search_drift()` and `master_search_drift()` both `(0,0,0)`; on an older schema these queries fail. Cut from v0.11.1 on the release branch `release/v0.11.x-search` with only the search commits (gm-catalog-api-2jka, gm-catalog-api-4asm), so it carries none of the unreleased prototype or Missing/copy serving source on main.
+
+### Refactor
+
+- **search**: split decade facet into masters and releases fragments
+
+### Perf
+
+- **search**: count every match in the release facets
+- **search**: serve facets and filtered release branches from release_search
+- **search**: read the decade facet's masters half from public.master_search
+- **search**: rank master matches from public.master_search
+
 ## v0.11.1 (2026-11-08)
 
 ### Release notes
