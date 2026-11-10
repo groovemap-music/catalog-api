@@ -46,6 +46,16 @@
     "nlq_status": {"method": "GET", "path": "/api/nlq/status"},
     "nlq_suggestions": {"method": "GET", "path": "/api/nlq/suggestions"},
     "node": {"method": "GET", "path": "/api/node/{node_id}"},
+    "node_label": {
+      "method": "GET",
+      "path": "/api/node/{node_id}",
+      "parameters": ["type"],
+      "query": {"type": "label"},
+      "response_fields": [
+        "id", "name", "release_count", "is_placeholder",
+        "first_year", "last_year", "years_active", "total_releases", "peak_decade"
+      ]
+    },
     "oauth_authorize": {"method": "GET", "path": "/api/oauth/authorize/discogs"},
     "oauth_revoke": {"method": "DELETE", "path": "/api/oauth/revoke/discogs"},
     "oauth_status": {"method": "GET", "path": "/api/oauth/status/discogs"},

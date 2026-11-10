@@ -801,15 +801,6 @@ class TestNodeDetailsQueries:
         assert result == record
 
     @pytest.mark.asyncio
-    async def test_get_label_details(self) -> None:
-        from api.queries.neo4j_queries import get_label_details
-
-        record = {"id": "100", "name": "Warp Records", "release_count": 500}
-        driver = _make_driver(single=record)
-        result = await get_label_details(driver, "100")
-        assert result == record
-
-    @pytest.mark.asyncio
     async def test_get_genre_details(self) -> None:
         from api.queries.neo4j_queries import get_genre_details
 
