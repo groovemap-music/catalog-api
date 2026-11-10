@@ -892,7 +892,26 @@ class TestDlqReplay:
         with patch("api.routers.admin.AsyncResilientRabbitMQ", return_value=rabbitmq):
             resp = test_client.post(f"/api/admin/dlq/replay/{_DLQ}", headers=_admin_auth_headers())
         assert resp.status_code == 502
+        assert resp.json()["replayed"] == 0
+        assert resp.json()["remaining"] is None  # unknown, not an empty DLQ
         rabbitmq.close.assert_awaited_once()
+
+    def test_partial_failure_502_carries_replayed_and_remaining(self, test_client: TestClient) -> None:
+        broker = _FakeBroker(3, fail_publish_at=1)
+        resp = self._post(test_client, broker)
+        assert resp.status_code == 502
+        body = resp.json()
+        assert set(body) == {"detail", "replayed", "remaining"}
+        assert body["replayed"] == 1
+        assert body["remaining"] == 2
+        assert body["detail"] == "RabbitMQ unreachable or replay failed after 1 replayed; unreplayed messages remain in the DLQ"
+
+    def test_partial_failure_502_counts_only_what_is_left(self, test_client: TestClient) -> None:
+        broker = _FakeBroker(5, fail_publish_at=2)
+        resp = self._post(test_client, broker, "?limit=4")
+        assert resp.status_code == 502
+        assert resp.json()["replayed"] == 2
+        assert resp.json()["remaining"] == len(broker.dlq) == 3
 
 
 class TestRabbitmqUrl:

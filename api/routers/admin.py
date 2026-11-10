@@ -1003,7 +1003,7 @@ async def replay_dlq(
 
     work_queue = queue.removesuffix(_DLQ_SUFFIX)
     progress = [0]
-    remaining = 0
+    remaining: int | None = None  # None until the DLQ depth is read; a failure before that leaves it unknown
     failed = False
     missing_work_queue = False
     rabbitmq = AsyncResilientRabbitMQ(_config.rabbitmq_url, max_retries=1)
@@ -1022,7 +1022,7 @@ async def replay_dlq(
                 finally:
                     # a failed replay left its message in the DLQ; count what is still there
                     # aio-pika's robust channel caches queues, so re-issue the passive declare for a live count
-                    remaining = 0 if channel.is_closed else (await source.declare()).message_count or 0
+                    remaining = None if channel.is_closed else (await source.declare()).message_count or 0
     except Exception:  # the shared client wraps connect failures in a bare Exception
         failed = True
     finally:
@@ -1041,10 +1041,15 @@ async def replay_dlq(
             target=queue,
             details={"replayed_count": replayed, "remaining": remaining, "limit": limit, "failed": failed},
         )
-    if failed:
-        raise HTTPException(
+    if failed or remaining is None:  # a replay that finished without a readable depth is also unknown, not empty
+        # the partial count rides in the body so the console reads it without parsing the detail text
+        return JSONResponse(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"RabbitMQ unreachable or replay failed after {replayed} replayed; unreplayed messages remain in the DLQ",
+            content={
+                "detail": f"RabbitMQ unreachable or replay failed after {replayed} replayed; unreplayed messages remain in the DLQ",
+                "replayed": replayed,
+                "remaining": remaining,  # null: the DLQ depth was not read, so it is unknown rather than empty
+            },
         )
 
     return JSONResponse(content=DlqReplayResponse(queue=queue, replayed=replayed, remaining=remaining).model_dump())
