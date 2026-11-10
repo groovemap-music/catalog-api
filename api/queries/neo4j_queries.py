@@ -308,22 +308,56 @@ async def explore_genre(driver: AsyncResilientNeo4jDriver, name: str) -> dict[st
     }
 
 
-async def explore_label(driver: AsyncResilientNeo4jDriver, name: str) -> dict[str, Any] | None:
+class AmbiguousLabelNameError(Exception):
+    """A label name matched more than one Label node; the caller must choose one by id."""
+
+    def __init__(self, name: str, candidates: list[dict[str, Any]]) -> None:
+        super().__init__(f"Label name '{name}' matches {len(candidates)} labels")
+        self.name = name
+        self.candidates = candidates
+
+
+async def resolve_label_id(driver: AsyncResilientNeo4jDriver, name: str) -> str | None:
+    """The id of the one label called ``name``; ``None`` when there is none.
+
+    Raises :class:`AmbiguousLabelNameError` when several labels share the name (Discogs has many), so a name
+    never merges their releases, counts or expansion.
+    """
+    matches = await run_query(driver, "MATCH (l:Label {name: $name}) RETURN l.id AS id, l.name AS name ORDER BY l.id", name=name)
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise AmbiguousLabelNameError(name, matches)
+    return str(matches[0]["id"])
+
+
+async def _label_id(driver: AsyncResilientNeo4jDriver, name: str, label_id: str | None) -> str | None:
+    """``label_id`` when the caller has it, else the one label ``name`` resolves to."""
+    return label_id if label_id is not None else await resolve_label_id(driver, name)
+
+
+async def explore_label(driver: AsyncResilientNeo4jDriver, name: str, label_id: str | None = None) -> dict[str, Any] | None:
     """Get label center node with pre-computed category counts.
 
     Reads release_count, artist_count, genre_count directly from Label
     node properties (set during graphinator post-import).  This replaces
     a 1.2M DB-hit traversal with a single property read (~3 DB hits).
     Falls back to live traversal if pre-computed properties are absent.
+
+    The label is identified by ``label_id`` when given, else by ``name`` when exactly one label has it
+    (:class:`AmbiguousLabelNameError` when several do).
     """
+    label_id = await _label_id(driver, name, label_id)
+    if label_id is None:
+        return None
     cypher = """
-    MATCH (l:Label {name: $name})
+    MATCH (l:Label {id: $id})
     RETURN l.id AS id, l.name AS name,
            l.release_count AS release_count,
            l.artist_count AS artist_count,
            l.genre_count AS genre_count
     """
-    result = await run_single(driver, cypher, name=name)
+    result = await run_single(driver, cypher, id=label_id)
     if not result:
         return None
 
@@ -339,7 +373,7 @@ async def explore_label(driver: AsyncResilientNeo4jDriver, name: str) -> dict[st
 
     # Fallback: live traversal (for labels without pre-computed stats)
     fallback_cypher = """
-    MATCH (l:Label {name: $name})
+    MATCH (l:Label {id: $id})
     CALL {
         WITH l
         MATCH (l)<-[:ON]-(r:Release)
@@ -352,7 +386,7 @@ async def explore_label(driver: AsyncResilientNeo4jDriver, name: str) -> dict[st
     RETURN l.id AS id, l.name AS name,
            release_count, artist_count, genre_count
     """
-    return await run_single(driver, fallback_cypher, name=name)
+    return await run_single(driver, fallback_cypher, id=label_id)
 
 
 async def explore_style(driver: AsyncResilientNeo4jDriver, name: str) -> dict[str, Any] | None:
@@ -410,8 +444,9 @@ def _query_params(
     before_year: int | None = None,
     limit: int | None = None,
     offset: int | None = None,
+    key: str = "name",
 ) -> dict[str, Any]:
-    params: dict[str, Any] = {"name": name}
+    params: dict[str, Any] = {key: name}
     if limit is not None:
         params["limit"] = limit
     if offset is not None:
@@ -425,6 +460,7 @@ def _query_params(
 class _AggregateExpandSpec:
     match_clause: str
     return_clause: str
+    key: str = "name"  # the query parameter the match clause reads: "id" for a label, whose id is unique
 
 
 async def _expand_aggregate(
@@ -443,7 +479,7 @@ async def _expand_aggregate(
     SKIP $offset
     LIMIT $limit
     """
-    return await run_query(driver, cypher, **_query_params(name, before_year=before_year, limit=limit, offset=offset))
+    return await run_query(driver, cypher, **_query_params(name, before_year=before_year, limit=limit, offset=offset, key=spec.key))
 
 
 _ARTIST_LABELS_EXPAND = _AggregateExpandSpec(
@@ -463,12 +499,14 @@ _GENRE_STYLES_EXPAND = _AggregateExpandSpec(
     "s.name AS id, s.name AS name, 'style' AS type, count(DISTINCT r) AS release_count",
 )
 _LABEL_ARTISTS_EXPAND = _AggregateExpandSpec(
-    "(r:Release)-[:ON]->(l:Label {name: $name}), (r)-[:BY]->(a:Artist)",
+    "(r:Release)-[:ON]->(l:Label {id: $id}), (r)-[:BY]->(a:Artist)",
     "a.id AS id, a.name AS name, 'artist' AS type, count(DISTINCT r) AS release_count",
+    key="id",
 )
 _LABEL_GENRES_EXPAND = _AggregateExpandSpec(
-    "(r:Release)-[:ON]->(l:Label {name: $name}), (r)-[:IS]->(g:Genre)",
+    "(r:Release)-[:ON]->(l:Label {id: $id}), (r)-[:IS]->(g:Genre)",
     "g.name AS id, g.name AS name, 'genre' AS type, count(DISTINCT r) AS release_count",
+    key="id",
 )
 _STYLE_ARTISTS_EXPAND = _AggregateExpandSpec(
     "(r:Release)-[:IS]->(s:Style {name: $name}), (r)-[:BY]->(a:Artist)",
@@ -485,7 +523,7 @@ _STYLE_GENRES_EXPAND = _AggregateExpandSpec(
 
 
 async def _expand_releases(
-    driver: AsyncResilientNeo4jDriver, match_clause: str, name: str, limit: int, offset: int, *, before_year: int | None = None
+    driver: AsyncResilientNeo4jDriver, match_clause: str, name: str, limit: int, offset: int, *, before_year: int | None = None, key: str = "name"
 ) -> list[dict[str, Any]]:
     """Get paginated releases matching a MATCH clause (shared by artist/genre/label/style)."""
     # With before_year the filter keeps only 0 < year <= before_year, so no year is null and
@@ -501,7 +539,7 @@ async def _expand_releases(
     SKIP $offset
     LIMIT $limit
     """
-    return await run_query(driver, cypher, **_query_params(name, before_year=before_year, limit=limit, offset=offset))
+    return await run_query(driver, cypher, **_query_params(name, before_year=before_year, limit=limit, offset=offset, key=key))
 
 
 async def expand_artist_releases(
@@ -578,24 +616,51 @@ async def expand_genre_styles(
 
 
 async def expand_label_releases(
-    driver: AsyncResilientNeo4jDriver, label_name: str, limit: int = 50, offset: int = 0, *, before_year: int | None = None
+    driver: AsyncResilientNeo4jDriver,
+    label_name: str,
+    limit: int = 50,
+    offset: int = 0,
+    *,
+    before_year: int | None = None,
+    label_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Get releases on a label."""
-    return await _expand_releases(driver, "(r:Release)-[:ON]->(l:Label {name: $name})", label_name, limit, offset, before_year=before_year)
+    """Get releases on ONE label: ``label_id`` when given, else the one label called ``label_name``."""
+    label_id = await _label_id(driver, label_name, label_id)
+    if label_id is None:
+        return []
+    return await _expand_releases(driver, "(r:Release)-[:ON]->(l:Label {id: $id})", label_id, limit, offset, before_year=before_year, key="id")
 
 
 async def expand_label_artists(
-    driver: AsyncResilientNeo4jDriver, label_name: str, limit: int = 50, offset: int = 0, *, before_year: int | None = None
+    driver: AsyncResilientNeo4jDriver,
+    label_name: str,
+    limit: int = 50,
+    offset: int = 0,
+    *,
+    before_year: int | None = None,
+    label_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Get artists on a label."""
-    return await _expand_aggregate(driver, _LABEL_ARTISTS_EXPAND, label_name, limit, offset, before_year=before_year)
+    """Get artists on ONE label (by ``label_id``, else the one label called ``label_name``)."""
+    label_id = await _label_id(driver, label_name, label_id)
+    if label_id is None:
+        return []
+    return await _expand_aggregate(driver, _LABEL_ARTISTS_EXPAND, label_id, limit, offset, before_year=before_year)
 
 
 async def expand_label_genres(
-    driver: AsyncResilientNeo4jDriver, label_name: str, limit: int = 50, offset: int = 0, *, before_year: int | None = None
+    driver: AsyncResilientNeo4jDriver,
+    label_name: str,
+    limit: int = 50,
+    offset: int = 0,
+    *,
+    before_year: int | None = None,
+    label_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Get genres associated with a label via releases."""
-    return await _expand_aggregate(driver, _LABEL_GENRES_EXPAND, label_name, limit, offset, before_year=before_year)
+    """Get genres associated with ONE label via releases (by ``label_id``, else the one label called ``label_name``)."""
+    label_id = await _label_id(driver, label_name, label_id)
+    if label_id is None:
+        return []
+    return await _expand_aggregate(driver, _LABEL_GENRES_EXPAND, label_id, limit, offset, before_year=before_year)
 
 
 async def expand_style_releases(
@@ -634,6 +699,7 @@ class _CountSpec:
     match_clause: str
     target: str
     compact: bool = False
+    key: str = "name"  # the query parameter the match clause reads: "id" for a label, whose id is unique
     # ("Genre", "artist_count"): the node label and the enricher-written property that holds this count.
     stored: tuple[str, str] | None = None
 
@@ -647,7 +713,8 @@ async def _count(
 ) -> int:
     if before_year is None and spec.stored is not None:
         label, prop = spec.stored
-        row = await run_single(driver, f"MATCH (n:{label} {{name: $name}}) RETURN n.{prop} AS total", name=name)
+        params: dict[str, Any] = {spec.key: name}
+        row = await run_single(driver, f"MATCH (n:{label} {{{spec.key}: ${spec.key}}}) RETURN n.{prop} AS total", **params)
         if row is not None and row["total"] is not None:
             return int(row["total"])
         # Node absent or the property not written yet: count live, as before.
@@ -659,7 +726,7 @@ async def _count(
     MATCH {spec.match_clause}{year_filter}
     RETURN count(DISTINCT {spec.target}) AS total
     """
-    return await run_count(driver, cypher, **_query_params(name, before_year=before_year))
+    return await run_count(driver, cypher, **_query_params(name, before_year=before_year, key=spec.key))
 
 
 _ARTIST_RELEASES_COUNT = _CountSpec("(r:Release)-[:BY]->(a:Artist {name: $name})", "r", compact=True)
@@ -668,9 +735,9 @@ _GENRE_RELEASES_COUNT = _CountSpec("(r:Release)-[:IS]->(g:Genre {name: $name})",
 _GENRE_ARTISTS_COUNT = _CountSpec("(r:Release)-[:IS]->(g:Genre {name: $name}), (r)-[:BY]->(a:Artist)", "a", stored=("Genre", "artist_count"))
 _GENRE_LABELS_COUNT = _CountSpec("(r:Release)-[:IS]->(g:Genre {name: $name}), (r)-[:ON]->(l:Label)", "l", stored=("Genre", "label_count"))
 _GENRE_STYLES_COUNT = _CountSpec("(r:Release)-[:IS]->(g:Genre {name: $name}), (r)-[:IS]->(s:Style)", "s", stored=("Genre", "style_count"))
-_LABEL_RELEASES_COUNT = _CountSpec("(r:Release)-[:ON]->(l:Label {name: $name})", "r", compact=True, stored=("Label", "release_count"))
-_LABEL_ARTISTS_COUNT = _CountSpec("(r:Release)-[:ON]->(l:Label {name: $name}), (r)-[:BY]->(a:Artist)", "a", stored=("Label", "artist_count"))
-_LABEL_GENRES_COUNT = _CountSpec("(r:Release)-[:ON]->(l:Label {name: $name}), (r)-[:IS]->(g:Genre)", "g", stored=("Label", "genre_count"))
+_LABEL_RELEASES_COUNT = _CountSpec("(r:Release)-[:ON]->(l:Label {id: $id})", "r", compact=True, key="id", stored=("Label", "release_count"))
+_LABEL_ARTISTS_COUNT = _CountSpec("(r:Release)-[:ON]->(l:Label {id: $id}), (r)-[:BY]->(a:Artist)", "a", key="id", stored=("Label", "artist_count"))
+_LABEL_GENRES_COUNT = _CountSpec("(r:Release)-[:ON]->(l:Label {id: $id}), (r)-[:IS]->(g:Genre)", "g", key="id", stored=("Label", "genre_count"))
 _STYLE_RELEASES_COUNT = _CountSpec("(r:Release)-[:IS]->(s:Style {name: $name})", "r", compact=True, stored=("Style", "release_count"))
 _STYLE_ARTISTS_COUNT = _CountSpec("(r:Release)-[:IS]->(s:Style {name: $name}), (r)-[:BY]->(a:Artist)", "a", stored=("Style", "artist_count"))
 _STYLE_LABELS_COUNT = _CountSpec("(r:Release)-[:IS]->(s:Style {name: $name}), (r)-[:ON]->(l:Label)", "l", stored=("Style", "label_count"))
@@ -731,19 +798,34 @@ async def count_genre_styles(driver: AsyncResilientNeo4jDriver, genre_name: str,
     return await _count(driver, _GENRE_STYLES_COUNT, genre_name, before_year=before_year)
 
 
-async def count_label_releases(driver: AsyncResilientNeo4jDriver, label_name: str, *, before_year: int | None = None) -> int:
-    """Count total releases on a label."""
-    return await _count(driver, _LABEL_RELEASES_COUNT, label_name, before_year=before_year)
+async def count_label_releases(
+    driver: AsyncResilientNeo4jDriver, label_name: str, *, before_year: int | None = None, label_id: str | None = None
+) -> int:
+    """Count total releases on ONE label (by ``label_id``, else the one label called ``label_name``)."""
+    label_id = await _label_id(driver, label_name, label_id)
+    if label_id is None:
+        return 0
+    return await _count(driver, _LABEL_RELEASES_COUNT, label_id, before_year=before_year)
 
 
-async def count_label_artists(driver: AsyncResilientNeo4jDriver, label_name: str, *, before_year: int | None = None) -> int:
-    """Count total distinct artists on a label."""
-    return await _count(driver, _LABEL_ARTISTS_COUNT, label_name, before_year=before_year)
+async def count_label_artists(
+    driver: AsyncResilientNeo4jDriver, label_name: str, *, before_year: int | None = None, label_id: str | None = None
+) -> int:
+    """Count total distinct artists on ONE label (by ``label_id``, else the one label called ``label_name``)."""
+    label_id = await _label_id(driver, label_name, label_id)
+    if label_id is None:
+        return 0
+    return await _count(driver, _LABEL_ARTISTS_COUNT, label_id, before_year=before_year)
 
 
-async def count_label_genres(driver: AsyncResilientNeo4jDriver, label_name: str, *, before_year: int | None = None) -> int:
-    """Count total distinct genres associated with a label."""
-    return await _count(driver, _LABEL_GENRES_COUNT, label_name, before_year=before_year)
+async def count_label_genres(
+    driver: AsyncResilientNeo4jDriver, label_name: str, *, before_year: int | None = None, label_id: str | None = None
+) -> int:
+    """Count total distinct genres associated with ONE label (by ``label_id``, else the one label called ``label_name``)."""
+    label_id = await _label_id(driver, label_name, label_id)
+    if label_id is None:
+        return 0
+    return await _count(driver, _LABEL_GENRES_COUNT, label_id, before_year=before_year)
 
 
 async def count_style_releases(driver: AsyncResilientNeo4jDriver, style_name: str, *, before_year: int | None = None) -> int:
@@ -1004,15 +1086,6 @@ async def _trends_genre_live(driver: AsyncResilientNeo4jDriver, name: str) -> li
     return await run_query(driver, cypher, name=name)
 
 
-class AmbiguousLabelNameError(Exception):
-    """A label name matched more than one Label node; the caller must choose one by id."""
-
-    def __init__(self, name: str, candidates: list[dict[str, Any]]) -> None:
-        super().__init__(f"Label name '{name}' matches {len(candidates)} labels")
-        self.name = name
-        self.candidates = candidates
-
-
 # One label's releases grouped by year, matched by label id so labels sharing a name never merge.
 _TRENDS_LABEL_CYPHER = """
 MATCH (l:Label {id: $id})
@@ -1033,13 +1106,9 @@ async def trends_label(driver: AsyncResilientNeo4jDriver, name: str, label_id: s
     that matches exactly one label uses it, no match returns ``[]``, and several matches raise
     :class:`AmbiguousLabelNameError` (Discogs has many labels sharing a name) rather than merging their series.
     """
+    label_id = await _label_id(driver, name, label_id)
     if label_id is None:
-        matches = await run_query(driver, "MATCH (l:Label {name: $name}) RETURN l.id AS id, l.name AS name ORDER BY l.id", name=name)
-        if not matches:
-            return []
-        if len(matches) > 1:
-            raise AmbiguousLabelNameError(name, matches)
-        label_id = matches[0]["id"]
+        return []
     return await run_query(driver, _TRENDS_LABEL_CYPHER, id=label_id)
 
 

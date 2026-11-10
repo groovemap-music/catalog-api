@@ -440,7 +440,7 @@ class TestExploreCaching:
             response = test_client.get("/api/explore?name=Radiohead&type=artist")
         assert response.status_code == 200
         mock_valkey.setex.assert_called_once()
-        assert mock_valkey.setex.call_args[0][0] == "explore:artist:Radiohead"
+        assert mock_valkey.setex.call_args[0][0] == "explore:artist:name:Radiohead"
 
     def test_explore_genre_skips_cache(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
         """Genre explore should NOT be cached (already uses pre-computed properties)."""
@@ -1342,3 +1342,103 @@ class TestReleaseDetailCatalogBlocks:
             explore_router._pg_pool = original
 
         assert blocks == {"identifiers": [], "companies": [], "country": None}
+
+
+class TestLabelIdentity:
+    """Labels sharing a name stay apart in /api/explore and /api/expand: by id, 409 on a bare ambiguous name."""
+
+    @staticmethod
+    def _ambiguous() -> Any:
+        from api.queries.neo4j_queries import AmbiguousLabelNameError
+
+        return AmbiguousLabelNameError("Same", [{"id": "L1", "name": "Same"}, {"id": "L2", "name": "Same"}])
+
+    def test_explore_label_by_id_passes_id_and_caches_per_id(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        mock_valkey.get = AsyncMock(return_value=None)
+        result: dict[str, Any] = {"id": "L2", "name": "Same", "release_count": 5, "artist_count": 1, "genre_count": 1}
+        mock_func = AsyncMock(return_value=result)
+        with patch.dict("api.routers.explore.EXPLORE_DISPATCH", {"label": mock_func}), patch("api.routers.explore._MIN_CACHE_RELEASES", 0):
+            response = test_client.get("/api/explore?name=Same&type=label&id=L2")
+        assert response.status_code == 200
+        assert response.json()["center"]["id"] == "L2"
+        assert mock_func.call_args.kwargs == {"label_id": "L2"}
+        assert mock_valkey.setex.call_args[0][0] == "explore:label:id:L2"
+
+    def test_explore_label_ambiguous_name_is_409_with_candidates(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        mock_valkey.get = AsyncMock(return_value=None)
+        with patch.dict("api.routers.explore.EXPLORE_DISPATCH", {"label": AsyncMock(side_effect=self._ambiguous())}):
+            response = test_client.get("/api/explore?name=Same&type=label")
+        assert response.status_code == 409
+        assert [c["id"] for c in response.json()["candidates"]] == ["L1", "L2"]
+        mock_valkey.setex.assert_not_called()
+
+    def test_explore_label_name_equal_to_another_labels_id_never_shares_a_cache_entry(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        """Label A is named '808'; label B has id '808'. Each gets its own center through a shared fake cache."""
+        store: dict[str, str] = {}
+        mock_valkey.get = AsyncMock(side_effect=lambda key: store.get(key))
+        mock_valkey.setex = AsyncMock(side_effect=lambda key, _ttl, value: store.__setitem__(key, value))
+        rows = {"A": {"id": "A", "name": "808", "release_count": 1}, "808": {"id": "808", "name": "Other", "release_count": 9}}
+
+        async def fake(_driver: Any, _name: str, label_id: str | None = None) -> dict[str, Any]:
+            return rows[label_id or "A"]
+
+        with patch.dict("api.routers.explore.EXPLORE_DISPATCH", {"label": fake}), patch("api.routers.explore._MIN_CACHE_RELEASES", 0):
+            by_name = test_client.get("/api/explore?name=808&type=label").json()
+            by_id = test_client.get("/api/explore?name=x&type=label&id=808").json()
+            by_name_again = test_client.get("/api/explore?name=808&type=label").json()
+            by_id_again = test_client.get("/api/explore?name=x&type=label&id=808").json()
+        assert by_name["center"]["id"] == by_name_again["center"]["id"] == "A"
+        assert by_id["center"]["id"] == by_id_again["center"]["id"] == "808"
+        assert len(store) == 2
+
+    def test_expand_label_by_id_skips_name_resolution(self, test_client: TestClient) -> None:
+        query, count = AsyncMock(return_value=[{"id": "r1"}]), AsyncMock(return_value=1)
+        resolve = AsyncMock()
+        with (
+            patch.dict("api.routers.explore.EXPAND_DISPATCH", {"label": {"releases": query}}),
+            patch.dict("api.routers.explore.COUNT_DISPATCH", {"label": {"releases": count}}),
+            patch("api.routers.explore.resolve_label_id", resolve),
+        ):
+            response = test_client.get("/api/expand?node_id=Same&id=L2&type=label&category=releases")
+        assert response.status_code == 200
+        assert response.json()["total"] == 1
+        assert query.call_args.kwargs["label_id"] == count.call_args.kwargs["label_id"] == "L2"
+        resolve.assert_not_called()
+
+    def test_expand_label_unique_name_resolves_once_for_page_and_total(self, test_client: TestClient) -> None:
+        query, count = AsyncMock(return_value=[{"id": "r1"}]), AsyncMock(return_value=1)
+        with (
+            patch.dict("api.routers.explore.EXPAND_DISPATCH", {"label": {"releases": query}}),
+            patch.dict("api.routers.explore.COUNT_DISPATCH", {"label": {"releases": count}}),
+            patch("api.routers.explore.resolve_label_id", AsyncMock(return_value="L7")) as resolve,
+        ):
+            response = test_client.get("/api/expand?node_id=Unique&type=label&category=releases")
+        assert response.status_code == 200
+        assert resolve.await_count == 1
+        assert query.call_args.kwargs["label_id"] == count.call_args.kwargs["label_id"] == "L7"
+
+    def test_expand_label_ambiguous_name_is_409_with_candidates(self, test_client: TestClient) -> None:
+        query, count = AsyncMock(), AsyncMock()
+        with (
+            patch.dict("api.routers.explore.EXPAND_DISPATCH", {"label": {"releases": query}}),
+            patch.dict("api.routers.explore.COUNT_DISPATCH", {"label": {"releases": count}}),
+            patch("api.routers.explore.resolve_label_id", AsyncMock(side_effect=self._ambiguous())),
+        ):
+            response = test_client.get("/api/expand?node_id=Same&type=label&category=releases")
+        assert response.status_code == 409
+        assert [c["id"] for c in response.json()["candidates"]] == ["L1", "L2"]
+        query.assert_not_called()
+
+    def test_expand_cache_key_separates_a_label_id_from_a_name(self) -> None:
+        from api.routers.explore import _expand_cache_key
+
+        assert _expand_cache_key("label", "808", "releases", 50, 0, None) != _expand_cache_key("label", "808", "releases", 50, 0, None, by_id=True)
+
+    def test_expand_non_label_types_get_no_label_id(self, test_client: TestClient) -> None:
+        query, count = AsyncMock(return_value=[{"id": "r1"}]), AsyncMock(return_value=1)
+        with (
+            patch.dict("api.routers.explore.EXPAND_DISPATCH", {"artist": {"releases": query}}),
+            patch.dict("api.routers.explore.COUNT_DISPATCH", {"artist": {"releases": count}}),
+        ):
+            test_client.get("/api/expand?node_id=Radiohead&id=L2&type=artist&category=releases")
+        assert "label_id" not in query.call_args.kwargs

@@ -671,7 +671,10 @@ class NLQToolRunner:
         if tool_fn is None:
             return {"error": f"Unknown explore type: {entity_type}"}
 
-        return await tool_fn(driver=self._driver, name=params.get("name", ""), handler=handler)
+        try:
+            return await tool_fn(driver=self._driver, name=params.get("name", ""), handler=handler)
+        except neo4j_queries.AmbiguousLabelNameError as exc:
+            return {"error": f"Label name '{exc.name}' is ambiguous: {len(exc.candidates)} labels share it", "candidates": exc.candidates}
 
     async def _handle_find_path(self, params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:
         import common.agent_tools as agent_tools  # noqa: PLC0415
@@ -703,16 +706,19 @@ class NLQToolRunner:
             raw_max_depth = neo4j_queries.DEFAULT_PATH_DEPTH
         max_depth = max(neo4j_queries.MIN_PATH_DEPTH, min(raw_max_depth, neo4j_queries.MAX_PATH_DEPTH))
 
-        return await agent_tools.find_path(
-            driver=self._driver,
-            from_name=params.get("from_id", ""),
-            from_type=params.get("from_type", ""),
-            to_name=params.get("to_id", ""),
-            to_type=params.get("to_type", ""),
-            max_depth=max_depth,
-            resolve_name=resolve_name,
-            find_shortest_path_fn=neo4j_queries.find_shortest_path,
-        )
+        try:
+            return await agent_tools.find_path(
+                driver=self._driver,
+                from_name=params.get("from_id", ""),
+                from_type=params.get("from_type", ""),
+                to_name=params.get("to_id", ""),
+                to_type=params.get("to_type", ""),
+                max_depth=max_depth,
+                resolve_name=resolve_name,
+                find_shortest_path_fn=neo4j_queries.find_shortest_path,
+            )
+        except neo4j_queries.AmbiguousLabelNameError as exc:
+            return {"error": f"Label name '{exc.name}' is ambiguous: {len(exc.candidates)} labels share it", "candidates": exc.candidates}
 
     async def _handle_get_collaborators(self, params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:
         import common.agent_tools as agent_tools  # noqa: PLC0415

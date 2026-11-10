@@ -564,6 +564,10 @@ All graph query endpoints are served by the API and consumed by
 | GET    | `/api/node/{node_id}` | No            | —          | Get full details for a node          |
 | GET    | `/api/trends`         | No            | —          | Get time-series release counts       |
 
+**Labels sharing a name:** `/api/explore`, `/api/expand` and `/api/trends` accept `id=<label id>` with `type=label` and then
+serve that one label. Without it, a name that matches exactly one label works as before; a name shared by several labels
+answers `409` with `candidates` (`id`, `name`) so the caller can retry with `id`. Response shapes are unchanged.
+
 **Label (`GET /api/node/{node_id}?type=label`):** the response carries `is_placeholder` and the
 longevity fields `first_year`, `last_year`, `years_active`, `total_releases` and `peak_decade`, all
 computed for that label id (two labels with one name get their own values) and equal to what
