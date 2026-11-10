@@ -264,6 +264,26 @@ class TestValkeyOperationDuration:
         assert collector.metrics()[DB_DURATION].unit == "s"
 
     @pytest.mark.asyncio
+    async def test_buckets_are_second_scale_not_the_millisecond_defaults(self, collector: Collector) -> None:
+        valkey = telemetry.instrument_valkey(fake_store.FakeAsyncValkey())
+
+        await valkey.get("k")
+
+        (point,) = collector.metrics()[DB_DURATION].data.data_points
+        assert tuple(point.explicit_bounds) == telemetry.DB_OPERATION_DURATION_BUCKETS
+        assert point.explicit_bounds[0] == 0.0001
+        assert point.explicit_bounds[-1] == 60.0
+
+    def test_thirty_millisecond_statement_lands_below_fifty_milliseconds(self, collector: Collector) -> None:
+        telemetry.record_neo4j_query("count_artists_for_telemetry", 0.030)
+
+        (point,) = collector.metrics()[DB_DURATION].data.data_points
+        (filled,) = [index for index, count in enumerate(point.bucket_counts) if count]
+        upper_bound = point.explicit_bounds[filled]
+        assert upper_bound == 0.05
+        assert filled != 0, "a 30 ms observation must not fall in the first default bucket"
+
+    @pytest.mark.asyncio
     async def test_proxy_stands_in_for_the_client(self, collector: Collector) -> None:
         client = fake_store.FakeAsyncValkey()
         valkey = telemetry.instrument_valkey(client)

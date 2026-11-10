@@ -113,6 +113,32 @@ NEO4J_SYSTEM = "neo4j"
 # The wrapper samples in the same histogram use "session"; a statement is an "execute".
 NEO4J_OPERATION = "execute"
 
+# Bucket boundaries for `db.client.operation.duration`, in seconds. The instrument records
+# seconds, so the OpenTelemetry default boundaries (0, 5, 10, 25, ... meant for milliseconds)
+# would put nearly every database operation in the first bucket. These run from 0.1 ms, the
+# low end of a pooled-connection wait, to 60 s, past which a statement is a timeout. Each
+# value is an upper bound (`le`), so a 30 ms operation lands in the 0.05 s bucket.
+DB_OPERATION_DURATION_BUCKETS = (
+    0.0001,
+    0.00025,
+    0.0005,
+    0.001,
+    0.0025,
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+    10.0,
+    30.0,
+    60.0,
+)
+
 # Valkey client methods that manage the connection rather than issue a command. Timing them
 # would put lifecycle latency into the database-operation histogram.
 _UNTIMED_VALKEY_METHODS = frozenset({"aclose", "close", "disconnect", "initialize", "reset"})
@@ -182,6 +208,7 @@ def _build_instruments() -> _Instruments:
             "db.client.operation.duration",
             unit="s",
             description="Duration of a database client operation",
+            explicit_bucket_boundaries_advisory=list(DB_OPERATION_DURATION_BUCKETS),
         ),
         identity_ledger_refreshes=meter.create_counter(
             "groovemap.api.identity_ledger.refreshes",
