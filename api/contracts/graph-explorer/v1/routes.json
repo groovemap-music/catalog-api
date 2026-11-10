@@ -61,7 +61,7 @@
     "oauth_revoke": {"method": "DELETE", "path": "/api/oauth/revoke/discogs"},
     "oauth_status": {"method": "GET", "path": "/api/oauth/status/discogs"},
     "oauth_verify": {"method": "POST", "path": "/api/oauth/verify/discogs"},
-    "path": {"method": "GET", "path": "/api/path"},
+    "path": {"method": "GET", "path": "/api/path", "parameters": ["from_id", "to_id"]},
     "search": {"method": "GET", "path": "/api/search", "parameters": ["country"]},
     "snapshot_get": {"method": "GET", "path": "/api/snapshot/{token}"},
     "snapshot_save": {"method": "POST", "path": "/api/snapshot"},
