@@ -24,6 +24,11 @@ from typing import Any
 from common import AsyncResilientNeo4jDriver
 
 from api.queries.helpers import run_count, run_query, run_single
+from api.queries.insights_neo4j_queries import (
+    PLACEHOLDER_LABEL_IDS,
+    PLACEHOLDER_LABEL_NAME,
+    REAL_LABELS_NAMED_LIKE_PLACEHOLDERS,
+)
 
 
 # Lucene special characters that must be escaped in fulltext queries
@@ -806,22 +811,104 @@ async def get_release_details(driver: AsyncResilientNeo4jDriver, node_id: str) -
     return await run_single(driver, cypher, id=node_id)
 
 
+# One label by id: the stored release count and the placeholder verdict. The verdict is the statement
+# /api/insights/label-longevity uses (same names, same parameters), so the two cannot disagree.
+_LABEL_STORED_CYPHER = """
+MATCH (l:Label {id: $id})
+CALL {
+  OPTIONAL MATCH (m:ExtractionCompletion)
+  WITH m ORDER BY m.version DESC LIMIT 1
+  RETURN m.maintained_at IS NOT NULL AS maintained, m.stats_version AS stats_version
+}
+RETURN l.id AS id, l.name AS name, l.release_count AS release_count,
+       l.first_year AS first_year, l.last_year AS last_year, l.years_active AS years_active,
+       l.total_releases AS total_releases, l.peak_decade AS peak_decade,
+       maintained, stats_version,
+       l.name IS NOT NULL AND (l.id IN $placeholder_ids
+         OR (l.name =~ $placeholder_name AND NOT l.id IN $real_lookalike_ids)) AS is_placeholder
+"""
+
+# The label's releases grouped by year, matched by label id so two labels with one name never mix.
+# This is the fallback for a graph the enricher has not swept (stats_version < 3): one traversal of the
+# label's releases; groups are at most a few hundred rows.
+_LABEL_YEARS_CYPHER = """
+MATCH (l:Label {id: $id})
+CALL (l) {
+  MATCH (r:Release)-[:ON]->(l)
+  RETURN r.year AS year, count(DISTINCT r) AS releases
+}
+RETURN year, releases
+"""
+
+
+# discogs-graph-enricher v0.8.0 stores the longevity fields on every Label (stats_version 3): total_releases (year > 0) is
+# always present, the other four only when the label has a dated release.
+_LABEL_LONGEVITY_MIN_STATS_VERSION = 3
+_LABEL_LONGEVITY_KEYS = ("first_year", "last_year", "years_active", "total_releases", "peak_decade")
+
+
+def _stored_label_longevity(stored: dict[str, Any]) -> dict[str, Any] | None:
+    """The enricher's stored longevity of a label, or ``None`` to use the live traversal.
+
+    Trusted only when the newest ``ExtractionCompletion`` is maintained with ``stats_version`` >= 3 and the label has
+    ``total_releases``; anything else (an older enricher, a label not yet swept) reads live.
+    """
+    if not stored.get("maintained") or (stored.get("stats_version") or 0) < _LABEL_LONGEVITY_MIN_STATS_VERSION:
+        return None
+    if stored.get("total_releases") is None:
+        return None
+    return {key: stored.get(key) for key in _LABEL_LONGEVITY_KEYS}
+
+
+def _label_longevity(year_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Longevity of a label from its releases per year, defined as in /api/insights/label-longevity.
+
+    Only releases with ``year > 0`` count; ``peak_decade`` is the decade with the most of them, the
+    earliest decade on a tie. A label with no dated release has no years, so its span is ``None``.
+    """
+    dated = {int(row["year"]): int(row["releases"]) for row in year_rows if row["year"] is not None and row["year"] > 0}
+    if not dated:
+        return {"first_year": None, "last_year": None, "years_active": None, "total_releases": 0, "peak_decade": None}
+    by_decade: dict[int, int] = {}
+    for year, releases in dated.items():
+        by_decade[year // 10 * 10] = by_decade.get(year // 10 * 10, 0) + releases
+    first, last = min(dated), max(dated)
+    return {
+        "first_year": first,
+        "last_year": last,
+        "years_active": last - first + 1,
+        "total_releases": sum(dated.values()),
+        "peak_decade": min(by_decade, key=lambda decade: (-by_decade[decade], decade)),
+    }
+
+
 async def get_label_details(driver: AsyncResilientNeo4jDriver, node_id: str) -> dict[str, Any] | None:
-    """Get full details for a label node."""
+    """Get full details for a label node, by label id.
+
+    Adds ``is_placeholder`` and the longevity fields (``first_year``, ``last_year``, ``years_active``,
+    ``total_releases``, ``peak_decade``), which equal what /api/insights/label-longevity reports for the label.
+    The longevity fields are read from the Label node when the newest ``ExtractionCompletion`` has
+    ``stats_version`` >= 3 and the label has ``total_releases``, else computed live. ``release_count`` stays the
+    enricher's stored count (every release, dated or not) and is only counted from the traversal when not stored.
+    """
     stored = await run_single(
         driver,
-        "MATCH (l:Label {id: $id}) RETURN l.id AS id, l.name AS name, l.release_count AS release_count",
+        _LABEL_STORED_CYPHER,
         id=node_id,
+        placeholder_ids=list(PLACEHOLDER_LABEL_IDS),
+        placeholder_name=PLACEHOLDER_LABEL_NAME,
+        real_lookalike_ids=list(REAL_LABELS_NAMED_LIKE_PLACEHOLDERS),
     )
-    if stored is None or stored["release_count"] is not None:
-        return stored  # absent, or the enricher's count: no traversal
-    cypher = """
-    MATCH (l:Label {id: $id})
-    OPTIONAL MATCH (r:Release)-[:ON]->(l)
-    WITH l, count(DISTINCT r) AS release_count
-    RETURN l.id AS id, l.name AS name, release_count
-    """
-    return await run_single(driver, cypher, id=node_id)
+    if stored is None:
+        return None
+    base = {key: stored[key] for key in ("id", "name", "release_count", "is_placeholder")}
+    longevity = _stored_label_longevity(stored)
+    if longevity is not None and base["release_count"] is not None:
+        return {**base, **longevity}  # stored: no traversal
+    year_rows = await run_query(driver, _LABEL_YEARS_CYPHER, id=node_id)
+    if base["release_count"] is None:
+        base["release_count"] = sum(int(row["releases"]) for row in year_rows)
+    return {**base, **(longevity if longevity is not None else _label_longevity(year_rows))}
 
 
 async def get_genre_details(driver: AsyncResilientNeo4jDriver, node_id: str) -> dict[str, Any] | None:
@@ -935,10 +1022,9 @@ async def _trends_style_live(driver: AsyncResilientNeo4jDriver, name: str) -> li
 _STORED_SERIES = """
 MATCH (n:%(label)s {name: $name})
 CALL {
-    MATCH (m:ExtractionCompletion)
+    OPTIONAL MATCH (m:ExtractionCompletion)
+    WITH m ORDER BY m.version DESC LIMIT 1
     RETURN m.maintained_at IS NOT NULL AS maintained, m.stats_version AS stats_version
-    ORDER BY m.version DESC
-    LIMIT 1
 }
 RETURN n.release_years AS years, n.release_year_counts AS counts, maintained, stats_version
 """

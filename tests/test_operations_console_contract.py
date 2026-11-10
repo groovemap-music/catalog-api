@@ -163,3 +163,20 @@ def test_identity_ledger_payloads_carry_refreshed_at_in_rfc_3339_utc() -> None:
     assert never["refreshed_at"] is None
     refreshed = build_work(LedgerRows(aliases=[], supersessions=[]), "00000000-0000-4000-8000-000000000101", [], refreshed_at=_REFRESHED[1])
     assert refreshed["refreshed_at"] == "2026-10-25T10:00:00.250000Z"
+
+
+def test_dlq_replay_route_is_declared() -> None:
+    """The console proxies the replay action, so the route, its limit query and response stay declared."""
+    operation = json.loads(CONTRACT.read_text())["operations"]["admin_dlq_replay"]
+    assert operation["method"] == "POST"
+    assert operation["path"] == "/api/admin/dlq/replay/{queue}"
+    assert operation["query"] == ["limit"]
+    schemas = app.openapi()["components"]["schemas"]
+    assert set(operation["response_fields"]) == set(schemas["DlqReplayResponse"]["properties"])
+    # the partial-failure 502 body: detail plus the same replayed/remaining fields as the success body
+    assert set(operation["error_fields"]) == {"detail", *operation["response_fields"]} - {"queue"}
+    assert "null" in operation["error_field_semantics"]["remaining"]  # unknown depth is null, distinct from an empty 0
+
+    binding = _load_binding()
+    assert binding.ADMIN_DLQ_REPLAY_METHOD == "POST"
+    assert operation["path"] == binding.ADMIN_DLQ_REPLAY_PATH
