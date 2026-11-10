@@ -683,3 +683,73 @@ async def test_autocomplete_unknown_type(runner: NLQToolRunner) -> None:
     """Autocomplete with invalid entity type returns error."""
     result = await runner.execute("autocomplete", {"type": "invalid_type", "query": "test"})
     assert "error" in result
+
+
+# ── find_path: labels that share a name ────────────────────────────────────
+# These run the real explore_label / resolve_label_id over a fake label table, so the by-id and by-name
+# resolution paths are the production ones; only the Cypher runners and the path query are stubbed.
+
+_LABELS = {"L1": "Same", "L2": "Same", "L3": "Unique"}
+
+
+async def _fake_run_query(_driver: Any, _cypher: str, **kw: Any) -> list[dict[str, Any]]:
+    return [{"id": i, "name": n} for i, n in sorted(_LABELS.items()) if n == kw["name"]]
+
+
+async def _fake_run_single(_driver: Any, _cypher: str, **kw: Any) -> dict[str, Any] | None:
+    name = _LABELS.get(kw["id"])
+    return None if name is None else {"id": kw["id"], "name": name, "release_count": 1, "artist_count": 1, "genre_count": 1}
+
+
+async def _fake_path(*, from_id: str, to_id: str, **_kw: Any) -> dict[str, Any]:
+    return {"nodes": [{"id": from_id}, {"id": to_id}], "rels": ["R"]}
+
+
+async def _find_path(runner: NLQToolRunner, **params: Any) -> dict[str, Any]:
+    with (
+        patch("api.queries.neo4j_queries.run_query", new=_fake_run_query),
+        patch("api.queries.neo4j_queries.run_single", new=_fake_run_single),
+        patch("api.queries.neo4j_queries.find_shortest_path", new=_fake_path),
+    ):
+        return await runner.execute("find_path", {"to_id": "Unique", "to_type": "label", "from_type": "label", **params})
+
+
+def test_find_path_schema_offers_label_id_params() -> None:
+    schema = next(t for t in get_public_tool_schemas() + get_authenticated_tool_schemas() if t["name"] == "find_path")
+    props = schema["input_schema"]["properties"]
+    assert {"from_label_id", "to_label_id"} <= set(props)
+    assert not {"from_label_id", "to_label_id"} & set(schema["input_schema"]["required"])
+
+
+@pytest.mark.asyncio
+async def test_find_path_by_label_id_is_distinct_per_label(runner: NLQToolRunner) -> None:
+    first = await _find_path(runner, from_id="Same", from_label_id="L1")
+    second = await _find_path(runner, from_id="Same", from_label_id="L2")
+    assert first["nodes"][0]["id"] == "L1"
+    assert second["nodes"][0]["id"] == "L2"
+    assert first != second
+
+
+@pytest.mark.asyncio
+async def test_find_path_to_label_id_selects_target(runner: NLQToolRunner) -> None:
+    result = await _find_path(runner, from_id="Unique", to_id="Same", to_label_id="L2")
+    assert result["nodes"][-1]["id"] == "L2"
+
+
+@pytest.mark.asyncio
+async def test_find_path_ambiguous_bare_name_keeps_candidates_error(runner: NLQToolRunner) -> None:
+    result = await _find_path(runner, from_id="Same")
+    assert "ambiguous" in result["error"]
+    assert [c["id"] for c in result["candidates"]] == ["L1", "L2"]
+
+
+@pytest.mark.asyncio
+async def test_find_path_unique_name_unchanged(runner: NLQToolRunner) -> None:
+    result = await _find_path(runner, from_id="Unique")
+    assert result["nodes"][0]["id"] == "L3"
+
+
+@pytest.mark.asyncio
+async def test_find_path_unknown_label_id_is_not_found(runner: NLQToolRunner) -> None:
+    result = await _find_path(runner, from_id="Same", from_label_id="L9")
+    assert result == {"error": "label id 'L9' not found"}

@@ -93,6 +93,14 @@ def get_public_tool_schemas() -> list[dict[str, Any]]:
                 "properties": {
                     "from_id": {"type": "string", "description": "Starting entity ID or name"},
                     "to_id": {"type": "string", "description": "Target entity ID or name"},
+                    "from_label_id": {
+                        "type": "string",
+                        "description": "Label id of the starting entity when from_type is label. Use it to pick one label when several share a name (the candidates in an ambiguous-name error)",
+                    },
+                    "to_label_id": {
+                        "type": "string",
+                        "description": "Label id of the target entity when to_type is label. Use it to pick one label when several share a name (the candidates in an ambiguous-name error)",
+                    },
                     "from_type": {
                         "type": "string",
                         "enum": ["artist", "genre", "label", "style"],
@@ -693,6 +701,11 @@ class NLQToolRunner:
             result: dict[str, Any] | None = await handler(driver, name)
             return result
 
+        async def resolve_label_by_id(driver: Any, label_id: str) -> dict[str, Any] | None:
+            # The same by-id lookup /api/path uses (explore_label with label_id=); the name is not consulted.
+            result: dict[str, Any] | None = await neo4j_queries.explore_label(driver, "", label_id=label_id)
+            return result
+
         # Clamp the model-supplied max_depth to the same bound the HTTP
         # /api/path route enforces (FastAPI Query(ge=1, le=MAX_PATH_DEPTH)).
         # find_shortest_path also clamps internally as a backstop, but the
@@ -716,6 +729,9 @@ class NLQToolRunner:
                 max_depth=max_depth,
                 resolve_name=resolve_name,
                 find_shortest_path_fn=neo4j_queries.find_shortest_path,
+                from_label_id=params.get("from_label_id") or None,
+                to_label_id=params.get("to_label_id") or None,
+                resolve_label_id=resolve_label_by_id,
             )
         except neo4j_queries.AmbiguousLabelNameError as exc:
             return {"error": f"Label name '{exc.name}' is ambiguous: {len(exc.candidates)} labels share it", "candidates": exc.candidates}
