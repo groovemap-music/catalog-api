@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v0.15.1 (2026-11-10)
+
+### Release notes
+
+The first search after a restart or a quiet spell no longer waits behind connection setup or the startup prewarm (gm-catalog-api-0n70). The PostgreSQL pool now opens one search's width of connections (6, capped by `POSTGRES_POOL_MAX_SIZE`; a larger configured minimum is kept) before `/health` reports healthy, and keeps them open instead of idling back to 2. Search statements run with `jit=off`, scoped to their transaction: on a new backend JIT cost about 400 ms of the genre and media facets. The startup search prewarm runs at background priority, one statement at a time and only while no user search is waiting, so user searches go first and the prewarm finishes later. On lux the first all-types `love` after a restart was 961 ms with the old prewarm (target 1 s) and the first master `love` 82 ms (target 100 ms). Expect about 4 more idle `groovemap` connections per api replica on the shared PostgreSQL. A search whose pages are out of the PostgreSQL cache still pays its disk reads. No schema dependency.
+
+### Perf
+
+- **search**: run the startup prewarm at background priority so user searches go first
+- **search**: open one search's worth of pool connections before ready; run search statements without JIT
+
 ## v0.15.0 (2026-11-10)
 
 ### Release notes
