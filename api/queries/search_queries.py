@@ -85,6 +85,21 @@ SEARCH_QUEUE_TIMEOUT_SECONDS = _env_seconds("SEARCH_QUEUE_TIMEOUT_SECONDS", 5.0)
 # Connections left for everything that is not a search. Two keeps login and token routes alive.
 SEARCH_POOL_RESERVE = 2
 
+# The most statements one uncached search runs at once (``execute_search``'s gather). The pool keeps at
+# least this many connections open from startup (``search_pool_floor``) so a first search after a
+# restart or a quiet spell does not open its backends while the caller waits (gm-catalog-api-0n70).
+SEARCH_STATEMENTS_PER_SEARCH = 6
+
+
+def search_pool_floor(min_connections: int, max_connections: int) -> int:
+    """The pool's ``min_connections`` once one full search is covered: never below it, never above ``max_connections``.
+
+    An operator's larger minimum is kept; a ``max_connections`` below one search's width wins, since it is
+    the shared backend budget.
+    """
+    return max(1, min(max_connections, max(min_connections, SEARCH_STATEMENTS_PER_SEARCH)))
+
+
 # Keyed weakly by pool: the slots belong to one pool (and its event loop) and die with it.
 _slots: weakref.WeakKeyDictionary[Any, asyncio.Semaphore] = weakref.WeakKeyDictionary()
 
@@ -100,11 +115,19 @@ def _search_slots(pool: AsyncPostgreSQLPool) -> asyncio.Semaphore:
 
 @contextlib.asynccontextmanager
 async def _search_cursor(pool: AsyncPostgreSQLPool) -> AsyncIterator[Any]:
-    """A dict-row cursor for one search statement, inside a slot and under a statement timeout.
+    """A dict-row cursor for one search statement, inside a slot, under a statement timeout and without JIT.
 
     Waiting for a slot is bounded by ``SEARCH_QUEUE_TIMEOUT_SECONDS`` (``SearchBusy``); the
-    statement is bounded by ``SEARCH_STATEMENT_TIMEOUT_SECONDS``, scoped to this transaction so the
-    pooled connection keeps no setting (``SearchTimedOut``). Neither is ever an empty success.
+    statement is bounded by ``SEARCH_STATEMENT_TIMEOUT_SECONDS`` (``SearchTimedOut``). Neither is
+    ever an empty success.
+
+    JIT is off for search statements. On lux (gm-catalog-api-0n70, EXPLAIN ANALYZE on a new backend,
+    all-types 'love') JIT took 398 of the genre facet's 485 ms and 374 of the media facet's 417 ms,
+    mostly inlining and optimisation that a backend pays in full the first time it compiles; with
+    JIT off they ran in 322 and 335 ms, the results statement in 384 ms instead of 468 ms. These
+    statements are index lookups and small aggregates, not the long scans JIT pays back on.
+
+    Both settings are scoped to this transaction, so the pooled connection keeps neither.
     """
     slots = _search_slots(pool)
     try:
@@ -113,7 +136,10 @@ async def _search_cursor(pool: AsyncPostgreSQLPool) -> AsyncIterator[Any]:
         raise SearchBusy from None
     try:
         async with pool.connection() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute("SELECT set_config('statement_timeout', %s, true)", (f"{int(SEARCH_STATEMENT_TIMEOUT_SECONDS * 1000)}ms",))
+            await cur.execute(
+                "SELECT set_config('statement_timeout', %s, true), set_config('jit', 'off', true)",
+                (f"{int(SEARCH_STATEMENT_TIMEOUT_SECONDS * 1000)}ms",),
+            )
             yield cur
     except QueryCanceled:
         raise SearchTimedOut from None

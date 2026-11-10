@@ -144,3 +144,45 @@ async def test_searches_never_take_the_reserved_connections(pool: AsyncPostgreSQ
         active = (await cur.fetchone())[0]  # type: ignore[index]
     assert active <= _POOL_SIZE - search_queries.SEARCH_POOL_RESERVE
     await asyncio.gather(*holders)
+
+
+async def test_search_statements_run_without_jit_and_leave_the_connection_at_its_default(pool: AsyncPostgreSQLPool) -> None:
+    """gm-catalog-api-0n70: JIT is off for the statement's transaction only, like the statement timeout."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("SHOW jit")
+        default = (await cur.fetchone())[0]  # type: ignore[index]
+    async with _search_cursor(pool) as cur:
+        await cur.execute("SHOW jit")
+        assert (await cur.fetchone())["jit"] == "off"
+    for _ in range(_POOL_SIZE):  # every pooled connection, whichever the search used
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute("SHOW jit")
+            assert (await cur.fetchone())[0] == default  # type: ignore[index]
+
+
+async def test_a_pool_at_the_search_floor_has_one_search_open_before_the_first_request() -> None:
+    """gm-catalog-api-0n70: initialize() opens the floor, so the first search checks out open backends."""
+    host, port = parse_postgres_host_port(_env("POSTGRES_HOST"))
+    floor = search_queries.search_pool_floor(2, _POOL_SIZE)
+    pool = AsyncPostgreSQLPool(
+        connection_params={
+            "host": host,
+            "port": port,
+            "dbname": _env("POSTGRES_DATABASE"),
+            "user": _env("POSTGRES_USERNAME"),
+            "password": _env("POSTGRES_PASSWORD"),
+        },
+        min_connections=floor,
+        max_connections=_POOL_SIZE,
+        max_retries=3,
+        health_check_interval=3600,
+    )
+    await pool.initialize()
+    try:
+        assert floor == search_queries.SEARCH_STATEMENTS_PER_SEARCH
+        assert pool.connections.qsize() == floor
+        # One search's worth of concurrent statements opens no further backend.
+        await asyncio.gather(*[_statement(pool, 0.2) for _ in range(floor)])
+        assert pool.active_connections == floor
+    finally:
+        await pool.close()

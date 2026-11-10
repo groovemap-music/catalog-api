@@ -83,7 +83,7 @@ from api.limiter import limiter
 from api.neo4j_timeouts import install_neo4j_timeout_handler
 from api.notifications import LogNotificationChannel, ResendNotificationChannel
 from api.queries.rarity_queries import run_rarity_membership_refresh
-from api.queries.search_queries import ALL_TYPES, execute_search
+from api.queries.search_queries import ALL_TYPES, execute_search, search_pool_floor
 from api.reattach_trigger import run_trigger_loop
 from api.services.discogs import (
     DISCOGS_AUTHORIZE_URL,
@@ -228,10 +228,15 @@ async def _create_pool(config: ApiConfig) -> AsyncPostgreSQLPool:
             "password": config.postgres_password,
         },
         max_connections=config.postgres_pool_max_size,
-        min_connections=config.postgres_pool_min_size,
+        # One uncached search runs six statements at once. With the configured floor of two, the first search
+        # after a start or a quiet spell opened four backends while the caller waited (lux, gm-catalog-api-0n70:
+        # the pool sat at 2 and grew to 6 on the first search). The floor covers one search, and initialize()
+        # opens it here, before the service reports healthy; the pool's health loop keeps it there after
+        # lifetime recycling and never idles below it. max_connections, the shared backend budget, is unchanged.
+        min_connections=search_pool_floor(config.postgres_pool_min_size, config.postgres_pool_max_size),
     )
     await pool.initialize()
-    logger.info("💾 Database pool initialized")
+    logger.info("💾 Database pool initialized", min_connections=pool.min_connections, max_connections=pool.max_connections)
     await reconcile_stale_sync_history(pool)
     return pool
 
