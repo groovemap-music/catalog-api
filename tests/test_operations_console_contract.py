@@ -173,6 +173,9 @@ def test_dlq_replay_route_is_declared() -> None:
     assert operation["query"] == ["limit"]
     schemas = app.openapi()["components"]["schemas"]
     assert set(operation["response_fields"]) == set(schemas["DlqReplayResponse"]["properties"])
+    # the partial-failure 502 body: detail plus the same replayed/remaining fields as the success body
+    assert set(operation["error_fields"]) == {"detail", *operation["response_fields"]} - {"queue"}
+    assert "null" in operation["error_field_semantics"]["remaining"]  # unknown depth is null, distinct from an empty 0
 
     binding = _load_binding()
     assert binding.ADMIN_DLQ_REPLAY_METHOD == "POST"
