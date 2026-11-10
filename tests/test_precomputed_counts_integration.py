@@ -73,6 +73,8 @@ _L2_LIVE: dict[str, Any] = {
     "years_active": None,
     "total_releases": 0,
     "peak_decade": None,
+    "longevity_rank": None,
+    "longevity_rank_of": None,
 }
 _L2_DATED: dict[str, Any] = {**_L2_LIVE, "first_year": 1980, "last_year": 1990, "years_active": 11, "total_releases": 2, "peak_decade": 1980}
 _STORED_LABEL = (
@@ -179,6 +181,31 @@ async def test_label_details_always_return_the_label_row_in_every_gate_state(neo
 
     # An absent label is still None.
     assert await q.get_label_details(neo4j_driver, "NOPE") is None
+
+
+async def test_label_longevity_rank_from_the_graph_by_stats_version(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    """longevity_rank / longevity_rank_of come from the label and the newest node, and only at stats_version >= 4."""
+    await _dated(neo4j_driver)
+    await run_query(neo4j_driver, _STORED_LABEL + ", l.longevity_rank = 7", database="neo4j", timeout=None)
+    await _completion(neo4j_driver, "maintained_at: datetime(), stats_version: 3, label_longevity_rank_of: 900")
+    details = await q.get_label_details(neo4j_driver, "L2")
+    assert (details["longevity_rank"], details["longevity_rank_of"]) == (None, None)  # stats_version 3
+
+    await run_query(neo4j_driver, "MATCH (m:ExtractionCompletion) SET m.stats_version = 4", database="neo4j", timeout=None)
+    details = await q.get_label_details(neo4j_driver, "L2")
+    assert (details["longevity_rank"], details["longevity_rank_of"]) == (7, 900)  # ranked
+
+    await run_query(neo4j_driver, "MATCH (l:Label {id: 'L2'}) REMOVE l.longevity_rank", database="neo4j", timeout=None)
+    details = await q.get_label_details(neo4j_driver, "L2")
+    assert (details["longevity_rank"], details["longevity_rank_of"]) == (None, 900)  # unranked label
+
+    await run_query(neo4j_driver, "MATCH (l:Label {id: 'L2'}) SET l.longevity_rank = 7", database="neo4j", timeout=None)
+    await _completion(neo4j_driver, "stats_version: 4, label_longevity_rank_of: 901")
+    await run_query(
+        neo4j_driver, "MATCH (m:ExtractionCompletion {label_longevity_rank_of: 901}) SET m.version = '20260901'", database="neo4j", timeout=None
+    )
+    details = await q.get_label_details(neo4j_driver, "L2")
+    assert (details["longevity_rank"], details["longevity_rank_of"]) == (None, None)  # newest node not maintained
 
 
 async def test_stored_series_gate_yields_a_row_without_an_extraction_completion(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
