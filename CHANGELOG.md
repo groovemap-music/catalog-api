@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v0.15.3 (2026-11-10)
+
+### Release notes
+
+The database-latency histograms now have seconds-scale buckets (0.1 ms to 60 s), so their percentiles mean something: `db.client.operation.duration` for Valkey and Neo4j from catalog-api itself (gm-catalog-api-b13y), and `db.client.operation.duration` (PostgreSQL), `db.client.connection.wait_time` and `messaging.client.operation.duration` from the runtime. Before, every observation landed in the first default bucket, which is meant for milliseconds. The python-libraries pin moves from f0964cc to c440b6f for both groovemap-runtime and groovemap-agent-tools (gm-catalog-api-0feh). The only change between them is the bucket fix (gm-python-libraries-ggkm), so there is no other runtime behaviour change. Metric names and units are unchanged. A dashboard's quantiles for these series change scale at the deploy, because the new buckets don't line up with the old ones. No schema dependency.
+
+### Fix
+
+- **telemetry**: give db.client.operation.duration seconds-scale buckets
+
 ## v0.15.2 (2026-11-10)
 
 ### Release notes
