@@ -34,6 +34,7 @@ from api.queries.neo4j_queries import (
     get_graph_stats,
     get_year_range,
     node_label_to_type,
+    resolve_label_id,
 )
 from api.queries.neo4j_queries import (
     DEFAULT_PATH_DEPTH as _DEFAULT_PATH_DEPTH,
@@ -159,20 +160,40 @@ async def autocomplete(
     return JSONResponse(content={"results": results})
 
 
+def _ambiguous_label_response(exc: AmbiguousLabelNameError) -> JSONResponse:
+    """409 listing the labels that share a name, so the caller can retry with ``id=<label id>``."""
+    return JSONResponse(
+        content={
+            "error": f"Label name '{exc.name}' is ambiguous: {len(exc.candidates)} labels share it. Retry with id=<label id>.",
+            "candidates": exc.candidates,
+        },
+        status_code=409,
+    )
+
+
+def _explore_cache_key(entity_type: str, name: str, label_id: str | None) -> str:
+    """Id and name lookups use separate namespaces, so a name equal to an id can never read an id entry."""
+    if label_id:
+        return valkey_key(f"explore:label:id:{label_id}")
+    return valkey_key(f"explore:{entity_type}:name:{name}")
+
+
 @router.get("/api/explore")
 async def explore(
     name: str = Query(...),
     type: str = Query("artist"),
+    id: str | None = Query(None, description="Label id; identifies one label when several share a name (type=label)"),
 ) -> JSONResponse:
     if not _neo4j_driver:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     entity_type = type.lower()
     if entity_type not in EXPLORE_DISPATCH:
         return JSONResponse(content={"error": f"Invalid type: {type}. Must be artist, genre, label, or style"}, status_code=400)
+    label_id = id if entity_type == "label" else None
 
     # Cache artist and label explore results in Valkey (expensive COUNT traversals)
     if _valkey and entity_type in ("artist", "label"):
-        cache_key = valkey_key(f"explore:{entity_type}:{name}")
+        cache_key = _explore_cache_key(entity_type, name, label_id)
         try:
             cached = await cache_get(_valkey, cache_key, cache=CACHE_EXPLORE)
             if cached:
@@ -181,14 +202,17 @@ async def explore(
             logger.debug("⚠️ Explore cache get failed", key=cache_key)
 
     query_func = EXPLORE_DISPATCH[entity_type]
-    result = await query_func(_neo4j_driver, name)
+    try:
+        result = await (query_func(_neo4j_driver, name, label_id=label_id) if label_id else query_func(_neo4j_driver, name))
+    except AmbiguousLabelNameError as exc:
+        return _ambiguous_label_response(exc)
     if not result:
         return JSONResponse(content={"error": f"{type.capitalize()} '{name}' not found"}, status_code=404)
     categories = _build_categories(entity_type, result)
     response = {"center": {"id": str(result["id"]), "name": result["name"], "type": entity_type}, "categories": categories}
 
     if _valkey and entity_type in ("artist", "label"):
-        cache_key = valkey_key(f"explore:{entity_type}:{name}")
+        cache_key = _explore_cache_key(entity_type, name, label_id)
         try:
             await store_within_budget(
                 _valkey,
@@ -239,9 +263,15 @@ def _expand_page_is_cacheable(limit: int, offset: int, before_year: int | None) 
     return before_year is None or offset == 0
 
 
-def _expand_cache_key(entity_type: str, node_id: str, category: str, limit: int, offset: int, before_year: int | None) -> str:
-    """One page and its total, keyed on everything that changes either. Hashed so a name cannot collide on ``:``."""
-    digest = hashlib.sha256(json.dumps([entity_type, node_id, category, limit, offset, before_year]).encode()).hexdigest()
+def _expand_cache_key(entity_type: str, node_id: str, category: str, limit: int, offset: int, before_year: int | None, *, by_id: bool = False) -> str:
+    """One page and its total, keyed on everything that changes either. Hashed so a name cannot collide on ``:``.
+
+    ``by_id`` separates a label id from a name, so a label named like another label's id never reads its page.
+    """
+    parts: list[Any] = [entity_type, node_id, category, limit, offset, before_year]
+    if by_id:
+        parts.append("id")
+    digest = hashlib.sha256(json.dumps(parts).encode()).hexdigest()
     return valkey_key(f"expand:{digest}")
 
 
@@ -253,10 +283,12 @@ async def expand(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     before_year: int | None = Query(default=None, ge=1900, le=2030),
+    id: str | None = Query(None, description="Label id; identifies one label when several share a name (type=label)"),
 ) -> JSONResponse:
     if not _neo4j_driver:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     entity_type = type.lower()
+    label_id = id if entity_type == "label" else None
     category_lower = category.lower()
     if entity_type not in EXPAND_DISPATCH:
         return JSONResponse(content={"error": f"Invalid type: {type}"}, status_code=400)
@@ -264,7 +296,7 @@ async def expand(
     if category_lower not in type_categories:
         valid = ", ".join(type_categories.keys())
         return JSONResponse(content={"error": f"Invalid category '{category}' for type '{type}'. Valid: {valid}"}, status_code=400)
-    cache_key = _expand_cache_key(entity_type, node_id, category_lower, limit, offset, before_year)
+    cache_key = _expand_cache_key(entity_type, label_id or node_id, category_lower, limit, offset, before_year, by_id=bool(label_id))
     cacheable = _expand_page_is_cacheable(limit, offset, before_year)
     if _valkey and cacheable:
         try:
@@ -276,9 +308,16 @@ async def expand(
 
     query_func = type_categories[category_lower]
     count_func = COUNT_DISPATCH[entity_type][category_lower]
+    id_kwargs: dict[str, Any] = {}
+    if entity_type == "label":
+        # Resolve a bare name once, here, so the page and its total are for the same label and a shared name is a 409.
+        try:
+            id_kwargs["label_id"] = label_id if label_id else await resolve_label_id(_neo4j_driver, node_id)
+        except AmbiguousLabelNameError as exc:
+            return _ambiguous_label_response(exc)
     results, total = await asyncio.gather(
-        query_func(_neo4j_driver, node_id, limit, offset, before_year=before_year),
-        count_func(_neo4j_driver, node_id, before_year=before_year),
+        query_func(_neo4j_driver, node_id, limit, offset, before_year=before_year, **id_kwargs),
+        count_func(_neo4j_driver, node_id, before_year=before_year, **id_kwargs),
     )
     body = {"children": results, "total": total, "offset": offset, "limit": limit, "has_more": offset + len(results) < total}
     # Only pages worth caching are written (see _expand_page_is_cacheable); an empty page never is.
@@ -634,13 +673,7 @@ async def get_trends(
     try:
         results = await (query_func(_neo4j_driver, name, label_id=label_id) if label_id else query_func(_neo4j_driver, name))
     except AmbiguousLabelNameError as exc:
-        return JSONResponse(
-            content={
-                "error": f"Label name '{name}' is ambiguous: {len(exc.candidates)} labels share it. Retry with id=<label id>.",
-                "candidates": exc.candidates,
-            },
-            status_code=409,
-        )
+        return _ambiguous_label_response(exc)
     response = {"name": name, "type": entity_type, "data": results}
 
     # An empty result is not stored: a name that does not exist would otherwise spend budget.
@@ -700,10 +733,13 @@ async def find_path(
     from_explore = EXPLORE_DISPATCH[from_type_lower]
     to_explore = EXPLORE_DISPATCH[to_type_lower]
 
-    from_node, to_node = await asyncio.gather(
-        from_explore(_neo4j_driver, from_name),
-        to_explore(_neo4j_driver, to_name),
-    )
+    try:
+        from_node, to_node = await asyncio.gather(
+            from_explore(_neo4j_driver, from_name),
+            to_explore(_neo4j_driver, to_name),
+        )
+    except AmbiguousLabelNameError as exc:
+        return _ambiguous_label_response(exc)
 
     if not from_node:
         return JSONResponse(

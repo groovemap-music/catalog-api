@@ -305,7 +305,7 @@ class TestExploreQueries:
         from api.queries.neo4j_queries import explore_label
 
         record = {"id": "100", "name": "Warp Records", "release_count": 500, "artist_count": 120, "genre_count": 8}
-        driver = _make_driver(single=record)
+        driver = _make_driver_with_side_effects([_MockResult(records=[{"id": "100", "name": "Warp Records"}]), _MockResult(single=record)])
         result = await explore_label(driver, "Warp Records")
         assert result == record
 
@@ -314,7 +314,7 @@ class TestExploreQueries:
         """Label not found returns None."""
         from api.queries.neo4j_queries import explore_label
 
-        driver = _make_driver(single=None)
+        driver = _make_driver(records=[], single=None)
         result = await explore_label(driver, "Nonexistent Label")
         assert result is None
 
@@ -327,7 +327,8 @@ class TestExploreQueries:
         first_result = _MockResult(single={"id": "200", "name": "New Label", "release_count": None, "artist_count": None, "genre_count": None})
         # Second call: fallback live traversal returns actual counts
         fallback_result = _MockResult(single={"id": "200", "name": "New Label", "release_count": 50, "artist_count": 10, "genre_count": 3})
-        driver = _make_driver_with_side_effects([first_result, fallback_result])
+        resolved = _MockResult(records=[{"id": "200", "name": "New Label"}])
+        driver = _make_driver_with_side_effects([resolved, first_result, fallback_result])
         result = await explore_label(driver, "New Label")
         assert result is not None
         assert result["release_count"] == 50
@@ -601,21 +602,21 @@ class TestCountQueries:
     async def test_count_label_releases(self) -> None:
         from api.queries.neo4j_queries import count_label_releases
 
-        driver = _make_driver(single={"total": 500})
+        driver = _make_driver(records=[{"id": "L1", "name": "Warp"}], single={"total": 500})
         assert await count_label_releases(driver, "Warp") == 500
 
     @pytest.mark.asyncio
     async def test_count_label_artists(self) -> None:
         from api.queries.neo4j_queries import count_label_artists
 
-        driver = _make_driver(single={"total": 80})
+        driver = _make_driver(records=[{"id": "L1", "name": "Warp"}], single={"total": 80})
         assert await count_label_artists(driver, "Warp") == 80
 
     @pytest.mark.asyncio
     async def test_count_label_genres(self) -> None:
         from api.queries.neo4j_queries import count_label_genres
 
-        driver = _make_driver(single={"total": 5})
+        driver = _make_driver(records=[{"id": "L1", "name": "Warp"}], single={"total": 5})
         assert await count_label_genres(driver, "Warp") == 5
 
     @pytest.mark.asyncio
@@ -746,13 +747,14 @@ class TestCountBeforeYearAllFunctions:
             ("count_style_genres", "style", "Alt Rock"),
         ],
     )
-    async def test_count_with_before_year(self, func_name: str, entity_type: str, entity_arg_name: str) -> None:  # noqa: ARG002
+    async def test_count_with_before_year(self, func_name: str, entity_type: str, entity_arg_name: str) -> None:
         """Each count_* function with before_year includes it in Cypher and params."""
         import api.queries.neo4j_queries as mod
 
         func = getattr(mod, func_name)
         driver, captured_cypher, captured_params = _make_capturing_driver(total=7)
-        result = await func(driver, entity_arg_name, before_year=2000)
+        extra = {"label_id": "L1"} if entity_type == "label" else {}  # a label is matched by id; a bare name would resolve first
+        result = await func(driver, entity_arg_name, before_year=2000, **extra)
         assert result == 7
         assert len(captured_cypher) == 1
         assert "before_year" in captured_cypher[0]
@@ -1011,7 +1013,7 @@ class TestExpandBeforeYear:
         from api.queries.neo4j_queries import expand_label_releases
 
         driver, calls = self._capture_driver()
-        await expand_label_releases(driver, "Warp Records", limit=10, offset=0, before_year=1995)
+        await expand_label_releases(driver, "Warp Records", label_id="L1", limit=10, offset=0, before_year=1995)
         cypher, params = calls[0]
         assert "before_year" in cypher
         assert params.get("before_year") == 1995
@@ -1099,7 +1101,7 @@ class TestExpandBeforeYear:
         from api.queries.neo4j_queries import expand_label_artists
 
         driver, calls = self._capture_driver()
-        await expand_label_artists(driver, "Warp Records", limit=10, offset=0, before_year=2000)
+        await expand_label_artists(driver, "Warp Records", label_id="L1", limit=10, offset=0, before_year=2000)
         cypher, params = calls[0]
         assert "before_year" in cypher
         assert params.get("before_year") == 2000
@@ -1110,7 +1112,7 @@ class TestExpandBeforeYear:
         from api.queries.neo4j_queries import expand_label_genres
 
         driver, calls = self._capture_driver()
-        await expand_label_genres(driver, "Warp Records", limit=10, offset=0, before_year=2010)
+        await expand_label_genres(driver, "Warp Records", label_id="L1", limit=10, offset=0, before_year=2010)
         cypher, params = calls[0]
         assert "before_year" in cypher
         assert params.get("before_year") == 2010
@@ -1471,7 +1473,7 @@ class TestExpandReleasesNullYearOrdering:
         from api.queries.neo4j_queries import expand_label_releases
 
         driver, calls = self._capture_driver()
-        await expand_label_releases(driver, "Warp Records", limit=50, offset=0)
+        await expand_label_releases(driver, "Warp Records", label_id="L1", limit=50, offset=0)
         cypher, _params = calls[0]
         assert "ORDER BY year IS NULL ASC, year DESC" in cypher
 
@@ -1541,8 +1543,99 @@ class TestExpandQueriesHaveUniqueOrderByTiebreaker:
 
         func = getattr(nq, func_name)
         driver, calls = self._capture_driver()
-        await func(driver, entity_arg, limit=50, offset=0)
+        extra = {"label_id": "L1"} if func_name.startswith("expand_label_") else {}
+        await func(driver, entity_arg, limit=50, offset=0, **extra)
         cypher, _params = calls[0]
         assert "ORDER BY release_count DESC, id" in cypher
         # Guard against regressing to the bare (non-unique) form.
         assert "ORDER BY release_count DESC\n" not in cypher
+
+
+class TestLabelIdentityQueries:
+    """Label explore, expand and counts match one label by id; a bare name must resolve to exactly one."""
+
+    @staticmethod
+    def _cypher(driver: MagicMock, index: int = -1) -> tuple[str, dict[str, Any]]:
+        call = driver.session.return_value.run.call_args_list[index]
+        return call[0][0].text, call[0][1]
+
+    @pytest.mark.asyncio
+    async def test_label_queries_given_an_id_match_on_id_and_skip_resolution(self) -> None:
+        from api.queries import neo4j_queries as q
+
+        calls: list[Any] = [
+            (q.expand_label_releases, {}),
+            (q.expand_label_artists, {}),
+            (q.expand_label_genres, {}),
+            (q.count_label_releases, {}),
+            (q.count_label_artists, {}),
+            (q.count_label_genres, {}),
+        ]
+        for fn, kwargs in calls:
+            driver = _make_driver(records=[{"total": 3}], single={"total": 3})
+            await fn(driver, "Same", label_id="L2", **kwargs)
+            sessions = driver.session.return_value.run.call_args_list
+            assert all("name: $name" not in c[0][0].text for c in sessions), fn.__name__
+            assert all(c[0][1].get("id") == "L2" for c in sessions), fn.__name__
+
+    @pytest.mark.asyncio
+    async def test_explore_label_by_id_matches_on_id(self) -> None:
+        from api.queries.neo4j_queries import explore_label
+
+        driver = _make_driver(single={"id": "L2", "name": "Same", "release_count": 4, "artist_count": 1, "genre_count": 1})
+        result = await explore_label(driver, "Same", label_id="L2")
+        cypher, params = self._cypher(driver)
+        assert result is not None
+        assert result["id"] == "L2"
+        assert "{id: $id}" in cypher
+        assert "name: $name" not in cypher
+        assert params["id"] == "L2"
+
+    @pytest.mark.asyncio
+    async def test_explore_label_fallback_matches_on_id(self) -> None:
+        from api.queries.neo4j_queries import explore_label
+
+        driver = _make_driver_with_side_effects(
+            [
+                _MockResult(single={"id": "L2", "name": "Same", "release_count": None, "artist_count": None, "genre_count": None}),
+                _MockResult(single={"id": "L2", "name": "Same", "release_count": 2, "artist_count": 1, "genre_count": 1}),
+            ]
+        )
+        result = await explore_label(driver, "Same", label_id="L2")
+        assert result is not None
+        assert result["release_count"] == 2
+        assert "name: $name" not in self._cypher(driver)[0]
+
+    @pytest.mark.asyncio
+    async def test_a_name_shared_by_two_labels_raises_for_every_label_query(self) -> None:
+        from api.queries import neo4j_queries as q
+
+        for fn in (
+            q.explore_label,
+            q.expand_label_releases,
+            q.expand_label_artists,
+            q.expand_label_genres,
+            q.count_label_releases,
+            q.count_label_artists,
+            q.count_label_genres,
+        ):
+            driver = _make_driver(records=[{"id": "L1", "name": "Same"}, {"id": "L2", "name": "Same"}])
+            with pytest.raises(q.AmbiguousLabelNameError) as exc:
+                await fn(driver, "Same")
+            assert [c["id"] for c in exc.value.candidates] == ["L1", "L2"], fn.__name__
+
+    @pytest.mark.asyncio
+    async def test_a_unique_name_resolves_to_its_id_then_queries_by_id(self) -> None:
+        from api.queries.neo4j_queries import count_label_releases
+
+        driver = _make_driver_with_side_effects([_MockResult(records=[{"id": "L7", "name": "Unique"}]), _MockResult(single={"total": 9})])
+        assert await count_label_releases(driver, "Unique") == 9
+        assert self._cypher(driver)[1] == {"id": "L7"}
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_name_is_empty_not_an_error(self) -> None:
+        from api.queries import neo4j_queries as q
+
+        assert await q.explore_label(_make_driver(records=[]), "Nope") is None
+        assert await q.expand_label_releases(_make_driver(records=[]), "Nope") == []
+        assert await q.count_label_artists(_make_driver(records=[]), "Nope") == 0

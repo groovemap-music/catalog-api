@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -15,9 +16,9 @@ COUNTS = [
     (q.count_genre_artists, "Genre", "artist_count"),
     (q.count_genre_labels, "Genre", "label_count"),
     (q.count_genre_styles, "Genre", "style_count"),
-    (q.count_label_releases, "Label", "release_count"),
-    (q.count_label_artists, "Label", "artist_count"),
-    (q.count_label_genres, "Label", "genre_count"),
+    (partial(q.count_label_releases, label_id="L1"), "Label", "release_count"),
+    (partial(q.count_label_artists, label_id="L1"), "Label", "artist_count"),
+    (partial(q.count_label_genres, label_id="L1"), "Label", "genre_count"),
     (q.count_style_releases, "Style", "release_count"),
     (q.count_style_artists, "Style", "artist_count"),
     (q.count_style_labels, "Style", "label_count"),
@@ -34,7 +35,8 @@ async def test_total_without_before_year_is_one_property_read(fn: Any, label: st
     ):
         assert await fn(object(), "X") == 42
     cypher = single.call_args.args[1]
-    assert f"(n:{label} {{name: $name}})" in cypher
+    key = "id" if label == "Label" else "name"  # a label is matched by its unique id, the rest by name
+    assert f"(n:{label} {{{key}: ${key}}})" in cypher
     assert f"n.{prop}" in cypher
 
 

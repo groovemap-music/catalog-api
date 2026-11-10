@@ -237,3 +237,55 @@ async def test_trends_label_keeps_same_name_labels_apart(neo4j_driver: AsyncResi
         await q.trends_label(neo4j_driver, "Same")
     assert await q.trends_label(neo4j_driver, "Unique") == [{"year": 1995, "count": 1}]
     assert await q.trends_label(neo4j_driver, "Nope") == []
+
+
+async def test_label_explore_expand_and_counts_keep_same_name_labels_apart(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    """Two labels share a name, and a third is named like the first's id: each gets its own center, page and counts."""
+    await run_query(neo4j_driver, "MATCH (n) DETACH DELETE n", database="neo4j", timeout=None)
+    await run_query(
+        neo4j_driver,
+        """
+        CREATE (a:Label {id: 'S1', name: 'Same'}), (b:Label {id: 'S2', name: 'Same'}), (u:Label {id: 'U1', name: 'S1'}),
+               (g1:Genre {name: 'G1'}), (g2:Genre {name: 'G2'}),
+               (ar1:Artist {id: 'A1', name: 'A1'}), (ar2:Artist {id: 'A2', name: 'A2'}),
+               (x1:Release {id: 'x1', year: 1990})-[:ON]->(a), (x2:Release {id: 'x2', year: 1991})-[:ON]->(a),
+               (y1:Release {id: 'y1', year: 1990})-[:ON]->(b),
+               (z1:Release {id: 'z1', year: 1995})-[:ON]->(u),
+               (x1)-[:BY]->(ar1), (x2)-[:BY]->(ar1), (y1)-[:BY]->(ar2), (x1)-[:IS]->(g1), (y1)-[:IS]->(g2)
+        """,
+        database="neo4j",
+        timeout=None,
+    )
+    # With no stored counts the live traversal answers; with them stored the stored value must be that label's own.
+    for stored in (False, True):
+        if stored:
+            await run_query(
+                neo4j_driver,
+                "MATCH (l:Label) SET l.release_count = COUNT { (l)<-[:ON]-(:Release) }, "
+                "l.artist_count = COUNT { MATCH (r:Release)-[:ON]->(l), (r)-[:BY]->(a:Artist) RETURN DISTINCT a }, "
+                "l.genre_count = COUNT { MATCH (r:Release)-[:ON]->(l), (r)-[:IS]->(g:Genre) RETURN DISTINCT g }",
+                database="neo4j",
+                timeout=None,
+            )
+        assert await q.count_label_releases(neo4j_driver, "Same", label_id="S1") == 2
+        assert await q.count_label_releases(neo4j_driver, "Same", label_id="S2") == 1
+        assert await q.count_label_artists(neo4j_driver, "Same", label_id="S2") == 1
+        assert await q.count_label_genres(neo4j_driver, "Same", label_id="S1") == 1
+        assert await q.count_label_releases(neo4j_driver, "Same", label_id="S1", before_year=1990) == 1
+        first = await q.explore_label(neo4j_driver, "Same", label_id="S1")
+        second = await q.explore_label(neo4j_driver, "Same", label_id="S2")
+        assert first is not None
+        assert second is not None
+        assert (first["id"], first["release_count"]) == ("S1", 2)
+        assert (second["id"], second["release_count"]) == ("S2", 1)
+    assert [r["id"] for r in await q.expand_label_releases(neo4j_driver, "Same", label_id="S1")] == ["x2", "x1"]
+    assert [r["id"] for r in await q.expand_label_releases(neo4j_driver, "Same", label_id="S2")] == ["y1"]
+    assert [r["id"] for r in await q.expand_label_artists(neo4j_driver, "Same", label_id="S2")] == ["A2"]
+    assert [r["id"] for r in await q.expand_label_genres(neo4j_driver, "Same", label_id="S1")] == ["G1"]
+    # A bare name shared by two labels is ambiguous everywhere; a unique name works as before.
+    for fn in (q.explore_label, q.expand_label_releases, q.count_label_releases):
+        with pytest.raises(q.AmbiguousLabelNameError):
+            await fn(neo4j_driver, "Same")
+    assert await q.count_label_releases(neo4j_driver, "S1") == 1  # the label NAMED 'S1' is not the label with id 'S1'
+    assert [r["id"] for r in await q.expand_label_releases(neo4j_driver, "S1")] == ["z1"]
+    assert await q.count_label_releases(neo4j_driver, "Nope") == 0
