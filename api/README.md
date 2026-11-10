@@ -573,6 +573,10 @@ exceptions. Only releases with a year above 0 count towards the span, `total_rel
 below `release_count`, which counts every release. A label with no dated release has `null` for the
 year fields and `peak_decade` and `0` for `total_releases`. The graph-explorer contract promises
 these fields as `node_label.response_fields`.
+It also carries `longevity_rank` (the label's place, 1..M) and `longevity_rank_of` (M), both stored by
+discogs-graph-enricher v0.9.0 and read in the same query as the longevity gate. They are `null` unless the
+newest ExtractionCompletion is maintained with `stats_version >= 4`; there is no live fallback. A label with no
+stored rank (placeholder, unnamed, undated) has `longevity_rank` `null` and `longevity_rank_of` set.
 
 **Media (`GET /api/node/{node_id}?type=release`):** a release node response always carries a
 `media` field — the ADR 0007 canonical media block. It is read from `releases.media` in

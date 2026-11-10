@@ -53,7 +53,8 @@
       "query": {"type": "label"},
       "response_fields": [
         "id", "name", "release_count", "is_placeholder",
-        "first_year", "last_year", "years_active", "total_releases", "peak_decade"
+        "first_year", "last_year", "years_active", "total_releases", "peak_decade",
+        "longevity_rank", "longevity_rank_of"
       ]
     },
     "oauth_authorize": {"method": "GET", "path": "/api/oauth/authorize/discogs"},

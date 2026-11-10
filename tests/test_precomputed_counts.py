@@ -135,6 +135,8 @@ async def test_label_details_add_longevity_and_keep_the_stored_count() -> None:
         "name": "Warp",
         "release_count": 40,  # stored: counts the undated releases too
         "is_placeholder": False,
+        "longevity_rank": None,
+        "longevity_rank_of": None,
         "first_year": 1989,
         "last_year": 2001,
         "years_active": 13,
@@ -238,7 +240,37 @@ async def test_swept_label_reads_the_stored_longevity_without_a_traversal() -> N
     ):
         details = await q.get_label_details(object(), "7")
     assert query.await_count == 0
-    assert details == {"id": "7", "name": "Warp", "release_count": 40, "is_placeholder": False, **_SWEPT}
+    assert details == {
+        "id": "7",
+        "name": "Warp",
+        "release_count": 40,
+        "is_placeholder": False,
+        "longevity_rank": None,
+        "longevity_rank_of": None,
+        **_SWEPT,
+    }
+
+
+@pytest.mark.parametrize(
+    ("gate", "expected"),
+    [
+        ({"stats_version": 3}, (None, None)),
+        ({"stats_version": 4}, (12, 900)),
+        ({"stats_version": 4, "longevity_rank": None}, (None, 900)),
+        ({"stats_version": 4, "maintained": False}, (None, None)),
+        ({"stats_version": None}, (None, None)),
+    ],
+)
+@pytest.mark.asyncio
+async def test_longevity_rank_is_read_from_the_graph_by_gate(gate: dict[str, Any], expected: tuple[int | None, int | None]) -> None:
+    stored = _swept_label(**_SWEPT) | {"longevity_rank": 12, "longevity_rank_of": 900} | gate
+    with (
+        patch("api.queries.neo4j_queries.run_single", AsyncMock(return_value=stored)) as single,
+        patch("api.queries.neo4j_queries.run_query", AsyncMock(return_value=_years(y2000=3))),
+    ):
+        details = await q.get_label_details(object(), "7")
+    assert (details["longevity_rank"], details["longevity_rank_of"]) == expected
+    assert single.await_count == 1  # the rank rides the existing label query: no extra round trip, no live rank
 
 
 @pytest.mark.asyncio

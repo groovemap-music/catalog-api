@@ -818,9 +818,11 @@ MATCH (l:Label {id: $id})
 CALL {
   OPTIONAL MATCH (m:ExtractionCompletion)
   WITH m ORDER BY m.version DESC LIMIT 1
-  RETURN m.maintained_at IS NOT NULL AS maintained, m.stats_version AS stats_version
+  RETURN m.maintained_at IS NOT NULL AS maintained, m.stats_version AS stats_version,
+         m.label_longevity_rank_of AS longevity_rank_of
 }
 RETURN l.id AS id, l.name AS name, l.release_count AS release_count,
+       l.longevity_rank AS longevity_rank, longevity_rank_of,
        l.first_year AS first_year, l.last_year AS last_year, l.years_active AS years_active,
        l.total_releases AS total_releases, l.peak_decade AS peak_decade,
        maintained, stats_version,
@@ -844,6 +846,8 @@ RETURN year, releases
 # discogs-graph-enricher v0.8.0 stores the longevity fields on every Label (stats_version 3): total_releases (year > 0) is
 # always present, the other four only when the label has a dated release.
 _LABEL_LONGEVITY_MIN_STATS_VERSION = 3
+# The enricher's global rank (v0.9.0, stats_version 4): l.longevity_rank on ranked labels, M on the newest dump node.
+_LABEL_RANK_MIN_STATS_VERSION = 4
 _LABEL_LONGEVITY_KEYS = ("first_year", "last_year", "years_active", "total_releases", "peak_decade")
 
 
@@ -858,6 +862,19 @@ def _stored_label_longevity(stored: dict[str, Any]) -> dict[str, Any] | None:
     if stored.get("total_releases") is None:
         return None
     return {key: stored.get(key) for key in _LABEL_LONGEVITY_KEYS}
+
+
+def _stored_label_rank(stored: dict[str, Any]) -> dict[str, int | None]:
+    """``longevity_rank`` and ``longevity_rank_of`` from the graph, both ``None`` unless trusted.
+
+    Trusted only when the newest ``ExtractionCompletion`` is maintained with ``stats_version`` >= 4. There is no live
+    fallback (ranking the whole catalog per request is the cost the stored rank removes). An unranked label keeps
+    ``longevity_rank`` ``None`` while ``longevity_rank_of`` is still set.
+    """
+    if not stored.get("maintained") or (stored.get("stats_version") or 0) < _LABEL_RANK_MIN_STATS_VERSION:
+        return {"longevity_rank": None, "longevity_rank_of": None}
+    rank, of = stored.get("longevity_rank"), stored.get("longevity_rank_of")
+    return {"longevity_rank": None if rank is None else int(rank), "longevity_rank_of": None if of is None else int(of)}
 
 
 def _label_longevity(year_rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -902,6 +919,7 @@ async def get_label_details(driver: AsyncResilientNeo4jDriver, node_id: str) -> 
     if stored is None:
         return None
     base = {key: stored[key] for key in ("id", "name", "release_count", "is_placeholder")}
+    base.update(_stored_label_rank(stored))
     longevity = _stored_label_longevity(stored)
     if longevity is not None and base["release_count"] is not None:
         return {**base, **longevity}  # stored: no traversal

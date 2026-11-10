@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## Unreleased
+
+### Feat
+
+- **label**: label details (`GET /api/node/{id}?type=label`) add `longevity_rank` and `longevity_rank_of` (int or null), read from discogs-graph-enricher v0.9.0's `Label.longevity_rank` and the newest ExtractionCompletion's `label_longevity_rank_of` in the same query as the stats_version gate. Both are null unless the newest node is maintained with `stats_version >= 4` (no live fallback); a label with no stored rank has `longevity_rank` null and `longevity_rank_of` set. Published in the graph-explorer v1 contract (`node_label`).
+
 ## v0.13.0 (2026-11-09)
 
 ### Release notes
