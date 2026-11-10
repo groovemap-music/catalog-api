@@ -20,11 +20,13 @@ Runs 6 concurrent queries per uncached search:
 
 import asyncio
 import contextlib
+import contextvars
+import dataclasses
 import hashlib
 import json
 import os
 import weakref
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from functools import lru_cache
 from typing import Any
 
@@ -85,40 +87,144 @@ SEARCH_QUEUE_TIMEOUT_SECONDS = _env_seconds("SEARCH_QUEUE_TIMEOUT_SECONDS", 5.0)
 # Connections left for everything that is not a search. Two keeps login and token routes alive.
 SEARCH_POOL_RESERVE = 2
 
+# The most statements one uncached search runs at once (``execute_search``'s gather). The pool keeps at
+# least this many connections open from startup (``search_pool_floor``) so a first search after a
+# restart or a quiet spell does not open its backends while the caller waits (gm-catalog-api-0n70).
+SEARCH_STATEMENTS_PER_SEARCH = 6
+
+
+def search_pool_floor(min_connections: int, max_connections: int) -> int:
+    """The pool's ``min_connections`` once one full search is covered: never below it, never above ``max_connections``.
+
+    An operator's larger minimum is kept; a ``max_connections`` below one search's width wins, since it is
+    the shared backend budget.
+    """
+    return max(1, min(max_connections, max(min_connections, SEARCH_STATEMENTS_PER_SEARCH)))
+
+
+@dataclasses.dataclass(eq=False)
+class _SlotState:
+    """One pool's search slots, and who may take them.
+
+    ``slots`` bounds every search statement. A background search (the startup prewarm, see
+    :func:`background_searches`) also passes ``background`` (one statement at a time) and starts a
+    statement only while no user statement is waiting for or holding a slot (``users_idle``), so user
+    searches go first. On lux (gm-catalog-api-0n70) the prewarm's all-types searches took all six slots
+    right after a restart: the first all-types 'love' took 961 ms and the next 758 ms, against 538-624 ms
+    once the prewarm was done.
+    """
+
+    slots: asyncio.Semaphore
+    background: asyncio.Semaphore = dataclasses.field(default_factory=lambda: asyncio.Semaphore(1))
+    users: int = 0
+    users_idle: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
+
+    def __post_init__(self) -> None:
+        self.users_idle.set()
+
+    def user_enters(self) -> None:
+        self.users += 1
+        self.users_idle.clear()
+
+    def user_leaves(self) -> None:
+        self.users -= 1
+        if self.users == 0:
+            self.users_idle.set()
+
+
 # Keyed weakly by pool: the slots belong to one pool (and its event loop) and die with it.
-_slots: weakref.WeakKeyDictionary[Any, asyncio.Semaphore] = weakref.WeakKeyDictionary()
+_slots: weakref.WeakKeyDictionary[Any, _SlotState] = weakref.WeakKeyDictionary()
+
+# True inside :func:`background_searches`. Context variables follow the tasks asyncio.gather starts,
+# so every statement of a background search sees it.
+_background: contextvars.ContextVar[bool] = contextvars.ContextVar("search_background", default=False)
 
 
-def _search_slots(pool: AsyncPostgreSQLPool) -> asyncio.Semaphore:
-    """The slot semaphore for ``pool``: its connections minus the reserve, never fewer than one."""
-    slots = _slots.get(pool)
-    if slots is None:
+@contextlib.contextmanager
+def background_searches() -> Iterator[None]:
+    """Run the searches inside at background priority: one slot at most, and only while no user search wants one."""
+    token = _background.set(True)
+    try:
+        yield
+    finally:
+        _background.reset(token)
+
+
+def _slot_state(pool: AsyncPostgreSQLPool) -> _SlotState:
+    """The slot state for ``pool``: its connections minus the reserve, never fewer than one."""
+    state = _slots.get(pool)
+    if state is None:
         size = max(1, int(getattr(pool, "max_connections", 8)) - SEARCH_POOL_RESERVE)
-        slots = _slots[pool] = asyncio.Semaphore(size)
-    return slots
+        state = _slots[pool] = _SlotState(asyncio.Semaphore(size))
+    return state
+
+
+@contextlib.asynccontextmanager
+async def _user_slot(state: _SlotState) -> AsyncIterator[None]:
+    """Hold one slot for a user statement, counted from the moment it starts waiting."""
+    state.user_enters()
+    try:
+        try:
+            await asyncio.wait_for(state.slots.acquire(), timeout=SEARCH_QUEUE_TIMEOUT_SECONDS)
+        except TimeoutError:
+            raise SearchBusy from None
+        try:
+            yield
+        finally:
+            state.slots.release()
+    finally:
+        state.user_leaves()
+
+
+@contextlib.asynccontextmanager
+async def _background_slot(state: _SlotState) -> AsyncIterator[None]:
+    """Hold one slot for a background statement: one at a time, started only while no user wants a slot.
+
+    It waits as long as user searches keep coming; the prewarm finishing later is the intended trade.
+    """
+    async with state.background:
+        while True:
+            await state.users_idle.wait()
+            await state.slots.acquire()
+            if state.users == 0:
+                break
+            # A user arrived while this waited for the slot: give it back and let the user go first.
+            state.slots.release()
+        try:
+            yield
+        finally:
+            state.slots.release()
 
 
 @contextlib.asynccontextmanager
 async def _search_cursor(pool: AsyncPostgreSQLPool) -> AsyncIterator[Any]:
-    """A dict-row cursor for one search statement, inside a slot and under a statement timeout.
+    """A dict-row cursor for one search statement, inside a slot, under a statement timeout and without JIT.
 
-    Waiting for a slot is bounded by ``SEARCH_QUEUE_TIMEOUT_SECONDS`` (``SearchBusy``); the
-    statement is bounded by ``SEARCH_STATEMENT_TIMEOUT_SECONDS``, scoped to this transaction so the
-    pooled connection keeps no setting (``SearchTimedOut``). Neither is ever an empty success.
+    Waiting for a slot is bounded by ``SEARCH_QUEUE_TIMEOUT_SECONDS`` (``SearchBusy``) for a user
+    search; a background search waits until users leave a slot free (:class:`_SlotState`). The
+    statement is bounded by ``SEARCH_STATEMENT_TIMEOUT_SECONDS`` (``SearchTimedOut``). Neither is
+    ever an empty success.
+
+    JIT is off for search statements. On lux (gm-catalog-api-0n70, EXPLAIN ANALYZE on a new backend,
+    all-types 'love') JIT took 398 of the genre facet's 485 ms and 374 of the media facet's 417 ms,
+    mostly inlining and optimisation that a backend pays in full the first time it compiles; with
+    JIT off they ran in 322 and 335 ms, the results statement in 384 ms instead of 468 ms. These
+    statements are index lookups and small aggregates, not the long scans JIT pays back on.
+
+    Both settings are scoped to this transaction, so the pooled connection keeps neither.
     """
-    slots = _search_slots(pool)
-    try:
-        await asyncio.wait_for(slots.acquire(), timeout=SEARCH_QUEUE_TIMEOUT_SECONDS)
-    except TimeoutError:
-        raise SearchBusy from None
-    try:
-        async with pool.connection() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute("SELECT set_config('statement_timeout', %s, true)", (f"{int(SEARCH_STATEMENT_TIMEOUT_SECONDS * 1000)}ms",))
-            yield cur
-    except QueryCanceled:
-        raise SearchTimedOut from None
-    finally:
-        slots.release()
+    state = _slot_state(pool)
+    slot = _background_slot(state) if _background.get() else _user_slot(state)
+    async with slot:
+        try:
+            async with pool.connection() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT set_config('statement_timeout', %s, true), set_config('jit', 'off', true)",
+                    (f"{int(SEARCH_STATEMENT_TIMEOUT_SECONDS * 1000)}ms",),
+                )
+                yield cur
+        except QueryCanceled:
+            raise SearchTimedOut from None
 
 
 @lru_cache(maxsize=1)
