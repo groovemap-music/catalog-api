@@ -1442,3 +1442,128 @@ class TestLabelIdentity:
         ):
             test_client.get("/api/expand?node_id=Radiohead&id=L2&type=artist&category=releases")
         assert "label_id" not in query.call_args.kwargs
+
+
+class TestPathLabelIdentity:
+    """/api/path: labels sharing a name stay apart by from_id / to_id; a bare ambiguous name is 409 with candidates."""
+
+    @staticmethod
+    def _ambiguous() -> Any:
+        from api.queries.neo4j_queries import AmbiguousLabelNameError
+
+        return AmbiguousLabelNameError("Same", [{"id": "L1", "name": "Same"}, {"id": "L2", "name": "Same"}])
+
+    @staticmethod
+    def _label_rows() -> dict[str, dict[str, Any]]:
+        return {"L1": {"id": "L1", "name": "Same"}, "L2": {"id": "L2", "name": "Same"}}
+
+    @staticmethod
+    def _fake_path(_driver: Any, from_id: str, to_id: str, **_kw: Any) -> dict[str, Any]:
+        """A two-hop path that starts at ``from_id``, so each label's path is distinguishable."""
+        return {
+            "nodes": [
+                {"id": from_id, "name": f"node-{from_id}", "labels": ["Label" if from_id.startswith("L") else "Artist"]},
+                {"id": to_id, "name": f"node-{to_id}", "labels": ["Artist"]},
+            ],
+            "rels": ["ON"],
+        }
+
+    def test_path_from_id_selects_that_label_and_is_distinct_per_label(self, test_client: TestClient) -> None:
+        rows = self._label_rows()
+
+        async def explore_label(_driver: Any, _name: str, label_id: str | None = None) -> dict[str, Any]:
+            return rows[label_id or "L1"]
+
+        fsp = AsyncMock(side_effect=self._fake_path)
+        with (
+            patch.dict(
+                "api.routers.explore.EXPLORE_DISPATCH", {"label": explore_label, "artist": AsyncMock(return_value={"id": "A9", "name": "Radiohead"})}
+            ),
+            patch("api.routers.explore.find_shortest_path", fsp),
+        ):
+            by_l1 = test_client.get("/api/path?from_name=Same&from_type=label&from_id=L1&to_name=Radiohead&to_type=artist").json()
+            by_l2 = test_client.get("/api/path?from_name=Same&from_type=label&from_id=L2&to_name=Radiohead&to_type=artist").json()
+        assert by_l1["found"] is True and by_l2["found"] is True
+        assert by_l1["path"][0]["id"] == "L1"
+        assert by_l2["path"][0]["id"] == "L2"
+        assert by_l1 != by_l2
+        assert [c.args[1] for c in fsp.call_args_list] == ["L1", "L2"]
+
+    def test_path_to_id_selects_that_label_and_is_distinct_per_label(self, test_client: TestClient) -> None:
+        rows = self._label_rows()
+
+        async def explore_label(_driver: Any, _name: str, label_id: str | None = None) -> dict[str, Any]:
+            return rows[label_id or "L1"]
+
+        fsp = AsyncMock(side_effect=self._fake_path)
+        with (
+            patch.dict(
+                "api.routers.explore.EXPLORE_DISPATCH", {"label": explore_label, "artist": AsyncMock(return_value={"id": "A9", "name": "Radiohead"})}
+            ),
+            patch("api.routers.explore.find_shortest_path", fsp),
+        ):
+            to_l1 = test_client.get("/api/path?from_name=Radiohead&from_type=artist&to_name=Same&to_type=label&to_id=L1").json()
+            to_l2 = test_client.get("/api/path?from_name=Radiohead&from_type=artist&to_name=Same&to_type=label&to_id=L2").json()
+        assert to_l1["path"][-1]["id"] == "L1"
+        assert to_l2["path"][-1]["id"] == "L2"
+        assert to_l1 != to_l2
+        assert [c.args[2] for c in fsp.call_args_list] == ["L1", "L2"]
+
+    def test_path_ambiguous_bare_label_name_is_409_with_candidates(self, test_client: TestClient) -> None:
+        fsp = AsyncMock()
+        with (
+            patch.dict(
+                "api.routers.explore.EXPLORE_DISPATCH",
+                {"label": AsyncMock(side_effect=self._ambiguous()), "artist": AsyncMock(return_value={"id": "A9", "name": "Radiohead"})},
+            ),
+            patch("api.routers.explore.find_shortest_path", fsp),
+        ):
+            response = test_client.get("/api/path?from_name=Same&from_type=label&to_name=Radiohead&to_type=artist")
+        assert response.status_code == 409
+        assert [c["id"] for c in response.json()["candidates"]] == ["L1", "L2"]
+        assert "id=<label id>" in response.json()["error"]
+        fsp.assert_not_called()
+
+    def test_path_ambiguous_bare_to_name_is_409_with_candidates(self, test_client: TestClient) -> None:
+        fsp = AsyncMock()
+        with (
+            patch.dict(
+                "api.routers.explore.EXPLORE_DISPATCH",
+                {"label": AsyncMock(side_effect=self._ambiguous()), "artist": AsyncMock(return_value={"id": "A9", "name": "Radiohead"})},
+            ),
+            patch("api.routers.explore.find_shortest_path", fsp),
+        ):
+            response = test_client.get("/api/path?from_name=Radiohead&from_type=artist&to_name=Same&to_type=label")
+        assert response.status_code == 409
+        assert [c["id"] for c in response.json()["candidates"]] == ["L1", "L2"]
+        fsp.assert_not_called()
+
+    def test_path_unique_label_name_is_unchanged_and_passes_no_label_id(self, test_client: TestClient) -> None:
+        explore_label = AsyncMock(return_value={"id": "L7", "name": "Unique"})
+        fsp = AsyncMock(side_effect=self._fake_path)
+        with (
+            patch.dict(
+                "api.routers.explore.EXPLORE_DISPATCH", {"label": explore_label, "artist": AsyncMock(return_value={"id": "A9", "name": "Radiohead"})}
+            ),
+            patch("api.routers.explore.find_shortest_path", fsp),
+        ):
+            response = test_client.get("/api/path?from_name=Unique&from_type=label&to_name=Radiohead&to_type=artist")
+        assert response.status_code == 200
+        assert response.json()["found"] is True
+        assert explore_label.call_args.args == (ANY, "Unique")
+        assert "label_id" not in explore_label.call_args.kwargs
+        assert fsp.call_args.args[1] == "L7"
+
+    def test_path_id_is_ignored_when_type_is_not_label(self, test_client: TestClient) -> None:
+        artist = AsyncMock(return_value={"id": "A9", "name": "Radiohead"})
+        genre = AsyncMock(return_value={"id": "G1", "name": "Rock"})
+        fsp = AsyncMock(side_effect=self._fake_path)
+        with (
+            patch.dict("api.routers.explore.EXPLORE_DISPATCH", {"artist": artist, "genre": genre}),
+            patch("api.routers.explore.find_shortest_path", fsp),
+        ):
+            response = test_client.get("/api/path?from_name=Radiohead&from_type=artist&from_id=L2&to_name=Rock&to_type=genre&to_id=L9")
+        assert response.status_code == 200
+        assert "label_id" not in artist.call_args.kwargs
+        assert "label_id" not in genre.call_args.kwargs
+        assert fsp.call_args.args[1] == "A9"

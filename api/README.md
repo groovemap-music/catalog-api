@@ -568,6 +568,14 @@ All graph query endpoints are served by the API and consumed by
 serve that one label. Without it, a name that matches exactly one label works as before; a name shared by several labels
 answers `409` with `candidates` (`id`, `name`) so the caller can retry with `id`. Response shapes are unchanged.
 
+**Labels sharing a name, paths:** `/api/path` accepts `from_id=<label id>` (with `from_type=label`) and
+`to_id=<label id>` (with `to_type=label`) to name one label exactly. A bare name that matches one label works as before;
+a shared name answers `409` with `candidates`, and the caller retries with the id.
+
+Limitation: the NLQ `find_path` tool does not take label ids yet. It still answers a shared name with the `409`-style
+error and candidates, with no id retry. The fix needs a `groovemap-agent-tools` change that adds label-id parameters to
+`find_path`, followed by a catalog-api pin bump; it is tracked as a follow-up.
+
 **Label (`GET /api/node/{node_id}?type=label`):** the response carries `is_placeholder` and the
 longevity fields `first_year`, `last_year`, `years_active`, `total_releases` and `peak_decade`, all
 computed for that label id (two labels with one name get their own values) and equal to what

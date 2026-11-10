@@ -705,6 +705,11 @@ _VALID_PATH_TYPES = frozenset(EXPLORE_DISPATCH.keys())
 # diverge again.
 
 
+def _label_id_kwargs(entity_type: str, label_id: str | None) -> dict[str, str]:
+    """``label_id=`` for an explore call on one label by id; nothing for other types or a bare name."""
+    return {"label_id": label_id} if entity_type == "label" and label_id else {}
+
+
 @router.get("/api/path")
 async def find_path(
     from_name: str = Query(...),
@@ -712,6 +717,8 @@ async def find_path(
     to_name: str = Query(...),
     to_type: str = Query("artist"),
     max_depth: int = Query(_DEFAULT_PATH_DEPTH, ge=1, le=_MAX_PATH_DEPTH),
+    from_id: str | None = Query(None, description="Label id for from_name when from_type=label; identifies one label when several share a name"),
+    to_id: str | None = Query(None, description="Label id for to_name when to_type=label; identifies one label when several share a name"),
 ) -> JSONResponse:
     if not _neo4j_driver:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
@@ -735,8 +742,8 @@ async def find_path(
 
     try:
         from_node, to_node = await asyncio.gather(
-            from_explore(_neo4j_driver, from_name),
-            to_explore(_neo4j_driver, to_name),
+            from_explore(_neo4j_driver, from_name, **_label_id_kwargs(from_type_lower, from_id)),
+            to_explore(_neo4j_driver, to_name, **_label_id_kwargs(to_type_lower, to_id)),
         )
     except AmbiguousLabelNameError as exc:
         return _ambiguous_label_response(exc)
