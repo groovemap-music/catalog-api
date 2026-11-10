@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v0.12.0 (2026-11-09)
+
+### Release notes
+
+Three additions, cut on the release branch `release/v0.11.x-search` (v0.11.4 plus gm-catalog-api-axbs, gm-catalog-api-vflb and gm-catalog-api-3uvj only), so it still carries none of the unreleased prototype or Missing/copy serving source on main.
+
+- **Dead-letter replay** (`POST /api/admin/dlq/replay/{queue}?limit=N`, 1..5000): the same admin auth and queue allow-list as purge. Each message is fetched unacked, republished to its work queue with a publisher confirm and `mandatory`, and acked only after the confirm; an unroutable return or a failed confirm leaves it in the DLQ and stops the replay; `x-*` headers are dropped. It returns `{queue, replayed, remaining}` and writes a `dlq.replay` audit row. On a partial failure the 502 body carries `{detail, replayed, remaining}`, where `remaining` is null when the depth is unknown and 0 when the queue is empty. Published in the operations-console v1 contract (`admin_dlq_replay`, with `error_fields`).
+- **Label longevity on label details** (`GET /api/node/{id}?type=label`): `is_placeholder`, `first_year`, `last_year`, `years_active`, `total_releases` and `peak_decade`, computed by label id and matching `/api/insights/label-longevity`. They are read from the fields discogs-graph-enricher v0.8.0 stores on Label nodes when the newest ExtractionCompletion has `stats_version >= 3`, and computed live otherwise. Published in the graph-explorer v1 contract (`node_label`).
+
+No schema change; runs on database-schema 0.12.0 or later, like v0.11.2.
+
+### Feat
+
+- **label**: add is_placeholder and longevity fields to label details
+- **admin**: add POST /api/admin/dlq/replay/{queue}
+
+### Fix
+
+- **admin**: return partial DLQ replay count as fields on 502
+
 ## v0.11.4 (2026-11-09)
 
 ### Release notes
