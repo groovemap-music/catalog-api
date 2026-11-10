@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v0.14.1 (2026-11-10)
+
+### Release notes
+
+Label trends (`/api/trends?type=label`) match the label by id, so two labels that share a name no longer merge their counts (gm-catalog-api-1whr). `id` identifies the label. A bare name resolves when exactly one label has it. An ambiguous name returns 409 with the candidate ids, and the NLQ trends tool returns the same. Cache keys are namespaced by id vs name for every trends type, so the trends cache starts cold once after deploy. Entries keyed by id no longer store a caller-supplied name. graph-explorer v0.6.0 sends the id; deploy it first or together. On lux, 2 names are shared by 4 labels. No schema dependency.
+
+### Fix
+
+- **trends**: keep labels that share a name apart in label trends
+- **trends**: namespace id and name cache keys for label trends
+
 ## v0.14.0 (2026-11-10)
 
 ### Release notes
