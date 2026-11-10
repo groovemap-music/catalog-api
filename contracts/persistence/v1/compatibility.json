@@ -206,6 +206,7 @@
     "owner": "database-schema declares DDL; each loader owns only its discriminator's rows",
     "semantics": "The future loader commits the final signal and pending job before acknowledging its delivery. It scans due and expired jobs at startup and periodically, claims transactionally with row locking, and fences on both lease token/epoch and the per-loader cursor at the refresh transaction's commit. Refresh, latch stamp, and completed state commit atomically. A failure rolls back or schedules bounded retry; a superseded generation cannot stamp refreshed_at. No delivery may be acknowledged while its sole refresh obligation is in process memory.",
     "rollout": "Schema first. Existing latch rows have NULL generation and remain readable by the current inline writer; the loader cutover must reconcile any unfinished legacy latch before acknowledging a terminal signal under the new protocol. Neither relation schedules work until a loader adopts it. Reverting the loader to inline behavior is safe while retaining these additive objects.",
+    "musicbrainz_job": "A public.loader_derived_refresh_job row with loader = 'musicbrainz' is accepted: no CHECK restricts loader, and the latch foreign key reaches the loader's own loader_extraction_latch row. musicbrainz-sql-loader runs graph.refresh_artist_member_of() then graph.refresh_vertex_degree() in that job's refresh transaction.",
     "failure_visibility": "The loader must expose pending age, current and last completed versions, attempt count, lease expiry, retry due, sanitized last failure, and superseded count; the schema stores these facts but does not report health itself."
   },
   "identity_link_events": {
@@ -274,12 +275,12 @@
     "consumers": [
       "catalog-api"
     ],
-    "design_decision": "catalog-api's Identity Ledger works list and density routes computed every release item's event history per request (71.5 s p95 for the default works list at 50% scale, against a 2 s budget), and no index helps because each statement aggregates the whole history before it filters. Four tables hold what those statements compute, and a fifth rolls the works list up per UTC day (gm-database-schema-9dcd), all maintained off the request path by one function. They were materialized views until gm-database-schema-xen5: REFRESH recomputes all history whether or not anything changed, and CONCURRENTLY diffs every row, so a materialized view cannot cost less than its history (45 s on lux to produce 4 rows). The definitions remain catalog-api's route SQL with the filters lifted out, as its prototype composed them (scripts/ledger_scale.py, _view_statements, catalog-api 6d744e2); identity_ledger_verify() and the integration suite pin the tables to them. They are declared after the graph statements because the capture triggers and the refresh reach graph.derived_from.",
+    "design_decision": "catalog-api's Identity Ledger works list and density routes computed every release item's event history per request (71.5 s p95 for the default works list at 50% scale, against a 2 s budget), and no index helps because each statement aggregates the whole history before it filters. Four tables hold what those statements compute, a fifth rolls the works list up per UTC day (gm-database-schema-9dcd), and a sixth holds each work's distinct event instants with their neighbours for windowed lists (gm-database-schema-xq8r), all maintained off the request path by one function. They were materialized views until gm-database-schema-xen5: REFRESH recomputes all history whether or not anything changed, and CONCURRENTLY diffs every row, so a materialized view cannot cost less than its history (45 s on lux to produce 4 rows). The definitions remain catalog-api's route SQL with the filters lifted out, as its prototype composed them (scripts/ledger_scale.py, _view_statements, catalog-api 6d744e2); identity_ledger_verify() and the integration suite pin the tables to them. They are declared after the graph statements because the capture triggers and the refresh reach graph.derived_from.",
     "introduced_in_contract_version": 1,
     "kind": "additive",
     "populate": "every table is created empty, so applying the schema never runs the whole history inline; identity_ledger_refresh_state holds no row until the first refresh commits, and that row, not the tables' emptiness, answers 'refreshed yet?', because a catalog with no events is empty too; reapplying the schema never empties a table",
     "refresh": {
-      "freshness": "all four tables commit together in the refresh's one transaction; a change committed after the refresh drained the log can show in part, and stays in the log, so the next refresh is exact and nothing is lost; freshness is bounded by catalog-api's refresh trigger, since this repository never calls the function",
+      "freshness": "every table commits together in the refresh's one transaction; a change committed after the refresh drained the log can show in part, and stays in the log, so the next refresh is exact and nothing is lost; freshness is bounded by catalog-api's refresh trigger, since this repository never calls the function",
       "function": "public.identity_ledger_refresh(source_watermark jsonb DEFAULT NULL) RETURNS timestamptz",
       "locking": "the refresh writes rows under ordinary row locks, so readers never block and keep the previous rows until it commits, the first build included; it takes the advisory lock hashtext('groovemap:identity-ledger-refresh') that catalog-api already holds, so refreshes run one at a time",
       "order": [
@@ -287,6 +288,7 @@
         "identity_ledger_edition_parents",
         "identity_ledger_work_summary",
         "identity_ledger_work_summary_day",
+        "identity_ledger_work_events",
         "identity_ledger_density"
       ],
       "privilege": "SECURITY INVOKER: the caller needs SELECT, INSERT, UPDATE, DELETE on IDENTITY_LEDGER_REFRESH_GRANTS and SELECT on the six sources. catalog-api connects as the login that owns public, like every service (deployment .env.example), and EXECUTE defaults to PUBLIC, so no grant is declared. The capture functions are SECURITY DEFINER, so a writer of a source needs no grant on the log",
@@ -399,6 +401,27 @@
             "prev_day"
           ],
           "index": "idx_identity_ledger_work_summary_day_key"
+        }
+      },
+      "identity_ledger_work_events": {
+        "columns": [
+          "event",
+          "work_id",
+          "at",
+          "prev_at",
+          "next_at"
+        ],
+        "indexes": [
+          "idx_identity_ledger_work_events_page ON public.identity_ledger_work_events (event, at DESC, work_id) INCLUDE (prev_at, next_at)"
+        ],
+        "meaning": "the works list in a [since, until) window. One row per work, event filter ('any' or an event type: the filter set of identity_ledger_work_summary, with no 'repaired') and distinct instant at which any of the work's editions (identity_ledger_edition_events joined to identity_ledger_edition_parents) has an event of that filter; prev_at and next_at are the work's previous and next instant of the same filter, NULL at its first and its last. WINDOW TOTAL for filter F and [since, until): count(*) over event = F, at >= since, at < until, and (prev_at IS NULL OR prev_at < since), one row per work with an event in the window, its first. WINDOW PAGE: the rows with event = F, the same range, and (next_at IS NULL OR next_at >= until), one per work, its last event in the window, ORDER BY at DESC, work_id. Both are index-only scans of idx_identity_ledger_work_events_page; an all-time window is since = '-infinity', until = 'infinity'. A page's evented and repaired edition counts come from identity_ledger_edition_events for its works only. A refresh replaces every row of a dirty work, since the neighbours span its whole history",
+        "unique": {
+          "columns": [
+            "event",
+            "work_id",
+            "at"
+          ],
+          "index": "idx_identity_ledger_work_events_key"
         }
       },
       "identity_ledger_density": {
@@ -681,7 +704,14 @@
       "kind": "additive",
       "note": "Neo4j holds a Discogs band membership and a MusicBrainz member-of-band assertion in one MEMBER_OF relationship space, so shortestPath traverses both without knowing which is which. On the relational side they are two relations in two key spaces: graph.member_of is Discogs-only and keyed on Discogs artist ids, while the MusicBrainz half lives in musicbrainz.relationships keyed on MBIDs and reaches a Discogs id only through musicbrainz.artists.discogs_artist_id. Spike gm-database-schema-gkt.1 measured 22,577 Discogs rows against 36,189 MusicBrainz ones, so 61.6% of that edge class is MusicBrainz provenance and a traversal over graph.member_of alone returns different paths from the Cypher it replaces. This relation resolves the crossing once at build time, with source in the key so the same membership asserted by both providers is two rows rather than a collision. It binds no property-graph label: a second artist-to-artist edge label overlapping member_of would double-count every Discogs membership in a pattern that matched both. The refresh is truncate-and-insert, so it converges in both directions and reports a row count per provenance; discogs-sql-loader calls it on the extraction_complete latch it already handles, the same latch the counter relations are recomputed on.",
       "refresh_latch": "extraction_complete",
+      "refresh_lock": {
+        "kind": "pg_advisory_xact_lock",
+        "key": "hashtextextended('graph.refresh_artist_member_of', 0)",
+        "meaning": "The function takes this transaction-scoped advisory lock before TRUNCATE, so two loaders refreshing at once queue and each rebuilds from the sources as the other left them."
+      },
+      "refresh_order": ["graph.refresh_artist_member_of", "graph.refresh_vertex_degree"],
       "refresh_owner": "discogs-sql-loader",
+      "refresh_owners": ["discogs-sql-loader", "musicbrainz-sql-loader"],
       "relation": "graph.artist_member_of",
       "reverse_index": "(group_artist_id, member_artist_id)",
       "sources": [
@@ -1069,7 +1099,14 @@
       "kind": "additive",
       "note": "One bigint per vertex of the path traversal surface, holding its undirected degree. It decides expansion order only - which side of a bidirectional search to expand next, and which vertex of that side's frontier to expand first - and changes no answer. Spike gm-database-schema-gkt.1 measured the distance-5 variance falling from 1,774 ms to 334 ms with it and unchanged answers; it does not help distance 6 and made it slightly worse, so it is a variance reducer rather than a fix. It is 97 MB at catalog scale against the 1,649 MB spike gm-database-schema-9c8.3 priced for a dense adjacency copy. kind is a one-byte discriminator rather than a prefix on the key because the pathfinder's node identity is the pair and an equality on a concatenated token cannot use the edge tables' text indexes. Only a vertex carrying an edge has a row; a lookup that misses reads as degree zero. A membership both provenances assert counts twice, because graph.artist_member_of carries source in its key and an expansion of that vertex really does scan two rows. It binds no property-graph label: it is an ordering heuristic for the path functions, not a property of any Neo4j node. The refresh is truncate-and-insert, so it converges in both directions and reports a row count per vertex kind; discogs-sql-loader calls it on the extraction_complete latch it already handles, the same latch the counter relations are recomputed on and after graph.refresh_artist_member_of, which writes one of the ten relations it sums.",
       "refresh_latch": "extraction_complete",
+      "refresh_lock": {
+        "kind": "pg_advisory_xact_lock",
+        "key": "hashtextextended('graph.refresh_vertex_degree', 0)",
+        "meaning": "The function takes this transaction-scoped advisory lock before TRUNCATE, so two loaders refreshing at once queue and each rebuilds from the sources as the other left them."
+      },
+      "refresh_order": ["graph.refresh_artist_member_of", "graph.refresh_vertex_degree"],
       "refresh_owner": "discogs-sql-loader",
+      "refresh_owners": ["discogs-sql-loader", "musicbrainz-sql-loader"],
       "relation": "graph.vertex_degree",
       "sources": [
         "graph.by_artist",
@@ -1226,6 +1263,100 @@
     "rollback": "move catalog-api's readers back to releases first; then the statements in RELEASE_SEARCH_ROLLBACK_STATEMENTS, in order (they also drop the media trigger and its function); they touch no releases row",
     "upgrade": "from v0.11.0's (release_id, title_tsv): each attribute column is added by ALTER TABLE public.release_search ADD COLUMN IF NOT EXISTS, nullable with no default (a catalog change under ACCESS EXCLUSIVE on release_search only, about 1 ms each on a populated table; skipped, taking no lock, once the column exists), and the five triggers are recreated together under SHARE ROW EXCLUSIVE on releases (about 4-6 ms); the columns are NULL until CALL public.release_search_backfill() fills them",
     "vector": "to_tsvector('english', COALESCE(data->>'title', '')) of the release's data, the expression idx_releases_fts indexes, for every release and no other row"
+  },
+  "reload_seen_lists": {
+    "kind": "additive",
+    "introduced_in_contract_version": 1,
+    "consumers": [
+      "discogs-sql-loader",
+      "musicbrainz-sql-loader"
+    ],
+    "design_decision": "A reload proved a row still upstream by rewriting it for updated_at: discogs-sql-loader's hash gate touched every unchanged row and musicbrainz-sql-loader's upserts rewrite every conflict, because the stale-row purge deletes what updated_at says the extraction did not reach (measured on a lux-shaped releases sample: 230 us and 7.8 KB of WAL a row, 0 HOT; about 150 GB and 75 minutes for lux's 19.6M releases). A seen list records the same fact without the rewrite: the loader appends the row's key, in the transaction that would have touched the row, to a narrow, unlogged, index-free list (14-18 us and under 2 bytes of WAL a row), and the purge deletes a row only when it is older than the extraction AND not in the list. One design for both loaders, by operator decision 2026-11-04 (gm-database-schema-uw6d, gm-discogs-sql-loader-g77f, gm-musicbrainz-sql-loader-3osm).",
+    "schema": "loader_seen",
+    "lists": {
+      "loader_seen.discogs_artists": {
+        "reconciles": "public.artists",
+        "seen_key": "TEXT NOT NULL, the row's data_id"
+      },
+      "loader_seen.discogs_labels": {
+        "reconciles": "public.labels",
+        "seen_key": "TEXT NOT NULL, the row's data_id"
+      },
+      "loader_seen.discogs_masters": {
+        "reconciles": "public.masters",
+        "seen_key": "TEXT NOT NULL, the row's data_id"
+      },
+      "loader_seen.discogs_releases": {
+        "reconciles": "public.releases",
+        "seen_key": "TEXT NOT NULL, the row's data_id"
+      },
+      "loader_seen.musicbrainz_relationships": {
+        "reconciles": "musicbrainz.relationships",
+        "seen_key": "BIGINT NOT NULL, loader_seen.hash_key(musicbrainz.relationship_key(source_mbid, target_mbid, source_entity_type, target_entity_type, relationship_type, begin_date, end_date, attributes))"
+      },
+      "loader_seen.musicbrainz_external_links": {
+        "reconciles": "musicbrainz.external_links",
+        "seen_key": "BIGINT NOT NULL, loader_seen.hash_key(musicbrainz.external_link_key(mbid, entity_type, service_name, url))"
+      }
+    },
+    "list_columns": {
+      "seen_at": "TIMESTAMPTZ NOT NULL DEFAULT now(), the appending transaction's start, as updated_at = NOW() was",
+      "seen_key": "the list's key, as above"
+    },
+    "storage": "UNLOGGED, no index, no key, autovacuum_vacuum_insert_threshold = -1; append-only between restarts, emptied only by loader_seen.start; duplicates are expected and harmless",
+    "registry": {
+      "relation": "loader_seen.lists",
+      "columns": {
+        "loader": "TEXT NOT NULL",
+        "data_type": "TEXT NOT NULL",
+        "opened_at": "TIMESTAMPTZ NOT NULL DEFAULT now()"
+      },
+      "primary_key": [
+        "loader",
+        "data_type"
+      ],
+      "storage": "UNLOGGED, so crash recovery empties it together with the lists it vouches for",
+      "intact": "a list is intact for an extraction when its registry row exists and opened_at <= started_at - 15 minutes (the clock margin between the extractor's started_at and the database's now())"
+    },
+    "functions": {
+      "loader_seen.start(p_loader text, p_data_type text) RETURNS timestamptz": "TRUNCATE the one list and stamp its registry row with now(), in the caller's transaction; raises 22023 for an unknown list",
+      "loader_seen.intact(p_loader text, p_data_type text, p_started_at timestamptz) RETURNS boolean": "one registry read, no scan",
+      "loader_seen.status(p_loader text, p_data_type text, p_started_at timestamptz) RETURNS TABLE (opened_at timestamptz, intact boolean, seen_keys bigint)": "seen_keys counts distinct keys appended at or after p_started_at; one scan of the list; raises 22023 for an unknown list",
+      "loader_seen.<list>_stale(p_started_at timestamptz) RETURNS TABLE (<row id>)": "the purge set: rows of the reconciled table with updated_at < p_started_at AND no key in the list since p_started_at; returns data_id text for Discogs lists and id bigint for MusicBrainz lists; raises 55000 when the list is not intact",
+      "loader_seen.<list>_shadow(p_started_at timestamptz, p_sample integer DEFAULT 20) RETURNS TABLE (intact boolean, total_rows bigint, touch_purge bigint, seen_purge bigint, refreshed_not_seen bigint, seen_not_refreshed bigint, refreshed_not_seen_sample <row id>[], seen_not_refreshed_sample <row id>[])": "for a shadow reload, which still touches: touch_purge is the old purge set (updated_at < p_started_at), seen_purge what the seen purge deletes once the touch is gone (not in the list); any refreshed_not_seen blocks the switch",
+      "loader_seen.hash_key(key bytea) RETURNS bigint": "the first 8 bytes of a key hash; IMMUTABLE STRICT; a collision only keeps a stale row one more month",
+      "musicbrainz.external_link_key(mbid uuid, entity_type text, service_name text, url text) RETURNS bytea": "SHA-256 of the link's unique key, length-prefixed as musicbrainz.relationship_key is; IMMUTABLE"
+    },
+    "loader_obligations": [
+      "append every row a batch processes (inserted, changed, unchanged, and each sighting of a MusicBrainz child row) to its list in the batch's own transaction, on every write path",
+      "before a purge: skip it, as for a dead-letter veto, when loader_seen.intact is false, or when status.seen_keys is below the guard fraction of the extractor's record_counts for that type (Discogs); keep PURGE_MAX_DELETE_FRACTION on the stale set",
+      "purge from loader_seen.<list>_stale only; delete graph rows and entity rows by the returned ids, not by updated_at",
+      "call loader_seen.start for the list when the extraction settles for it (purged, vetoed or skipped), in the purge's transaction when it purges",
+      "never TRUNCATE or DELETE from a list directly"
+    ],
+    "consumer_rollout": [
+      {
+        "phase": "expand",
+        "step": "database-schema adds loader_seen; the initializer starts every list once, when it creates it",
+        "tracked_in": "gm-database-schema-uw6d"
+      },
+      {
+        "phase": "shadow",
+        "step": "each loader appends, keeps the touch and the updated_at purge, and logs loader_seen.<list>_shadow at every purge for one full reload",
+        "tracked_in": "gm-discogs-sql-loader-g77f, gm-musicbrainz-sql-loader-3osm"
+      },
+      {
+        "phase": "switch",
+        "step": "with operator approval, once a shadow reload reports refreshed_not_seen = 0 and touch_purge = seen_purge (or every difference explained): stop touching unchanged rows and purge from loader_seen.<list>_stale",
+        "tracked_in": "gm-discogs-sql-loader-g77f, gm-musicbrainz-sql-loader-3osm"
+      },
+      {
+        "phase": "contract",
+        "step": "drop idx_<table>_updated_at if no reader remains; a separate database-schema change",
+        "tracked_in": "not yet filed"
+      }
+    ],
+    "rollback": "a loader switches back to the touch and the updated_at purge by configuration; the first purge after switching back still sees every unchanged row as stale, so it must be a reload with the touch on, not a purge of the reload that ran without it. The schema's own rollback is SEEN_LIST_ROLLBACK_STATEMENTS: DROP SCHEMA loader_seen CASCADE and drop musicbrainz.external_link_key; no other relation reads them"
   },
   "retired_relations": {
     "consumer_rollout": "contract phase of expand, migrate consumers, then contract: catalog-api stopped writing and reading both tables (gm-catalog-api-gz4r) and operations-console reads queue and service-health history from VictoriaMetrics, so the drop lands only after a catalog-api release containing that removal is deployed",

@@ -8,12 +8,12 @@ payload.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 import pytest
-from psycopg.errors import ObjectNotInPrerequisiteState
+from psycopg.errors import ObjectNotInPrerequisiteState, UndefinedTable
 
 from api.queries import identity_ledger_queries as queries
 from api.queries.identity_ledger_queries import LedgerNotRefreshed, get_ledger_density, get_ledger_work, get_ledger_works
@@ -34,6 +34,14 @@ BACKFILLED = datetime(2025, 11, 14, tzinfo=UTC)
 REFRESHED = datetime(2026, 10, 25, 9, 30, tzinfo=UTC)
 # `_FRESHNESS`: every view the read needs is populated, and the last refresh started at REFRESHED.
 FRESH = [(True, REFRESHED)]
+# `_WORK_EVENTS_PRESENT` and `_WORK_EVENTS_FILLED`: the work-level events exist and hold rows.
+READY = [[(True,)], [(True,)]]
+
+
+@pytest.fixture(autouse=True)
+def _fresh_readiness(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test starts in a process that has not yet looked for the work-level events."""
+    monkeypatch.setattr(queries, "_work_events", queries._WorkEventsReadiness())
 
 
 def _alias(provider: str, kind: str, external_id: str, native_id: str, valid_from: datetime) -> tuple[Any, ...]:
@@ -178,7 +186,7 @@ async def test_works_list_pages_and_joins_each_works_summary() -> None:
         [
             [],
             FRESH,
-            [(T0, T1, True)],  # the ledger's first and last event, and the rollup is populated
+            *READY,
             [(3, UUID(W), 3, 1, T0, T1), (3, UUID(E), 1, 0, T1, T1)],
             [(UUID(W), 5, 0)],
             [(UUID(W), "discogs", "10"), (UUID(W), "musicbrainz", G1)],
@@ -188,15 +196,14 @@ async def test_works_list_pages_and_joins_each_works_summary() -> None:
     data = await get_ledger_works(pool, event="reattached", since=since, until=until, page=2, page_size=2)
 
     works_call = next(call for call in pool.calls if call.sql == queries._WORKS_WINDOWED)
-    assert works_call.params == {
-        "event": "reattached",
-        "since": since,
-        "until": until,
-        "limit": 2,
-        "offset": 2,
-        **queries._window_params(since, until),
-    }
-    assert _statements(pool)[1:5] == [queries._READ_ONLY, queries._FRESHNESS, queries._WINDOW_FACTS, queries._WORKS_WINDOWED]
+    assert works_call.params == {"event": "reattached", "since": since, "until": until, "limit": 2, "offset": 2}
+    assert _statements(pool)[1:6] == [
+        queries._READ_ONLY,
+        queries._FRESHNESS,
+        queries._WORK_EVENTS_PRESENT,
+        queries._WORK_EVENTS_FILLED,
+        queries._WORKS_WINDOWED,
+    ]
     assert pool.calls[2].params == {"views": ["identity_ledger_edition_events", "identity_ledger_edition_parents", "identity_ledger_work_summary"]}
     assert next(call.params for call in pool.calls if call.sql == queries._WORK_SUMMARIES) == {"works": [W, E]}
     assert data == {
@@ -332,87 +339,148 @@ async def test_list_and_density_read_only_the_views() -> None:
             assert base not in statement
 
 
-async def test_a_window_holding_every_event_reads_the_unwindowed_statement() -> None:
-    pool = FakePool([[], FRESH, [(T0, T1, True)], []])
+def _utc(*args: int) -> datetime:
+    return datetime(*args, tzinfo=UTC)
+
+
+async def test_the_work_events_are_looked_for_once_and_then_kept() -> None:
+    window = {"since": _utc(2026, 11, 1), "until": _utc(2026, 12, 1)}
+    first = FakePool([[], FRESH, *READY, []])
+    await get_ledger_works(first, **window)
+    second = FakePool([[], FRESH, []])
+    await get_ledger_works(second, **window)
+
+    assert queries._WORK_EVENTS_PRESENT in _statements(first)
+    assert _statements(second)[1:4] == [queries._READ_ONLY, queries._FRESHNESS, queries._WORKS_WINDOWED]
+
+
+async def test_a_window_reads_raw_events_until_the_work_events_are_filled(monkeypatch: pytest.MonkeyPatch) -> None:
+    window = {"since": _utc(2026, 11, 1), "until": _utc(2026, 12, 1)}
+    clock = [1000.0]
+    monkeypatch.setattr(queries.time, "monotonic", lambda: clock[0])
+
+    # Present but empty, as between the schema upgrade and the next refresh.
+    empty = FakePool([[], FRESH, [(True,)], [(False,)], [(T0, T1)], []])
+    await get_ledger_works(empty, **window)
+    assert _statements(empty)[3:6] == [queries._WORK_EVENTS_PRESENT, queries._WORK_EVENTS_FILLED, queries._WINDOW_FACTS]
+    assert queries._WORKS_WINDOWED_RAW in _statements(empty)
+    assert queries._WORKS_WINDOWED not in _statements(empty)
+
+    # Within the minute the answer stands: no statement asks again.
+    clock[0] += queries._WORK_EVENTS_RECHECK_SECONDS - 1
+    again = FakePool([[], FRESH, [(T0, T1)], []])
+    await get_ledger_works(again, **window)
+    assert queries._WORK_EVENTS_PRESENT not in _statements(again)
+    assert queries._WORKS_WINDOWED_RAW in _statements(again)
+
+    # After it, the next windowed read asks again and finds the table filled.
+    clock[0] += 1
+    filled = FakePool([[], FRESH, *READY, []])
+    await get_ledger_works(filled, **window)
+    assert queries._WORKS_WINDOWED in _statements(filled)
+    assert queries._WINDOW_FACTS not in _statements(filled)
+
+
+async def test_an_absent_table_is_not_read() -> None:
+    # The pinned schema has no work-level events yet: naming the table would fail to plan.
+    pool = FakePool([[], FRESH, [(False,)], [(T0, T1)], []])
+
+    await get_ledger_works(pool, since=_utc(2026, 11, 1), until=_utc(2026, 12, 1))
+
+    assert queries._WORK_EVENTS_FILLED not in _statements(pool)
+    assert queries._WORKS_WINDOWED_RAW in _statements(pool)
+
+
+async def test_a_table_dropped_after_it_was_found_falls_back_to_raw_events() -> None:
+    queries._work_events.ready = True
+    dropped = UndefinedTable('relation "identity_ledger_work_events" does not exist')
+    pool = FakePool([[], FRESH, [], FRESH, [(False,)], [(T0, T1)], []], raise_on={queries._WORKS_WINDOWED: dropped})
+
+    await get_ledger_works(pool, since=_utc(2026, 11, 1), until=_utc(2026, 12, 1))
+
+    assert queries._work_events.ready is False
+    assert _statements(pool).count(queries._WORKS_WINDOWED) == 1
+    assert queries._WORKS_WINDOWED_RAW in _statements(pool)
+
+
+async def test_a_missing_table_outside_the_work_events_is_not_retried() -> None:
+    missing = UndefinedTable('relation "identity_ledger_work_summary" does not exist')
+    with pytest.raises(UndefinedTable):
+        await get_ledger_works(FakePool([[], FRESH], raise_on={queries._WORKS: missing}))
+
+
+async def test_an_open_window_side_is_bound_past_every_event() -> None:
+    since_only = FakePool([[], FRESH, *READY, []])
+    await get_ledger_works(since_only, since=_utc(2026, 11, 1))
+    until_only = FakePool([[], FRESH, []])
+    await get_ledger_works(until_only, until=_utc(2026, 12, 1))
+
+    def bounds(pool: FakePool) -> tuple[datetime, datetime]:
+        params = next(call.params for call in pool.calls if call.sql == queries._WORKS_WINDOWED)
+        return params["since"], params["until"]
+
+    assert bounds(since_only) == (_utc(2026, 11, 1), queries._LATEST)
+    assert bounds(until_only) == (queries._EARLIEST, _utc(2026, 12, 1))
+    assert queries._EARLIEST.year == 1 and queries._LATEST.year == 9999
+
+
+def test_the_work_events_read_has_no_null_branch_on_its_bounds() -> None:
+    # A generic plan of `(bound IS NULL OR at >= bound)` cannot range-scan the index.
+    assert "%(since)s::timestamptz IS NULL" not in queries._WORKS_WINDOWED
+    assert "%(until)s::timestamptz IS NULL" not in queries._WORKS_WINDOWED
+
+
+def test_the_work_events_read_counts_each_work_once_and_pages_its_last_event() -> None:
+    statement = queries._WORKS_WINDOWED
+    assert "(prev_at IS NULL OR prev_at < %(since)s::timestamptz)" in statement
+    assert "(next_at IS NULL OR next_at >= %(until)s::timestamptz)" in statement
+    assert "ORDER BY at DESC, work_id" in statement
+    for table in ("identity_ledger_work_events", "identity_ledger_edition_parents", "identity_ledger_edition_events"):
+        assert table in statement
+    for base in ("provider_aliases", "catalog_items", "catalog_item_supersessions", "identity_link_events", "graph.derived_from"):
+        assert base not in statement
+
+
+def test_no_statement_reads_the_per_day_rollup() -> None:
+    for name, value in vars(queries).items():
+        if isinstance(value, str):
+            assert "identity_ledger_work_summary_day" not in value, name
+
+
+async def test_a_window_holding_every_event_reads_the_unwindowed_statement_while_raw() -> None:
+    pool = FakePool([[], FRESH, [(False,)], [(T0, T1)], []])
 
     await get_ledger_works(pool, since=T0, until=datetime(2026, 8, 4, tzinfo=UTC))
 
     assert queries._WORKS in _statements(pool)
-    assert queries._WORKS_WINDOWED not in _statements(pool)
+    assert queries._WORKS_WINDOWED_RAW not in _statements(pool)
     works_call = next(call for call in pool.calls if call.sql == queries._WORKS)
     assert (works_call.params["since"], works_call.params["until"]) == (None, None)
 
 
 async def test_a_window_cutting_the_ledger_is_not_the_unwindowed_read() -> None:
     # `until` is exclusive: an event at exactly `until` is outside it.
-    pool = FakePool([[], FRESH, [(T0, T1, True)], []])
+    pool = FakePool([[], FRESH, [(False,)], [(T0, T1)], []])
 
     await get_ledger_works(pool, since=T0, until=T1)
 
-    assert queries._WORKS_WINDOWED in _statements(pool)
-
-
-def _utc(*args: int) -> datetime:
-    return datetime(*args, tzinfo=UTC)
-
-
-def test_whole_day_window_reads_only_the_rollup() -> None:
-    assert queries._window_params(_utc(2026, 11, 1), _utc(2026, 12, 1)) == {
-        "full": True,
-        "first_day": date(2026, 11, 1),
-        "end_day": date(2026, 12, 1),
-        "first_at": _utc(2026, 11, 1),
-        "end_at": _utc(2026, 12, 1),
-        "head_end": None,
-        "tail_start": None,
-    }
-
-
-def test_partial_edge_days_are_read_raw() -> None:
-    params = queries._window_params(_utc(2026, 11, 1, 6), _utc(2026, 11, 20, 12))
-
-    assert (params["first_day"], params["end_day"]) == (date(2026, 11, 2), date(2026, 11, 20))
-    assert (params["head_end"], params["tail_start"]) == (_utc(2026, 11, 2), _utc(2026, 11, 20))
-    # An instant in a non-UTC offset is the same instant: 2026-11-01 23:00-08:00 is 2026-11-02 07:00 UTC.
-    offset = datetime(2026, 11, 1, 23, tzinfo=timezone(timedelta(hours=-8)))
-    assert queries._window_params(offset, None)["first_day"] == date(2026, 11, 3)
-
-
-def test_a_window_inside_one_day_is_one_raw_edge() -> None:
-    params = queries._window_params(_utc(2026, 11, 1, 6), _utc(2026, 11, 1, 18))
-
-    assert params["full"] is False
-    assert (params["head_end"], params["tail_start"]) == (_utc(2026, 11, 1, 18), None)
-
-
-def test_open_ended_windows_leave_that_side_unbounded() -> None:
-    since_only = queries._window_params(_utc(2026, 11, 1, 6), None)
-    until_only = queries._window_params(None, _utc(2026, 11, 20, 12))
-
-    assert (since_only["end_day"], since_only["tail_start"], since_only["head_end"]) == (None, None, _utc(2026, 11, 2))
-    assert (until_only["first_day"], until_only["head_end"], until_only["tail_start"]) == (None, None, _utc(2026, 11, 20))
-    assert queries._window_params(None, None)["full"] is False
-
-
-async def test_a_window_reads_raw_events_until_the_rollup_is_populated() -> None:
-    pool = FakePool([[], FRESH, [(T0, T1, False)], []])
-
-    await get_ledger_works(pool, since=_utc(2026, 11, 1), until=_utc(2026, 12, 1))
-
     assert queries._WORKS_WINDOWED_RAW in _statements(pool)
-    assert queries._WORKS_WINDOWED not in _statements(pool)
 
 
-def test_the_rollup_read_skips_editions_already_counted_inside_the_full_days() -> None:
-    assert "covered_any" in queries._WORKS_WINDOWED
-    assert "covered_repaired" in queries._WORKS_WINDOWED
-    assert "prev_day < %(first_day)s::date" in queries._WORKS_WINDOWED
+async def test_a_covering_window_reads_the_work_events_once_they_are_filled() -> None:
+    # No shortcut: the work-level read costs a covering window an index-only count and a LIMIT walk.
+    pool = FakePool([[], FRESH, *READY, []])
+
+    await get_ledger_works(pool, since=T0, until=datetime(2026, 8, 4, tzinfo=UTC))
+
+    assert queries._WORKS_WINDOWED in _statements(pool)
+    assert queries._WINDOW_FACTS not in _statements(pool)
 
 
-def test_only_a_window_materializes_its_aggregation() -> None:
+def test_only_the_raw_window_materializes_its_aggregation() -> None:
     # Inlined, the window's aggregation runs for the count and again for the page; materialized
     # for the unwindowed read, the summary page loses its index walk (320 ms to about 1.9 s).
-    assert "windowed AS MATERIALIZED (" in queries._WORKS_WINDOWED
+    assert "windowed AS MATERIALIZED (" in queries._WORKS_WINDOWED_RAW
     assert "MATERIALIZED (" not in queries._WORKS.replace("NOT MATERIALIZED", "")
 
 
@@ -422,4 +490,5 @@ async def test_works_list_without_a_window_reads_the_unwindowed_statement() -> N
     await get_ledger_works(pool)
 
     assert queries._WORKS in _statements(pool)
+    assert queries._WORK_EVENTS_PRESENT not in _statements(pool)
     assert queries._WORKS_WINDOWED not in _statements(pool)
