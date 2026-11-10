@@ -300,7 +300,7 @@ class TestTrendsCaching:
         assert response.status_code == 200
         mock_valkey.setex.assert_called_once()
         call_args = mock_valkey.setex.call_args
-        assert call_args[0][0] == "trends:genre:Electronic"
+        assert call_args[0][0] == "trends:genre:name:Electronic"
 
     def test_trends_artist_skips_cache(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
         """Artist trends should NOT be cached (only genre/style)."""
@@ -347,7 +347,7 @@ class TestTrendsCaching:
             response = test_client.get("/api/trends?name=Reprise Records&type=label")
         assert response.status_code == 200
         mock_valkey.setex.assert_called_once()
-        assert mock_valkey.setex.call_args[0][0] == "trends:label:Reprise Records"
+        assert mock_valkey.setex.call_args[0][0] == "trends:label:name:Reprise Records"
 
     def test_trends_label_by_id_passes_id_and_caches_per_id(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
         mock_valkey.get = AsyncMock(return_value=None)
@@ -356,7 +356,32 @@ class TestTrendsCaching:
             response = test_client.get("/api/trends?name=Same&type=label&id=L2")
         assert response.status_code == 200
         assert mock_func.call_args.kwargs == {"label_id": "L2"}
-        assert mock_valkey.setex.call_args[0][0] == "trends:label:L2"
+        assert mock_valkey.setex.call_args[0][0] == "trends:label:id:L2"
+        assert json.loads(mock_valkey.setex.call_args[0][2])["name"] == ""  # no caller-supplied name is cached
+
+    def test_trends_label_name_equal_to_another_labels_id_never_shares_a_cache_entry(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        """Label A is named '808'; label B has id '808'. Each gets its own series through a shared fake cache."""
+        store: dict[str, str] = {}
+        mock_valkey.get = AsyncMock(side_effect=lambda key: store.get(key))
+        mock_valkey.setex = AsyncMock(side_effect=lambda key, _ttl, value: store.__setitem__(key, value))
+        series = {"A": [{"year": 1990, "count": 1}], "808": [{"year": 2000, "count": 9}]}
+
+        async def fake(_driver: Any, name: str, label_id: str | None = None) -> list[dict[str, int]]:
+            return series[label_id or "A"]  # a bare name resolves to label A (the only label named '808')
+
+        with patch.dict("api.routers.explore.TRENDS_DISPATCH", {"label": fake}):
+            by_name = test_client.get("/api/trends?name=808&type=label").json()
+            by_id = test_client.get("/api/trends?name=Other&type=label&id=808").json()
+            by_name_again = test_client.get("/api/trends?name=808&type=label").json()  # served from the cache
+            by_id_again = test_client.get("/api/trends?name=Other&type=label&id=808").json()
+        assert by_name["data"] == by_name_again["data"] == series["A"]
+        assert by_id["data"] == by_id_again["data"] == series["808"]
+        assert len(store) == 2
+
+    def test_trends_label_id_cache_hit_echoes_this_callers_name(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        mock_valkey.get = AsyncMock(return_value=json.dumps({"name": "", "type": "label", "data": [{"year": 1970, "count": 1}]}))
+        response = test_client.get("/api/trends?name=Same&type=label&id=L2")
+        assert response.json()["name"] == "Same"
 
     def test_trends_label_ambiguous_name_is_409_with_candidates(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
         from api.queries.neo4j_queries import AmbiguousLabelNameError
