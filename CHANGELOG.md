@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v0.14.2 (2026-11-10)
+
+### Release notes
+
+Label explore, expand, the label counts and path match labels by id, so labels that share a name no longer merge (gm-catalog-api-ntnw, gm-catalog-api-jjuh). `/api/explore` and `/api/expand` accept `id=` for type=label (expand's `node_id` stays a name). `/api/path` accepts `from_id` and `to_id` for type=label. A bare name resolves when exactly one label has it. An ambiguous name returns 409 with the candidate ids, on explore, expand, path and the NLQ explore and find_path tools. Explore cache keys are namespaced by id vs name, so the explore cache starts cold once after deploy. The NLQ find_path tool can't retry by label id yet; that waits on an agent-tools change (gm-python-libraries-od04, then gm-catalog-api-p4hv). Deploy graph-explorer v0.7.0 first or together. On lux, 2 names are shared by 4 labels. No schema dependency.
+
+### Fix
+
+- **explore**: keep labels that share a name apart in label explore, expand and counts
+- **path**: resolve labels that share a name by from_id / to_id
+
 ## v0.14.1 (2026-11-10)
 
 ### Release notes
