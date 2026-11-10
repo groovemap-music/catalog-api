@@ -816,10 +816,9 @@ async def get_release_details(driver: AsyncResilientNeo4jDriver, node_id: str) -
 _LABEL_STORED_CYPHER = """
 MATCH (l:Label {id: $id})
 CALL {
-  MATCH (m:ExtractionCompletion)
+  OPTIONAL MATCH (m:ExtractionCompletion)
+  WITH m ORDER BY m.version DESC LIMIT 1
   RETURN m.maintained_at IS NOT NULL AS maintained, m.stats_version AS stats_version
-  ORDER BY m.version DESC
-  LIMIT 1
 }
 RETURN l.id AS id, l.name AS name, l.release_count AS release_count,
        l.first_year AS first_year, l.last_year AS last_year, l.years_active AS years_active,
@@ -1023,10 +1022,9 @@ async def _trends_style_live(driver: AsyncResilientNeo4jDriver, name: str) -> li
 _STORED_SERIES = """
 MATCH (n:%(label)s {name: $name})
 CALL {
-    MATCH (m:ExtractionCompletion)
+    OPTIONAL MATCH (m:ExtractionCompletion)
+    WITH m ORDER BY m.version DESC LIMIT 1
     RETURN m.maintained_at IS NOT NULL AS maintained, m.stats_version AS stats_version
-    ORDER BY m.version DESC
-    LIMIT 1
 }
 RETURN n.release_years AS years, n.release_year_counts AS counts, maintained, stats_version
 """

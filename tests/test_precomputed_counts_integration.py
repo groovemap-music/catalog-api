@@ -62,6 +62,24 @@ _CASES: list[tuple[Any, str, int]] = [
 ]
 
 
+# L2 has two releases and no dated one: no span, zero dated releases, and not a placeholder.
+_L2_LIVE: dict[str, Any] = {
+    "id": "L2",
+    "name": "Two",
+    "release_count": 2,
+    "is_placeholder": False,
+    "first_year": None,
+    "last_year": None,
+    "years_active": None,
+    "total_releases": 0,
+    "peak_decade": None,
+}
+_L2_DATED: dict[str, Any] = {**_L2_LIVE, "first_year": 1980, "last_year": 1990, "years_active": 11, "total_releases": 2, "peak_decade": 1980}
+_STORED_LABEL = (
+    "MATCH (l:Label {id: 'L2'}) SET l.first_year = 1980, l.last_year = 1990, l.years_active = 11, l.total_releases = 2, l.peak_decade = 1980"
+)
+
+
 async def _seed(driver: AsyncResilientNeo4jDriver, *, maintained: bool) -> None:
     await run_query(driver, "MATCH (n) DETACH DELETE n", database="neo4j", timeout=None)
     await run_query(driver, _GRAPH, database="neo4j", timeout=None)
@@ -99,7 +117,7 @@ async def test_details_equal_live_either_way(neo4j_driver: AsyncResilientNeo4jDr
     assert live == (
         {"id": "Rock", "name": "Rock", "artist_count": 3},
         {"id": "Punk", "name": "Punk", "artist_count": 2},
-        {"id": "L2", "name": "Two", "release_count": 2},
+        _L2_LIVE,
     )
     await _seed(neo4j_driver, maintained=True)
     stored = (
@@ -109,3 +127,64 @@ async def test_details_equal_live_either_way(neo4j_driver: AsyncResilientNeo4jDr
     )
     assert stored == live
     assert await q.get_genre_details(neo4j_driver, "Nope") is None
+
+
+async def _dated(driver: AsyncResilientNeo4jDriver) -> None:
+    await _seed(driver, maintained=True)
+    await run_query(
+        driver,
+        "MATCH (r:Release) WHERE r.id IN ['r3', 'r4'] SET r.year = CASE r.id WHEN 'r3' THEN 1980 ELSE 1990 END",
+        database="neo4j",
+        timeout=None,
+    )
+
+
+async def _completion(driver: AsyncResilientNeo4jDriver, properties: str) -> None:
+    await run_query(driver, f"CREATE (:ExtractionCompletion {{version: '20260801', {properties}}})", database="neo4j", timeout=None)
+
+
+async def test_label_details_always_return_the_label_row_in_every_gate_state(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    """The label row survives every state of the ExtractionCompletion gate; only the longevity source changes."""
+    # No ExtractionCompletion at all, and no dated release: the row is there, longevity empty.
+    await _seed(neo4j_driver, maintained=True)
+    assert await q.get_label_details(neo4j_driver, "L2") == _L2_LIVE
+
+    # No ExtractionCompletion, dated releases: computed live.
+    await _dated(neo4j_driver)
+    assert await q.get_label_details(neo4j_driver, "L2") == _L2_DATED
+
+    # stats_version < 3, even with stored values on the label: the stored values are ignored, live wins.
+    await _dated(neo4j_driver)
+    await run_query(neo4j_driver, _STORED_LABEL.replace("1980, l.last_year = 1990", "1900, l.last_year = 1901"), database="neo4j", timeout=None)
+    await _completion(neo4j_driver, "maintained_at: datetime(), stats_version: 2")
+    assert await q.get_label_details(neo4j_driver, "L2") == _L2_DATED
+
+    # Not maintained (no maintained_at) at stats_version 3: live.
+    await _dated(neo4j_driver)
+    await _completion(neo4j_driver, "stats_version: 3")
+    assert await q.get_label_details(neo4j_driver, "L2") == _L2_DATED
+
+    # Maintained at stats_version 3 but this label was not swept (no total_releases): live.
+    await _dated(neo4j_driver)
+    await _completion(neo4j_driver, "maintained_at: datetime(), stats_version: 3")
+    assert await q.get_label_details(neo4j_driver, "L2") == _L2_DATED
+
+    # Maintained at stats_version 3 and swept: the stored values (distinguishable from live) are returned.
+    await _dated(neo4j_driver)
+    await _completion(neo4j_driver, "maintained_at: datetime(), stats_version: 3")
+    await run_query(
+        neo4j_driver, _STORED_LABEL.replace("1990", "2001").replace("years_active = 11", "years_active = 22"), database="neo4j", timeout=None
+    )
+    assert await q.get_label_details(neo4j_driver, "L2") == {**_L2_DATED, "last_year": 2001, "years_active": 22}
+
+    # An absent label is still None.
+    assert await q.get_label_details(neo4j_driver, "NOPE") is None
+
+
+async def test_stored_series_gate_yields_a_row_without_an_extraction_completion(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    """The trends gate subquery also yields exactly one row when no ExtractionCompletion exists (read live, not dropped)."""
+    await _seed(neo4j_driver, maintained=True)
+    record = await q.run_single(neo4j_driver, q._STORED_SERIES % {"label": "Genre"}, name="Rock")  # noqa: SLF001
+    assert record is not None
+    assert record["maintained"] is False
+    assert record["stats_version"] is None
