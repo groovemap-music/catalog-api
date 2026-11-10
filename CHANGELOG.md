@@ -2,6 +2,53 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v0.13.0 (2026-11-09)
+
+### Release notes
+
+First release cut from main since v0.11.1. It carries everything in v0.12.0 plus:
+
+- **Fix: label details for a fresh install** (gm-catalog-api-adq2). The stored-longevity gate in label details, and the same gate in genre/style trends, used a non-optional `MATCH` on `ExtractionCompletion`, so a database with no completion node returned no label (and no trends). Both gates now always yield one row and fall back to the live traversal. v0.12.0 has the bug; do not deploy v0.12.0.
+- **Missing previews and owned-copy listing** (gm-catalog-api-t3e9 / 8t16, operator-authorized for release 2026-11-09): bounded, session-owned scope previews (GM06) and an owner-scoped copy listing (GM10), published in the graph-explorer producer contract. graph-explorer's Missing and copy-selection UI needs this release.
+- **Prototype cores** (gm-catalog-api-ifqv): offline/bounded evaluation modules (runout interpreter, NLQ baseline evaluator, discovery policies, pursuit preview, crate coverage, pressing comparison, authority-separated evidence readers, copy selection reader), with baselines in docs/prototypes/README.md. They add no new public behaviour beyond the routes above.
+
+No schema change; runs on database-schema 0.12.0 or later (lux runs 0.13.0).
+
+### Feat
+
+- **label**: add is_placeholder and longevity fields to label details
+- **admin**: add POST /api/admin/dlq/replay/{queue}
+- **contract**: publish Missing and copy routes
+- **missing**: serve bounded session-owned scope previews
+- **observations**: expose owner-scoped copy listing
+- **evidence**: add authority-separated readers
+- **pressing**: compare known release candidates
+- **crate**: compare bounded joint coverage against fit and popularity
+- **observations**: add bounded copy selection reader
+- **evaluation**: add replayable discovery policies
+- **scope**: add transient pursuit preview core
+- **nlq**: add offline baseline evaluator
+- **runout**: add pure interpreter and fixture evaluator
+
+### Fix
+
+- **label**: lint fixup
+- **label**: always return the label row when no ExtractionCompletion exists
+- **admin**: return partial DLQ replay count as fields on 502
+
+### Refactor
+
+- **search**: split decade facet into masters and releases fragments
+
+### Perf
+
+- **trends**: read the stored genre/style release series, live traversal as fallback
+- **search**: skip release facets for searches that exclude releases
+- **search**: count every match in the release facets
+- **search**: serve facets and filtered release branches from release_search
+- **search**: read the decade facet's masters half from public.master_search
+- **search**: rank master matches from public.master_search
+
 ## v0.12.0 (2026-11-09)
 
 ### Release notes
