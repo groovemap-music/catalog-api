@@ -349,6 +349,26 @@ class TestTrendsCaching:
         mock_valkey.setex.assert_called_once()
         assert mock_valkey.setex.call_args[0][0] == "trends:label:Reprise Records"
 
+    def test_trends_label_by_id_passes_id_and_caches_per_id(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        mock_valkey.get = AsyncMock(return_value=None)
+        mock_func = AsyncMock(return_value=[{"year": 1970, "count": 100}])
+        with patch.dict("api.routers.explore.TRENDS_DISPATCH", {"label": mock_func}):
+            response = test_client.get("/api/trends?name=Same&type=label&id=L2")
+        assert response.status_code == 200
+        assert mock_func.call_args.kwargs == {"label_id": "L2"}
+        assert mock_valkey.setex.call_args[0][0] == "trends:label:L2"
+
+    def test_trends_label_ambiguous_name_is_409_with_candidates(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
+        from api.queries.neo4j_queries import AmbiguousLabelNameError
+
+        mock_valkey.get = AsyncMock(return_value=None)
+        err = AmbiguousLabelNameError("Same", [{"id": "L1", "name": "Same"}, {"id": "L2", "name": "Same"}])
+        with patch.dict("api.routers.explore.TRENDS_DISPATCH", {"label": AsyncMock(side_effect=err)}):
+            response = test_client.get("/api/trends?name=Same&type=label")
+        assert response.status_code == 409
+        assert [c["id"] for c in response.json()["candidates"]] == ["L1", "L2"]
+        mock_valkey.setex.assert_not_called()
+
     def test_trends_empty_result_is_answered_but_not_cached(self, test_client: TestClient, mock_valkey: AsyncMock) -> None:
         """A name with no trends spends no cache budget, and the response is the same."""
         mock_valkey.get = AsyncMock(return_value=None)

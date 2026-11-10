@@ -755,12 +755,15 @@ class NLQToolRunner:
 
         entity_type = params.get("type", "artist")
         handler = neo4j_queries.TRENDS_DISPATCH.get(entity_type)
-        return await agent_tools.get_trends(
-            driver=self._driver,
-            entity_type=entity_type,
-            name=params.get("name", ""),
-            handler=handler,
-        )
+        try:
+            return await agent_tools.get_trends(
+                driver=self._driver,
+                entity_type=entity_type,
+                name=params.get("name", ""),
+                handler=handler,
+            )
+        except neo4j_queries.AmbiguousLabelNameError as exc:
+            return {"error": f"Label name '{exc.name}' is ambiguous: {len(exc.candidates)} labels share it", "candidates": exc.candidates}
 
     async def _handle_get_genre_tree(self, _params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:
         import common.agent_tools as agent_tools  # noqa: PLC0415

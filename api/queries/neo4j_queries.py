@@ -1004,16 +1004,43 @@ async def _trends_genre_live(driver: AsyncResilientNeo4jDriver, name: str) -> li
     return await run_query(driver, cypher, name=name)
 
 
-async def trends_label(driver: AsyncResilientNeo4jDriver, name: str) -> list[dict[str, Any]]:
-    """Get release count by year for a label."""
-    cypher = """
-    MATCH (r:Release)-[:ON]->(l:Label {name: $name})
-    WHERE r.year > 0
-    WITH r.year AS year, count(DISTINCT r) AS count
-    RETURN year, count
-    ORDER BY year
+class AmbiguousLabelNameError(Exception):
+    """A label name matched more than one Label node; the caller must choose one by id."""
+
+    def __init__(self, name: str, candidates: list[dict[str, Any]]) -> None:
+        super().__init__(f"Label name '{name}' matches {len(candidates)} labels")
+        self.name = name
+        self.candidates = candidates
+
+
+# One label's releases grouped by year, matched by label id so labels sharing a name never merge.
+_TRENDS_LABEL_CYPHER = """
+MATCH (l:Label {id: $id})
+CALL (l) {
+  MATCH (r:Release)-[:ON]->(l)
+  WHERE r.year > 0
+  RETURN r.year AS year, count(DISTINCT r) AS count
+}
+RETURN year, count
+ORDER BY year
+"""
+
+
+async def trends_label(driver: AsyncResilientNeo4jDriver, name: str, label_id: str | None = None) -> list[dict[str, Any]]:
+    """Get release count by year for ONE label.
+
+    The label is identified by ``label_id`` when given. Otherwise ``name`` is resolved to a label id; a name
+    that matches exactly one label uses it, no match returns ``[]``, and several matches raise
+    :class:`AmbiguousLabelNameError` (Discogs has many labels sharing a name) rather than merging their series.
     """
-    return await run_query(driver, cypher, name=name)
+    if label_id is None:
+        matches = await run_query(driver, "MATCH (l:Label {name: $name}) RETURN l.id AS id, l.name AS name ORDER BY l.id", name=name)
+        if not matches:
+            return []
+        if len(matches) > 1:
+            raise AmbiguousLabelNameError(name, matches)
+        label_id = matches[0]["id"]
+    return await run_query(driver, _TRENDS_LABEL_CYPHER, id=label_id)
 
 
 async def _trends_style_live(driver: AsyncResilientNeo4jDriver, name: str) -> list[dict[str, Any]]:

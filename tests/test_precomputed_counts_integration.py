@@ -215,3 +215,25 @@ async def test_stored_series_gate_yields_a_row_without_an_extraction_completion(
     assert record is not None
     assert record["maintained"] is False
     assert record["stats_version"] is None
+
+
+async def test_trends_label_keeps_same_name_labels_apart(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
+    """Two distinct labels sharing a name get their own series by id; the bare name is ambiguous, a unique name works."""
+    await run_query(neo4j_driver, "MATCH (n) DETACH DELETE n", database="neo4j", timeout=None)
+    await run_query(
+        neo4j_driver,
+        """
+        CREATE (a:Label {id: 'S1', name: 'Same'}), (b:Label {id: 'S2', name: 'Same'}), (u:Label {id: 'U1', name: 'Unique'}),
+               (:Release {id: 'x1', year: 1990})-[:ON]->(a), (:Release {id: 'x2', year: 1990})-[:ON]->(a),
+               (:Release {id: 'y1', year: 1990})-[:ON]->(b), (:Release {id: 'y2', year: 2000})-[:ON]->(b),
+               (:Release {id: 'u1', year: 1995})-[:ON]->(u)
+        """,
+        database="neo4j",
+        timeout=None,
+    )
+    assert await q.trends_label(neo4j_driver, "Same", label_id="S1") == [{"year": 1990, "count": 2}]
+    assert await q.trends_label(neo4j_driver, "Same", label_id="S2") == [{"year": 1990, "count": 1}, {"year": 2000, "count": 1}]
+    with pytest.raises(q.AmbiguousLabelNameError):
+        await q.trends_label(neo4j_driver, "Same")
+    assert await q.trends_label(neo4j_driver, "Unique") == [{"year": 1995, "count": 1}]
+    assert await q.trends_label(neo4j_driver, "Nope") == []
