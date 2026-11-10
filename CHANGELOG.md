@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v0.15.2 (2026-11-10)
+
+### Release notes
+
+The Identity Ledger works list with a `since`/`until` window reads database-schema v0.15.0's `identity_ledger_work_events` (gm-catalog-api-l7ek.3, gm-database-schema-xq8r). It counts each work once and pages each work's last event in the window from one index, instead of grouping every edition event in range per work. On lux, a one-month window that does not hold every event took 4.6 s (raw) to 8.1 s (per-day rollup) against the 2 s budget; the expected time is 0.2 to 0.4 s, measured after deploy. Until the table exists and holds rows (database-schema v0.15.0 applied and `identity_ledger_refresh()` run), windowed reads fall back to the raw aggregation, checked at most once a minute, so this release is safe on an older schema. catalog-api no longer reads `identity_ledger_work_summary_day`. The database-schema pin moves to v0.15.0 (974c0b7). Apply database-schema v0.15.0 and its refresh first for the speed-up.
+
+### Perf
+
+- **ledger**: read windowed works from the work-level events
+
 ## v0.15.1 (2026-11-10)
 
 ### Release notes
