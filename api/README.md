@@ -564,6 +564,16 @@ All graph query endpoints are served by the API and consumed by
 | GET    | `/api/node/{node_id}` | No            | —          | Get full details for a node          |
 | GET    | `/api/trends`         | No            | —          | Get time-series release counts       |
 
+**Label (`GET /api/node/{node_id}?type=label`):** the response carries `is_placeholder` and the
+longevity fields `first_year`, `last_year`, `years_active`, `total_releases` and `peak_decade`, all
+computed for that label id (two labels with one name get their own values) and equal to what
+`/api/insights/label-longevity` reports for it. `is_placeholder` uses the same name rule and
+exceptions. Only releases with a year above 0 count towards the span, `total_releases` and
+`peak_decade` (the decade with the most releases, the earlier on a tie), so `total_releases` can be
+below `release_count`, which counts every release. A label with no dated release has `null` for the
+year fields and `peak_decade` and `0` for `total_releases`. The graph-explorer contract promises
+these fields as `node_label.response_fields`.
+
 **Media (`GET /api/node/{node_id}?type=release`):** a release node response always carries a
 `media` field — the ADR 0007 canonical media block. It is read from `releases.media` in
 PostgreSQL (the block the Discogs SQL loader computes at load time), keyed by the same id as
