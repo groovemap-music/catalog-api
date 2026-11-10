@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-expected="f0964cc95ff6045468e3a0d16f235a85cd3dac70"
+expected="c440b6f8c23850ab20eb2851d4603cb63a58ce91"
 runtime_repo="${GROOVEMAP_RUNTIME_REPO:-../python-libraries}"
 runtime_checkout=
 
