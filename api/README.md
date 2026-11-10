@@ -1567,7 +1567,7 @@ evented editions, 1,938,932 works with an event), **0 supersessions**, **0 link 
 | Works list, `event=linked_at_ingest` | 305 ms | 320 ms | |
 | Works list, `event=evidence_attached` | 145 ms | 158 ms | |
 | Works list, `event=reattached`, `promoted`, `reverted`, `alias_closed`, `link_added`, `link_changed`, `link_removed` | 3 to 4 ms | 4 ms | no such events exist yet: zero rows |
-| Works list, one-month window, 2026-11 | **5,058 ms** | **5,146 ms** | over the 2 s budget: reads 1.92M buffers and writes 13,814 temp blocks |
+| Works list, one-month window, 2026-11 | **5,058 ms** | **5,146 ms** | over the 2 s budget: reads 1.92M buffers and writes 13,814 temp blocks; see below for the fix |
 | Works list, one-month window, 2026-10 | 4 ms | 4 ms | zero rows: nothing was loaded then |
 | Density, `release` / `master` / `artist` / `label` | 2 ms each | 2 ms | 3 buckets each |
 | One work (the Discogs master with the most releases) | 57 ms | 58 ms | 12 statements, 33 ms in the first |
@@ -1579,6 +1579,27 @@ milliseconds per statement for a request. The cache was warm. The slowest unwind
 unfiltered list at 320 ms, about 2.4x the 137 ms the synthetic 50% scale measured; the filters that
 match no events are as fast as before. The window case is the exception and is slow because it
 scans the edition events in range and groups them per work instead of reading the summary.
+
+**The windowed list (`gm-catalog-api-l7ek.3`).** The total needs each work counted once, and the
+page needs each work's last event inside the window. Neither the edition events nor database-schema's
+per-day rollup (`identity_ledger_work_summary_day`, one row per edition's previous event day) can
+answer that without grouping every event in range per work. Re-measured on lux on **2026-11-10**
+(read-only, warm, one `EXPLAIN ANALYZE` each), the 2026-11 window took 4,613 ms on the raw events
+and 8,097 ms on the rollup (4.09M buffers, 13,728 temp blocks). It was answered in about 0.3 s only
+because every one of lux's 2,085,918 edition events falls on 2026-11-07, so the window held every
+event and read the unwindowed summary. One event outside November would have put it back on the
+rollup.
+
+A window now reads `identity_ledger_work_events` (`gm-database-schema-xq8r`): one row per work,
+event filter, and event instant, with the work's previous and next instants of that filter. The
+total is an index-only count of the rows whose previous instant is before `since`, the page walks
+the rows whose next instant is at or after `until` in page order and stops after the page, and the
+evented and repaired editions are counted live for the page's works only. A window of any shape is
+exact to the instant, with no day grain and no edge days. The figures it stands in for: an
+index-only count over lux's 2.09M edition events takes 56 ms, and the live counts for the 50
+largest works about 40 ms. Until the table exists and holds rows the window reads the raw events.
+The process checks for it at most once a minute, and stops checking once it is found. The 2026-11 figure on lux is
+re-measured once catalog-api and database-schema with `gm-database-schema-xq8r` are both deployed.
 
 `identity_ledger_refresh()` on the real catalog: the server's function counters (cumulative, kept
 since the statistics were last reset) record four calls, a mean of 354 s (5.9 min) each, of which
