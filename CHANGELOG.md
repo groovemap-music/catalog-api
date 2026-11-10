@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v0.15.0 (2026-11-10)
+
+### Release notes
+
+The NLQ `find_path` tool takes `from_label_id` and `to_label_id`, so a label that shares a name can be picked by id. A bare ambiguous name still returns its candidates (gm-catalog-api-p4hv, with gm-python-libraries-od04). The python-libraries pin moves from 5f35c03 to f0964cc for both groovemap-runtime and groovemap-agent-tools. That runtime code is the same as 89811f4, which discogs-sql-loader v0.6.0 already runs on lux against the shared PostgreSQL. Behavior catalog-api now gets from the runtime:
+
+- **PostgreSQL pool:** the checkout probe is skipped on connections verified in the last 30 s. Idle connections above `min_connections` close after 300 s, and connections recycle after 1800 s. Every connection gets TCP keepalives (idle 30 s, interval 10 s, count 3, `tcp_user_timeout` 90 s). Expect the open-connection count to settle lower between bursts.
+- **Neo4j driver:** a probe timeout on a saturated pool counts as busy rather than dead, so a saturated pool is no longer torn down. `ServiceUnavailable` and `SessionExpired` clear the healthy verdict.
+- **Probes:** health probes run once as a shared task outside the handle lock, with a 5 s timeout, so callers no longer queue behind a slow probe.
+- **Metrics:** new `db.client.connection.{count,max,pending_requests,wait_time}` and `groovemap.pipeline.pool.connections_closed`.
+
+No schema dependency. Deploy on its own and watch the PostgreSQL connection count and pool wait time.
+
+### Feat
+
+- **nlq**: find_path takes from_label_id / to_label_id
+
 ## v0.14.2 (2026-11-10)
 
 ### Release notes
