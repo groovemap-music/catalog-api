@@ -2,7 +2,11 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
-## Unreleased
+## v0.14.0 (2026-11-10)
+
+### Release notes
+
+Label details (`GET /api/node/{id}?type=label`) add `longevity_rank` and `longevity_rank_of`. They are read in the existing stored-stats query, so there's no extra round trip. Both are `null` until the newest ExtractionCompletion is maintained with `stats_version >= 4`, which discogs-graph-enricher v0.9.0 stamps after its rank phase. No live fallback, and no schema dependency. graph-explorer consumes the fields in gm-graph-explorer-ugpg.
 
 ### Feat
 
