@@ -847,10 +847,31 @@ class TestTrendsQueries:
     async def test_trends_label(self) -> None:
         from api.queries.neo4j_queries import trends_label
 
-        records = [{"year": 1990, "count": 30}]
+        records = [{"id": "L7", "year": 1990, "count": 30}]  # the name resolves to one label (L7), then its series
         driver = _make_driver(records=records)
         result = await trends_label(driver, "Warp Records")
         assert result == records
+
+    @pytest.mark.asyncio
+    async def test_trends_label_by_id_matches_on_id_not_name(self) -> None:
+        from api.queries.neo4j_queries import trends_label
+
+        driver = _make_driver(records=[{"year": 1990, "count": 3}])
+        await trends_label(driver, "Warp Records", label_id="L9")
+        session = driver.session.return_value
+        cypher = session.run.call_args[0][0].text
+        assert "{id: $id}" in cypher
+        assert "name" not in cypher
+        assert session.run.call_args[0][1]["id"] == "L9"
+
+    @pytest.mark.asyncio
+    async def test_trends_label_ambiguous_name_raises(self) -> None:
+        from api.queries.neo4j_queries import AmbiguousLabelNameError, trends_label
+
+        driver = _make_driver(records=[{"id": "L1", "name": "Same"}, {"id": "L2", "name": "Same"}])
+        with pytest.raises(AmbiguousLabelNameError) as exc:
+            await trends_label(driver, "Same")
+        assert [c["id"] for c in exc.value.candidates] == ["L1", "L2"]
 
     @pytest.mark.asyncio
     async def test_trends_style(self) -> None:

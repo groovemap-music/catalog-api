@@ -28,6 +28,7 @@ from api.queries.neo4j_queries import (
     EXPAND_DISPATCH,
     EXPLORE_DISPATCH,
     TRENDS_DISPATCH,
+    AmbiguousLabelNameError,
     find_shortest_path,
     get_genre_emergence,
     get_graph_stats,
@@ -596,40 +597,61 @@ async def get_node_details(
     return JSONResponse(content=result)
 
 
+def _trends_cache_key(entity_type: str, name: str, label_id: str | None) -> str:
+    """Id and name lookups use separate namespaces, so a name equal to an id can never read an id entry."""
+    if label_id:
+        return valkey_key(f"trends:label:id:{label_id}")
+    return valkey_key(f"trends:{entity_type}:name:{name}")
+
+
 @router.get("/api/trends")
 async def get_trends(
     name: str = Query(...),
     type: str = Query("artist"),
+    id: str | None = Query(None, description="Label id; identifies one label when several share a name (type=label)"),
 ) -> JSONResponse:
     if not _neo4j_driver:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
     entity_type = type.lower()
+    label_id = id if entity_type == "label" else None
     if entity_type not in TRENDS_DISPATCH:
         return JSONResponse(content={"error": f"Invalid type: {type}. Must be artist, genre, label, or style"}, status_code=400)
 
     # Cache genre, style, and label trends in Valkey (data changes only on import)
     if _valkey and entity_type in ("genre", "style", "label"):
-        cache_key = valkey_key(f"trends:{entity_type}:{name}")
+        cache_key = _trends_cache_key(entity_type, name, label_id)
         try:
             cached = await cache_get(_valkey, cache_key, cache=CACHE_TRENDS)
             if cached:
-                return JSONResponse(content=json.loads(cached))
+                payload = json.loads(cached)
+                if label_id:
+                    payload["name"] = name  # an id entry is shared by every caller: never serve another caller's name
+                return JSONResponse(content=payload)
         except Exception:
             logger.debug("⚠️ Trends cache get failed", key=cache_key)
 
     query_func = TRENDS_DISPATCH[entity_type]
-    results = await query_func(_neo4j_driver, name)
+    try:
+        results = await (query_func(_neo4j_driver, name, label_id=label_id) if label_id else query_func(_neo4j_driver, name))
+    except AmbiguousLabelNameError as exc:
+        return JSONResponse(
+            content={
+                "error": f"Label name '{name}' is ambiguous: {len(exc.candidates)} labels share it. Retry with id=<label id>.",
+                "candidates": exc.candidates,
+            },
+            status_code=409,
+        )
     response = {"name": name, "type": entity_type, "data": results}
 
     # An empty result is not stored: a name that does not exist would otherwise spend budget.
     if _valkey and entity_type in ("genre", "style", "label") and results:
-        cache_key = valkey_key(f"trends:{entity_type}:{name}")
+        cache_key = _trends_cache_key(entity_type, name, label_id)
         try:
             await store_within_budget(
                 _valkey,
                 cache=CACHE_TRENDS,
                 key=cache_key,
-                value=json.dumps(response),
+                value=json.dumps({**response, "name": ""} if label_id else response),  # id entries carry no caller-supplied name
                 ttl=_TRENDS_CACHE_TTL,
                 cost=sum(row.get("count", 0) for row in results),  # the releases the yearly counts add up to
                 min_cost=_MIN_CACHE_RELEASES,
