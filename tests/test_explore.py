@@ -366,7 +366,7 @@ class TestTrendsCaching:
         mock_valkey.setex = AsyncMock(side_effect=lambda key, _ttl, value: store.__setitem__(key, value))
         series = {"A": [{"year": 1990, "count": 1}], "808": [{"year": 2000, "count": 9}]}
 
-        async def fake(_driver: Any, name: str, label_id: str | None = None) -> list[dict[str, int]]:
+        async def fake(_driver: Any, _name: str, label_id: str | None = None) -> list[dict[str, int]]:
             return series[label_id or "A"]  # a bare name resolves to label A (the only label named '808')
 
         with patch.dict("api.routers.explore.TRENDS_DISPATCH", {"label": fake}):
