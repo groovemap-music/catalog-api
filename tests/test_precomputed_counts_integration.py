@@ -184,7 +184,7 @@ async def test_label_details_always_return_the_label_row_in_every_gate_state(neo
 async def test_stored_series_gate_yields_a_row_without_an_extraction_completion(neo4j_driver: AsyncResilientNeo4jDriver) -> None:
     """The trends gate subquery also yields exactly one row when no ExtractionCompletion exists (read live, not dropped)."""
     await _seed(neo4j_driver, maintained=True)
-    record = await q.run_single(neo4j_driver, q._STORED_SERIES % {"label": "Genre"}, name="Rock")  # noqa: SLF001
+    record = await q.run_single(neo4j_driver, q._STORED_SERIES % {"label": "Genre"}, name="Rock")
     assert record is not None
     assert record["maintained"] is False
     assert record["stats_version"] is None
