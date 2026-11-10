@@ -224,7 +224,9 @@ is fetched unacknowledged, republished with a publisher confirm, and acknowledge
 confirm, so a failure leaves it in the dead-letter queue. A message may be delivered twice, never
 lost, so consumers must be idempotent. Broker-set `x-*` headers are dropped so the retry count
 starts over. The response is `{queue, replayed, remaining}`, an audit entry (`dlq.replay`) is
-written, a missing work queue returns 409, and a broker failure returns 502.
+written, a missing work queue returns 409, and a broker failure returns 502. The 502 body is
+`{detail, replayed, remaining}`; `remaining` is `null` when the dead-letter depth could not be read
+(the broker was unreachable before the count), so `null` means unknown and `0` means empty.
 
 The audit table definitions are owned by
 [`database-schema`](https://github.com/groovemap-music/database-schema). Apply schema changes
