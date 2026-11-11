@@ -1567,7 +1567,8 @@ evented editions, 1,938,932 works with an event), **0 supersessions**, **0 link 
 | Works list, `event=linked_at_ingest` | 305 ms | 320 ms | |
 | Works list, `event=evidence_attached` | 145 ms | 158 ms | |
 | Works list, `event=reattached`, `promoted`, `reverted`, `alias_closed`, `link_added`, `link_changed`, `link_removed` | 3 to 4 ms | 4 ms | no such events exist yet: zero rows |
-| Works list, one-month window, 2026-11 | **5,058 ms** | **5,146 ms** | over the 2 s budget: reads 1.92M buffers and writes 13,814 temp blocks; see below for the fix |
+| Works list, one-month window, 2026-11 | 113 ms | 120 ms | re-measured 2026-11-11 on `identity_ledger_work_events` (24,700 buffers, no temp); was 5,058 / 5,146 ms; see below |
+| Works list, window 2026-11-08 to 2026-12-01 | 1.6 ms | 1.7 ms | 2026-11-11; a window that does not hold every event (2,233 works) |
 | Works list, one-month window, 2026-10 | 4 ms | 4 ms | zero rows: nothing was loaded then |
 | Density, `release` / `master` / `artist` / `label` | 2 ms each | 2 ms | 3 buckets each |
 | One work (the Discogs master with the most releases) | 57 ms | 58 ms | 12 statements, 33 ms in the first |
@@ -1598,8 +1599,14 @@ evented and repaired editions are counted live for the page's works only. A wind
 exact to the instant, with no day grain and no edge days. The figures it stands in for: an
 index-only count over lux's 2.09M edition events takes 56 ms, and the live counts for the 50
 largest works about 40 ms. Until the table exists and holds rows the window reads the raw events.
-The process checks for it at most once a minute, and stops checking once it is found. The 2026-11 figure on lux is
-re-measured once catalog-api and database-schema with `gm-database-schema-xq8r` are both deployed.
+The process checks for it at most once a minute, and stops checking once it is found.
+
+Re-measured on lux on **2026-11-11** with catalog-api v0.15.3 and database-schema v0.15.0, after a full
+`identity_ledger_refresh()` (`identity_ledger_verify()` 0, 0, 0 on every relation), read-only, warm, one
+`EXPLAIN ANALYZE` per run, 5 runs after one warm-up: the 2026-11 window (1,940,688 works, every event on
+lux) takes 108 to 120 ms (p50 113 ms, 24,700 buffers, no temp blocks), and the window 2026-11-08 to
+2026-12-01 (2,233 works, from 2026-11-10 and 2026-11-11's events) takes 1.5 to 1.7 ms. Its total matches a
+count of distinct parent works over the raw edition events in the same window (2,233).
 
 `identity_ledger_refresh()` on the real catalog: the server's function counters (cumulative, kept
 since the statistics were last reset) record four calls, a mean of 354 s (5.9 min) each, of which
