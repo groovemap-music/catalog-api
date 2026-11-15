@@ -79,7 +79,7 @@ from api.config import ApiConfig
 from api.genre_tree_store import run_refresh_loop as run_genre_tree_loop
 from api.import_cache import run_import_cache_watch
 from api.ledger_refresh import run_refresh_loop
-from api.limiter import limiter
+from api.limiter import default_rate_limit, limiter
 from api.neo4j_timeouts import install_neo4j_timeout_handler
 from api.notifications import LogNotificationChannel, ResendNotificationChannel
 from api.queries.rarity_queries import run_rarity_membership_refresh
@@ -581,6 +581,7 @@ def _create_application() -> FastAPI:
         license_info={"name": "GNU Affero General Public License v3 only", "identifier": "AGPL-3.0-only"},
         openapi_external_docs={"description": "Corresponding source for this API revision", "url": SOURCE_URL},
         default_response_class=JSONResponse,
+        dependencies=[Depends(default_rate_limit)],
         lifespan=lifespan,
     )
     application.state.limiter = limiter
@@ -612,6 +613,7 @@ async def security_headers(request: Request, call_next: Any) -> Any:
 
 
 @app.get("/health")
+@limiter.exempt
 async def health_check() -> JSONResponse:
     """Service health check endpoint."""
     return JSONResponse(content=get_health_data())

@@ -15,10 +15,10 @@ from fastapi.responses import JSONResponse
 from neo4j.exceptions import ClientError as Neo4jClientError
 from psycopg.errors import QueryCanceled
 
-from api import genre_tree_store
+from api import genre_tree_store, request_budgets
 from api.cache_budget import store_within_budget
 from api.dependencies import get_optional_user
-from api.limiter import limiter
+from api.limiter import limit_for, limiter
 from api.models import PathNode, PathResponse
 from api.queries import collaborator_queries
 from api.queries.neo4j_queries import (
@@ -29,6 +29,8 @@ from api.queries.neo4j_queries import (
     EXPLORE_DISPATCH,
     TRENDS_DISPATCH,
     AmbiguousLabelNameError,
+    PathTooBroadError,
+    TrendsBusyError,
     find_shortest_path,
     get_genre_emergence,
     get_graph_stats,
@@ -179,7 +181,9 @@ def _explore_cache_key(entity_type: str, name: str, label_id: str | None) -> str
 
 
 @router.get("/api/explore")
+@limiter.limit(limit_for("explore"))
 async def explore(
+    request: Request,  # noqa: ARG001 — required by slowapi rate limiter
     name: str = Query(...),
     type: str = Query("artist"),
     id: str | None = Query(None, description="Label id; identifies one label when several share a name (type=label)"),
@@ -276,7 +280,9 @@ def _expand_cache_key(entity_type: str, node_id: str, category: str, limit: int,
 
 
 @router.get("/api/expand")
+@limiter.limit(limit_for("expand"))
 async def expand(
+    request: Request,  # noqa: ARG001 — required by slowapi rate limiter
     node_id: str = Query(...),
     type: str = Query(...),
     category: str = Query(...),
@@ -644,7 +650,9 @@ def _trends_cache_key(entity_type: str, name: str, label_id: str | None) -> str:
 
 
 @router.get("/api/trends")
+@limiter.limit(limit_for("trends"))
 async def get_trends(
+    request: Request,  # noqa: ARG001 — required by slowapi rate limiter
     name: str = Query(...),
     type: str = Query("artist"),
     id: str | None = Query(None, description="Label id; identifies one label when several share a name (type=label)"),
@@ -674,6 +682,12 @@ async def get_trends(
         results = await (query_func(_neo4j_driver, name, label_id=label_id) if label_id else query_func(_neo4j_driver, name))
     except AmbiguousLabelNameError as exc:
         return _ambiguous_label_response(exc)
+    except TrendsBusyError:
+        return JSONResponse(
+            content={"error": "Trends for this entity are being computed — retry shortly"},
+            status_code=503,
+            headers={"Retry-After": str(_TRENDS_BUSY_RETRY_AFTER_SECONDS)},
+        )
     response = {"name": name, "type": entity_type, "data": results}
 
     # An empty result is not stored: a name that does not exist would otherwise spend budget.
@@ -695,6 +709,8 @@ async def get_trends(
     return JSONResponse(content=response)
 
 
+_TRENDS_BUSY_RETRY_AFTER_SECONDS = 10
+
 _VALID_PATH_TYPES = frozenset(EXPLORE_DISPATCH.keys())
 # _MAX_PATH_DEPTH / _DEFAULT_PATH_DEPTH are re-exported (aliased on import,
 # above) from neo4j_queries — the single source of truth for shortestPath
@@ -711,7 +727,9 @@ def _label_id_kwargs(entity_type: str, label_id: str | None) -> dict[str, str]:
 
 
 @router.get("/api/path")
+@limiter.limit(limit_for("path"))
 async def find_path(
+    request: Request,  # noqa: ARG001 — required by slowapi rate limiter
     from_name: str = Query(...),
     from_type: str = Query("artist"),
     to_name: str = Query(...),
@@ -722,6 +740,10 @@ async def find_path(
 ) -> JSONResponse:
     if not _neo4j_driver:
         return JSONResponse(content={"error": "Service not ready"}, status_code=503)
+
+    depth_cap = request_budgets.path_max_depth(_MAX_PATH_DEPTH)
+    if max_depth > depth_cap:
+        return JSONResponse(content={"error": f"max_depth must be at most {depth_cap}"}, status_code=422)
 
     from_type_lower = from_type.lower()
     to_type_lower = to_type.lower()
@@ -768,11 +790,20 @@ async def find_path(
             from_type=from_type_lower,
             to_type=to_type_lower,
         )
+    except PathTooBroadError as exc:
+        logger.info("🛑 Path search refused: both endpoints are hubs", from_degree=exc.from_degree, to_degree=exc.to_degree)
+        return JSONResponse(
+            content={
+                "error": "path search too broad",
+                "detail": "Both ends are very widely connected; pick a more specific artist, label or style for one end",
+            },
+            status_code=422,
+        )
     except Neo4jClientError as exc:
         if "TransactionTimedOut" in str(exc):
             logger.warning("⏱️ Path query timed out", from_name=from_name, to_name=to_name, max_depth=max_depth)
             return JSONResponse(
-                content={"error": "Path query timed out — try reducing max_depth or searching closer nodes"},
+                content={"error": "path search too broad", "detail": "The search ran out of time — try a smaller max_depth or closer nodes"},
                 status_code=504,
             )
         raise

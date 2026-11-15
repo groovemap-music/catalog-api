@@ -735,6 +735,8 @@ class NLQToolRunner:
             )
         except neo4j_queries.AmbiguousLabelNameError as exc:
             return {"error": f"Label name '{exc.name}' is ambiguous: {len(exc.candidates)} labels share it", "candidates": exc.candidates}
+        except neo4j_queries.PathTooBroadError:
+            return {"error": "path search too broad: both ends are very widely connected, pick a more specific one"}
 
     async def _handle_get_collaborators(self, params: dict[str, Any], _user_id: str | None) -> dict[str, Any]:
         import common.agent_tools as agent_tools  # noqa: PLC0415

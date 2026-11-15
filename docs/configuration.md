@@ -278,6 +278,34 @@ API does not schedule or coordinate ingestion.
 
 See the [logging guide](logging-guide.md) for the API's logging behavior.
 
+## Rate limits and graph work budgets
+
+Every route has a rate limit. A caller is keyed by the signed-in user when the request carries a valid
+access JWT, otherwise by the client IP. The IP is the socket peer, which Uvicorn takes from
+`X-Forwarded-For` only for peers in `FORWARDED_ALLOW_IPS`; a forged header or a forged token never
+gets a fresh bucket. Past a limit the API answers `429` with `Retry-After`. A limit is a
+[`limits`](https://limits.readthedocs.io/) string such as `10/minute`, or several joined by `;`
+(`10/minute;100/hour`). An unparsable value is ignored and the default stays. `/health` is exempt.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RATE_LIMIT_DEFAULT` | `300/minute` | Every route that sets no limit of its own |
+| `RATE_LIMIT_EXPLORE` | `30/minute` | `/api/explore` |
+| `RATE_LIMIT_EXPAND` | `60/minute` | `/api/expand` |
+| `RATE_LIMIT_TRENDS` | `10/minute` | `/api/trends` |
+| `RATE_LIMIT_PATH` | `6/minute` | `/api/path` |
+| `PATH_SEARCH_TIMEOUT_SECONDS` | `10` | Server-side budget of one shortest-path statement; a timeout is a `504` "path search too broad" |
+| `PATH_SEARCH_MAX_DEPTH` | `8` | Deepest `max_depth` `/api/path` accepts (`422` above it); never above 10 |
+| `PATH_HUB_DEGREE_THRESHOLD` | `500000` | A search whose two endpoints both have more edges than this is refused with `422` "path search too broad" before it runs. `0` disables the guard |
+| `TRENDS_LIVE_TIMEOUT_SECONDS` | `8` | Budget of the live trends traversal (see below) |
+| `TRENDS_LIVE_CONCURRENCY` | `1` | Live trends traversals allowed at once per process; more get `503` with `Retry-After` |
+
+`/api/trends` for a genre or style reads the series the enricher stores on the node. It falls back to a
+live traversal of the node's releases (17 s and 20.7 M db hits for Rock) when the newest
+`ExtractionCompletion` has no `maintained_at`, has a `stats_version` below 2, or the node has no
+series. Label trends have no stored series and always run live. The live traversal is the part the
+trends limit, the timeout and the concurrency gate exist for, and Valkey caches what it returns.
+
 ## OpenTelemetry metrics and traces
 
 The API pushes metrics and spans over OTLP HTTP/protobuf and exposes no Prometheus scrape

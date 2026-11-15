@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from neo4j import Query
 from neo4j.exceptions import ClientError as Neo4jClientError
 
+from api import request_budgets
 from api.neo4j_timeouts import install_neo4j_timeout_handler
 from api.queries import helpers
 
@@ -72,6 +73,15 @@ def _call_sites() -> list[tuple[str, int, str, Any]]:
             elif isinstance(kw.value, ast.Name):
                 constants = constants if constants is not None else _module_constants(path)
                 sites.append((rel, node.lineno, name, constants[kw.value.id]))
+            elif (
+                isinstance(kw.value, ast.Call)
+                and isinstance(kw.value.func, ast.Attribute)
+                and isinstance(kw.value.func.value, ast.Name)
+                and kw.value.func.value.id == "request_budgets"
+                and not kw.value.args
+            ):
+                # An operator-configurable budget (api/request_budgets.py): judged by its default.
+                sites.append((rel, node.lineno, name, getattr(request_budgets, kw.value.func.attr)()))
             else:
                 sites.append((rel, node.lineno, name, "unresolved"))
     return sites

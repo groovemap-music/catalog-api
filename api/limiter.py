@@ -2,11 +2,14 @@
 
 import hashlib
 import inspect
+from collections.abc import Callable
 
 import slowapi.extension as slowapi_extension
 from fastapi import Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+
+from api import dependencies, request_budgets
 
 
 # SlowAPI 0.1.10 still delegates its coroutine checks to the deprecated
@@ -20,7 +23,37 @@ if hasattr(slowapi_extension, "asyncio"):
 
 # headers_enabled=True so 429 responses carry `Retry-After` (in seconds) — required
 # by the GRUVAX contract and good practice for any throttled API.
-limiter = Limiter(key_func=get_remote_address, headers_enabled=True)
+def caller_key_func(request: Request) -> str:
+    """Rate-limit key: the signed-in user when the request carries a valid access JWT, else the client IP.
+
+    The JWT signature and expiry are checked (``dependencies.rate_limit_subject``), so a made-up ``Authorization`` header cannot
+    mint a fresh bucket per request; it falls back to the IP like any anonymous caller. Revocation is not
+    consulted: a revoked but correctly signed token only shares its real owner's bucket.
+
+    The IP is ``request.client.host``, which Uvicorn rewrites from ``X-Forwarded-For`` only for peers in
+    ``FORWARDED_ALLOW_IPS`` (api/api.py). A client-supplied header is never read here.
+    """
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        subject = dependencies.rate_limit_subject(auth[len("bearer ") :].strip())
+        if subject:
+            return "user:" + subject
+    return "ip:" + get_remote_address(request)
+
+
+# default_limits are the limit for every route without its own decorator, applied by `default_rate_limit` below
+# (SlowAPI's own middleware cannot see routes that FastAPI includes lazily). A callable reads the environment per
+# request, so the limit is configurable (api/request_budgets.py).
+limiter = Limiter(
+    key_func=caller_key_func,
+    headers_enabled=True,
+    default_limits=[lambda: request_budgets.rate_limit("default")],
+)
+
+
+def limit_for(name: str) -> Callable[[], str]:
+    """A dynamic limit provider for ``@limiter.limit(limit_for("trends"))``."""
+    return lambda: request_budgets.rate_limit(name)
 
 
 def bearer_token_key_func(request: Request) -> str:
@@ -42,3 +75,18 @@ def bearer_token_key_func(request: Request) -> str:
             # without filling slowapi's in-memory keyspace with full SHA-256 hashes.
             return "tok:" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
     return "ip:" + get_remote_address(request)
+
+
+async def default_rate_limit(request: Request) -> None:
+    """Router dependency: apply the default limit to a route that has no ``@limiter.limit`` of its own.
+
+    A decorated route already checks its own limits together with the defaults inside the decorator, so it is
+    skipped here to avoid counting one request twice. ``@limiter.exempt`` routes are skipped by the limiter.
+    """
+    endpoint = request.scope.get("endpoint")
+    if endpoint is None:
+        return
+    name = f"{endpoint.__module__}.{endpoint.__name__}"
+    if name in limiter._route_limits or name in limiter._dynamic_route_limits:
+        return
+    limiter._check_request_limit(request, endpoint, False)
