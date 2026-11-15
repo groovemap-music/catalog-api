@@ -23,6 +23,7 @@ from typing import Any
 
 from common import AsyncResilientNeo4jDriver
 
+from api import request_budgets
 from api.queries.helpers import run_count, run_query, run_single
 from api.queries.insights_neo4j_queries import (
     PLACEHOLDER_LABEL_IDS,
@@ -153,6 +154,56 @@ MAX_PATH_DEPTH = 10
 DEFAULT_PATH_DEPTH = 6
 
 
+class PathTooBroadError(Exception):
+    """Both path endpoints are hubs: a search between them would sweep a large part of the graph."""
+
+    def __init__(self, from_degree: int, to_degree: int, threshold: int) -> None:
+        super().__init__(f"path endpoints have degree {from_degree} and {to_degree}, above {threshold}")
+        self.from_degree = from_degree
+        self.to_degree = to_degree
+        self.threshold = threshold
+
+
+class TrendsBusyError(Exception):
+    """The live trends traversal is already running at its concurrency limit."""
+
+
+# Degree of both endpoints in one statement. ``COUNT { (n)--() }`` on an untyped single-hop pattern is answered
+# from the node's degree store, so even Rock costs a handful of db hits, not a traversal.
+_PATH_DEGREE_TIMEOUT_SECONDS = 3.0
+
+
+async def _guard_path_hubs(
+    driver: AsyncResilientNeo4jDriver,
+    a_match: str,
+    b_match: str,
+    from_id: str,
+    to_id: str,
+) -> None:
+    """Refuse a path search whose two endpoints are both hubs (degree above ``PATH_HUB_DEGREE_THRESHOLD``).
+
+    A hub on one end alone is fine: the other end's few edges bound the first frontier. Hub to hub is the
+    case that expands millions of relationships from both sides, so it is refused up front rather than
+    left to run into the server timeout. A threshold of 0 disables the guard.
+    """
+    threshold = request_budgets.path_hub_degree()
+    if threshold <= 0:
+        return
+    record = await run_single(
+        driver,
+        f"MATCH {a_match}, {b_match} RETURN COUNT {{ (a)--() }} AS from_degree, COUNT {{ (b)--() }} AS to_degree",
+        timeout=_PATH_DEGREE_TIMEOUT_SECONDS,
+        from_id=from_id,
+        to_id=to_id,
+    )
+    if not record:
+        return
+    from_degree = int(record.get("from_degree") or 0)
+    to_degree = int(record.get("to_degree") or 0)
+    if from_degree > threshold and to_degree > threshold:
+        raise PathTooBroadError(from_degree, to_degree, threshold)
+
+
 async def find_shortest_path(
     driver: AsyncResilientNeo4jDriver,
     from_id: str,
@@ -179,7 +230,7 @@ async def find_shortest_path(
     ``name`` as its identifier (Genre, Style), ``$from_id`` / ``$to_id`` are
     matched against the ``name`` property instead of ``id``.
     """
-    depth = max(MIN_PATH_DEPTH, min(int(max_depth), MAX_PATH_DEPTH))
+    depth = max(MIN_PATH_DEPTH, min(int(max_depth), request_budgets.path_max_depth(MAX_PATH_DEPTH)))
     from_label = _LABEL_MAP.get(from_type, "")
     to_label = _LABEL_MAP.get(to_type, "")
 
@@ -189,6 +240,8 @@ async def find_shortest_path(
 
     a_match = f"(a:{from_label} {{{from_prop}: $from_id}})" if from_label else "(a {id: $from_id})"
     b_match = f"(b:{to_label} {{{to_prop}: $to_id}})" if to_label else "(b {id: $to_id})"
+
+    await _guard_path_hubs(driver, a_match, b_match, from_id, to_id)
 
     cypher = f"""
     MATCH {a_match}, {b_match}
@@ -200,7 +253,7 @@ async def find_shortest_path(
            }}] AS nodes,
            [rel IN relationships(p) | type(rel)] AS rels
     """
-    return await run_single(driver, cypher, from_id=from_id, to_id=to_id)
+    return await run_single(driver, cypher, timeout=request_budgets.path_timeout_seconds(), from_id=from_id, to_id=to_id)
 
 
 # --- Autocomplete ---
@@ -1062,6 +1115,29 @@ async def trends_artist(driver: AsyncResilientNeo4jDriver, name: str) -> list[di
     return await run_query(driver, cypher, name=name)
 
 
+_live_trends_gate: asyncio.Semaphore | None = None
+_live_trends_gate_size = 0
+
+
+async def _run_live_trends(driver: AsyncResilientNeo4jDriver, cypher: str, **params: Any) -> list[dict[str, Any]]:
+    """Run a live (non-stored) trends traversal under a short server timeout and a concurrency gate.
+
+    These traversals cost up to 20M db hits (Rock, docs/cypher-performance-audit-2026-11-04.md), so a cold or
+    stale stored series must not let repeated requests stack them: past ``TRENDS_LIVE_CONCURRENCY`` in
+    flight the caller gets :class:`TrendsBusyError` (503 + Retry-After) instead of queueing, and each
+    traversal is cut off after ``TRENDS_LIVE_TIMEOUT_SECONDS`` (504 through the timeout handler).
+    """
+    global _live_trends_gate, _live_trends_gate_size
+    size = request_budgets.trends_live_concurrency()
+    if _live_trends_gate is None or _live_trends_gate_size != size:
+        _live_trends_gate, _live_trends_gate_size = asyncio.Semaphore(size), size
+    gate = _live_trends_gate
+    if gate.locked():
+        raise TrendsBusyError
+    async with gate:
+        return await run_query(driver, cypher, timeout=request_budgets.trends_live_timeout_seconds(), **params)
+
+
 async def _trends_genre_live(driver: AsyncResilientNeo4jDriver, name: str) -> list[dict[str, Any]]:
     """Get release count by year for a genre by traversing its releases.
 
@@ -1083,7 +1159,7 @@ async def _trends_genre_live(driver: AsyncResilientNeo4jDriver, name: str) -> li
     RETURN year, count
     ORDER BY year
     """
-    return await run_query(driver, cypher, name=name)
+    return await _run_live_trends(driver, cypher, name=name)
 
 
 # One label's releases grouped by year, matched by label id so labels sharing a name never merge.
@@ -1109,7 +1185,7 @@ async def trends_label(driver: AsyncResilientNeo4jDriver, name: str, label_id: s
     label_id = await _label_id(driver, name, label_id)
     if label_id is None:
         return []
-    return await run_query(driver, _TRENDS_LABEL_CYPHER, id=label_id)
+    return await _run_live_trends(driver, _TRENDS_LABEL_CYPHER, id=label_id)
 
 
 async def _trends_style_live(driver: AsyncResilientNeo4jDriver, name: str) -> list[dict[str, Any]]:
@@ -1130,7 +1206,7 @@ async def _trends_style_live(driver: AsyncResilientNeo4jDriver, name: str) -> li
     RETURN year, count
     ORDER BY year
     """
-    return await run_query(driver, cypher, name=name)
+    return await _run_live_trends(driver, cypher, name=name)
 
 
 _STORED_SERIES = """

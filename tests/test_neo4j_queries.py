@@ -1263,8 +1263,11 @@ class TestFindShortestPath:
 
         await find_shortest_path(mock_driver, "1", "2", max_depth=1000)
 
+        from api import request_budgets
+
         cypher = self._sent_cypher(mock_session)
-        assert f"*..{MAX_PATH_DEPTH}]" in cypher
+        assert f"*..{request_budgets.path_max_depth(MAX_PATH_DEPTH)}]" in cypher
+        assert request_budgets.path_max_depth(MAX_PATH_DEPTH) <= MAX_PATH_DEPTH
         assert "*..1000]" not in cypher
 
     @pytest.mark.asyncio

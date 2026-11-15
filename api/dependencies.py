@@ -117,6 +117,24 @@ async def validate_token(
     return payload
 
 
+def rate_limit_subject(token: str) -> str | None:
+    """The subject of a correctly signed, unexpired access token, for the rate limiter's key; else ``None``.
+
+    Signature and expiry only (no revocation lookup, no I/O): the limiter keys a bucket with it and grants
+    no access, so a revoked but signed token merely shares its real owner's bucket.
+    """
+    if _jwt_secret is None:
+        return None
+    try:
+        payload = decode_token(token, _jwt_secret)
+    except ValueError, UnicodeError:
+        return None
+    if payload.get("type") is not None:
+        return None
+    subject = payload.get("sub")
+    return str(subject) if subject else None
+
+
 async def get_optional_user(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_security)],
 ) -> dict[str, Any] | None:
