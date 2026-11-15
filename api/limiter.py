@@ -24,7 +24,8 @@ if hasattr(slowapi_extension, "asyncio"):
 # headers_enabled=True so 429 responses carry `Retry-After` (in seconds) — required
 # by the GRUVAX contract and good practice for any throttled API.
 def caller_key_func(request: Request) -> str:
-    """Rate-limit key: the signed-in user when the request carries a valid access JWT, else the client IP.
+    """Rate-limit key for the expensive read routes only (never auth or other credential routes, where a
+    self-registered account would mint a fresh bucket per account): the signed-in user when the request carries a valid access JWT, else the client IP.
 
     The JWT signature and expiry are checked (``dependencies.rate_limit_subject``), so a made-up ``Authorization`` header cannot
     mint a fresh bucket per request; it falls back to the IP like any anonymous caller. Revocation is not
@@ -45,14 +46,14 @@ def caller_key_func(request: Request) -> str:
 # (SlowAPI's own middleware cannot see routes that FastAPI includes lazily). A callable reads the environment per
 # request, so the limit is configurable (api/request_budgets.py).
 limiter = Limiter(
-    key_func=caller_key_func,
+    key_func=get_remote_address,
     headers_enabled=True,
     default_limits=[lambda: request_budgets.rate_limit("default")],
 )
 
 
 def limit_for(name: str) -> Callable[[], str]:
-    """A dynamic limit provider for ``@limiter.limit(limit_for("trends"))``."""
+    """A dynamic limit provider for ``@limiter.limit(limit_for("trends"), key_func=caller_key_func)``."""
     return lambda: request_budgets.rate_limit(name)
 
 

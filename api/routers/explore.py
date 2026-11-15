@@ -18,7 +18,7 @@ from psycopg.errors import QueryCanceled
 from api import genre_tree_store, request_budgets
 from api.cache_budget import store_within_budget
 from api.dependencies import get_optional_user
-from api.limiter import limit_for, limiter
+from api.limiter import caller_key_func, limit_for, limiter
 from api.models import PathNode, PathResponse
 from api.queries import collaborator_queries
 from api.queries.neo4j_queries import (
@@ -181,7 +181,7 @@ def _explore_cache_key(entity_type: str, name: str, label_id: str | None) -> str
 
 
 @router.get("/api/explore")
-@limiter.limit(limit_for("explore"))
+@limiter.limit(limit_for("explore"), key_func=caller_key_func)
 async def explore(
     request: Request,  # noqa: ARG001 — required by slowapi rate limiter
     name: str = Query(...),
@@ -280,7 +280,7 @@ def _expand_cache_key(entity_type: str, node_id: str, category: str, limit: int,
 
 
 @router.get("/api/expand")
-@limiter.limit(limit_for("expand"))
+@limiter.limit(limit_for("expand"), key_func=caller_key_func)
 async def expand(
     request: Request,  # noqa: ARG001 — required by slowapi rate limiter
     node_id: str = Query(...),
@@ -650,7 +650,7 @@ def _trends_cache_key(entity_type: str, name: str, label_id: str | None) -> str:
 
 
 @router.get("/api/trends")
-@limiter.limit(limit_for("trends"))
+@limiter.limit(limit_for("trends"), key_func=caller_key_func)
 async def get_trends(
     request: Request,  # noqa: ARG001 — required by slowapi rate limiter
     name: str = Query(...),
@@ -727,7 +727,7 @@ def _label_id_kwargs(entity_type: str, label_id: str | None) -> dict[str, str]:
 
 
 @router.get("/api/path")
-@limiter.limit(limit_for("path"))
+@limiter.limit(limit_for("path"), key_func=caller_key_func)
 async def find_path(
     request: Request,  # noqa: ARG001 — required by slowapi rate limiter
     from_name: str = Query(...),
