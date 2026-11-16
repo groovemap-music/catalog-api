@@ -303,22 +303,25 @@ def _year_filter_clause(year_min: int | None, year_max: int | None, column: sql.
     return (sql.SQL(" AND ").join(clauses), params) if clauses else (sql.SQL("TRUE"), [])
 
 
-def _genre_filter_clause(genres: list[str], column: sql.Composable | None = None) -> tuple[sql.Composable, list[Any]]:
+def _genre_filter_clause(genres: list[str], column: sql.Composable | None = None, *, has_genres: bool = True) -> tuple[sql.Composable, list[Any]]:
     """Return (SQL_clause, params) for optional genre filtering.
 
-    Rows with NULL genres (artists, labels, masters) are always included
-    regardless of genre filter — only rows with genre data are filtered.
+    A genre filter keeps only rows tagged with at least one chosen genre: a release with NULL
+    or empty genres does not match. An entity type with no genres column at all (artists,
+    labels, masters; ``has_genres=False``) is not filtered by genre and passes through TRUE
+    on its own branch, rather than through a NULL arm that would also admit untagged releases.
 
     ``column`` lets callers point the clause at a raw column expression (e.g.
     ``(data->'genres')``) instead of the default ``genres`` identifier —
     needed to push the filter into a per-table subquery *before* its rank
     LIMIT.
     """
-    if not genres:
+    if not genres or not has_genres:
         return (sql.SQL("TRUE"), [])
     col = column if column is not None else sql.SQL("genres")
-    # ?| checks if JSONB array contains any of the given strings
-    return (sql.SQL("({c} IS NULL OR {c} ?| %s::text[])").format(c=col), [genres])
+    # ?| checks if JSONB array contains any of the given strings; NULL ?| ... is NULL, so a
+    # release with no genres is excluded.
+    return (sql.SQL("({c} ?| %s::text[])").format(c=col), [genres])
 
 
 def _media_filter_clause(
@@ -471,7 +474,7 @@ def _entity_select(
         country_clause, country_params = _country_filter_clause(countries or [], column=sql.SQL("country"))
     else:
         year_clause, year_params = _year_filter_clause(year_min, year_max, column=year_col)
-        genre_clause, genre_params = _genre_filter_clause(genres or [], column=genres_col)
+        genre_clause, genre_params = _genre_filter_clause(genres or [], column=genres_col, has_genres=has_genres)
         media_clause, media_params = _media_filter_clause(media_families or [], media_mediums or [], column=media_col)
         country_clause, country_params = _country_filter_clause(countries or [], column=country_col)
     filter_params = [*year_params, *genre_params, *media_params, *country_params]
@@ -673,9 +676,7 @@ def _build_count_union(
             year_clause, year_params = _year_filter_clause(
                 year_min, year_max, column=sql.SQL("(data->>'year')") if has_year else sql.SQL("NULL::text")
             )
-            genre_clause, genre_params = _genre_filter_clause(
-                genres or [], column=sql.SQL("(data->'genres')") if has_genres else sql.SQL("NULL::jsonb")
-            )
+            genre_clause, genre_params = _genre_filter_clause(genres or [], column=sql.SQL("(data->'genres')"), has_genres=has_genres)
             media_clause, media_params = _media_filter_clause(
                 media_families or [], media_mediums or [], column=sql.SQL("media") if has_media else sql.SQL("NULL::jsonb")
             )

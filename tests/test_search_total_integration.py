@@ -126,3 +126,25 @@ async def test_count_statement_has_no_sort_and_no_materialized_cte(pool: AsyncPo
     assert "CTE Scan" not in plan
     assert '"Sort"' not in plan
     assert "Top-N" not in plan
+
+
+async def test_genre_filter_excludes_untagged_releases_from_results_and_total(pool: AsyncPostgreSQLPool) -> None:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("TRUNCATE artists, labels, masters, releases")
+        rows = [
+            ("g1", "g1", json.dumps({"title": "Zebra Match", "genres": ["Jazz"]})),
+            ("g2", "g2", json.dumps({"title": "Zebra Other", "genres": ["Rock"]})),
+            ("g3", "g3", json.dumps({"title": "Zebra Untagged"})),
+            ("g4", "g4", json.dumps({"title": "Zebra Empty", "genres": []})),
+        ]
+        await cur.executemany("INSERT INTO releases (data_id, hash, data) VALUES (%s, %s, %s::jsonb)", rows)
+        await cur.execute("INSERT INTO artists (data_id, hash, data) VALUES ('ga', 'ga', %s::jsonb)", [json.dumps({"name": "Zebra Artist"})])
+        await cur.execute("ANALYZE artists, releases")
+
+    union_sql, union_params = _build_union(_TYPES, per_table_limit=100, genres=["Jazz"])
+    query = sql.SQL("WITH q AS (SELECT plainto_tsquery('english', %s) AS tsq), results AS ({u}) SELECT type, id FROM results").format(u=union_sql)
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(query, ["zebra", *union_params])
+        found = {(r["type"], r["id"]) for r in await cur.fetchall()}
+    assert found == {("release", "g1"), ("artist", "ga")}
+    assert await _run_total(pool, "zebra", _TYPES, ["Jazz"], None, None) == 2

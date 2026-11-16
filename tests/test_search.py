@@ -288,7 +288,8 @@ class TestSearchQueryModuleHelpers:
         assert "FROM public.release_search" in ranked
         assert "to_tsvector" not in rendered
         assert "title_tsv @@ q.tsq AND (year IS NULL OR year::int >= %s)" in ranked
-        assert "(genres IS NULL OR genres ?| %s::text[])" in ranked
+        assert "(genres ?| %s::text[])" in ranked
+        assert "genres IS NULL" not in ranked
         assert "media_mediums IS NULL OR (media_families ?| %s::text[] OR media_mediums ? %s::text)" in ranked
         assert "(country IS NULL OR country = ANY(%s::text[]))" in ranked
         assert "data->" not in ranked
@@ -573,8 +574,26 @@ class TestSearchQueryModuleHelpers:
 
         clause, params = _genre_filter_clause(["Rock", "Jazz"])
         rendered = clause.as_string(None)
-        assert "?|" in rendered
+        assert rendered == "(genres ?| %s::text[])"
+        assert "IS NULL" not in rendered
         assert params == [["Rock", "Jazz"]]
+
+    def test_genre_filter_clause_no_genres_column_passes(self) -> None:
+        from api.queries.search_queries import _genre_filter_clause
+
+        clause, params = _genre_filter_clause(["Rock"], has_genres=False)
+        assert clause.as_string(None) == "TRUE"
+        assert params == []
+
+    def test_genre_filter_per_branch(self) -> None:
+        from api.queries.search_queries import _entity_select
+
+        for entity, has_genres in (("artist", False), ("label", False), ("master", False), ("release", True)):
+            frag, params = _entity_select(entity, "name", has_year=entity in ("master", "release"), has_genres=has_genres, genres=["Rock"])
+            rendered = frag.as_string(None)
+            assert "genres IS NULL" not in rendered
+            assert "?|" in rendered if has_genres else "?|" not in rendered
+            assert (["Rock"] in params) is has_genres
 
     def test_format_result_no_rank(self) -> None:
         from api.queries.search_queries import _format_result

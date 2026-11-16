@@ -675,7 +675,8 @@ curl "http://localhost:8004/api/snapshot/<token>"
 # Full-text search across all entity types
 curl "http://localhost:8004/api/search?q=kraftwerk&types=artist&limit=10"
 
-# Search releases with genre and year filters
+# Search releases with genre and year filters (a genre filter returns only releases tagged with a chosen
+# genre; releases with no genres are excluded. Artists, labels and masters have no genre and still match)
 curl "http://localhost:8004/api/search?q=blue&types=release&genres=Jazz&year_min=1955&year_max=1965&limit=20"
 
 # Search across multiple entity types with pagination
