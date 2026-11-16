@@ -287,7 +287,6 @@
         "identity_ledger_edition_events",
         "identity_ledger_edition_parents",
         "identity_ledger_work_summary",
-        "identity_ledger_work_summary_day",
         "identity_ledger_work_events",
         "identity_ledger_density"
       ],
@@ -317,6 +316,20 @@
       ],
       "meaning": "one row (singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton)), upserted by each refresh with its start instant, duration, and the caller's watermark (JSONB, NULL when the caller names none); empty until the first refresh",
       "relation": "public.identity_ledger_refresh_state"
+    },
+    "retired_views": {
+      "identity_ledger_work_summary_day": {
+        "decision": "gm-database-schema-ahg8",
+        "consumer_rollout": "contract phase of expand, migrate consumers, then contract: catalog-api v0.15.2 (gm-catalog-api-l7ek.3) reads identity_ledger_work_events for a windowed works list and no longer reads the per-day rollup, so schema-init drops it. A catalog-api older than v0.15.2 reads this table for a window of full days and fails without it; deployment's reviewed set runs catalog-api v0.15.3. catalog-api's own contract still lists the relation until its follow-up removes it",
+        "drop_statement": "DROP TABLE IF EXISTS public.identity_ledger_work_summary_day",
+        "indexes_dropped_with_table": [
+          "idx_identity_ledger_work_summary_day_key",
+          "idx_identity_ledger_work_summary_day_work"
+        ],
+        "idempotent": "DROP TABLE IF EXISTS: a database that never had the table, or already dropped it, is unchanged. The drop takes a brief ACCESS EXCLUSIVE lock on a table nothing reads. The rebuild and refresh no longer fill it, and the rebuild request no longer checks it, so the upgrade requests no rebuild",
+        "saving": "the table held 5.2M rows and 796 MB on lux; its fill was about 50 s of each full ledger rebuild, which a rebuild no longer spends, and the refresh no longer replaces a dirty work's day rows",
+        "rollback": "previous release's schema apply recreates the table empty, and one identity_ledger_refresh() with identity_ledger_request_rebuild() fills it; derived rows only, so no history is at risk"
+      }
     },
     "views": {
       "identity_ledger_edition_events": {
@@ -377,30 +390,6 @@
             "work_id"
           ],
           "index": "idx_identity_ledger_work_summary_key"
-        }
-      },
-      "identity_ledger_work_summary_day": {
-        "columns": [
-          "work_id",
-          "event",
-          "day",
-          "prev_day",
-          "editions",
-          "first_event",
-          "last_event"
-        ],
-        "indexes": [
-          "idx_identity_ledger_work_summary_day_work ON public.identity_ledger_work_summary_day (work_id)"
-        ],
-        "meaning": "the works list's rollup per UTC day, for windows of full days. One row per work, event filter ('any', an event type, or the pseudo filter 'repaired' for reattached, promoted or reverted), day and prev_day; editions counts the work's editions with an event of that filter on that day, and prev_day is that edition's previous day with an event of the same filter, '-infinity' for its first. WINDOW RULE for full UTC days [a, b]: evented_editions = sum(editions) over event = F, day in [a, b] and prev_day < a, which counts an edition once at its first day in the window; repaired_editions = the same over event = 'repaired' when F = 'any', editions itself when F is a repair type, and 0 otherwise; first_event and last_event = min(first_event) and max(last_event) over every row of event F with day in [a, b]. Summing editions over days without the prev_day condition counts an edition once per day it has events",
-        "unique": {
-          "columns": [
-            "event",
-            "day",
-            "work_id",
-            "prev_day"
-          ],
-          "index": "idx_identity_ledger_work_summary_day_key"
         }
       },
       "identity_ledger_work_events": {
