@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
+## v0.16.0 (2026-11-15)
+
+### Release notes
+
+The expensive graph routes are rate-limited and the path and live-trends work is bounded (gm-catalog-api-8fou).
+- Every route without its own limit gets `RATE_LIMIT_DEFAULT` (300/minute). `/api/explore`, `/api/expand`, `/api/trends` and `/api/path` get 30, 60, 10 and 6 per minute (`RATE_LIMIT_EXPLORE`, `_EXPAND`, `_TRENDS`, `_PATH`). These four are keyed by the signed-in user when the request carries a valid access token, and by client IP otherwise. Every other route keeps the IP key. Past a limit the API answers `429` with `Retry-After`.
+- `/api/path` runs at most `PATH_SEARCH_TIMEOUT_SECONDS` (10 s, previously 120 s), refusing `max_depth` above `PATH_SEARCH_MAX_DEPTH` (8). When both endpoints have more than `PATH_HUB_DEGREE_THRESHOLD` (500,000) edges, it is refused before running. Both answer "path search too broad".
+- `/api/trends` already reads the stored per-year series when the latest extraction maintained them (`stats_version` 2 or later). The live fallback now has an 8 s budget (`TRENDS_LIVE_TIMEOUT_SECONDS`) and one traversal at a time per process (`TRENDS_LIVE_CONCURRENCY`, `503` with `Retry-After` beyond it). On a cold series, Rock answers in 8 s at most instead of 17.5 s.
+
+The persistence contract copy matches database-schema v0.16.0: `identity_ledger_work_summary_day` is retired (gm-catalog-api-vgyp). This release doesn't read it, and neither did v0.15.2. OpenTelemetry moves to 1.45.2 / 0.66b2 (`traceparent` parsing denial of service, Dependabot #4). All limits are documented in `docs/configuration.md`, and nothing needs configuring to take the defaults.
+
+### Feat
+
+- **api**: rate-limit the expensive graph routes and bound path and live trends work
+
+### Fix
+
+- **api**: key only the expensive read routes by user, keep IP for everything else
+
 ## v0.15.3 (2026-11-10)
 
 ### Release notes
