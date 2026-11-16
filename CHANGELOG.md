@@ -2,11 +2,17 @@
 
 All notable changes to this project will be documented here by Commitizen.
 
-## Unreleased
+## v0.16.1 (2026-11-16)
 
 ### Release notes
 
 - **Fix: a genre filter returns only releases tagged with a chosen genre** (gm-catalog-api-9vdz). Searching with `genres=` used to pad the results, and the total, with releases that have no genres at all. Those releases no longer match, and the total counts only what the results return. Artists, labels and masters have no genres and still match as before. No schema dependency.
+
+The persistence contract copy matches database-schema v0.16.1, which retires the unread free-text key lookup indexes. This release reads none of the changed fields.
+
+### Fix
+
+- **search**: genre filter returns only releases tagged with a chosen genre
 
 ## v0.16.0 (2026-11-15)
 
