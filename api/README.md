@@ -1582,14 +1582,15 @@ match no events are as fast as before. The window case is the exception and is s
 scans the edition events in range and groups them per work instead of reading the summary.
 
 **The windowed list (`gm-catalog-api-l7ek.3`).** The total needs each work counted once, and the
-page needs each work's last event inside the window. Neither the edition events nor database-schema's
-per-day rollup (`identity_ledger_work_summary_day`, one row per edition's previous event day) can
-answer that without grouping every event in range per work. Re-measured on lux on **2026-11-10**
+page needs each work's last event inside the window. Neither the edition events nor the per-day rollup
+database-schema used to keep (`identity_ledger_work_summary_day`, one row per edition's previous event
+day; dropped in database-schema v0.16.0) can answer that without grouping every event in range per
+work. The figures below are the historical measurements that led to the work-events table. Re-measured on lux on **2026-11-10**
 (read-only, warm, one `EXPLAIN ANALYZE` each), the 2026-11 window took 4,613 ms on the raw events
 and 8,097 ms on the rollup (4.09M buffers, 13,728 temp blocks). It was answered in about 0.3 s only
 because every one of lux's 2,085,918 edition events falls on 2026-11-07, so the window held every
 event and read the unwindowed summary. One event outside November would have put it back on the
-rollup.
+rollup, which catalog-api no longer reads (v0.15.2) and database-schema no longer creates (v0.16.0).
 
 A window now reads `identity_ledger_work_events` (`gm-database-schema-xq8r`): one row per work,
 event filter, and event instant, with the work's previous and next instants of that filter. The
