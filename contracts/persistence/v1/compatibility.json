@@ -579,14 +579,15 @@
       "hash": "sha256 of the value's UTF-8 bytes",
       "introduced_in_contract_version": 1,
       "kind": "additive",
-      "migration": "A guarded transaction per relation builds the unique index and any hash index, then drops the primary key and the indexes that stored the raw column. A database already on the v0.6.1 two-hash credit keys has a second guarded transaction per credit relation, which builds the combined key, drops the old one, renames it, and drops the relation's person_name hash index. Both run with the loaders stopped and neither rewrites the table.",
-      "note": "PostgreSQL refuses a btree entry over 2704 bytes after compression, and these columns are free text with no bound, so a credit past the limit could not be stored. Each relation keeps its key columns and its whole value; a UNIQUE index over graph.text_key enforces the key in place of a primary key, and a hash index keeps = on the column where a consumer reads by it. credited_on and track_credited_on have none, and key both free-text columns through graph.credit_key. No column is added, so a writer's column list is unchanged. A target-less ON CONFLICT DO NOTHING fires on the unique index; an ON CONFLICT naming the columns does not infer it, and none of the loaders uses one.",
+      "migration": "A guarded transaction per relation builds the unique index and any hash index, restores NOT NULL on a free-text column that held it only through the primary key, then drops the primary key and the indexes that stored the raw column. A database already on the v0.6.1 two-hash credit keys has a second guarded transaction per credit relation, which builds the combined key, drops the old one, renames it, and drops the relation's person_name hash index. Both run with the loaders stopped and neither rewrites the table.",
+      "note": "PostgreSQL refuses a btree entry over 2704 bytes after compression, and these columns are free text with no bound, so a credit past the limit could not be stored. Each relation keeps its key columns and its whole value; a UNIQUE index over graph.text_key enforces the key in place of a primary key, and a hash index keeps = on the column where a consumer reads by it, which is same_as alone. The person, company and credited_to hash indexes and graph.person_name_trgm were built for a planned PostgreSQL read of person and company, which went away with catalog-api's PostgreSQL graph backend; schema-init drops them (gm-database-schema-ntr5), and their columns keep NOT NULL. credited_on and track_credited_on never had one, and key both free-text columns through graph.credit_key. No column is added, so a writer's column list is unchanged. A target-less ON CONFLICT DO NOTHING fires on the unique index; an ON CONFLICT naming the columns does not infer it, and none of the loaders uses one.",
       "relations": {
         "company": {
           "key": [
             "company_id"
           ],
-          "lookup": "company_id"
+          "lookup": null,
+          "not_null_restored": "company_id"
         },
         "credited_on": {
           "key": [
@@ -594,7 +595,8 @@
             "person_name",
             "role"
           ],
-          "lookup": null
+          "lookup": null,
+          "not_null_restored": null
         },
         "credited_to": {
           "key": [
@@ -603,20 +605,23 @@
             "role",
             "source"
           ],
-          "lookup": "company_id"
+          "lookup": null,
+          "not_null_restored": "company_id"
         },
         "person": {
           "key": [
             "name"
           ],
-          "lookup": "name"
+          "lookup": null,
+          "not_null_restored": "name"
         },
         "same_as": {
           "key": [
             "artist_id",
             "person_name"
           ],
-          "lookup": "person_name"
+          "lookup": "person_name",
+          "not_null_restored": "person_name"
         },
         "track_credited_on": {
           "key": [
@@ -626,7 +631,8 @@
             "person_name",
             "role"
           ],
-          "lookup": null
+          "lookup": null,
+          "not_null_restored": null
         }
       }
     },

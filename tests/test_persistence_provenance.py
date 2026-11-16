@@ -13,7 +13,7 @@ ROOT = Path(__file__).parent.parent
 SOURCE_PATH = ROOT / "contracts/persistence/v1/source.json"
 CONTRACT_PATH = ROOT / "contracts/persistence/v1/compatibility.json"
 PRODUCER_CONTRACT_PATH = "contracts/persistence/v1/compatibility.json"
-PRODUCER_COMMIT = "83296964752abbfd2cfe6230863ccf0bf356f1af"
+PRODUCER_COMMIT = "c093c092524b9ac206c40ed73986b009d933888e"
 KNOWN_MISMATCHING_COMMIT = "c1c0ecc479f6ae612792bc72d2cf34d4b443dc4e"
 GIT = shutil.which("git")
 assert GIT is not None
